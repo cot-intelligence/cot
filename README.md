@@ -39,8 +39,6 @@ port and saves the URL in `~/.cot/config.json`.
 
 Collector API, dashboard, bridge scripts, and Docker image — all in this repo.
 
-Marketing site: [cot-intelligence/website](https://github.com/cot-intelligence/website).
-
 ### Development
 
 ```bash
