@@ -15,7 +15,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .costing import estimate_cost
 from .normalize import categorize, normalize
 
 _write_lock = threading.Lock()
@@ -765,22 +764,6 @@ def _session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, An
         " FROM events WHERE session_id = ?",
         (row["id"],),
     ).fetchone()
-    cost_rows = [
-        dict(r)
-        for r in conn.execute(
-            "SELECT model,"
-            " COALESCE(SUM(input_tokens),0) input_tokens,"
-            " COALESCE(SUM(output_tokens),0) output_tokens,"
-            " COALESCE(SUM(cache_read_tokens),0) cache_read_tokens,"
-            " COALESCE(SUM(cache_write_tokens),0) cache_write_tokens"
-            " FROM events WHERE session_id = ?"
-            " GROUP BY model"
-            " HAVING COALESCE(SUM(input_tokens),0) + COALESCE(SUM(output_tokens),0)"
-            " + COALESCE(SUM(cache_read_tokens),0) + COALESCE(SUM(cache_write_tokens),0) > 0"
-            " ORDER BY model",
-            (row["id"],),
-        ).fetchall()
-    ]
     return {
         "id": row["id"],
         "source": row["source"],
@@ -803,7 +786,6 @@ def _session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, An
             "cache_write": tok["cw"],
             "total": tok["i"] + tok["o"] + tok["cr"] + tok["cw"],
         },
-        "cost": estimate_cost(cost_rows),
     }
 
 
@@ -873,33 +855,18 @@ def metrics() -> dict[str, Any]:
                 " GROUP BY tool ORDER BY n DESC LIMIT 12"
             )
         ]
-        cost_rows = [
-            dict(r)
-            for r in rows(
-                "SELECT model,"
-                " COALESCE(SUM(input_tokens),0) input_tokens,"
-                " COALESCE(SUM(output_tokens),0) output_tokens,"
-                " COALESCE(SUM(cache_read_tokens),0) cache_read_tokens,"
-                " COALESCE(SUM(cache_write_tokens),0) cache_write_tokens"
-                " FROM events GROUP BY model"
-                " HAVING COALESCE(SUM(input_tokens),0) + COALESCE(SUM(output_tokens),0)"
-                " + COALESCE(SUM(cache_read_tokens),0) + COALESCE(SUM(cache_write_tokens),0) > 0"
-                " ORDER BY model"
-            )
-        ]
-        cost = estimate_cost(cost_rows)
-        cost_by_model = {m["model"]: m for m in cost["models"]}
         by_model = [
             {
                 "model": r["model"],
                 "events": r["n"],
                 "output_tokens": r["o"] or 0,
-                "total_tokens": (cost_by_model.get(r["model"]) or {}).get("total_tokens", 0),
-                "cost_usd": (cost_by_model.get(r["model"]) or {}).get("total_usd", 0.0),
-                "pricing_found": bool((cost_by_model.get(r["model"]) or {}).get("pricing_found")),
+                "total_tokens": r["t"] or 0,
             }
             for r in rows(
-                "SELECT model, COUNT(*) n, SUM(output_tokens) o FROM events"
+                "SELECT model, COUNT(*) n, SUM(output_tokens) o,"
+                " COALESCE(SUM(input_tokens),0) + COALESCE(SUM(output_tokens),0)"
+                " + COALESCE(SUM(cache_read_tokens),0) + COALESCE(SUM(cache_write_tokens),0) t"
+                " FROM events"
                 " WHERE model IS NOT NULL AND model != '' GROUP BY model ORDER BY n DESC"
             )
         ]
@@ -1008,7 +975,6 @@ def metrics() -> dict[str, Any]:
                 "permissions": permissions,
             },
             "tokens": tokens,
-            "cost": cost,
             "by_day": by_day,
             "by_hour": by_hour,
             "by_category": by_category,

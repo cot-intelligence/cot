@@ -23,12 +23,6 @@ function compact(n: number): string {
   if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`;
   return String(n);
 }
-function dollars(n: number): string {
-  if (!n) return '$0.00';
-  if (n < 0.01) return `$${n.toFixed(4)}`;
-  if (n < 100) return `$${n.toFixed(2)}`;
-  return `$${compact(Math.round(n))}`;
-}
 function hourLabel(h: number): string {
   const p = h < 12 ? 'am' : 'pm';
   return `${h % 12 === 0 ? 12 : h % 12}${p}`;
@@ -207,20 +201,11 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
 
         {/* Headline stat strip */}
         <FadeIn delay={0.03}>
-          <Grid cols="grid-cols-2 sm:grid-cols-5">
+          <Grid cols="grid-cols-2 sm:grid-cols-4">
             <Stat label="Sessions" value={compact(t.sessions)} hint={`${t.active_sessions} active now`} />
             <Stat label="Events" value={compact(t.events)} />
             <Stat label="Tool calls" value={compact(t.tool_calls)} />
             <Stat label="Tokens" value={compact(m.tokens.total)} hint="Claude only" />
-            <Stat
-              label="Est. cost"
-              value={dollars(m.cost.total_usd)}
-              hint={
-                m.cost.unpriced_tokens
-                  ? `${compact(m.cost.unpriced_tokens)} unpriced tokens`
-                  : 'USD estimate'
-              }
-            />
           </Grid>
         </FadeIn>
 
@@ -315,9 +300,7 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
                             />
                             <span className="truncate">{formatModel(model.model)}</span>
                           </span>
-                          <span className="shrink-0 text-fg/45">
-                            {model.pricing_found ? dollars(model.cost_usd) : 'unpriced'}
-                          </span>
+                          <span className="shrink-0 text-fg/45">{compact(model.events)}</span>
                         </div>
                       ))}
                     </div>

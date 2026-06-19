@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import type { CostModelEstimate, SessionDetail } from '../../../../lib/api';
+import type { SessionDetail } from '../../../../lib/api';
 import { formatDuration, getCategoryMeta, toTimestampString } from '../../../../lib/categoryMeta';
 import { formatModel } from '../../../../lib/modelMeta';
 import { buildInsights } from '../../../../lib/sessionInsights';
@@ -14,12 +14,6 @@ function compact(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`;
   return String(n);
-}
-function dollars(n: number): string {
-  if (!n) return '$0.00';
-  if (n < 0.01) return `$${n.toFixed(4)}`;
-  if (n < 100) return `$${n.toFixed(2)}`;
-  return `$${compact(Math.round(n))}`;
 }
 
 // --- line-based building blocks (shared visual language with the Metrics page) ---
@@ -138,24 +132,6 @@ export function InsightsTab({ detail }: InsightsTabProps) {
     { name: 'Cache write', value: s.tokens.cache_write, color: CHART_COLORS[3] },
   ];
 
-  const costByModel = useMemo(() => {
-    const map = new Map<string, CostModelEstimate>();
-    for (const m of s.cost.models ?? []) {
-      if (m.model) map.set(formatModel(m.model), m);
-    }
-    return map;
-  }, [s.cost.models]);
-
-  const hasCost = s.cost.total_usd > 0;
-  const costData: Datum[] = hasCost
-    ? [
-        { name: 'Input', value: s.cost.models.reduce((n, m) => n + m.input_usd, 0), color: CHART_COLORS[1] },
-        { name: 'Output', value: s.cost.models.reduce((n, m) => n + m.output_usd, 0), color: CHART_COLORS[0] },
-        { name: 'Cache read', value: s.cost.models.reduce((n, m) => n + m.cache_read_usd, 0), color: CHART_COLORS[2] },
-        { name: 'Cache write', value: s.cost.models.reduce((n, m) => n + m.cache_write_usd, 0), color: CHART_COLORS[3] },
-      ].filter((d) => d.value > 0)
-    : [];
-
   const files = [
     ...detail.components.files_edited.map((f) => ({ path: f.path!, count: f.count, kind: 'edit' as const })),
     ...detail.components.files_read.map((f) => ({ path: f.path!, count: f.count, kind: 'read' as const })),
@@ -166,12 +142,11 @@ export function InsightsTab({ detail }: InsightsTabProps) {
       <p className="font-sans text-sm leading-relaxed text-fg/80">{narrative}</p>
 
       {/* Headline stats */}
-      <Grid cols="grid-cols-2 sm:grid-cols-5">
+      <Grid cols="grid-cols-2 sm:grid-cols-4">
         <Stat label="Duration" value={s.duration_seconds ? formatDuration(null, s.duration_seconds) : '—'} />
         <Stat label="Events" value={compact(s.event_count)} />
         <Stat label="Tool calls" value={compact(s.tool_count)} />
-        <Stat label="Tokens" value={hasTokens ? compact(s.tokens.total) : '—'} />
-        <Stat label="Est. cost" value={dollars(s.cost.total_usd)} accent={s.cost.total_usd > 0} />
+        <Stat label="Tokens" value={hasTokens ? compact(s.tokens.total) : '—'} accent={hasTokens} />
       </Grid>
 
       <Section n="01" title="Activity">
@@ -196,25 +171,20 @@ export function InsightsTab({ detail }: InsightsTabProps) {
                   <DonutChart data={modelData} centerLabel={String(modelData.length)} centerSub="models" />
                 </div>
                 <div className="min-w-0 flex-1 space-y-1.5">
-                  {modelData.map((d, i) => {
-                    const cm = costByModel.get(d.name);
-                    return (
-                      <div
-                        key={d.name}
-                        className="flex items-center justify-between gap-2 font-mono text-[0.62rem]">
-                        <span className="flex min-w-0 items-center gap-1.5">
-                          <span
-                            className="h-2 w-2 shrink-0"
-                            style={{ background: d.color ?? CHART_COLORS[i % CHART_COLORS.length] }}
-                          />
-                          <span className="truncate text-fg/70">{d.name}</span>
-                        </span>
-                        <span className="shrink-0 tabular-nums text-fg/45">
-                          {cm && cm.pricing_found ? dollars(cm.total_usd) : 'unpriced'}
-                        </span>
-                      </div>
-                    );
-                  })}
+                  {modelData.map((d, i) => (
+                    <div
+                      key={d.name}
+                      className="flex items-center justify-between gap-2 font-mono text-[0.62rem]">
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span
+                          className="h-2 w-2 shrink-0"
+                          style={{ background: d.color ?? CHART_COLORS[i % CHART_COLORS.length] }}
+                        />
+                        <span className="truncate text-fg/70">{d.name}</span>
+                      </span>
+                      <span className="shrink-0 tabular-nums text-fg/45">{compact(d.value)}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
             ) : (
@@ -224,46 +194,14 @@ export function InsightsTab({ detail }: InsightsTabProps) {
         </Grid>
       </Section>
 
-      <Section n="03" title="Tokens & cost">
-        <Grid cols="md:grid-cols-2">
-          <ChartBox label={hasTokens ? `Token usage — ${compact(s.tokens.total)} total` : 'Token usage'}>
-            {hasTokens ? (
-              <div className="space-y-3">
-                <HBars data={tokenData} height={150} />
-                <p className="font-mono text-[0.58rem] text-fg/40">
-                  {s.cost.unpriced_tokens
-                    ? `${compact(s.cost.unpriced_tokens)} tokens could not be priced.`
-                    : `Estimated at ${dollars(s.cost.total_usd)}.`}
-                </p>
-              </div>
-            ) : (
-              <p className="font-mono text-xs text-fg/40">No token data (Claude sessions only).</p>
-            )}
-          </ChartBox>
-          <ChartBox label={hasCost ? `Cost breakdown — ${dollars(s.cost.total_usd)}` : 'Cost breakdown'}>
-            {hasCost ? (
-              <div className="space-y-3">
-                <HBars data={costData} height={150} />
-                <ul className="space-y-1">
-                  {costData.map((d, i) => (
-                    <li key={d.name} className="flex items-center justify-between gap-2 font-mono text-[0.62rem]">
-                      <span className="flex items-center gap-1.5">
-                        <span
-                          className="h-2 w-2 shrink-0"
-                          style={{ background: d.color ?? CHART_COLORS[i % CHART_COLORS.length] }}
-                        />
-                        <span className="text-fg/70">{d.name}</span>
-                      </span>
-                      <span className="tabular-nums text-fg/45">{dollars(d.value)}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : (
-              <p className="font-mono text-xs text-fg/40">No cost data available.</p>
-            )}
-          </ChartBox>
-        </Grid>
+      <Section n="03" title="Tokens">
+        <ChartBox label={hasTokens ? `Token usage — ${compact(s.tokens.total)} total` : 'Token usage'}>
+          {hasTokens ? (
+            <HBars data={tokenData} height={150} />
+          ) : (
+            <p className="font-mono text-xs text-fg/40">No token data (Claude sessions only).</p>
+          )}
+        </ChartBox>
       </Section>
 
       <Section n="04" title="Files">

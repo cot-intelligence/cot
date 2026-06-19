@@ -41,7 +41,6 @@ export interface SessionSummary {
     cache_write: number;
     total: number;
   };
-  cost: CostEstimate;
 }
 
 export interface TimelineItem {
@@ -281,7 +280,6 @@ export interface Metrics {
     cache_write: number;
     total: number;
   };
-  cost: CostEstimate;
   by_day: { day: string; events: number }[];
   by_hour: { hour: number; events: number }[];
   by_category: { category: string; events: number }[];
@@ -291,8 +289,6 @@ export interface Metrics {
     events: number;
     output_tokens: number;
     total_tokens: number;
-    cost_usd: number;
-    pricing_found: boolean;
   }[];
   by_source: { source: AgentId; sessions: number; events: number }[];
   by_project: { cwd: string; sessions: number; events: number; last_activity: string | null }[];
@@ -319,37 +315,6 @@ export interface Metrics {
     thoughts: number;
     top_tool: string | null;
     error_rate: number;
-  };
-}
-
-export interface CostModelEstimate {
-  model: string | null;
-  pricing_model: string | null;
-  pricing_found: boolean;
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens: number;
-  cache_write_tokens: number;
-  total_tokens: number;
-  input_usd: number;
-  output_usd: number;
-  cache_read_usd: number;
-  cache_write_usd: number;
-  total_usd: number;
-}
-
-export interface CostEstimate {
-  total_usd: number;
-  currency: 'USD' | string;
-  priced_tokens: number;
-  unpriced_tokens: number;
-  models: CostModelEstimate[];
-  pricing: {
-    source: string;
-    source_url: string;
-    license: string;
-    unit: string;
-    model_count: number;
   };
 }
 

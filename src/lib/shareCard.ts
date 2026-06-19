@@ -48,12 +48,6 @@ function compact(n: number): string {
   if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`;
   return String(n);
 }
-function dollars(n: number): string {
-  if (!n) return '$0.00';
-  if (n < 0.01) return `$${n.toFixed(4)}`;
-  if (n < 100) return `$${n.toFixed(2)}`;
-  return `$${compact(Math.round(n))}`;
-}
 function hourLabel(h: number): string {
   const p = h < 12 ? 'am' : 'pm';
   return `${h % 12 === 0 ? 12 : h % 12}${p}`;
@@ -69,7 +63,6 @@ export function buildStats(m: Metrics): ShareStat[] {
     { key: 'events', label: 'Events', value: compact(t.events) },
     { key: 'tool_calls', label: 'Tool calls', value: compact(t.tool_calls) },
     { key: 'tokens', label: 'Tokens', value: compact(m.tokens.total) },
-    { key: 'cost', label: 'Est. cost', value: dollars(m.cost.total_usd) },
     { key: 'projects', label: 'Projects', value: compact(t.projects) },
     { key: 'active_days', label: 'Active days', value: String(activeDays) },
     { key: 'files', label: 'Files touched', value: compact(fun.files_touched) },
@@ -88,7 +81,7 @@ export function buildStats(m: Metrics): ShareStat[] {
 }
 
 /** Default scalar selection — a punchy, broadly-impressive set. */
-export const DEFAULT_KEYS = ['sessions', 'events', 'tool_calls', 'tokens', 'cost', 'files'];
+export const DEFAULT_KEYS = ['sessions', 'events', 'tool_calls', 'tokens', 'files'];
 
 const sum = (a: number[]) => a.reduce((n, v) => n + v, 0);
 

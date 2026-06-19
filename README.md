@@ -22,7 +22,7 @@ Already running the collector? Install just the bridge and hooks with
 
 - **Full-stack tracing** — LLM calls, tool executions, and custom spans in Python or TypeScript
 - **Continuous evaluation** — async evaluators on every trace, flagging regressions
-- **Cost & latency monitoring** — token usage, span waterfalls, budget alerts
+- **Latency monitoring** — token usage and span waterfalls
 
 ## Philosophy
 
