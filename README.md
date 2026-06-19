@@ -51,7 +51,7 @@ Serves at [http://localhost:8081](http://localhost:8081).
 
 ## Links
 
-- **GitHub:** [github.com/0xcardinal/cot](https://github.com/0xcardinal/cot)
+- **GitHub:** [github.com/cot-intelligence/cot](https://github.com/cot-intelligence/cot)
 - **Container:** `ghcr.io/cot-intelligence/cot:v1.0`
 
 ## License
