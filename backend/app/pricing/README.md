@@ -11,5 +11,5 @@ To refresh:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/safedep/gryph/main/pricing/models.json \
-  -o platform/backend/app/pricing/models.json
+  -o backend/app/pricing/models.json
 ```

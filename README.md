@@ -34,17 +34,13 @@ Already running the collector? Install just the bridge and hooks with
 
 ## Repository
 
-```
-cot/
-└── platform/     # Collector API, dashboard, and Docker image
-```
+Collector API, dashboard, bridge scripts, and Docker image — all in this repo.
 
-Marketing site lives in [cot-intelligence/website](https://github.com/cot-intelligence/website).
+Marketing site: [cot-intelligence/website](https://github.com/cot-intelligence/website).
 
 ### Development
 
 ```bash
-cd platform
 docker compose up
 ```
 

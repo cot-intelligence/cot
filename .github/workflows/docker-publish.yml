@@ -48,8 +48,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: platform
-          file: platform/Dockerfile.app
+          context: .
+          file: Dockerfile.app
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
