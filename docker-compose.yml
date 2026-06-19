@@ -1,12 +1,12 @@
 services:
-  # Development: hot-reloading Vite server. Installs run in the container,
-  # node_modules lives in a named volume so nothing is installed on the host.
+  # Development: hot-reloading Vite server on host :8000 (same as install).
+  # The collector API is internal-only on the compose network; Vite proxies /v1.
   dev:
     image: node:22-alpine
     working_dir: /app
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 4000"
     ports:
-      - "4000:4000"
+      - "8000:4000"
     volumes:
       - .:/app
       - node_modules_cache:/app/node_modules
@@ -22,8 +22,8 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     volumes:
       - ./backend/app:/app/app
       - ./bridge:/app/bridge
@@ -36,7 +36,7 @@ services:
     profiles: ["prod"]
     build: .
     ports:
-      - "8082:80"
+      - "8000:80"
 
 volumes:
   node_modules_cache:

@@ -1,3 +1,5 @@
+import { defaultCollectorUrl } from './ports';
+
 export type AgentId = 'claude' | 'cursor' | 'codex';
 
 export interface SetupStep {
@@ -107,7 +109,7 @@ const INSTALL_STEP: SetupStep = {
   detail:
     'Installs the bridge and asks which agents to wire up — it writes the hook config for you. No accounts, no network egress.',
   kind: 'shell',
-  command: 'curl -fsSL http://localhost:8000/install.sh | sh',
+  command: `curl -fsSL ${defaultCollectorUrl}/install.sh | sh`,
 };
 
 export const AGENTS: Agent[] = [
