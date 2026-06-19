@@ -1,0 +1,42 @@
+services:
+  # Development: hot-reloading Vite server. Installs run in the container,
+  # node_modules lives in a named volume so nothing is installed on the host.
+  dev:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 4000"
+    ports:
+      - "4000:4000"
+    volumes:
+      - .:/app
+      - platform_node_modules:/app/node_modules
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+    depends_on:
+      - api
+
+  # Python collector. Receives Claude/Cursor hook events and stores them in a
+  # single SQLite DB in the user's home (~/.cot/cot.db on the host).
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - ./bridge:/app/bridge
+      - ${HOME}/.cot:/root/.cot
+    environment:
+      - COT_DB_PATH=/root/.cot/cot.db
+
+  # Production: static dashboard served by nginx.
+  web:
+    profiles: ["prod"]
+    build: .
+    ports:
+      - "8082:80"
+
+volumes:
+  platform_node_modules:

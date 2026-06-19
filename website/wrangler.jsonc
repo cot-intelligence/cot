@@ -1,0 +1,39 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "cot",
+	"compatibility_date": "2026-06-13",
+	"main": "src/worker.ts",
+	"routes": [
+		{
+			"pattern": "cot.run",
+			"custom_domain": true
+		}
+	],
+	"observability": {
+		"enabled": true
+	},
+	"assets": {
+		"binding": "ASSETS",
+		"not_found_handling": "single-page-application",
+		// Let the worker handle the telemetry API before the SPA asset router does.
+		"run_worker_first": [
+			"/v1/telemetry",
+			"/v1/feedback"
+		]
+	},
+	"d1_databases": [
+		{
+			"binding": "TELEMETRY_DB",
+			"database_name": "cot-telemetry",
+			"database_id": "7c57c303-c23c-480f-bb6f-47931e98a59c"
+		},
+		{
+			"binding": "MESSAGES_DB",
+			"database_name": "cot-messages",
+			"database_id": "3f72daeb-e06b-4990-b55f-e106873da35f"
+		}
+	],
+	"compatibility_flags": [
+		"nodejs_compat"
+	]
+}

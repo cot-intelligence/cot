@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>cot.</title>
+    <meta name="description" content="Connect your agent to cot. Trace Claude and Cursor sessions with hooks — self-hosted." />
+    <link rel="icon" type="image/svg+xml" href="/favicon-vermilion.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.svg" />
+    <meta name="theme-color" content="#FF4500" />
+    <script>
+      // Apply the saved theme before paint to avoid a flash. Default: light.
+      (function () {
+        try {
+          var t = localStorage.getItem('cot.theme') || 'light';
+          document.documentElement.setAttribute('data-theme', t);
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/index.tsx"></script>
+  </body>
+</html>

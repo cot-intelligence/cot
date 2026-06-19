@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" role="img" aria-label="cot.">
+  <rect x="16" y="58" width="148" height="64" rx="32" ry="32" fill="#FF4500" />
+  <text
+    x="90"
+    y="106"
+    text-anchor="middle"
+    font-family="Georgia, 'Times New Roman', serif"
+    font-size="48"
+    font-weight="700"
+    font-style="italic"
+    fill="#F4F0EA">cot.</text>
+</svg>
