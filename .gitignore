@@ -7,9 +7,7 @@ dist/
 __pycache__/
 *.pyc
 .cursor/
-website/.wrangler/
 .claude/settings.local.json
 secrets.json
-.env.production
 .env.*
 _DESIGN_LANGUAGE.md

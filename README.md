@@ -32,22 +32,13 @@ Already running the collector? Install just the bridge and hooks with
 | Free forever | No license fees, no metered billing |
 | Open source | Licensed under AGPL-3.0 |
 
-## Repository
+## Repositories
 
-```
-cot/
-├── website/      # Marketing site (Vite + React)
-└── platform/     # Core product (coming soon)
-```
-
-### Landing page
-
-```bash
-cd website
-docker compose up --build
-```
-
-Serves at [http://localhost:8081](http://localhost:8081).
+| Repo | Description |
+|------|-------------|
+| [cot-intelligence/cot](https://github.com/cot-intelligence/cot) | Meta repo (this repo) |
+| [cot-intelligence/platform](https://github.com/cot-intelligence/platform) | Collector API, dashboard, and Docker image |
+| [cot-intelligence/website](https://github.com/cot-intelligence/website) | Marketing site at [cot.run](https://cot.run) |
 
 ## Links
 
