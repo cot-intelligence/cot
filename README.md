@@ -30,7 +30,7 @@ Already running the collector? Install just the bridge and hooks with
 |---|---|
 | Self-host only | Runs on your machines, your data stays yours |
 | Free forever | No license fees, no metered billing |
-| Open source | Licensed under GPL-3.0 |
+| Open source | Licensed under AGPL-3.0 |
 
 ## Repository
 
@@ -56,4 +56,4 @@ Serves at [http://localhost:8081](http://localhost:8081).
 
 ## License
 
-Cot is licensed under [GPL-3.0](LICENSE).
+Cot is licensed under [AGPL-3.0](LICENSE).
