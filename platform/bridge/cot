@@ -1,0 +1,1021 @@
+#!/usr/bin/env python3
+"""cot bridge — pipes agent hook events to the local collector."""
+
+from __future__ import annotations
+
+import base64
+from datetime import datetime, timezone
+import json
+import os
+import shutil
+import struct
+import sys
+import threading
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+STATE_DIR = Path.home() / ".cot"
+CONFIG_PATH = STATE_DIR / "config.json"
+TRANSCRIPT_OFFSETS = STATE_DIR / "transcript_offsets.json"
+BRIDGE_PATH = STATE_DIR / "bin" / "cot"
+HOOK_STATUS_PATH = STATE_DIR / "hooks_status.json"
+HOOK_BACKUPS_PATH = STATE_DIR / "hook_backups.json"
+
+DEFAULT_ENDPOINT = "http://localhost:8000"
+
+
+def _resolve_endpoint() -> str:
+    """COT_ENDPOINT env wins; otherwise the endpoint persisted at install time
+    (config.json), so hooks reach the right collector even when the agent runs
+    them with a bare environment."""
+    env = os.environ.get("COT_ENDPOINT")
+    if env:
+        return env
+    try:
+        data = json.loads(CONFIG_PATH.read_text())
+        ep = data.get("endpoint")
+        if isinstance(ep, str) and ep:
+            return ep.rstrip("/")
+    except (json.JSONDecodeError, OSError):
+        pass
+    return DEFAULT_ENDPOINT
+
+
+COT_ENDPOINT = _resolve_endpoint()
+
+CURSOR_ALLOW_HOOKS = {
+    "beforeSubmitPrompt",
+    "beforeShellExecution",
+    "beforeMCPExecution",
+    "beforeReadFile",
+}
+
+# Cursor's granular tool hooks duplicate the generic pre/postToolUse events
+# (see _hook_templates). We no longer wire these, but installs from before this
+# change still have them — drop their payloads so they don't double-count. The
+# permission response (CURSOR_ALLOW_HOOKS) is still returned, so behavior is
+# unchanged for the user.
+CURSOR_REDUNDANT_HOOKS = {
+    "beforeShellExecution",
+    "afterShellExecution",
+    "beforeMCPExecution",
+    "afterMCPExecution",
+    "beforeReadFile",
+    "afterFileEdit",
+}
+
+
+def _load_offsets() -> dict[str, int]:
+    if not TRANSCRIPT_OFFSETS.exists():
+        return {}
+    try:
+        return json.loads(TRANSCRIPT_OFFSETS.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_offsets(data: dict[str, int]) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    TRANSCRIPT_OFFSETS.write_text(json.dumps(data))
+
+
+def _post(url: str, payload: dict) -> None:
+    data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req, timeout=3)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(f"cot: failed to post event: {exc}", file=sys.stderr)
+
+
+def _post_async(url: str, payload: dict) -> None:
+    """Fire-and-forget — only for non-critical follow-up posts."""
+    def _send() -> None:
+        _post(url, payload)
+
+    threading.Thread(target=_send, daemon=True).start()
+
+
+def _audit_self(action: str, *, target: str | None = None, status: str = "ok", detail: dict | None = None) -> None:
+    """Best-effort self-audit for bridge config changes."""
+    payload = {
+        "action": action,
+        "actor": "cot-bridge",
+        "target": target,
+        "status": status,
+        "detail": detail or {},
+    }
+    data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+    req = urllib.request.Request(
+        f"{COT_ENDPOINT}/v1/audit/self",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req, timeout=2)
+    except (urllib.error.URLError, TimeoutError, OSError):
+        pass
+
+
+def _now_z() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _img_dims(raw: bytes) -> tuple[int | None, int | None]:
+    """Best-effort pixel dimensions from raw image bytes (PNG/GIF/JPEG)."""
+    try:
+        if raw[:8] == b"\x89PNG\r\n\x1a\n":
+            w, h = struct.unpack(">II", raw[16:24])
+            return w, h
+        if raw[:6] in (b"GIF87a", b"GIF89a"):
+            w, h = struct.unpack("<HH", raw[6:10])
+            return w, h
+        if raw[:2] == b"\xff\xd8":  # JPEG: scan for a start-of-frame marker
+            i, n = 2, len(raw)
+            while i + 9 < n:
+                if raw[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = raw[i + 1]
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    h, w = struct.unpack(">HH", raw[i + 5 : i + 9])
+                    return w, h
+                seg = struct.unpack(">H", raw[i + 2 : i + 4])[0]
+                i += 2 + seg
+    except Exception:
+        pass
+    return None, None
+
+
+def _message_attachments(content: list) -> list[dict]:
+    """Metadata for non-text user attachments (images / documents): kind,
+    media_type, byte size, and pixel dimensions — never the raw bytes."""
+    out: list[dict] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        bt = block.get("type")
+        if bt not in ("image", "document"):
+            continue
+        src = block.get("source") if isinstance(block.get("source"), dict) else {}
+        meta: dict = {"kind": bt, "media_type": src.get("media_type")}
+        name = block.get("title") or src.get("name")
+        if name:
+            meta["name"] = name
+        data = src.get("data")
+        if isinstance(data, str):
+            try:
+                raw = base64.b64decode(data)
+                meta["size_bytes"] = len(raw)
+                if bt == "image":
+                    w, h = _img_dims(raw)
+                    if w:
+                        meta["width"], meta["height"] = w, h
+            except Exception:
+                pass
+        out.append(meta)
+    return out
+
+
+def _text_from_blocks(content) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict):
+            if block.get("type") in ("text", "output_text", "input_text"):
+                t = block.get("text", "")
+                if t:
+                    parts.append(str(t))
+        elif isinstance(block, str) and block:
+            parts.append(block)
+    return "\n".join(parts).strip()
+
+
+def _is_interruption(text: str | None) -> bool:
+    """Both agents record a user-stop as a synthetic user message right after the
+    cut-off output: Claude ``[Request interrupted by user...]``, Codex
+    ``<turn_aborted> The user interrupted the previous turn...``."""
+    if not text:
+        return False
+    t = text.lower()
+    return (
+        "request interrupted by user" in t
+        or "<turn_aborted>" in t
+        or "interrupted the previous turn" in t
+    )
+
+
+def _merge_usage(acc: dict | None, usage: dict) -> dict:
+    """Sum Codex per-turn token deltas. Keys mirror the rollout ``token_count``
+    payload; normalize.py maps them onto the stored token columns."""
+    out = dict(acc) if isinstance(acc, dict) else {}
+    for key in (
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+    ):
+        val = usage.get(key)
+        if isinstance(val, (int, float)):
+            out[key] = out.get(key, 0) + int(val)
+    return out
+
+
+def _read_transcript_delta(transcript_path: str, session_id: str) -> str:
+    """Return newly appended transcript bytes since the last read for this session."""
+    path = Path(transcript_path)
+    if not path.exists():
+        return ""
+    offsets = _load_offsets()
+    key = f"{session_id}:{transcript_path}"
+    start = offsets.get(key, 0)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    if start > len(text):
+        start = 0
+    new_text = text[start:]
+    offsets[key] = len(text)
+    _save_offsets(offsets)
+    return new_text
+
+
+def _scan_transcript(transcript_path: str, session_id: str) -> dict:
+    """Read the transcript delta once; extract assistant responses and the
+    attachments (images/files) on user messages. Single read so the shared
+    file offset only advances once.
+
+    Returns {"responses": [(ts, text, model, usage, interrupted)],
+    "thoughts": [(ts, text, usage, interrupted)], "attachments": [(ts, [att])]}.
+    """
+    empty: dict[str, list] = {"responses": [], "thoughts": [], "attachments": []}
+    new_text = _read_transcript_delta(transcript_path, session_id)
+    if not new_text:
+        return empty
+
+    # Ordered records so a user-stop can flag the message it cut off (the last
+    # assistant thought/response before the interruption marker).
+    msgs: list[dict] = []
+    attachments: list[tuple] = []
+    for line in new_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        role = obj.get("role") or message.get("role") or obj.get("type")
+        content = obj.get("content")
+        if content is None:
+            content = message.get("content")
+        ts = obj.get("timestamp")
+
+        if role == "assistant" or obj.get("type") == "assistant":
+            # Extended-thinking blocks carry the chain of thought; surface them as
+            # thoughts so reasoning shows up alongside the final response.
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "thinking":
+                        think = block.get("thinking")
+                        if think:
+                            msgs.append({"kind": "thought", "ts": ts, "text": str(think),
+                                         "model": None, "usage": None, "interrupted": False})
+            text_val = _text_from_blocks(content) if isinstance(content, list) else (content or "")
+            if text_val:
+                model = message.get("model") or obj.get("model")
+                usage = message.get("usage") if isinstance(message.get("usage"), dict) else None
+                msgs.append({"kind": "response", "ts": ts, "text": str(text_val),
+                             "model": model, "usage": usage, "interrupted": False})
+        elif role == "user" and isinstance(content, list):
+            if _is_interruption(_text_from_blocks(content)) and msgs:
+                msgs[-1]["interrupted"] = True
+            atts = _message_attachments(content)
+            if atts:
+                texts = [
+                    b.get("text", "")
+                    for b in content
+                    if isinstance(b, dict) and b.get("type") in ("text", "input_text")
+                ]
+                attachments.append((ts, "\n".join(texts).strip(), atts))
+
+    thoughts = [(m["ts"], m["text"], m["usage"], m["interrupted"]) for m in msgs if m["kind"] == "thought"]
+    responses = [(m["ts"], m["text"], m["model"], m["usage"], m["interrupted"]) for m in msgs if m["kind"] == "response"]
+    return {"responses": responses, "thoughts": thoughts, "attachments": attachments}
+
+
+def _scan_codex_transcript(transcript_path: str, session_id: str) -> dict:
+    """Read Codex rollout JSONL deltas.
+
+    Codex mirrors each assistant line twice (``agent_message`` then
+    ``output_text`` with identical text). Only ingest the ``response_item``
+    and split by ``phase``: ``commentary`` → thought, ``final_answer`` → response.
+    """
+    empty: dict[str, list] = {
+        "thoughts": [],
+        "responses": [],
+        "attachments": [],
+        "web_searches": [],
+    }
+    new_text = _read_transcript_delta(transcript_path, session_id)
+    if not new_text:
+        return empty
+
+    # Each emitted assistant message gets a mutable record so we can fold the
+    # per-turn ``token_count`` deltas (which arrive after the message) onto it.
+    msgs: list[dict] = []
+    attachments: list[tuple] = []
+    web_searches: list[tuple] = []
+    for line in new_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ts = obj.get("timestamp")
+        kind = obj.get("type")
+        payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+
+        if kind == "response_item":
+            pt = payload.get("type")
+            if pt == "message" and payload.get("role") == "assistant":
+                text_val = _text_from_blocks(payload.get("content"))
+                if not text_val:
+                    continue
+                model = payload.get("model") or obj.get("model")
+                phase = payload.get("phase") or ""
+                # final_answer → response; commentary / unknown phase → thought.
+                msgs.append({
+                    "kind": "response" if phase == "final_answer" else "thought",
+                    "ts": ts,
+                    "text": text_val,
+                    "model": model,
+                    "usage": None,
+                    "interrupted": False,
+                })
+            elif pt == "message" and payload.get("role") == "user":
+                content = payload.get("content")
+                if isinstance(content, list):
+                    user_text = _text_from_blocks(content)
+                    if _is_interruption(user_text) and msgs:
+                        msgs[-1]["interrupted"] = True
+                    atts = _message_attachments(content)
+                    if atts:
+                        attachments.append((ts, user_text, atts))
+            elif pt == "web_search_call":
+                action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+                query = action.get("query") or payload.get("query") or ""
+                if query:
+                    web_searches.append((ts, str(query), action, payload.get("status")))
+        elif kind == "event_msg" and payload.get("type") == "token_count":
+            # Attribute the per-turn token delta to the message it followed.
+            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+            last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else None
+            if last and msgs:
+                msgs[-1]["usage"] = _merge_usage(msgs[-1].get("usage"), last)
+
+    thoughts = [(m["ts"], m["text"], m["usage"], m["interrupted"]) for m in msgs if m["kind"] == "thought"]
+    responses = [(m["ts"], m["text"], m["model"], m["usage"], m["interrupted"]) for m in msgs if m["kind"] == "response"]
+    return {
+        "thoughts": thoughts,
+        "responses": responses,
+        "attachments": attachments,
+        "web_searches": web_searches,
+    }
+
+
+def _emit_synthetic_messages(
+    source: str,
+    body: dict,
+    scanned: dict,
+) -> None:
+    session_id = body.get("session_id")
+    if not session_id:
+        return
+    for ts, text, atts in scanned.get("attachments", []):
+        _post(
+            f"{COT_ENDPOINT}/v1/ingest/{source}",
+            {
+                "session_id": session_id,
+                "cwd": body.get("cwd"),
+                "_attach_to_prompt": True,
+                "text": text,
+                "attachments": atts,
+                "timestamp": ts or body.get("timestamp"),
+            },
+        )
+    for ts, msg, usage, interrupted in scanned.get("thoughts", []):
+        _post(
+            f"{COT_ENDPOINT}/v1/ingest/{source}",
+            {
+                "session_id": session_id,
+                "cwd": body.get("cwd"),
+                "hook_event_name": "afterAgentThought",
+                "thought": msg,
+                "_synthetic_category": "thought",
+                "timestamp": ts or body.get("timestamp"),
+                "model": body.get("model"),
+                "usage": usage,
+                "interrupted": interrupted,
+            },
+        )
+    for ts, msg, model, usage, interrupted in scanned.get("responses", []):
+        _post(
+            f"{COT_ENDPOINT}/v1/ingest/{source}",
+            {
+                "session_id": session_id,
+                "cwd": body.get("cwd"),
+                "hook_event_name": "afterAgentResponse",
+                "response": msg,
+                "_synthetic_category": "response",
+                "timestamp": ts or body.get("timestamp"),
+                "model": model or body.get("model"),
+                "usage": usage,
+                "interrupted": interrupted,
+            },
+        )
+    for ts, query, action, status in scanned.get("web_searches", []):
+        _post(
+            f"{COT_ENDPOINT}/v1/ingest/{source}",
+            {
+                "session_id": session_id,
+                "cwd": body.get("cwd"),
+                "hook_event_name": "PostToolUse",
+                "tool_name": "WebSearch",
+                "tool_input": {"query": query, "queries": action.get("queries", [])},
+                "tool_response": {"status": status, "action": action},
+                "timestamp": ts or body.get("timestamp"),
+                "model": body.get("model"),
+            },
+        )
+
+
+def _emit_claude_responses(body: dict, source: str) -> None:
+    hook = body.get("hook_event_name") or body.get("hook") or ""
+    if hook not in ("Stop", "SubagentStop"):
+        return
+    transcript = body.get("transcript_path")
+    session_id = body.get("session_id")
+    if not transcript or not session_id:
+        return
+    scanned = _scan_transcript(transcript, session_id)
+    _emit_synthetic_messages(source, body, scanned)
+
+
+def _find_codex_transcript(session_id: str) -> str | None:
+    """Locate a Codex rollout transcript from the session id alone.
+
+    Codex only includes ``transcript_path`` on some hook payloads (it varies by
+    version/hook), but the session id is always present and is the suffix of the
+    rollout filename: ``rollout-<timestamp>-<session_id>.jsonl``. Deriving the
+    path here means intermediate thinking is captured regardless of payload shape.
+    """
+    if not session_id:
+        return None
+    base = STATE_DIR.parent / ".codex" / "sessions"
+    if not base.exists():
+        return None
+    matches = list(base.glob(f"**/rollout-*-{session_id}.jsonl"))
+    if not matches:
+        matches = list(base.glob(f"**/*{session_id}*.jsonl"))
+    if not matches:
+        return None
+    return str(max(matches, key=lambda p: p.stat().st_mtime))
+
+
+def _emit_codex_responses(body: dict, source: str) -> None:
+    """Codex stores commentary and assistant text in rollout JSONL transcripts.
+
+    Scan the transcript so intermediate thoughts, responses, web searches, and
+    token usage appear while the turn is in progress. The transcript is located
+    from the session id when the hook payload omits ``transcript_path``. Fall
+    back to ``last_assistant_message`` on Stop when the transcript can't be read.
+    """
+    session_id = body.get("session_id")
+    transcript = body.get("transcript_path") or _find_codex_transcript(session_id)
+    hook = body.get("hook_event_name") or body.get("hook") or ""
+
+    scanned: dict = {"thoughts": [], "responses": [], "attachments": [], "web_searches": []}
+    if transcript and session_id:
+        scanned = _scan_codex_transcript(transcript, session_id)
+        _emit_synthetic_messages(source, body, scanned)
+
+    # Fallback only when no transcript could be read at all. When a transcript
+    # was scanned it is authoritative: the final answer is already emitted (here
+    # or on an earlier hook), so adding last_assistant_message would duplicate it
+    # — the per-scan ``responses`` check can't see the earlier emit.
+    if hook in ("Stop", "SubagentStop") and session_id and not transcript:
+        msg = body.get("last_assistant_message")
+        if msg:
+            _post(
+                f"{COT_ENDPOINT}/v1/ingest/{source}",
+                {
+                    "session_id": session_id,
+                    "cwd": body.get("cwd"),
+                    "hook_event_name": "afterAgentResponse",
+                    "response": msg,
+                    "_synthetic_category": "response",
+                    "timestamp": body.get("timestamp"),
+                    "model": body.get("model"),
+                },
+            )
+
+
+def _hook_response(source: str, body: dict) -> dict | None:
+    hook = body.get("hook_event_name") or body.get("hook") or body.get("event") or ""
+    if source == "cursor":
+        if hook in CURSOR_ALLOW_HOOKS:
+            return {"permission": "allow"}
+        return {"continue": True}
+    if source == "codex":
+        # Codex's hook engine rejects the {continue, suppressOutput} envelope on
+        # tool-use events and marks the run "Failed". Emit nothing there (exit 0
+        # with no output is a pass); for the rest, the passive continue is fine.
+        if hook in ("PreToolUse", "PostToolUse", "PermissionRequest"):
+            return None
+        return {"continue": True}
+    return {"continue": True, "suppressOutput": True}
+
+
+def _log_launch(body: dict) -> None:
+    """Debug aid: record the process tree that started a Claude session, so we
+    can see what spawns the empty home-directory sessions."""
+    try:
+        import subprocess
+
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        log = STATE_DIR / "session-launches.log"
+        lines = [
+            f"=== {body.get('timestamp') or ''} session={body.get('session_id')} "
+            f"source={body.get('source')} cwd={body.get('cwd')}"
+        ]
+        pid = os.getppid()  # the claude process that ran this hook
+        for _ in range(8):
+            if pid <= 1:
+                break
+            row = subprocess.run(
+                ["ps", "-o", "pid=,ppid=,command=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=2,
+            ).stdout.strip()
+            if not row:
+                break
+            lines.append("  " + row)
+            ppid = subprocess.run(
+                ["ps", "-o", "ppid=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=2,
+            ).stdout.strip()
+            pid = int(ppid) if ppid.isdigit() else 0
+        with log.open("a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception:
+        pass
+
+
+AGENTS = ("claude", "cursor", "codex")
+
+# Where each agent reads its hook config, and whether it is a Cursor-style file
+# (a top-level "version" alongside "hooks") vs. a Claude/Codex-style file.
+_CONFIG_TARGETS = {
+    "claude": (Path.home() / ".claude" / "settings.json", False),
+    "cursor": (Path.home() / ".cursor" / "hooks.json", True),
+    "codex": (Path.home() / ".codex" / "hooks.json", False),
+}
+
+
+def _hook_command(agent: str) -> str:
+    """Absolute path to the installed bridge, so hooks fire regardless of the
+    PATH the agent happens to run them with."""
+    return f"{BRIDGE_PATH} hook {agent}"
+
+
+def _claude_style_hooks(agent: str, events: list[tuple[str, bool]]) -> dict:
+    """Claude/Codex hook shape: each event maps to a list of groups, each with a
+    `hooks` array of command entries (and an optional tool `matcher`)."""
+    cmd = _hook_command(agent)
+    out: dict[str, list] = {}
+    for name, matcher in events:
+        group: dict = {"hooks": [{"type": "command", "command": cmd}]}
+        if matcher:
+            group = {"matcher": "*", **group}
+        out[name] = [group]
+    return out
+
+
+def _hook_templates() -> dict[str, dict]:
+    return {
+        "claude": _claude_style_hooks(
+            "claude",
+            [
+                ("SessionStart", False),
+                ("SessionEnd", False),
+                ("UserPromptSubmit", False),
+                ("PreToolUse", True),
+                ("PostToolUse", True),
+                ("PostToolUseFailure", True),
+                ("Stop", False),
+                ("SubagentStop", False),
+                ("PreCompact", False),
+                ("Notification", False),
+            ],
+        ),
+        "codex": _claude_style_hooks(
+            "codex",
+            [
+                ("SessionStart", False),
+                ("UserPromptSubmit", False),
+                ("PreToolUse", True),
+                ("PostToolUse", True),
+                ("PermissionRequest", True),
+                ("PreCompact", False),
+                ("PostCompact", False),
+                ("SubagentStart", True),
+                ("SubagentStop", True),
+                ("Stop", False),
+            ],
+        ),
+        # Cursor fires both granular hooks (beforeShellExecution, afterFileEdit,
+        # before/afterMCPExecution, beforeReadFile) AND generic pre/postToolUse
+        # for the same action. The generic pair carries the richest, most uniform
+        # payload (tool_input, tool_output, duration, model) and fires for *every*
+        # tool — shell, read, edit, search, subagent, delete, web, and MCP — so we
+        # wire only those and skip the granular duplicates to avoid double-counting.
+        "cursor": {
+            name: [{"command": _hook_command("cursor")}]
+            for name in (
+                "sessionStart",
+                "sessionEnd",
+                "beforeSubmitPrompt",
+                "afterAgentResponse",
+                "afterAgentThought",
+                "preToolUse",
+                "postToolUse",
+                "postToolUseFailure",
+                "subagentStart",
+                "subagentStop",
+                "preCompact",
+                "stop",
+            )
+        },
+    }
+
+
+def _template_events(template: dict) -> list[str]:
+    return list(template.keys())
+
+
+def _read_json_file(path: Path) -> tuple[dict, str | None]:
+    try:
+        parsed = json.loads(path.read_text() or "{}")
+    except FileNotFoundError:
+        return {}, "missing"
+    except json.JSONDecodeError as exc:
+        return {}, f"invalid json: {exc}"
+    except OSError as exc:
+        return {}, str(exc)
+    if not isinstance(parsed, dict):
+        return {}, "json root is not an object"
+    return parsed, None
+
+
+def _read_backup_manifest() -> dict:
+    data, err = _read_json_file(HOOK_BACKUPS_PATH)
+    if err:
+        return {"entries": []}
+    entries = data.get("entries")
+    return {"entries": entries if isinstance(entries, list) else []}
+
+
+def _write_backup_manifest(manifest: dict) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    manifest["updated_at"] = _now_z()
+    HOOK_BACKUPS_PATH.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
+
+
+def _backup_entries(agent: str) -> list[dict]:
+    entries = _read_backup_manifest().get("entries", [])
+    return [e for e in entries if isinstance(e, dict) and e.get("agent") == agent]
+
+
+def _latest_backup(agent: str) -> dict | None:
+    entries = _backup_entries(agent)
+    if not entries:
+        return None
+    return sorted(entries, key=lambda e: str(e.get("created_at") or ""))[-1]
+
+
+def _backup_config(agent: str, path: Path, action: str) -> dict | None:
+    if not path.exists():
+        return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = path.with_name(f"{path.name}.cot-{stamp}.bak")
+    shutil.copy2(path, backup)
+    entry = {
+        "agent": agent,
+        "config_path": str(path),
+        "backup_path": str(backup),
+        "created_at": _now_z(),
+        "action": action,
+        "endpoint": COT_ENDPOINT,
+    }
+    manifest = _read_backup_manifest()
+    manifest.setdefault("entries", []).append(entry)
+    _write_backup_manifest(manifest)
+    _audit_self(
+        "bridge.hooks.backup_created",
+        target=agent,
+        detail=entry,
+    )
+    return entry
+
+
+def _agent_hook_status(agent: str) -> dict:
+    path, _ = _CONFIG_TARGETS[agent]
+    expected = _template_events(_hook_templates()[agent])
+    marker = f"hook {agent}"
+    config, err = _read_json_file(path)
+    exists = path.exists()
+    valid_json = err is None
+    hooks = config.get("hooks") if isinstance(config.get("hooks"), dict) else {}
+    installed_hooks: list[str] = []
+    if valid_json:
+        for name in expected:
+            entries = hooks.get(name)
+            if isinstance(entries, list) and marker in json.dumps(entries):
+                installed_hooks.append(name)
+    missing_hooks = [name for name in expected if name not in installed_hooks]
+    latest = _latest_backup(agent)
+    backups = _backup_entries(agent)
+    warnings: list[str] = []
+    if not exists:
+        warnings.append("config_missing")
+    elif not valid_json:
+        warnings.append("config_invalid")
+    if missing_hooks:
+        warnings.append("hooks_missing")
+    return {
+        "agent": agent,
+        "config_path": str(path),
+        "config_exists": exists,
+        "valid_json": valid_json,
+        "error": None if err == "missing" else err,
+        "installed": valid_json and not missing_hooks,
+        "expected_hooks": expected,
+        "installed_hooks": installed_hooks,
+        "missing_hooks": missing_hooks,
+        "backup_count": len(backups),
+        "latest_backup": latest,
+        "warnings": warnings,
+    }
+
+
+def _merge_hooks(existing: dict, template: dict, marker: str) -> dict:
+    """Add cot's command for each event without disturbing the user's own hooks.
+    Idempotent: if cot is already wired into an event (matched by ``marker``),
+    that event is left untouched."""
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    for event, entries in template.items():
+        current = merged.get(event)
+        if not isinstance(current, list):
+            current = []
+        if marker in json.dumps(current):
+            merged[event] = current
+        else:
+            merged[event] = current + entries
+    return merged
+
+
+def _hooks_installed(agent: str) -> bool:
+    return bool(_agent_hook_status(agent)["installed"])
+
+
+def _install_agent(agent: str, action: str = "install") -> dict:
+    path, cursor_style = _CONFIG_TARGETS[agent]
+    template = _hook_templates()[agent]
+
+    config, err = _read_json_file(path)
+    if err == "missing":
+        config = {}
+
+    existing = config.get("hooks") if isinstance(config.get("hooks"), dict) else {}
+    next_config = dict(config)
+    next_config["hooks"] = _merge_hooks(existing, template, f"hook {agent}")
+    if cursor_style:
+        next_config.setdefault("version", 1)
+    changed = next_config != config or err not in (None, "missing")
+    backup = None
+    if changed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        backup = _backup_config(agent, path, action)
+        path.write_text(json.dumps(next_config, indent=2) + "\n")
+    status = _agent_hook_status(agent)
+    status.update(
+        {
+            "changed": changed,
+            "backup_created": backup,
+            "status": "ok",
+        }
+    )
+    return status
+
+
+def _write_hook_status() -> None:
+    """Record installed hook status where the collector can read it.
+
+    The collector runs in Docker with ~/.cot mounted, so it cannot inspect
+    ~/.claude, ~/.cursor, or ~/.codex directly. This manifest is the bridge's
+    small, content-free handoff to the dashboard.
+    """
+    status = {
+        "updated_at": _now_z(),
+        "endpoint": COT_ENDPOINT,
+        "agents": {agent: _agent_hook_status(agent) for agent in AGENTS},
+    }
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    HOOK_STATUS_PATH.write_text(json.dumps(status, indent=2) + "\n")
+
+
+def _cmd_install(args: list[str]) -> int:
+    agents = [a for a in args if a in AGENTS]
+    if not agents:
+        agents = list(AGENTS)
+    repair = os.environ.get("COT_REPAIR") in ("1", "true", "yes")
+    action = "repair" if repair else "install"
+    results: list[dict] = []
+    for agent in agents:
+        try:
+            result = _install_agent(agent, action=action)
+            results.append(result)
+            verb = "repaired" if repair else "wired up"
+            print(f"cot: {verb} {agent} hooks -> {result['config_path']}")
+            if result.get("backup_created"):
+                print(f"cot: backup saved -> {result['backup_created']['backup_path']}")
+            elif not result.get("changed"):
+                print(f"cot: {agent} hooks already up to date")
+        except OSError as exc:
+            results.append(
+                {
+                    "agent": agent,
+                    "config_path": str(_CONFIG_TARGETS[agent][0]),
+                    "status": "error",
+                    "error": str(exc),
+                }
+            )
+            print(f"cot: failed to wire up {agent}: {exc}", file=sys.stderr)
+    try:
+        _write_hook_status()
+        status_written = True
+    except OSError as exc:
+        status_written = False
+        print(f"cot: failed to write hook status: {exc}", file=sys.stderr)
+    audit_detail = {
+        "agents": [
+            {
+                "agent": r.get("agent") or r.get("target"),
+                "config_path": r.get("config_path"),
+                "status": r.get("status"),
+                "changed": r.get("changed"),
+                "missing_hooks": r.get("missing_hooks"),
+                "backup_path": (r.get("backup_created") or {}).get("backup_path")
+                if isinstance(r.get("backup_created"), dict)
+                else None,
+            }
+            for r in results
+        ],
+        "hook_status_path": str(HOOK_STATUS_PATH),
+        "hook_status_written": status_written,
+        "endpoint": COT_ENDPOINT,
+    }
+    _audit_self(
+        "bridge.hooks.repaired" if repair else "bridge.hooks.installed",
+        target="hooks",
+        status="ok" if all(r["status"] == "ok" for r in results) and status_written else "error",
+        detail=audit_detail,
+    )
+    if "codex" in agents:
+        print("cot: run /hooks in Codex to review and trust the new hooks.")
+    return 0
+
+
+def _cmd_status() -> int:
+    status = {agent: _hooks_installed(agent) for agent in AGENTS}
+    print(json.dumps({"endpoint": COT_ENDPOINT, "hooks": status}, indent=2))
+    return 0
+
+
+def _api_json(method: str, path: str, payload: dict | None = None) -> dict:
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{COT_ENDPOINT}{path}",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method=method,
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _print_json(data: dict) -> None:
+    print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+
+
+def _cmd_retention(args: list[str]) -> int:
+    action = args[0] if args else "status"
+    try:
+        if action == "status":
+            _print_json(_api_json("GET", "/v1/retention"))
+            return 0
+        if action == "enable":
+            days = int(args[1]) if len(args) > 1 else 30
+            _print_json(_api_json("PUT", "/v1/retention", {"enabled": True, "days": days}))
+            return 0
+        if action == "disable":
+            _print_json(_api_json("PUT", "/v1/retention", {"enabled": False}))
+            return 0
+        if action == "dry-run":
+            _print_json(_api_json("POST", "/v1/retention/cleanup", {"dry_run": True}))
+            return 0
+        if action == "cleanup":
+            _print_json(_api_json("POST", "/v1/retention/cleanup", {"dry_run": False}))
+            return 0
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        print(f"cot: retention command failed: {exc}", file=sys.stderr)
+        return 1
+    print("Usage: cot retention [status|enable [days]|disable|dry-run|cleanup]", file=sys.stderr)
+    return 1
+
+
+def _cmd_audit(args: list[str]) -> int:
+    try:
+        limit = int(args[0]) if args else 20
+        _print_json(_api_json("GET", f"/v1/audit/self?limit={max(1, min(limit, 500))}"))
+        return 0
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        print(f"cot: audit command failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def main() -> int:
+    if len(sys.argv) >= 2 and sys.argv[1] == "install":
+        return _cmd_install(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "status":
+        return _cmd_status()
+    if len(sys.argv) >= 2 and sys.argv[1] == "retention":
+        return _cmd_retention(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "audit":
+        return _cmd_audit(sys.argv[2:])
+    if len(sys.argv) < 3 or sys.argv[1] != "hook":
+        print(
+            "Usage:\n"
+            "  cot hook <claude|cursor|codex>   # reads a hook payload from stdin\n"
+            "  cot install [claude cursor codex]  # wire up agent hook configs\n"
+            "  cot status                         # show endpoint + installed hooks\n"
+            "  cot retention [status|dry-run]     # manage local cleanup policy\n"
+            "  cot audit [limit]                  # show cot self-audit events",
+            file=sys.stderr,
+        )
+        return 1
+    source = sys.argv[2]
+    if source not in AGENTS:
+        print(f"Unknown source: {source}", file=sys.stderr)
+        return 1
+
+    raw = sys.stdin.read()
+    try:
+        body = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        body = {"_raw": raw}
+
+    hook = body.get("hook_event_name") or body.get("hook") or body.get("event") or ""
+    redundant = source == "cursor" and hook in CURSOR_REDUNDANT_HOOKS
+    if not redundant:
+        _post(f"{COT_ENDPOINT}/v1/ingest/{source}", body)
+    if source == "claude":
+        _emit_claude_responses(body, source)
+        if hook in ("SessionStart", "sessionStart"):
+            _log_launch(body)
+    elif source == "codex":
+        _emit_codex_responses(body, source)
+
+    response = _hook_response(source, body)
+    if response is not None:
+        print(json.dumps(response))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

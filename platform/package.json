@@ -1,0 +1,32 @@
+{
+  "name": "cot-platform",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/run-node-tool.mjs vite",
+    "build": "node scripts/run-node-tool.mjs vite build",
+    "preview": "npm run build && node scripts/run-node-tool.mjs vite preview"
+  },
+  "dependencies": {
+    "framer-motion": "^11.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "recharts": "^2.15.4",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^6.0.2",
+    "autoprefixer": "latest",
+    "postcss": "latest",
+    "tailwindcss": "3.4.17",
+    "typescript": "^5.5.4",
+    "vite": "^8.0.16"
+  },
+  "overrides": {
+    "esbuild": "0.28.1"
+  }
+}

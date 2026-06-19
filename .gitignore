@@ -9,5 +9,6 @@ __pycache__/
 .cursor/
 .claude/settings.local.json
 secrets.json
+.env.production
 .env.*
 _DESIGN_LANGUAGE.md
