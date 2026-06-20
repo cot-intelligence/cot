@@ -47,9 +47,32 @@ function DiffView({ detail }: { detail: string }) {
   );
 }
 
+function QaPill({ item }: { item: TimelineItem }) {
+  if (item.is_question) {
+    return (
+      <span
+        title="This prompt event contains questions"
+        className="rounded border border-fg/20 px-1 py-px font-mono text-[0.5rem] font-bold uppercase tracking-widest text-fg/50">
+        Question
+      </span>
+    );
+  }
+  if (item.answers_event_id != null) {
+    return (
+      <span
+        title="This prompt event stores the user answer"
+        className="rounded border border-cobalt/40 px-1 py-px font-mono text-[0.5rem] font-bold uppercase tracking-widest text-cobalt">
+        Answer
+      </span>
+    );
+  }
+  return null;
+}
+
 export function TimelineItemRow({ item }: TimelineItemRowProps) {
   const [open, setOpen] = useState(false);
   const meta = getCategoryMeta(item.category);
+  const showTarget = item.category !== 'question' && Boolean(item.target);
 
   return (
     <li className="relative flex gap-4 pb-6 last:pb-0">
@@ -70,12 +93,13 @@ export function TimelineItemRow({ item }: TimelineItemRowProps) {
               <span className={`font-mono text-[0.6rem] font-bold uppercase tracking-widest ${meta.color}`}>
                 {meta.label}
               </span>
+              <QaPill item={item} />
               {item.ongoing && (
                 <span className="font-mono text-[0.55rem] uppercase text-cobalt">ongoing</span>
               )}
             </div>
             <p className="font-mono text-xs font-bold text-fg">{item.title}</p>
-            {item.target && (
+            {showTarget && (
               <p className="truncate font-mono text-[0.65rem] text-fg/50">{item.target}</p>
             )}
           </div>

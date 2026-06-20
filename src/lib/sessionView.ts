@@ -103,11 +103,11 @@ const TAB_DEFS: TabDef[] = [
   { key: 'files', label: 'Files', icon: 'file', cats: ['file_edit', 'file_read'] },
   { key: 'shell', label: 'Shell', icon: 'terminal', cats: ['shell'] },
   { key: 'mcp', label: 'MCP', icon: 'plug', cats: ['mcp'] },
-  { key: 'web', label: 'Web', icon: 'globe', cats: ['web', 'search'] },
+  { key: 'web', label: 'Web', icon: 'globe', cats: ['web'] },
   { key: 'rules', label: 'Rules & context', icon: 'book', cats: ['context_read'] },
   { key: 'memory', label: 'Memory', icon: 'memory', cats: ['memory'] },
   { key: 'subagents', label: 'Subagents', icon: 'robot', cats: ['subagent'] },
-  { key: 'conversation', label: 'Conversation', icon: 'chat', cats: ['prompt', 'response', 'thought'] },
+  { key: 'conversation', label: 'Conversation', icon: 'chat', cats: ['prompt', 'question', 'response', 'thought', 'plan'] },
 ];
 
 export interface ActivityTab extends TabDef {
@@ -151,7 +151,6 @@ const ACTION_CATEGORIES = new Set([
   'shell',
   'file_read',
   'file_edit',
-  'search',
   'mcp',
   'web',
   'context_read',

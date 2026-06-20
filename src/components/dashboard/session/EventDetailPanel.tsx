@@ -73,6 +73,10 @@ function QuestionList({ questions }: { questions: NonNullable<TimelineItem['ques
             <Icon name="reply" className="mt-0.5 h-3 w-3 shrink-0 text-cobalt" />
             {q.answer ? (
               <span className="font-mono text-[0.78rem] font-bold text-cobalt">{q.answer}</span>
+            ) : q.skipped ? (
+              <span className="font-mono text-[0.72rem] font-bold uppercase tracking-widest text-fg/40">
+                skipped
+              </span>
             ) : (
               <span className="font-mono text-[0.72rem] italic text-fg/35">no recorded answer</span>
             )}
@@ -83,9 +87,74 @@ function QuestionList({ questions }: { questions: NonNullable<TimelineItem['ques
   );
 }
 
+interface PlanTodo {
+  id?: string;
+  content?: string;
+  status?: string;
+}
+
+function PlanView({ item }: { item: TimelineItem }) {
+  let overview = '';
+  let plan = '';
+  let todos: PlanTodo[] = [];
+  try {
+    const parsed = JSON.parse(item.detail ?? '{}');
+    overview = typeof parsed.overview === 'string' ? parsed.overview : '';
+    plan = typeof parsed.plan === 'string' ? parsed.plan : '';
+    todos = Array.isArray(parsed.todos) ? parsed.todos : [];
+  } catch {
+    /* fall back to raw markdown below */
+  }
+
+  return (
+    <div className="space-y-4">
+      {overview && (
+        <p className="font-mono text-[0.82rem] leading-relaxed text-fg/80">{overview}</p>
+      )}
+      {todos.length > 0 && (
+        <div>
+          <span className="font-mono text-[0.62rem] font-bold uppercase tracking-widest text-olive">
+            Todos · {todos.length}
+          </span>
+          <ul className="mt-2 space-y-1.5">
+            {todos.map((t, i) => {
+              const done = t.status === 'completed' || t.status === 'done';
+              return (
+                <li key={t.id ?? i} className="flex items-start gap-2">
+                  <Icon
+                    name={done ? 'check' : 'square'}
+                    className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${done ? 'text-olive' : 'text-fg/35'}`}
+                  />
+                  <span className={`font-mono text-[0.8rem] ${done ? 'text-fg/45 line-through' : 'text-fg/85'}`}>
+                    {t.content ?? t.id}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+      {plan && (
+        <div>
+          <span className="font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/45">
+            Plan
+          </span>
+          <div className="mt-1.5 rounded-md bg-panel p-3">
+            <MarkdownContent content={plan} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Body({ item }: { item: TimelineItem }) {
   if (item.category === 'question' && item.questions && item.questions.length > 0) {
     return <QuestionList questions={item.questions} />;
+  }
+
+  if (item.category === 'plan') {
+    return <PlanView item={item} />;
   }
 
   const d = parseDetail(item);
@@ -199,11 +268,11 @@ function QaBanner({ item, onJump }: { item: TimelineItem; onJump?: (id: number) 
       <div className="flex items-center gap-2 rounded-md border border-cobalt/25 bg-cobalt/[0.06] px-3 py-2 font-mono text-[0.68rem] text-fg/70">
         <Icon name="chat" className="h-3.5 w-3.5 shrink-0 text-cobalt" />
         {item.answered && item.answer_event_id != null ? (
-          <span>The agent asked the user a question. {link(item.answer_event_id, 'Jump to the answer')}</span>
+          <span>The agent prompted the user. {link(item.answer_event_id, 'Jump to the answer')}</span>
         ) : item.answered ? (
-          <span>The agent asked the user a question — answered inline.</span>
+          <span>The agent prompted the user — answered inline.</span>
         ) : (
-          <span>The agent asked the user a question — awaiting an answer.</span>
+          <span>The agent prompted the user — awaiting an answer.</span>
         )}
       </div>
     );
@@ -213,11 +282,33 @@ function QaBanner({ item, onJump }: { item: TimelineItem; onJump?: (id: number) 
     return (
       <div className="flex items-center gap-2 rounded-md border border-cobalt/25 bg-cobalt/[0.06] px-3 py-2 font-mono text-[0.68rem] text-fg/70">
         <Icon name="reply" className="h-3.5 w-3.5 shrink-0 text-cobalt" />
-        <span>This prompt answered the agent's question. {link(item.answers_event_id, 'Jump to the question')}</span>
+        <span>This answered the agent's prompt. {link(item.answers_event_id, 'Jump to the prompt')}</span>
       </div>
     );
   }
 
+  return null;
+}
+
+function QaPill({ item }: { item: TimelineItem }) {
+  if (item.is_question) {
+    return (
+      <span
+        title="This prompt event contains questions"
+        className="rounded border border-fg/20 px-1.5 py-0.5 font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/50">
+        Question
+      </span>
+    );
+  }
+  if (item.answers_event_id != null) {
+    return (
+      <span
+        title="This prompt event stores the user answer"
+        className="rounded border border-cobalt/40 px-1.5 py-0.5 font-mono text-[0.55rem] font-bold uppercase tracking-widest text-cobalt">
+        Answer
+      </span>
+    );
+  }
   return null;
 }
 
@@ -232,6 +323,7 @@ export function EventDetailPanel({ item, onViewInAll, onJump }: EventDetailPanel
 
   const meta = getCategoryMeta(item.category);
   const isError = item.status === 'error' || item.status === 'blocked';
+  const showTarget = item.category !== 'question' && Boolean(item.target);
 
   return (
     <div className="space-y-4">
@@ -241,6 +333,7 @@ export function EventDetailPanel({ item, onViewInAll, onJump }: EventDetailPanel
           <span className={`font-mono text-[0.62rem] font-bold uppercase tracking-widest ${meta.color}`}>
             {meta.label}
           </span>
+          <QaPill item={item} />
           <span className="font-mono text-[0.62rem] tabular-nums text-fg/45">
             {formatTime(item.start_ts || item.ts)}
           </span>
@@ -285,7 +378,7 @@ export function EventDetailPanel({ item, onViewInAll, onJump }: EventDetailPanel
           )}
         </div>
         <h3 className="font-mono text-base font-bold text-fg">{item.title}</h3>
-        {item.target && (
+        {showTarget && (
           <p className="break-all font-mono text-xs text-fg/60">{item.target}</p>
         )}
         {item.attachments && item.attachments.length > 0 && (

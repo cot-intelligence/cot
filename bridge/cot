@@ -477,6 +477,217 @@ def _emit_claude_responses(body: dict, source: str) -> None:
     _emit_synthetic_messages(source, body, scanned)
 
 
+def _norm_choice(text: object) -> str:
+    return " ".join(str(text or "").lower().replace("_", " ").split())
+
+
+def _contains_positive(haystack: str, needle: str) -> bool:
+    if not needle:
+        return False
+    start = haystack.find(needle)
+    if start < 0:
+        return False
+    before = haystack[max(0, start - 24) : start].split()
+    return not any(tok in {"no", "not", "without"} for tok in before[-3:])
+
+
+def _choice_matches(label: str, option_id: str, response_text: str) -> bool:
+    haystack = _norm_choice(response_text)
+    candidates = [label, label.split(" (", 1)[0]]
+    if " for now" in label:
+        candidates.append(label.split(" for now", 1)[0])
+    if " — " in label:
+        candidates.append(label.split(" — ", 1)[0])
+    if any(len(_norm_choice(c)) >= 4 and _contains_positive(haystack, _norm_choice(c)) for c in candidates):
+        return True
+    oid = _norm_choice(option_id.replace("_", " "))
+    if len(oid) >= 6 and _contains_positive(haystack, oid):
+        return True
+    return False
+
+
+def _answer_region(text: str) -> str:
+    region = str(text or "")
+    markers = (
+        "\n---",
+        "\n## Full picture",
+        "\n## Suggested",
+        "\n**Suggested roadmap",
+        "\n**Still unanswered",
+        "\n**Two optional follow-ups",
+    )
+    for marker in markers:
+        idx = region.find(marker)
+        if idx >= 0:
+            region = region[:idx]
+    return region
+
+
+def _cursor_question_response(tool_input: dict, response_text: str) -> dict:
+    """Best-effort recovery for Cursor AskQuestion selections.
+
+    Cursor records the question prompt as an ``AskQuestion`` transcript tool_use,
+    but does not persist a separate tool_result in the JSONL. The next assistant
+    response usually summarizes selected options and says which batches were
+    skipped/open. We only match explicit option labels/ids in that summary; no
+    free-form guessing.
+    """
+    questions = tool_input.get("questions") if isinstance(tool_input.get("questions"), list) else []
+    match_text = _answer_region(response_text)
+    haystack = _norm_choice(response_text)
+    mentions_skip = any(word in haystack for word in ("skipped", "unanswered", "still open"))
+    answers: dict[str, dict[str, list[str]]] = {}
+    skipped: list[str] = []
+
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        qid = str(q.get("id") or "")
+        if not qid:
+            continue
+        labels: list[str] = []
+        options = q.get("options") if isinstance(q.get("options"), list) else []
+        for opt in options:
+            if not isinstance(opt, dict):
+                continue
+            label = str(opt.get("label") or "").strip()
+            oid = str(opt.get("id") or "").strip()
+            if _choice_matches(label, oid, match_text):
+                labels.append(label or oid)
+        if labels:
+            answers[qid] = {"answers": labels}
+        elif mentions_skip:
+            skipped.append(qid)
+
+    out: dict = {}
+    if answers:
+        out["answers"] = answers
+        out["answer_source"] = "assistant_summary"
+    if skipped:
+        out["skipped"] = skipped
+    return out
+
+
+def _scan_cursor_artifacts(transcript_path: str, session_id: str, response_text: str = "") -> dict:
+    """Extract Cursor transcript-only artifacts.
+
+    In plan mode Cursor generates the plan through an internal ``CreatePlan``
+    tool that fires no tool hooks; ``afterAgentResponse`` then arrives with empty
+    text. Cursor question prompts similarly appear as ``AskQuestion`` tool_use
+    blocks without pre/post tool hooks. Recover both in one transcript pass so
+    one artifact scanner does not consume another scanner's offset."""
+    new_text = _read_transcript_delta(transcript_path, session_id)
+    out: dict[str, list] = {"plans": [], "questions": []}
+    if not new_text:
+        return out
+    plans: list[dict] = []
+    questions: list[dict] = []
+    for line in new_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        content = obj.get("content")
+        if content is None:
+            content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "tool_use":
+                continue
+            name = block.get("name")
+            if name == "CreatePlan":
+                inp = block.get("input") if isinstance(block.get("input"), dict) else {}
+                plans.append(
+                    {
+                        "name": inp.get("name") or "Plan",
+                        "overview": inp.get("overview") or "",
+                        "plan": inp.get("plan") or "",
+                        "todos": inp.get("todos") if isinstance(inp.get("todos"), list) else [],
+                    }
+                )
+            elif name == "AskQuestion":
+                inp = block.get("input") if isinstance(block.get("input"), dict) else {}
+                questions.append(
+                    {
+                        "input": inp,
+                        "response": _cursor_question_response(inp, response_text),
+                    }
+                )
+    out["plans"] = plans
+    out["questions"] = questions
+    return out
+
+
+def _emit_cursor_artifacts(body: dict, source: str) -> bool:
+    """Recover Cursor artifacts that are present only in transcript JSONL.
+
+    Returns True when this was a plan turn and the function has already posted
+    both the (text-filled) response and a structured plan event, so the caller
+    skips the default post."""
+    hook = body.get("hook_event_name") or body.get("hook") or ""
+    if hook != "afterAgentResponse":
+        return False
+    transcript = body.get("transcript_path")
+    session_id = body.get("session_id")
+    if not transcript or not session_id:
+        return False
+    scanned = _scan_cursor_artifacts(transcript, session_id, str(body.get("text") or body.get("response") or ""))
+    plans = scanned.get("plans", [])
+    questions = scanned.get("questions", [])
+    for q in questions:
+        for hook_name, response in (("preToolUse", {}), ("postToolUse", q["response"])):
+            _post(
+                f"{COT_ENDPOINT}/v1/ingest/{source}",
+                {
+                    "session_id": session_id,
+                    "cwd": body.get("cwd"),
+                    "hook_event_name": hook_name,
+                    "tool_name": "AskQuestion",
+                    "tool_input": q["input"],
+                    "tool_response": response,
+                    "composer_mode": body.get("composer_mode"),
+                    "model": body.get("model"),
+                    "timestamp": body.get("timestamp"),
+                },
+            )
+    if not plans:
+        return False
+    # Fill the empty conversation response with the plan body so the turn isn't
+    # blank in the conversation view.
+    if not str(body.get("text") or "").strip():
+        last = plans[-1]
+        body["text"] = last.get("plan") or last.get("overview") or ""
+    _post(f"{COT_ENDPOINT}/v1/ingest/{source}", body)
+    # Emit a structured plan artifact (name + overview + todo checklist). A
+    # distinct hook name keeps it out of the afterAgentResponse handler so it
+    # routes via _synthetic_category instead.
+    for p in plans:
+        _post(
+            f"{COT_ENDPOINT}/v1/ingest/{source}",
+            {
+                "session_id": session_id,
+                "cwd": body.get("cwd"),
+                "hook_event_name": "createPlan",
+                "_synthetic_category": "plan",
+                "plan_name": p["name"],
+                "plan_overview": p["overview"],
+                "plan_body": p["plan"],
+                "plan_todos": p["todos"],
+                "composer_mode": "plan",
+                "model": body.get("model"),
+                "timestamp": body.get("timestamp"),
+            },
+        )
+    return True
+
+
 def _find_codex_transcript(session_id: str) -> str | None:
     """Locate a Codex rollout transcript from the session id alone.
 
@@ -1002,7 +1213,11 @@ def main() -> int:
 
     hook = body.get("hook_event_name") or body.get("hook") or body.get("event") or ""
     redundant = source == "cursor" and hook in CURSOR_REDUNDANT_HOOKS
-    if not redundant:
+    # Cursor transcript-only artifacts are posted by _emit_cursor_artifacts. For
+    # plan-mode turns it also posts the filled response, so skip the default
+    # empty response in that case.
+    handled = source == "cursor" and _emit_cursor_artifacts(body, source)
+    if not redundant and not handled:
         _post(f"{COT_ENDPOINT}/v1/ingest/{source}", body)
     if source == "claude":
         _emit_claude_responses(body, source)

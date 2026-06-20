@@ -4,13 +4,14 @@ export type EventCategory =
   | 'prompt'
   | 'response'
   | 'thought'
+  | 'plan'
+  | 'question'
   | 'file_edit'
   | 'file_read'
   | 'context_read'
   | 'shell'
   | 'mcp'
   | 'web'
-  | 'search'
   | 'subagent'
   | 'memory'
   | 'compaction'
@@ -62,16 +63,18 @@ export interface TimelineItem {
   end_ts: string | null;
   ongoing?: boolean;
   payload?: string | null;
-  /** Set on response events the agent posed as a question to the user. */
+  /** Set on structured prompt events where the agent asked the user. */
   is_question?: boolean;
-  /** Whether a following user prompt answered this question. */
+  /** Whether a following answer event completed this prompt. */
   answered?: boolean;
-  /** Id of the prompt that answered this question (if any). */
+  /** Id of the event that answered this prompt (if any). */
   answer_event_id?: number | null;
-  /** Set on prompt events that answer a preceding agent question. */
+  /** Set on prompt events that answer a preceding agent prompt. */
   answers_event_id?: number | null;
   /** Sub-questions of a structured-question event, each with its chosen answer. */
   questions?: QuestionPart[];
+  /** Cursor composer mode when not the default "agent" (e.g. "plan"). */
+  composer_mode?: string;
 }
 
 export interface QuestionPart {
@@ -79,6 +82,7 @@ export interface QuestionPart {
   question: string;
   options?: string[];
   answer?: string | null;
+  skipped?: boolean;
 }
 
 export interface Clarification {

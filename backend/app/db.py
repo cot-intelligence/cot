@@ -389,13 +389,13 @@ def _recategorize_web_targets(conn: sqlite3.Connection) -> None:
 
 
 def _recategorize_questions(conn: sqlite3.Connection) -> None:
-    """AskUserQuestion / request_user_input tool calls used to fall through to
-    ``other``; they now have their own ``question`` category. Re-run any stored
-    ones so the timeline shows them as structured questions."""
+    """Structured question tools used to fall through to ``other`` and had no
+    stable merge target. Re-run stored rows so the timeline can pair asked and
+    answered events."""
     rows = conn.execute(
         "SELECT id, source, hook, tool, payload FROM events"
-        " WHERE tool IN ('AskUserQuestion', 'request_user_input')"
-        " AND category != 'question'"
+        " WHERE tool IN ('AskUserQuestion', 'AskQuestion', 'request_user_input')"
+        " AND (category != 'question' OR target IS NULL OR target = '')"
     ).fetchall()
     for row in rows:
         try:
@@ -440,6 +440,517 @@ def should_ignore_event(norm: dict[str, Any]) -> bool:
     return norm.get("source") == "cursor" and norm.get("hook") in _CURSOR_GRANULAR_HOOKS
 
 
+def _recategorize_web_search(conn: sqlite3.Connection) -> None:
+    """WebSearch events were historically stored as ``search``; they belong in
+    ``web``. Re-run categorize to fix category, title, and target."""
+    rows = conn.execute(
+        "SELECT id, source, hook, tool, payload FROM events"
+        " WHERE tool IN ('WebSearch', 'WebFetch') AND category = 'search'"
+    ).fetchall()
+    for row in rows:
+        try:
+            raw = json.loads(row["payload"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        cat = categorize(row["source"], row["hook"], raw, row["tool"])
+        conn.execute(
+            "UPDATE events SET category=?, title=?, target=?, detail=?, status=?,"
+            " duration_ms=? WHERE id=?",
+            (
+                cat["category"],
+                cat["title"],
+                cat["target"],
+                cat["detail"],
+                cat["status"],
+                cat["duration_ms"],
+                row["id"],
+            ),
+        )
+
+
+def _recategorize_browser_navigate_starts(conn: sqlite3.Connection) -> None:
+    """preToolUse events for browser_navigate were stored as ``mcp``; they
+    should be ``web`` (with the URL as target) so start/end spans merge."""
+    rows = conn.execute(
+        "SELECT id, source, hook, tool, payload FROM events"
+        " WHERE category = 'mcp'"
+        " AND hook IN ('PreToolUse', 'preToolUse')"
+        " AND (tool LIKE '%browser_navigate%')"
+    ).fetchall()
+    for row in rows:
+        try:
+            raw = json.loads(row["payload"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        cat = categorize(row["source"], row["hook"], raw, row["tool"])
+        if cat["category"] == "mcp":
+            continue
+        conn.execute(
+            "UPDATE events SET category=?, title=?, target=?, detail=?, status=?,"
+            " duration_ms=? WHERE id=?",
+            (
+                cat["category"],
+                cat["title"],
+                cat["target"],
+                cat["detail"],
+                cat["status"],
+                cat["duration_ms"],
+                row["id"],
+            ),
+        )
+
+
+def _backfill_search_targets(conn: sqlite3.Connection) -> None:
+    """Search/shell events (Grep etc.) with empty targets — backfill from the
+    glob or file_path fields in tool_input now that the extractor checks them."""
+    rows = conn.execute(
+        "SELECT id, source, hook, tool, payload FROM events"
+        " WHERE category IN ('search', 'shell')"
+        " AND tool IN ('Grep', 'Glob', 'Search', 'Codebase', 'GrepSearch', 'FileSearch', 'ListDir')"
+        " AND (target IS NULL OR target = '')"
+    ).fetchall()
+    for row in rows:
+        try:
+            raw = json.loads(row["payload"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        cat = categorize(row["source"], row["hook"], raw, row["tool"])
+        new_target = cat.get("target") or ""
+        if not new_target:
+            continue
+        conn.execute(
+            "UPDATE events SET target=? WHERE id=?",
+            (new_target, row["id"]),
+        )
+
+
+def _merge_search_into_shell(conn: sqlite3.Connection) -> None:
+    """The ``search`` category (Grep, Glob, etc.) has been folded into ``shell``.
+    Reclassify all stored search events."""
+    conn.execute("UPDATE events SET category = 'shell' WHERE category = 'search'")
+
+
+def _dedup_cursor_subagent_starts(conn: sqlite3.Connection) -> None:
+    """Cursor fires ``subagentStart`` AND ``preToolUse`` (tool=Task/Subagent)
+    for the same subagent, producing two ``start`` rows with the same
+    ``subagent::target`` key. Mark the redundant subagentStart with
+    phase='superseded' so the timeline merge skips it while keeping the
+    lifecycle record intact."""
+    conn.execute(
+        "UPDATE events SET phase = 'superseded'"
+        " WHERE source = 'cursor' AND hook = 'subagentStart'"
+        " AND phase = 'start'"
+        " AND EXISTS ("
+        "   SELECT 1 FROM events e2"
+        "   WHERE e2.session_id = events.session_id"
+        "   AND e2.target = events.target"
+        "   AND e2.source = 'cursor'"
+        "   AND e2.hook = 'preToolUse'"
+        "   AND e2.tool IN ('Task', 'Subagent')"
+        " )"
+    )
+
+
+def _norm_choice(text: object) -> str:
+    return " ".join(str(text or "").lower().replace("_", " ").split())
+
+
+def _contains_positive(haystack: str, needle: str) -> bool:
+    if not needle:
+        return False
+    start = haystack.find(needle)
+    if start < 0:
+        return False
+    before = haystack[max(0, start - 24) : start].split()
+    return not any(tok in {"no", "not", "without"} for tok in before[-3:])
+
+
+def _choice_matches(label: str, option_id: str, response_text: str) -> bool:
+    haystack = _norm_choice(response_text)
+    candidates = [label, label.split(" (", 1)[0]]
+    if " for now" in label:
+        candidates.append(label.split(" for now", 1)[0])
+    if " — " in label:
+        candidates.append(label.split(" — ", 1)[0])
+    if any(len(_norm_choice(c)) >= 4 and _contains_positive(haystack, _norm_choice(c)) for c in candidates):
+        return True
+    oid = _norm_choice(option_id.replace("_", " "))
+    if len(oid) >= 6 and _contains_positive(haystack, oid):
+        return True
+    return False
+
+
+def _answer_region(text: str) -> str:
+    region = str(text or "")
+    markers = (
+        "\n---",
+        "\n## Full picture",
+        "\n## Suggested",
+        "\n**Suggested roadmap",
+        "\n**Still unanswered",
+        "\n**Two optional follow-ups",
+    )
+    for marker in markers:
+        idx = region.find(marker)
+        if idx >= 0:
+            region = region[:idx]
+    return region
+
+
+def _cursor_question_response(tool_input: dict[str, Any], response_text: str) -> dict[str, Any]:
+    """Recover Cursor AskQuestion selections from the assistant summary.
+
+    Cursor writes the AskQuestion prompt to its transcript, but current hooks do
+    not include a tool result. The next assistant response normally names the
+    selected option labels. Match only explicit labels/ids so we do not invent
+    free-form answers.
+    """
+    questions = tool_input.get("questions") if isinstance(tool_input.get("questions"), list) else []
+    match_text = _answer_region(response_text)
+    haystack = _norm_choice(response_text)
+    mentions_skip = any(word in haystack for word in ("skipped", "unanswered", "still open"))
+    answers: dict[str, dict[str, list[str]]] = {}
+    skipped: list[str] = []
+
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        qid = str(q.get("id") or "")
+        if not qid:
+            continue
+        labels: list[str] = []
+        options = q.get("options") if isinstance(q.get("options"), list) else []
+        for opt in options:
+            if not isinstance(opt, dict):
+                continue
+            label = str(opt.get("label") or "").strip()
+            oid = str(opt.get("id") or "").strip()
+            if _choice_matches(label, oid, match_text):
+                labels.append(label or oid)
+        if labels:
+            answers[qid] = {"answers": labels}
+        elif mentions_skip:
+            skipped.append(qid)
+
+    out: dict[str, Any] = {}
+    if answers:
+        out["answers"] = answers
+        out["answer_source"] = "assistant_summary"
+    if skipped:
+        out["skipped"] = skipped
+    return out
+
+
+def _safe_cursor_transcript_path(path: str) -> Path | None:
+    try:
+        candidate = Path(path).expanduser()
+    except (TypeError, ValueError):
+        return None
+    if not candidate.is_absolute() or candidate.suffix != ".jsonl":
+        return None
+    try:
+        resolved = candidate.resolve(strict=True)
+        cursor_root = (Path.home() / ".cursor").resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    try:
+        resolved.relative_to(cursor_root)
+    except ValueError:
+        return None
+    try:
+        if resolved.stat().st_size > 25 * 1024 * 1024:
+            return None
+    except OSError:
+        return None
+    return resolved
+
+
+def _message_content(obj: dict[str, Any]) -> list[Any]:
+    message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+    content = obj.get("content")
+    if content is None:
+        content = message.get("content")
+    return content if isinstance(content, list) else []
+
+
+def _scan_cursor_question_artifacts(transcript_path: Path) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
+    with transcript_path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line_no, line in enumerate(fh, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            for block in _message_content(obj):
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use" and block.get("name") == "AskQuestion":
+                    inp = block.get("input") if isinstance(block.get("input"), dict) else {}
+                    if isinstance(inp.get("questions"), list):
+                        pending.append({"line": line_no, "input": inp})
+                    continue
+                if block.get("type") != "text" or not pending:
+                    continue
+                response_text = str(block.get("text") or "")
+                if not response_text.strip():
+                    continue
+                for item in pending:
+                    inp = item["input"]
+                    qids = [
+                        str(q.get("id") or "")
+                        for q in inp.get("questions", [])
+                        if isinstance(q, dict) and q.get("id")
+                    ]
+                    artifact_id = hashlib.sha1(
+                        json.dumps(
+                            {
+                                "path": str(transcript_path),
+                                "line": item["line"],
+                                "title": inp.get("title"),
+                                "qids": qids,
+                            },
+                            sort_keys=True,
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    artifacts.append(
+                        {
+                            "id": artifact_id,
+                            "line": item["line"],
+                            "input": inp,
+                            "response": _cursor_question_response(inp, response_text),
+                            "response_text": response_text,
+                        }
+                    )
+                pending = []
+    for item in pending:
+        inp = item["input"]
+        qids = [
+            str(q.get("id") or "")
+            for q in inp.get("questions", [])
+            if isinstance(q, dict) and q.get("id")
+        ]
+        artifact_id = hashlib.sha1(
+            json.dumps(
+                {
+                    "path": str(transcript_path),
+                    "line": item["line"],
+                    "title": inp.get("title"),
+                    "qids": qids,
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        artifacts.append(
+            {
+                "id": artifact_id,
+                "line": item["line"],
+                "input": inp,
+                "response": {},
+                "response_text": "",
+            }
+        )
+    return artifacts
+
+
+def _response_fingerprint(text: Any) -> str:
+    stripped = str(text or "").replace("[REDACTED]", "")
+    return " ".join(stripped.lower().split())
+
+
+def _timestamp_before(value: Any, milliseconds: int = 1) -> str:
+    dt = _parse_ts(value) or datetime.now(timezone.utc)
+    return (dt - timedelta(milliseconds=milliseconds)).isoformat()
+
+
+def _cursor_transcript_sources(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT e.session_id, e.ts, e.category, e.detail, e.payload, s.cwd"
+        " FROM events e LEFT JOIN sessions s ON s.id = e.session_id"
+        " WHERE e.source = 'cursor' AND e.payload LIKE '%transcript_path%'"
+        " ORDER BY e.id ASC"
+    ).fetchall()
+    sources: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        path = payload.get("transcript_path")
+        if not isinstance(path, str) or not path:
+            continue
+        key = (row["session_id"], path)
+        item = sources.setdefault(
+            key,
+            {
+                "session_id": row["session_id"],
+                "transcript_path": path,
+                "cwd": row["cwd"],
+                "responses": [],
+                "last_ts": row["ts"],
+            },
+        )
+        item["last_ts"] = row["ts"]
+        if row["category"] == "response":
+            item["responses"].append({"ts": row["ts"], "detail": row["detail"] or ""})
+    return list(sources.values())
+
+
+def _question_event_ts(source: dict[str, Any], response_text: str) -> str | None:
+    needle = _response_fingerprint(response_text)
+    if needle:
+        for row in source.get("responses", []):
+            hay = _response_fingerprint(row.get("detail"))
+            if hay and (needle.startswith(hay[:120]) or hay.startswith(needle[:120])):
+                return _timestamp_before(row.get("ts"))
+    return None
+
+
+def _question_signature(tool_input: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
+    questions = tool_input.get("questions") if isinstance(tool_input.get("questions"), list) else []
+    qids = tuple(
+        str(q.get("id") or q.get("prompt") or q.get("question") or "")
+        for q in questions
+        if isinstance(q, dict)
+    )
+    return str(tool_input.get("title") or ""), qids
+
+
+def _cursor_question_event_exists(
+    conn: sqlite3.Connection,
+    session_id: str,
+    artifact_id: str,
+    tool_input: dict[str, Any],
+    hook: str,
+) -> bool:
+    if conn.execute(
+        "SELECT 1 FROM events WHERE session_id = ? AND hook = ? AND payload LIKE ? LIMIT 1",
+        (session_id, hook, f"%{artifact_id}%"),
+    ).fetchone():
+        return True
+    wanted = _question_signature(tool_input)
+    rows = conn.execute(
+        "SELECT payload FROM events WHERE session_id = ? AND source = 'cursor'"
+        " AND hook = ? AND tool = 'AskQuestion'",
+        (session_id, hook),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        existing = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+        if _question_signature(existing) == wanted:
+            return True
+    return False
+
+
+def _insert_cursor_question_event(
+    conn: sqlite3.Connection,
+    raw: dict[str, Any],
+) -> None:
+    dedup_key = hashlib.sha1(
+        json.dumps(raw, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+    if conn.execute(
+        "SELECT 1 FROM events WHERE session_id = ? AND dedup_key = ? LIMIT 1",
+        (raw["session_id"], dedup_key),
+    ).fetchone():
+        return
+    norm = normalize("cursor", raw)
+    conn.execute(
+        "INSERT INTO events (session_id, source, hook, tool, phase, ts, payload,"
+        " category, title, detail, target, status, duration_ms, model,"
+        " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
+        " dedup_key, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            norm["session_id"],
+            norm["source"],
+            norm["hook"],
+            norm["tool"],
+            norm["phase"],
+            norm["ts"],
+            json.dumps(raw, ensure_ascii=False, default=str),
+            norm.get("category"),
+            norm.get("title"),
+            norm.get("detail"),
+            norm.get("target"),
+            norm.get("status"),
+            norm.get("duration_ms"),
+            norm.get("model"),
+            norm.get("input_tokens"),
+            norm.get("output_tokens"),
+            norm.get("cache_read_tokens"),
+            norm.get("cache_write_tokens"),
+            dedup_key,
+            _now(),
+        ),
+    )
+
+
+def _insert_backfilled_cursor_question(
+    conn: sqlite3.Connection,
+    source: dict[str, Any],
+    artifact: dict[str, Any],
+) -> None:
+    answer_ts = _question_event_ts(source, artifact.get("response_text") or "")
+    if answer_ts is None:
+        return
+    ask_ts = _timestamp_before(answer_ts, milliseconds=1)
+    base = {
+        "conversation_id": source["session_id"],
+        "session_id": source["session_id"],
+        "cwd": source.get("cwd"),
+        "tool_name": "AskQuestion",
+        "tool_input": artifact["input"],
+        "_synthetic_cursor_question_id": artifact["id"],
+    }
+    if not _cursor_question_event_exists(
+        conn, source["session_id"], artifact["id"], artifact["input"], "preToolUse"
+    ):
+        _insert_cursor_question_event(
+            conn,
+            {
+                **base,
+                "hook_event_name": "preToolUse",
+                "tool_response": {},
+                "timestamp": ask_ts,
+            },
+        )
+    if not _cursor_question_event_exists(
+        conn, source["session_id"], artifact["id"], artifact["input"], "postToolUse"
+    ):
+        _insert_cursor_question_event(
+            conn,
+            {
+                **base,
+                "hook_event_name": "postToolUse",
+                "tool_response": artifact["response"],
+                "timestamp": answer_ts,
+            },
+        )
+
+
+def _backfill_cursor_questions(conn: sqlite3.Connection) -> None:
+    """Recover Cursor AskQuestion prompts that only exist in transcript JSONL."""
+    for source in _cursor_transcript_sources(conn):
+        path = _safe_cursor_transcript_path(source["transcript_path"])
+        if path is None:
+            continue
+        try:
+            artifacts = _scan_cursor_question_artifacts(path)
+        except OSError:
+            continue
+        for artifact in artifacts:
+            _insert_backfilled_cursor_question(conn, source, artifact)
+
+
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(SCHEMA)
@@ -460,6 +971,12 @@ def init_db() -> None:
         _recategorize_web_targets(conn)
         _recategorize_questions(conn)
         _drop_redundant_cursor_hooks(conn)
+        _recategorize_web_search(conn)
+        _recategorize_browser_navigate_starts(conn)
+        _backfill_search_targets(conn)
+        _merge_search_into_shell(conn)
+        _dedup_cursor_subagent_starts(conn)
+        _backfill_cursor_questions(conn)
 
 
 def get_setting(key: str, default: str | None = None) -> str | None:
@@ -709,6 +1226,20 @@ def record_event(norm: dict[str, Any], raw: dict[str, Any]) -> tuple[str, int]:
                 _now(),
             ),
         )
+
+        if (
+            norm["source"] == "cursor"
+            and norm["hook"] == "preToolUse"
+            and norm.get("tool") in ("Task", "Subagent")
+            and norm.get("target")
+        ):
+            conn.execute(
+                "UPDATE events SET phase = 'superseded'"
+                " WHERE session_id = ? AND source = 'cursor'"
+                " AND hook = 'subagentStart' AND target = ? AND phase = 'start'",
+                (sid, norm["target"]),
+            )
+
         return sid, int(cur.lastrowid)
 
 
@@ -1180,7 +1711,7 @@ def search(query: str, limit: int = 40) -> list[dict[str, Any]]:
 
 
 def _event_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         "id": row["id"],
         "hook": row["hook"],
         "tool": row["tool"],
@@ -1197,6 +1728,15 @@ def _event_row(row: sqlite3.Row) -> dict[str, Any]:
         "attachments": json.loads(row["attachments"]) if row["attachments"] else None,
         "payload": row["payload"],
     }
+    if row["payload"]:
+        try:
+            body = json.loads(row["payload"])
+        except (json.JSONDecodeError, TypeError):
+            body = {}
+        mode = body.get("composer_mode")
+        if isinstance(mode, str) and mode != "agent":
+            out["composer_mode"] = mode
+    return out
 
 
 def attach_to_prompt(session_id: str, text: str | None, attachments: list[dict]) -> bool:
@@ -1268,7 +1808,7 @@ def timeline(session_id: str) -> list[dict[str, Any]]:
     """Build timeline items, merging start/end pairs into spans."""
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM events WHERE session_id=? ORDER BY id ASC",
+            "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
             (session_id,),
         ).fetchall()
         events = [_event_row(r) for r in rows]
@@ -1281,6 +1821,9 @@ def timeline(session_id: str) -> list[dict[str, Any]]:
         target = ev.get("target") or ""
         phase = ev.get("phase") or "instant"
         key = f"{cat}::{target}"
+
+        if phase == "superseded":
+            continue
 
         if phase == "start":
             spans[key] = {**ev, "start_ts": ev["ts"], "end_ts": None, "ongoing": True}
@@ -1314,7 +1857,7 @@ def events_list(session_id: str) -> list[dict[str, Any]]:
     """Every stored event, one row per hook fire (no start/end merging)."""
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM events WHERE session_id=? ORDER BY id ASC",
+            "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
             (session_id,),
         ).fetchall()
     return [
@@ -1382,9 +1925,9 @@ def session_components(session_id: str) -> dict[str, Any]:
 
 
 # Only structured questions count: the agent explicitly asking the user via
-# Claude's AskUserQuestion or Codex's request_user_input. We never guess from
-# assistant prose.
-_QUESTION_TOOLS = {"AskUserQuestion", "request_user_input"}
+# Claude's AskUserQuestion, Cursor's AskQuestion, or Codex's request_user_input.
+# We never guess from assistant prose alone.
+_QUESTION_TOOLS = {"AskUserQuestion", "AskQuestion", "request_user_input"}
 _QUESTION_END_HOOKS = {"PostToolUse", "postToolUse"}
 
 
@@ -1401,27 +1944,30 @@ def _coerce_dict(val: Any) -> dict[str, Any]:
 
 
 def _parse_questions(detail: Any) -> list[dict[str, Any]]:
-    """Break a structured-question event (AskUserQuestion / request_user_input)
+    """Break a structured-question event (AskUserQuestion / AskQuestion /
+    request_user_input)
     into its individual sub-questions, each paired with the user's chosen answer
     when it's recoverable.
 
     A single tool call can pose several questions at once; this returns one entry
-    per question: ``{header, question, options, answer}``. Codex carries the
-    answers in the response keyed by each question's ``id``; Claude doesn't put
-    the selection in the hook, so ``answer`` is ``None`` there.
+    per question: ``{header, question, options, answer, skipped}``. Codex and
+    recovered Cursor prompts carry answers keyed by each question's ``id``;
+    Claude doesn't put the selection in the hook, so ``answer`` is ``None`` there.
     """
     obj = _coerce_dict(detail)
     if not obj:
         return []
     src = obj.get("input") if isinstance(obj.get("input"), dict) else obj
     qs = src.get("questions") if isinstance(src.get("questions"), list) else []
-    # Codex response: {"answers": {<question id>: {"answers": [<label>, ...]}}}.
+    # Codex/Cursor response: {"answers": {<question id>: {"answers": [<label>, ...]}}}.
     resp = _coerce_dict(obj.get("response") or obj.get("output"))
     answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
+    skipped_raw = resp.get("skipped") or resp.get("skipped_questions") or []
+    skipped = {str(v) for v in skipped_raw if v} if isinstance(skipped_raw, list) else set()
 
     out: list[dict[str, Any]] = []
     for q in qs:
-        if not isinstance(q, dict) or not q.get("question"):
+        if not isinstance(q, dict) or not (q.get("question") or q.get("prompt")):
             continue
         ans: str | None = None
         picked = answers.get(q.get("id")) if q.get("id") else None
@@ -1436,12 +1982,14 @@ def _parse_questions(detail: Any) -> list[dict[str, Any]]:
             for o in (q.get("options") or [])
             if isinstance(o, dict) and o.get("label")
         ]
+        qid = str(q.get("id") or "")
         out.append(
             {
                 "header": q.get("header"),
-                "question": str(q.get("question")),
+                "question": str(q.get("question") or q.get("prompt")),
                 "options": options,
                 "answer": ans or None,
+                "skipped": bool(qid and qid in skipped and not ans),
             }
         )
     return out
@@ -1466,8 +2014,9 @@ def _build_clarifications(
     they were answered.
 
     The PreToolUse fires when the question is posed; the PostToolUse fires once
-    the user has answered (synchronously), so a completed pair = answered. If a
-    user prompt instead follows an open question, that prompt is the answer.
+    the user has answered through the structured prompt UI, so a completed pair
+    = answered. A later plain chat prompt is not treated as the answer; if the
+    structured prompt was never shown or was unavailable, it remains unanswered.
     Annotations are keyed by the question's start event id — the same id the
     merged timeline span carries — so the badge lands on the right item.
     """
@@ -1488,9 +2037,12 @@ def _build_clarifications(
     for r in ev_rows:
         if r["tool"] in _QUESTION_TOOLS:
             if r["hook"] in _QUESTION_END_HOOKS:
-                # Answer was returned inline to the agent — no separate event.
+                # Answer was returned inline to the agent by the tool end event.
                 if pending is not None:
                     pending["answered"] = True
+                    pending["answer_id"] = r["id"]
+                    pending["answer_ts"] = r["ts"]
+                    pending["answer_detail"] = r["detail"]
                 else:
                     pending = _new(r, answered=True)
                 questions.append(pending)
@@ -1499,13 +2051,6 @@ def _build_clarifications(
                 if pending is not None:
                     questions.append(pending)
                 pending = _new(r, answered=False)
-        elif r["category"] == "prompt" and pending is not None and not pending["answered"]:
-            pending["answered"] = True
-            pending["answer_id"] = r["id"]
-            pending["answer_ts"] = r["ts"]
-            pending["answer_detail"] = r["detail"]
-            questions.append(pending)
-            pending = None
     if pending is not None:
         questions.append(pending)
 
@@ -1541,7 +2086,7 @@ def get_session_detail(session_id: str) -> dict[str, Any] | None:
         summary = _session_summary(conn, row)
         ev_rows = conn.execute(
             "SELECT id, category, detail, ts, hook, tool FROM events"
-            " WHERE session_id=? ORDER BY id ASC",
+            " WHERE session_id=? ORDER BY ts ASC, id ASC",
             (session_id,),
         ).fetchall()
 

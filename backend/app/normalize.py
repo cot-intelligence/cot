@@ -200,6 +200,18 @@ def _extract_web_target(tool_input: dict[str, Any]) -> str:
     return ""
 
 
+def _question_target(tool_input: dict[str, Any], title: str) -> str:
+    questions = tool_input.get("questions")
+    qlist = questions if isinstance(questions, list) else []
+    qids = [
+        str(q.get("id") or q.get("prompt") or q.get("question") or "")
+        for q in qlist
+        if isinstance(q, dict)
+    ]
+    key = "|".join(q for q in qids if q) or title
+    return _short(key, 160)
+
+
 def _web_call(
     *,
     title: str,
@@ -238,8 +250,8 @@ def _is_failure(hook: str) -> bool:
     return hook in ("PostToolUseFailure", "postToolUseFailure")
 
 
-# Tools that map to the "search" category across agents. Cursor uses Grep /
-# Codebase / Search; Claude uses Glob / Grep.
+# Structured search tools that map to ``shell`` alongside Bash/Shell. Cursor
+# uses Grep / Codebase / Search; Claude uses Glob / Grep.
 _SEARCH_TOOLS = frozenset(
     {"Glob", "Grep", "Search", "Codebase", "GrepSearch", "FileSearch", "ListDir"}
 )
@@ -261,15 +273,19 @@ def _tool_event(
     status = "error" if _is_failure(hook) else "ok"
     path = _extract_path(body)
 
-    # The agent explicitly asking the user something — Claude's AskUserQuestion
-    # or Codex's request_user_input (same {questions:[{question, options}]}
-    # shape). These are the only "questions" we tag — the structured prompt shown
-    # to the user — never heuristics over assistant prose.
-    if tool_name in ("AskUserQuestion", "request_user_input"):
+    # The agent explicitly asking the user something — Claude's AskUserQuestion,
+    # Cursor's AskQuestion, or Codex's request_user_input. These are the only
+    # "questions" we tag: structured prompts shown to the user, never heuristics
+    # over assistant prose.
+    if tool_name in ("AskUserQuestion", "AskQuestion", "request_user_input"):
         questions = tool_input.get("questions")
         qlist = questions if isinstance(questions, list) else []
         first = next(
-            (str(q.get("question")) for q in qlist if isinstance(q, dict) and q.get("question")),
+            (
+                str(q.get("question") or q.get("prompt"))
+                for q in qlist
+                if isinstance(q, dict) and (q.get("question") or q.get("prompt"))
+            ),
             "",
         )
         title = first or "Question for the user"
@@ -278,7 +294,7 @@ def _tool_event(
         return {
             "category": "question",
             "title": _short(title, 120),
-            "target": None,
+            "target": _question_target(tool_input, title),
             "detail": _json_detail({"input": tool_input, "response": tool_response}),
             "status": status,
             "duration_ms": duration_ms,
@@ -345,11 +361,13 @@ def _tool_event(
             tool_input.get("pattern")
             or tool_input.get("glob_pattern")
             or tool_input.get("query")
+            or tool_input.get("glob")
             or tool_input.get("path")
+            or tool_input.get("file_path")
             or ""
         )
         return {
-            "category": "search",
+            "category": "shell",
             "title": tool_name,
             "target": _short(str(pattern)),
             "detail": _json_detail({"input": tool_input, "response": tool_response}),
@@ -372,7 +390,7 @@ def _tool_event(
             server, mcp_tool = None, tool_name[4:]
         else:
             server, mcp_tool = _parse_mcp(tool_name)
-        if _is_browser_network_tool(mcp_tool) and hook in _END_HOOKS:
+        if _is_browser_network_tool(mcp_tool):
             url = _extract_network_url(body) or tool_input.get("url")
             if url:
                 return _web_call(
@@ -538,12 +556,12 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
         if hook in ("beforeMCPExecution", "afterMCPExecution"):
             server = body.get("server") or body.get("mcp_server") or ""
             mcp_tool = body.get("tool_name") or body.get("tool") or ""
-            if _is_browser_network_tool(mcp_tool) and hook == "afterMCPExecution":
-                url = _extract_network_url(body)
+            if _is_browser_network_tool(mcp_tool):
+                url = _extract_network_url(body) or (body.get("arguments") or {}).get("url")
                 if url:
                     return _web_call(
                         title="External network",
-                        target=url,
+                        target=str(url),
                         detail=body,
                         status="ok",
                         duration_ms=duration_ms,
@@ -602,6 +620,25 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
             "target": None,
             "detail": body.get("thought") or body.get("text") or _json_detail(body),
             "status": msg_status,
+            "duration_ms": duration_ms,
+        }
+    # Plan-mode plan recovered from the Cursor transcript (the CreatePlan tool
+    # fires no hooks, so the bridge reconstructs it). Structured todos ride in
+    # detail for the frontend's checklist render.
+    if body.get("_synthetic_category") == "plan":
+        todos = body.get("plan_todos")
+        return {
+            "category": "plan",
+            "title": _short(body.get("plan_name") or "Plan", 120),
+            "target": None,
+            "detail": _json_detail(
+                {
+                    "overview": body.get("plan_overview") or "",
+                    "plan": body.get("plan_body") or "",
+                    "todos": todos if isinstance(todos, list) else [],
+                }
+            ),
+            "status": "ok",
             "duration_ms": duration_ms,
         }
 

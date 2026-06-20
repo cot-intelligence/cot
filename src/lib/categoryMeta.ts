@@ -11,16 +11,16 @@ export interface CategoryMeta {
 // olive = memory (persistence). This avoids a rainbow across lists/timeline.
 export const CATEGORY_META: Record<string, CategoryMeta> = {
   prompt: { label: 'Prompt', color: 'text-fg', dot: 'bg-fg' },
-  question: { label: 'Question', color: 'text-vermilion', dot: 'bg-vermilion' },
+  question: { label: 'Prompt', color: 'text-fg', dot: 'bg-fg' },
   response: { label: 'Response', color: 'text-fg/75', dot: 'bg-fg/65' },
   thought: { label: 'Thought', color: 'text-fg/55', dot: 'bg-fg/45' },
+  plan: { label: 'Plan', color: 'text-olive', dot: 'bg-olive' },
   file_edit: { label: 'File edit', color: 'text-vermilion', dot: 'bg-vermilion' },
   file_read: { label: 'File read', color: 'text-fg/65', dot: 'bg-fg/50' },
   context_read: { label: 'Context / skill', color: 'text-fg/65', dot: 'bg-fg/50' },
   shell: { label: 'Shell', color: 'text-fg/70', dot: 'bg-fg/55' },
   mcp: { label: 'MCP / plugin', color: 'text-cobalt', dot: 'bg-cobalt' },
   web: { label: 'External network', color: 'text-cobalt', dot: 'bg-cobalt' },
-  search: { label: 'Search', color: 'text-fg/60', dot: 'bg-fg/45' },
   subagent: { label: 'Subagent', color: 'text-fg/70', dot: 'bg-fg/55' },
   memory: { label: 'Memory', color: 'text-olive', dot: 'bg-olive' },
   compaction: { label: 'Compaction', color: 'text-fg/50', dot: 'bg-fg/35' },
