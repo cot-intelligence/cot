@@ -43,6 +43,8 @@ export function SettingsView({
   const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
   const [hookStatusError, setHookStatusError] = useState(false);
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
+  const [versionChecking, setVersionChecking] = useState(false);
+  const [versionCheckError, setVersionCheckError] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [retention, setRetention] = useState<RetentionStatus | null>(null);
   const [cleanupResult, setCleanupResult] = useState<RetentionCleanupResult | null>(null);
@@ -181,6 +183,22 @@ export function SettingsView({
       await refreshAudit();
     } finally {
       setRetentionBusy(false);
+    }
+  };
+
+  const checkForUpdates = async () => {
+    setVersionChecking(true);
+    setVersionCheckError(null);
+    try {
+      const data = await getVersionInfo(true);
+      setVersionInfo(data);
+      if (!data.latest) {
+        setVersionCheckError('Update check unavailable — offline or disabled.');
+      }
+    } catch {
+      setVersionCheckError('Could not reach the collector to check for updates.');
+    } finally {
+      setVersionChecking(false);
     }
   };
 
@@ -487,7 +505,13 @@ export function SettingsView({
                   </p>
                 </div>
               </div>
-              <VersionStatus info={versionInfo} />
+              <VersionStatus
+                info={versionInfo}
+                checking={versionChecking}
+                checkError={versionCheckError}
+                onCheck={checkForUpdates}
+                disabled={healthError}
+              />
             </div>
           </Section>
         </FadeIn>
@@ -576,18 +600,50 @@ function HookHealthRow({
   );
 }
 
-function VersionStatus({ info }: { info: VersionInfo | null }) {
-  // Don't render anything until the check resolves; stays quiet when offline.
-  if (!info || !info.latest) return null;
+function VersionStatus({
+  info,
+  checking,
+  checkError,
+  onCheck,
+  disabled = false,
+}: {
+  info: VersionInfo | null;
+  checking: boolean;
+  checkError: string | null;
+  onCheck: () => void;
+  disabled?: boolean;
+}) {
+  let status: ReactNode = (
+    <span className="font-mono text-xs text-fg/40">
+      Check whether a newer release is available.
+    </span>
+  );
 
-  if (info.update_available) {
-    return (
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line/10 pt-3">
-        <span className="inline-flex items-center gap-2 font-mono text-xs font-bold text-vermilion">
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-vermilion" />
-          Update available · v{info.latest}
-        </span>
-        {info.url && (
+  if (checking) {
+    status = <span className="font-mono text-xs text-fg/50">Checking for updates…</span>;
+  } else if (checkError) {
+    status = <span className="font-mono text-xs text-vermilion/80">{checkError}</span>;
+  } else if (info?.latest && info.update_available) {
+    status = (
+      <span className="inline-flex items-center gap-2 font-mono text-xs font-bold text-vermilion">
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-vermilion" />
+        Update available · v{info.latest}
+      </span>
+    );
+  } else if (info?.latest) {
+    status = (
+      <span className="inline-flex items-center gap-2 font-mono text-xs text-fg/50">
+        <span className="h-1.5 w-1.5 rounded-full bg-olive" />
+        Up to date · latest v{info.latest}
+      </span>
+    );
+  }
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line/10 pt-3">
+      <div className="min-w-0 flex-1">{status}</div>
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
+        {info?.update_available && info.url && !checking && (
           <a
             href={info.url}
             target="_blank"
@@ -596,16 +652,14 @@ function VersionStatus({ info }: { info: VersionInfo | null }) {
             Release notes
           </a>
         )}
+        <button
+          type="button"
+          onClick={onCheck}
+          disabled={disabled || checking}
+          className="border border-line/30 px-3 py-1.5 font-mono text-[0.6rem] font-bold uppercase tracking-widest text-fg transition-colors hover:border-cobalt hover:text-cobalt disabled:cursor-not-allowed disabled:opacity-40">
+          {checking ? 'Checking…' : 'Check for updates'}
+        </button>
       </div>
-    );
-  }
-
-  return (
-    <div className="flex items-center gap-2 border-t border-line/10 pt-3">
-      <span className="h-1.5 w-1.5 rounded-full bg-olive" />
-      <span className="font-mono text-xs text-fg/50">
-        Up to date · latest v{info.latest}
-      </span>
     </div>
   );
 }

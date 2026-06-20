@@ -7,8 +7,16 @@ COT_ENDPOINT="${COT_ENDPOINT:-http://localhost:8000}"
 COT_HOME="${HOME}/.cot"
 BIN_DIR="${COT_HOME}/bin"
 TARGET="${BIN_DIR}/cot"
+COT_VERSION="${COT_VERSION:-}"
 REPAIR_MODE=0
 REPAIR_SELECTION=""
+
+resolve_version() {
+  [ -n "${COT_VERSION}" ] && return 0
+  json=$(curl -fsSL "${COT_ENDPOINT}/health" 2>/dev/null) || json=""
+  COT_VERSION=$(printf '%s' "${json}" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+  COT_VERSION="${COT_VERSION:-unknown}"
+}
 
 for arg in "$@"; do
   case "${arg}" in
@@ -37,9 +45,9 @@ title() {
   printf '%s%s%s\n' "${C_VERMILION}${C_BOLD}" '┗┗┛┗' "${C_RESET}"
   printf '%s%s%s\n' "${C_VERMILION}${C_BOLD}" '    ' "${C_RESET}"
   if [ "${REPAIR_MODE}" = "1" ]; then
-    printf '%s\n' "cot hook repair"
+    printf '%s\n' "cot hook repair v${COT_VERSION}"
   else
-    printf '%s\n' "cot bridge installer"
+    printf '%s\n' "cot bridge installer v${COT_VERSION}"
   fi
   printf '%s\n\n' "hooks for Claude Code | Cursor | Codex"
 }
@@ -102,6 +110,7 @@ table_row() {
 
 summary_table() {
   table_line
+  table_row "Version" "${COT_VERSION}"
   table_row "Endpoint" "${COT_ENDPOINT}"
   table_row "Bridge" "${TARGET}"
   if [ "${REPAIR_MODE}" = "1" ]; then
@@ -155,6 +164,7 @@ run_spinner() {
   return "${code}"
 }
 
+resolve_version
 title
 summary_table
 

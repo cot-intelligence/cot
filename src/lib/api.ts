@@ -174,8 +174,9 @@ export async function getHealth(): Promise<Health> {
   return json<Health>(await fetch('/health'));
 }
 
-export async function getVersionInfo(): Promise<VersionInfo> {
-  return json<VersionInfo>(await fetch('/v1/version'));
+export async function getVersionInfo(refresh = false): Promise<VersionInfo> {
+  const query = refresh ? '?refresh=1' : '';
+  return json<VersionInfo>(await fetch(`/v1/version${query}`));
 }
 
 export interface Settings {

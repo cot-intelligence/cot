@@ -216,11 +216,13 @@ def _fetch_latest() -> tuple[str | None, str | None]:
 
 
 @app.get("/v1/version")
-def version_info() -> dict[str, Any]:
+def version_info(refresh: bool = False) -> dict[str, Any]:
     """Current vs. latest published version. Self-hosters can disable the
     outbound check entirely with COT_DISABLE_UPDATE_CHECK=1."""
     if os.environ.get("COT_DISABLE_UPDATE_CHECK") in ("1", "true", "yes"):
         return {"current": __version__, "latest": None, "update_available": False, "url": None}
+    if refresh:
+        _version_cache["fetched_at"] = 0.0
     latest, url = _fetch_latest()
     update_available = bool(latest) and _parse_semver(latest) > _parse_semver(__version__)
     return {
