@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { search, type SearchResult } from '../../lib/api';
 import { formatRelative, getCategoryMeta } from '../../lib/categoryMeta';
 import { formatModel } from '../../lib/modelMeta';
+import { highlight } from '../ui/Highlight';
 import { Icon, type IconName } from '../ui/icons';
 
 /** A navigation/action entry shown in the palette, built from the current route. */
@@ -35,33 +36,6 @@ interface CommandPaletteProps {
 type PaletteItem =
   | { kind: 'command'; command: PaletteCommand }
   | { kind: 'result'; result: SearchResult };
-
-/** Highlight every occurrence of any query term (case-insensitive). */
-function highlight(text: string, q: string) {
-  const terms = q.trim().split(/\s+/).filter(Boolean);
-  if (!terms.length) return text;
-  // Longest-first so overlapping terms prefer the longer match.
-  const escaped = terms
-    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-    .sort((a, b) => b.length - a.length);
-  const re = new RegExp(`(${escaped.join('|')})`, 'gi');
-  const out: (string | JSX.Element)[] = [];
-  let last = 0;
-  let key = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > last) out.push(text.slice(last, m.index));
-    out.push(
-      <mark key={key++} className="bg-vermilion/20 text-fg">
-        {m[0]}
-      </mark>,
-    );
-    last = m.index + m[0].length;
-    if (m.index === re.lastIndex) re.lastIndex++; // guard against zero-length matches
-  }
-  if (last < text.length) out.push(text.slice(last));
-  return out;
-}
 
 export function CommandPalette({ open, onClose, onSelect, commands, scope }: CommandPaletteProps) {
   const [q, setQ] = useState('');

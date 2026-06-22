@@ -1,5 +1,6 @@
 import type { Metrics } from './api';
 import { getCategoryMeta } from './categoryMeta';
+import { compact, hourLabel } from './format';
 import { formatModel } from './modelMeta';
 import { sourceLabel } from './sourceLabels';
 
@@ -43,15 +44,6 @@ export interface CardOptions {
 /** Max stats that lay out cleanly in the bento. */
 export const MAX_STATS = 6;
 
-function compact(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`;
-  return String(n);
-}
-function hourLabel(h: number): string {
-  const p = h < 12 ? 'am' : 'pm';
-  return `${h % 12 === 0 ? 12 : h % 12}${p}`;
-}
 
 /** Every shareable scalar metric, in menu order. */
 export function buildStats(m: Metrics): ShareStat[] {

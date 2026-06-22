@@ -152,6 +152,61 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_EVENT_INSERT_SQL = (
+    "INSERT INTO events (session_id, source, hook, tool, phase, ts, payload,"
+    " category, title, detail, target, status, duration_ms, model,"
+    " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
+    " dedup_key, created_at)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+
+def _dedup_key(raw: dict[str, Any]) -> str:
+    return hashlib.sha1(
+        json.dumps(raw, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _event_params(
+    norm: dict[str, Any],
+    raw: dict[str, Any],
+    dedup_key: str,
+    ts: str | None = None,
+) -> tuple[Any, ...]:
+    return (
+        norm["session_id"],
+        norm["source"],
+        norm["hook"],
+        norm["tool"],
+        norm["phase"],
+        ts or norm["ts"],
+        json.dumps(raw, ensure_ascii=False, default=str),
+        norm.get("category"),
+        norm.get("title"),
+        norm.get("detail"),
+        norm.get("target"),
+        norm.get("status"),
+        norm.get("duration_ms"),
+        norm.get("model"),
+        norm.get("input_tokens"),
+        norm.get("output_tokens"),
+        norm.get("cache_read_tokens"),
+        norm.get("cache_write_tokens"),
+        dedup_key,
+        _now(),
+    )
+
+
+def _tokens_dict(row: sqlite3.Row) -> dict[str, int]:
+    return {
+        "input": row["i"],
+        "output": row["o"],
+        "cache_read": row["cr"],
+        "cache_write": row["cw"],
+        "total": row["i"] + row["o"] + row["cr"] + row["cw"],
+    }
+
+
 def _connect() -> sqlite3.Connection:
     path = db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -854,44 +909,14 @@ def _insert_cursor_question_event(
     conn: sqlite3.Connection,
     raw: dict[str, Any],
 ) -> None:
-    dedup_key = hashlib.sha1(
-        json.dumps(raw, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
-    ).hexdigest()
+    dk = _dedup_key(raw)
     if conn.execute(
         "SELECT 1 FROM events WHERE session_id = ? AND dedup_key = ? LIMIT 1",
-        (raw["session_id"], dedup_key),
+        (raw["session_id"], dk),
     ).fetchone():
         return
     norm = normalize("cursor", raw)
-    conn.execute(
-        "INSERT INTO events (session_id, source, hook, tool, phase, ts, payload,"
-        " category, title, detail, target, status, duration_ms, model,"
-        " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
-        " dedup_key, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            norm["session_id"],
-            norm["source"],
-            norm["hook"],
-            norm["tool"],
-            norm["phase"],
-            norm["ts"],
-            json.dumps(raw, ensure_ascii=False, default=str),
-            norm.get("category"),
-            norm.get("title"),
-            norm.get("detail"),
-            norm.get("target"),
-            norm.get("status"),
-            norm.get("duration_ms"),
-            norm.get("model"),
-            norm.get("input_tokens"),
-            norm.get("output_tokens"),
-            norm.get("cache_read_tokens"),
-            norm.get("cache_write_tokens"),
-            dedup_key,
-            _now(),
-        ),
-    )
+    conn.execute(_EVENT_INSERT_SQL, _event_params(norm, raw, dk))
 
 
 def _insert_backfilled_cursor_question(
@@ -951,6 +976,9 @@ def _backfill_cursor_questions(conn: sqlite3.Connection) -> None:
             _insert_backfilled_cursor_question(conn, source, artifact)
 
 
+_MIGRATIONS_VERSION = "2"
+
+
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(SCHEMA)
@@ -964,6 +992,11 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)"
         )
+        stored = conn.execute(
+            "SELECT value FROM settings WHERE key = 'migrations_version'"
+        ).fetchone()
+        if stored and stored["value"] == _MIGRATIONS_VERSION:
+            return
         _backfill(conn)
         _recategorize_network_calls(conn)
         _recategorize_subagents(conn)
@@ -977,6 +1010,11 @@ def init_db() -> None:
         _merge_search_into_shell(conn)
         _dedup_cursor_subagent_starts(conn)
         _backfill_cursor_questions(conn)
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('migrations_version', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (_MIGRATIONS_VERSION,),
+        )
 
 
 def get_setting(key: str, default: str | None = None) -> str | None:
@@ -1165,15 +1203,13 @@ def record_event(norm: dict[str, Any], raw: dict[str, Any]) -> tuple[str, int]:
     # Cursor (Claude-Code-compatible) fires each hook to BOTH the cursor and
     # claude bridge, posting byte-identical payloads ~20ms apart. Fingerprint the
     # payload and skip a duplicate seen for this session in the last few seconds.
-    dedup_key = hashlib.sha1(
-        json.dumps(raw, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
-    ).hexdigest()
+    dk = _dedup_key(raw)
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
     with _write_lock, _connect() as conn:
         dup = conn.execute(
             "SELECT id FROM events WHERE session_id = ? AND dedup_key = ? AND created_at >= ?"
             " ORDER BY id DESC LIMIT 1",
-            (sid, dedup_key, cutoff),
+            (sid, dk, cutoff),
         ).fetchone()
         if dup is not None:
             return sid, int(dup["id"])
@@ -1197,35 +1233,7 @@ def record_event(norm: dict[str, Any], raw: dict[str, Any]) -> tuple[str, int]:
                 (ts, sid),
             )
 
-        cur = conn.execute(
-            "INSERT INTO events (session_id, source, hook, tool, phase, ts, payload,"
-            " category, title, detail, target, status, duration_ms, model,"
-            " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
-            " dedup_key, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                sid,
-                norm["source"],
-                norm["hook"],
-                norm["tool"],
-                norm["phase"],
-                ts,
-                json.dumps(raw, ensure_ascii=False, default=str),
-                norm.get("category"),
-                norm.get("title"),
-                norm.get("detail"),
-                norm.get("target"),
-                norm.get("status"),
-                norm.get("duration_ms"),
-                norm.get("model"),
-                norm.get("input_tokens"),
-                norm.get("output_tokens"),
-                norm.get("cache_read_tokens"),
-                norm.get("cache_write_tokens"),
-                dedup_key,
-                _now(),
-            ),
-        )
+        cur = conn.execute(_EVENT_INSERT_SQL, _event_params(norm, raw, dk, ts))
 
         if (
             norm["source"] == "cursor"
@@ -1310,13 +1318,7 @@ def _session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, An
         "duration_seconds": _duration_seconds(agg["first_ts"], last_ts),
         "title": _first_prompt(conn, row["id"]),
         "category_counts": _category_counts(conn, row["id"]),
-        "tokens": {
-            "input": tok["i"],
-            "output": tok["o"],
-            "cache_read": tok["cr"],
-            "cache_write": tok["cw"],
-            "total": tok["i"] + tok["o"] + tok["cr"] + tok["cw"],
-        },
+        "tokens": _tokens_dict(tok),
     }
 
 
@@ -1346,13 +1348,7 @@ def metrics() -> dict[str, Any]:
             " COALESCE(SUM(cache_read_tokens),0) cr, COALESCE(SUM(cache_write_tokens),0) cw"
             " FROM events"
         )
-        tokens = {
-            "input": tok["i"],
-            "output": tok["o"],
-            "cache_read": tok["cr"],
-            "cache_write": tok["cw"],
-            "total": tok["i"] + tok["o"] + tok["cr"] + tok["cw"],
-        }
+        tokens = _tokens_dict(tok)
 
         by_day = [
             {"day": r["d"], "events": r["n"]}
@@ -1436,24 +1432,23 @@ def metrics() -> dict[str, Any]:
             )
         ]
 
-        def cat_count(cat: str) -> int:
-            return one("SELECT COUNT(*) n FROM events WHERE category=?", cat)["n"]
+        cat_lookup = {r["category"]: r["events"] for r in by_category}
 
         fun = {
             "busiest_day": busiest_day,
             "peak_hour": peak_hour,
-            "shell_commands": cat_count("shell"),
-            "files_edited": cat_count("file_edit"),
-            "files_read": cat_count("file_read"),
+            "shell_commands": cat_lookup.get("shell", 0),
+            "files_edited": cat_lookup.get("file_edit", 0),
+            "files_read": cat_lookup.get("file_read", 0),
             "files_touched": one(
                 "SELECT COUNT(DISTINCT target) n FROM events"
                 " WHERE category IN ('file_edit','file_read') AND target IS NOT NULL"
             )["n"],
-            "web_calls": cat_count("web"),
-            "mcp_calls": cat_count("mcp"),
-            "prompts": cat_count("prompt"),
-            "responses": cat_count("response"),
-            "thoughts": cat_count("thought"),
+            "web_calls": cat_lookup.get("web", 0),
+            "mcp_calls": cat_lookup.get("mcp", 0),
+            "prompts": cat_lookup.get("prompt", 0),
+            "responses": cat_lookup.get("response", 0),
+            "thoughts": cat_lookup.get("thought", 0),
             "top_tool": by_tool[0]["tool"] if by_tool else None,
             "error_rate": round(errors / tool_calls, 4) if tool_calls else 0.0,
         }
@@ -1960,6 +1955,7 @@ def _parse_questions(detail: Any) -> list[dict[str, Any]]:
     src = obj.get("input") if isinstance(obj.get("input"), dict) else obj
     qs = src.get("questions") if isinstance(src.get("questions"), list) else []
     # Codex/Cursor response: {"answers": {<question id>: {"answers": [<label>, ...]}}}.
+    # Claude response: {"answers": {<question text>: "<answer text>"}}.
     resp = _coerce_dict(obj.get("response") or obj.get("output"))
     answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
     skipped_raw = resp.get("skipped") or resp.get("skipped_questions") or []
@@ -1971,6 +1967,8 @@ def _parse_questions(detail: Any) -> list[dict[str, Any]]:
             continue
         ans: str | None = None
         picked = answers.get(q.get("id")) if q.get("id") else None
+        if picked is None:
+            picked = answers.get(q.get("question")) or answers.get(q.get("prompt"))
         if isinstance(picked, dict) and isinstance(picked.get("answers"), list):
             ans = ", ".join(str(a) for a in picked["answers"] if a)
         elif isinstance(picked, list):

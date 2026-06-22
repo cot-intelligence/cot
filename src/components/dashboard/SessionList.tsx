@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { AgentId } from '../../lib/agents';
 import { getSessions, type SessionSummary } from '../../lib/api';
+import { usePolling } from '../../lib/usePolling';
 import { Icon } from '../ui/icons';
 import { Select } from '../ui/Select';
 import { SessionRow } from './SessionRow';
@@ -13,33 +14,15 @@ interface SessionListProps {
 }
 
 export function SessionList({ selectedId, onSelect, collapsed = false, onToggle }: SessionListProps) {
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [status, setStatus] = useState<string>('');
   const [source, setSource] = useState<AgentId | ''>('');
   const [q, setQ] = useState('');
 
-  useEffect(() => {
-    let active = true;
-    const load = async () => {
-      try {
-        const data = await getSessions({
-          limit: 100,
-          status: status || undefined,
-          source: source || undefined,
-          q: q || undefined,
-        });
-        if (active) setSessions(data);
-      } catch {
-        /* collector offline */
-      }
-    };
-    load();
-    const t = window.setInterval(load, 3000);
-    return () => {
-      active = false;
-      window.clearInterval(t);
-    };
-  }, [status, source, q]);
+  const { data: sessions } = usePolling<SessionSummary[]>(
+    () => getSessions({ limit: 100, status: status || undefined, source: source || undefined, q: q || undefined }),
+    3000,
+    [status, source, q],
+  );
 
   if (collapsed) {
     return (
@@ -111,7 +94,7 @@ export function SessionList({ selectedId, onSelect, collapsed = false, onToggle 
         </div>
       </div>
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
-        {sessions.map((s) => (
+        {(sessions ?? []).map((s) => (
           <SessionRow
             key={s.id}
             session={s}
@@ -119,7 +102,7 @@ export function SessionList({ selectedId, onSelect, collapsed = false, onToggle 
             onSelect={() => onSelect(s.id)}
           />
         ))}
-        {!sessions.length && (
+        {sessions && !sessions.length && (
           <p className="p-6 font-mono text-xs text-fg/40">
             No sessions yet. Run an agent with hooks configured.
           </p>

@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
 import { getStats, type Stats } from '../../lib/api';
+import { usePolling } from '../../lib/usePolling';
 import { formatDuration } from '../../lib/categoryMeta';
 import { sourceLabel } from '../../lib/sourceLabels';
 
@@ -33,25 +33,7 @@ function StatCard({
 }
 
 export function TelemetryPanel() {
-  const [stats, setStats] = useState<Stats | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    const load = async () => {
-      try {
-        const data = await getStats();
-        if (active) setStats(data);
-      } catch {
-        /* collector offline */
-      }
-    };
-    load();
-    const t = window.setInterval(load, 3000);
-    return () => {
-      active = false;
-      window.clearInterval(t);
-    };
-  }, []);
+  const { data: stats } = usePolling<Stats>(() => getStats(), 3000);
 
   const sourceHint = stats
     ? Object.entries(stats.by_source)

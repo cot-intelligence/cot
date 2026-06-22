@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { getMetrics, type Metrics } from '../../lib/api';
+import { usePolling } from '../../lib/usePolling';
 import { formatDuration, formatRelative, getCategoryMeta } from '../../lib/categoryMeta';
 import { formatModel } from '../../lib/modelMeta';
 import { sourceLabel } from '../../lib/sourceLabels';
@@ -18,15 +19,7 @@ interface MetricsViewProps {
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-function compact(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`;
-  return String(n);
-}
-function hourLabel(h: number): string {
-  const p = h < 12 ? 'am' : 'pm';
-  return `${h % 12 === 0 ? 12 : h % 12}${p}`;
-}
+import { compact, hourLabel } from '../../lib/format';
 function niceDay(iso: string): string {
   const [, m, d] = iso.split('-');
   return `${MONTHS[Number(m) - 1]} ${Number(d)}`;
@@ -109,30 +102,8 @@ function ChartBox({ label, children }: { label: string; children: React.ReactNod
 }
 
 export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
-  const [m, setM] = useState<Metrics | null>(null);
-  const [error, setError] = useState(false);
+  const { data: m, error } = usePolling<Metrics>(() => getMetrics(), 5000);
   const [shareOpen, setShareOpen] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    const load = async () => {
-      try {
-        const data = await getMetrics();
-        if (active) {
-          setM(data);
-          setError(false);
-        }
-      } catch {
-        if (active) setError(true);
-      }
-    };
-    load();
-    const t = window.setInterval(load, 5000);
-    return () => {
-      active = false;
-      window.clearInterval(t);
-    };
-  }, []);
 
   if (!m) {
     if (error) {

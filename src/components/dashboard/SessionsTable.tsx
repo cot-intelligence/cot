@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
+import { activateOnKey } from '../../lib/a11y';
 import { getSessions, setSessionArchived, type SessionSummary } from '../../lib/api';
 import { formatRelative, toTimestampString } from '../../lib/categoryMeta';
 import { sourceLabel } from '../../lib/sourceLabels';
@@ -395,9 +396,3 @@ function groupOf(
   return { key: cwd, label: basename(cwd), title: cwd };
 }
 
-function activateOnKey(e: React.KeyboardEvent, run: () => void) {
-  if (e.key === 'Enter' || e.key === ' ') {
-    e.preventDefault();
-    run();
-  }
-}

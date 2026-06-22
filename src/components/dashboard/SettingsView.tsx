@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
+import { usePolling } from '../../lib/usePolling';
 import {
   cleanupRetention,
   getHealth,
@@ -38,10 +39,8 @@ export function SettingsView({
   onRunOnboarding,
 }: SettingsViewProps) {
   const { theme, setTheme } = useTheme();
-  const [health, setHealth] = useState<Health | null>(null);
-  const [healthError, setHealthError] = useState(false);
-  const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
-  const [hookStatusError, setHookStatusError] = useState(false);
+  const { data: health, error: healthError } = usePolling<Health>(() => getHealth(), 10000);
+  const { data: hookStatus, error: hookStatusError } = usePolling<HookStatus>(() => getHookStatus(), 10000);
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
   const [versionChecking, setVersionChecking] = useState(false);
   const [versionCheckError, setVersionCheckError] = useState<string | null>(null);
@@ -51,54 +50,6 @@ export function SettingsView({
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [retentionBusy, setRetentionBusy] = useState(false);
   const savedAgent = readSavedAgent();
-
-  useEffect(() => {
-    let active = true;
-    const load = async () => {
-      try {
-        const data = await getHealth();
-        if (active) {
-          setHealth(data);
-          setHealthError(false);
-        }
-      } catch {
-        if (active) {
-          setHealth(null);
-          setHealthError(true);
-        }
-      }
-    };
-    load();
-    const t = window.setInterval(load, 10000);
-    return () => {
-      active = false;
-      window.clearInterval(t);
-    };
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    const load = async () => {
-      try {
-        const data = await getHookStatus();
-        if (active) {
-          setHookStatus(data);
-          setHookStatusError(false);
-        }
-      } catch {
-        if (active) {
-          setHookStatus(null);
-          setHookStatusError(true);
-        }
-      }
-    };
-    load();
-    const t = window.setInterval(load, 10000);
-    return () => {
-      active = false;
-      window.clearInterval(t);
-    };
-  }, []);
 
   useEffect(() => {
     let active = true;

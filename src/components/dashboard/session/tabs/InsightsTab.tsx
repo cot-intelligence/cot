@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { SessionDetail } from '../../../../lib/api';
 import { formatDuration, getCategoryMeta, toTimestampString } from '../../../../lib/categoryMeta';
+import { compact } from '../../../../lib/format';
 import { formatModel } from '../../../../lib/modelMeta';
 import { buildInsights } from '../../../../lib/sessionInsights';
 import { CHART_COLORS, type Datum } from '../../chartConstants';
@@ -8,12 +9,6 @@ import { AreaTrend, DonutChart, HBars } from '../../chartTheme';
 
 interface InsightsTabProps {
   detail: SessionDetail;
-}
-
-function compact(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`;
-  return String(n);
 }
 
 // --- line-based building blocks (shared visual language with the Metrics page) ---

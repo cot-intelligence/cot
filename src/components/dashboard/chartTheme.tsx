@@ -15,6 +15,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import { compact } from '../../lib/format';
 import { CHART_COLORS, type Datum } from './chartConstants';
 
 export type { Datum };
@@ -22,12 +23,6 @@ export type { Datum };
 const AXIS = 'rgb(var(--fg) / 0.4)';
 const GRID = 'rgb(var(--fg) / 0.07)';
 const MONO = 'JetBrains Mono, monospace';
-
-function compact(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`;
-  return String(n);
-}
 
 function BrutalTooltip({ active, payload, label, unit = 'events' }: any) {
   if (!active || !payload?.length) return null;

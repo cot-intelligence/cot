@@ -170,6 +170,16 @@ summary_table
 
 # 1. Download the bridge.
 section "Bridge"
+# Docker's bind-mount (docker-compose.yml) may have created ~/.cot as root
+# before the user runs this script. Reclaim ownership so mkdir/writes succeed.
+if [ -d "${COT_HOME}" ] && [ ! -w "${COT_HOME}" ]; then
+  step "Fixing ownership of ${COT_HOME}"
+  sudo chown -R "${USER}:${USER}" "${COT_HOME}" 2>/dev/null || {
+    fail "${COT_HOME} exists but is not writable (Docker may have created it as root)."
+    printf '%s\n' "  Run: sudo chown -R \$(id -u):\$(id -g) ${COT_HOME}"
+    exit 1
+  }
+fi
 if ! run_spinner "Preparing ${BIN_DIR}" mkdir -p "${BIN_DIR}"; then
   fail "Could not create ${BIN_DIR}."
   details "Error found" "${RUN_OUTPUT}"

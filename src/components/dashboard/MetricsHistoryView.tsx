@@ -1,7 +1,9 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
+import { activateOnKey } from '../../lib/a11y';
 import { getMetricsHistory, type MetricsHistoryItem } from '../../lib/api';
 import { formatRelative, formatTime } from '../../lib/categoryMeta';
 import { FadeIn } from '../ui/FadeIn';
+import { highlight } from '../ui/Highlight';
 import { Icon } from '../ui/icons';
 import { Select } from '../ui/Select';
 import { SourceBadge } from '../ui/SourceBadge';
@@ -54,35 +56,6 @@ function sortGroups(groups: GroupedEntry[], sort: SortKey): GroupedEntry[] {
     copy.sort((a, b) => (b.occurrences[0]?.ts ?? '').localeCompare(a.occurrences[0]?.ts ?? ''));
   }
   return copy;
-}
-
-function activateOnKey(e: React.KeyboardEvent, run: () => void) {
-  if (e.key === 'Enter' || e.key === ' ') {
-    e.preventDefault();
-    run();
-  }
-}
-
-function highlight(text: string, q: string) {
-  const term = q.trim();
-  if (!term) return text;
-  const re = new RegExp(`(${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
-  const out: (string | JSX.Element)[] = [];
-  let last = 0;
-  let key = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > last) out.push(text.slice(last, m.index));
-    out.push(
-      <mark key={key++} className="bg-vermilion/20 text-fg">
-        {m[0]}
-      </mark>,
-    );
-    last = m.index + m[0].length;
-    if (m.index === re.lastIndex) re.lastIndex++;
-  }
-  if (last < text.length) out.push(text.slice(last));
-  return out;
 }
 
 function groupBg(expanded: boolean) {
