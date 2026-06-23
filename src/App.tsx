@@ -18,10 +18,10 @@ function readOnboarded(): boolean {
   }
 }
 
-function markOnboarded(agent: AgentId) {
+function markOnboarded(agents: AgentId[]) {
   try {
     localStorage.setItem(ONBOARDED_KEY, '1');
-    localStorage.setItem('cot.onboarding.agent', agent);
+    localStorage.setItem('cot.onboarding.agents', JSON.stringify(agents));
   } catch {
     /* ignore */
   }
@@ -43,8 +43,8 @@ export function App() {
     if (view === 'onboarding') setDocumentTitle('Setup');
   }, [view]);
 
-  const handleComplete = (a: AgentId, origin: Origin) => {
-    markOnboarded(a);
+  const handleComplete = (agents: AgentId[], origin: Origin) => {
+    markOnboarded(agents);
     setTransition(origin);
   };
 

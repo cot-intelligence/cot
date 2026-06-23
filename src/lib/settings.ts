@@ -1,6 +1,7 @@
 const SIDEBAR_KEY = 'cot.sidebar.open';
 const ONBOARDED_KEY = 'cot.onboarded';
-const AGENT_KEY = 'cot.onboarding.agent';
+const AGENTS_KEY = 'cot.onboarding.agents';
+const LEGACY_AGENT_KEY = 'cot.onboarding.agent';
 
 export function readSidebarOpen(): boolean {
   try {
@@ -18,13 +19,24 @@ export function writeSidebarOpen(open: boolean): void {
   }
 }
 
-export function readSavedAgent(): 'claude' | 'cursor' | 'codex' | null {
+export function readSavedAgents(): ('claude' | 'cursor' | 'codex')[] {
   try {
-    const v = localStorage.getItem(AGENT_KEY);
-    return v === 'claude' || v === 'cursor' || v === 'codex' ? v : null;
+    const raw = localStorage.getItem(AGENTS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.filter(
+          (x): x is 'claude' | 'cursor' | 'codex' =>
+            x === 'claude' || x === 'cursor' || x === 'codex',
+        );
+      }
+    }
+    const legacy = localStorage.getItem(LEGACY_AGENT_KEY);
+    if (legacy === 'claude' || legacy === 'cursor' || legacy === 'codex') return [legacy];
   } catch {
-    return null;
+    /* ignore */
   }
+  return [];
 }
 
 export function clearOnboarding(): void {

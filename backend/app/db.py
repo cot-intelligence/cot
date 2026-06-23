@@ -156,8 +156,8 @@ _EVENT_INSERT_SQL = (
     "INSERT INTO events (session_id, source, hook, tool, phase, ts, payload,"
     " category, title, detail, target, status, duration_ms, model,"
     " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
-    " dedup_key, created_at)"
-    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    " dedup_key, origin, created_at)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 
@@ -172,6 +172,7 @@ def _event_params(
     raw: dict[str, Any],
     dedup_key: str,
     ts: str | None = None,
+    origin: str = "hook",
 ) -> tuple[Any, ...]:
     return (
         norm["session_id"],
@@ -193,6 +194,7 @@ def _event_params(
         norm.get("cache_read_tokens"),
         norm.get("cache_write_tokens"),
         dedup_key,
+        origin,
         _now(),
     )
 
@@ -254,6 +256,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("cache_write_tokens", "INTEGER"),
         ("attachments", "TEXT"),
         ("dedup_key", "TEXT"),
+        ("origin", "TEXT"),
     ):
         _add_column_if_missing(conn, "events", name, col_def, event_cols)
 
@@ -976,7 +979,7 @@ def _backfill_cursor_questions(conn: sqlite3.Connection) -> None:
             _insert_backfilled_cursor_question(conn, source, artifact)
 
 
-_MIGRATIONS_VERSION = "2"
+_MIGRATIONS_VERSION = "4"
 
 
 def init_db() -> None:
@@ -1010,6 +1013,9 @@ def init_db() -> None:
         _merge_search_into_shell(conn)
         _dedup_cursor_subagent_starts(conn)
         _backfill_cursor_questions(conn)
+        conn.execute(
+            "UPDATE events SET origin = 'hook' WHERE origin IS NULL"
+        )
         conn.execute(
             "INSERT INTO settings (key, value) VALUES ('migrations_version', ?)"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1200,19 +1206,28 @@ def get_install_id() -> str:
 def record_event(norm: dict[str, Any], raw: dict[str, Any]) -> tuple[str, int]:
     sid = norm["session_id"]
     ts = norm["ts"]
-    # Cursor (Claude-Code-compatible) fires each hook to BOTH the cursor and
-    # claude bridge, posting byte-identical payloads ~20ms apart. Fingerprint the
-    # payload and skip a duplicate seen for this session in the last few seconds.
-    dk = _dedup_key(raw)
-    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+    origin = "import" if raw.get("_import") else "hook"
+    explicit_dk = raw.get("_dedup_key")
+    dk = str(explicit_dk) if explicit_dk else _dedup_key(raw)
+
     with _write_lock, _connect() as conn:
-        dup = conn.execute(
-            "SELECT id FROM events WHERE session_id = ? AND dedup_key = ? AND created_at >= ?"
-            " ORDER BY id DESC LIMIT 1",
-            (sid, dk, cutoff),
-        ).fetchone()
+        if explicit_dk:
+            # Import path: dedup on (session_id, dedup_key) with no time window.
+            dup = conn.execute(
+                "SELECT id FROM events WHERE session_id = ? AND dedup_key = ? LIMIT 1",
+                (sid, dk),
+            ).fetchone()
+        else:
+            # Live hook path: 5s payload-hash window (Cursor double-posts).
+            cutoff = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+            dup = conn.execute(
+                "SELECT id FROM events WHERE session_id = ? AND dedup_key = ? AND created_at >= ?"
+                " ORDER BY id DESC LIMIT 1",
+                (sid, dk, cutoff),
+            ).fetchone()
         if dup is not None:
             return sid, int(dup["id"])
+
         row = conn.execute("SELECT id FROM sessions WHERE id = ?", (sid,)).fetchone()
         if row is None or norm["hook"] in _SESSION_START_HOOKS:
             if row is None:
@@ -1221,10 +1236,25 @@ def record_event(norm: dict[str, Any], raw: dict[str, Any]) -> tuple[str, int]:
                     " VALUES (?, ?, ?, ?, 'active', ?)",
                     (sid, norm["source"], norm["cwd"], ts, _now()),
                 )
+            elif norm["hook"] in _SESSION_START_HOOKS:
+                conn.execute(
+                    "UPDATE sessions SET status = 'active', cwd = COALESCE(?, cwd)"
+                    " WHERE id = ?",
+                    (norm["cwd"], sid),
+                )
         elif norm["cwd"]:
             conn.execute(
                 "UPDATE sessions SET cwd = COALESCE(cwd, ?) WHERE id = ?",
                 (norm["cwd"], sid),
+            )
+
+        # Imported events carry historical timestamps; ensure the session's
+        # started_at reflects the earliest event we've seen.
+        if origin == "import":
+            conn.execute(
+                "UPDATE sessions SET started_at = ? WHERE id = ?"
+                " AND (started_at IS NULL OR ? < started_at)",
+                (ts, sid, ts),
             )
 
         if norm["hook"] in _SESSION_END_HOOKS:
@@ -1233,7 +1263,9 @@ def record_event(norm: dict[str, Any], raw: dict[str, Any]) -> tuple[str, int]:
                 (ts, sid),
             )
 
-        cur = conn.execute(_EVENT_INSERT_SQL, _event_params(norm, raw, dk, ts))
+        cur = conn.execute(
+            _EVENT_INSERT_SQL, _event_params(norm, raw, dk, ts, origin)
+        )
 
         if (
             norm["source"] == "cursor"
@@ -2115,6 +2147,87 @@ def get_session_detail(session_id: str) -> dict[str, Any] | None:
 
 def get_session(session_id: str) -> dict[str, Any] | None:
     return get_session_detail(session_id)
+
+
+def session_origins() -> dict[str, str]:
+    """Return the dominant origin per session: 'hook' if any hook events exist,
+    else 'import'. Used by the bridge to skip already-hooked sessions."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT session_id,"
+            " MAX(CASE WHEN origin = 'hook' OR origin IS NULL THEN 1 ELSE 0 END) AS has_hook"
+            " FROM events GROUP BY session_id"
+        ).fetchall()
+    return {
+        r["session_id"]: "hook" if r["has_hook"] else "import"
+        for r in rows
+    }
+
+
+def import_summary() -> dict[str, Any]:
+    """Stats about transcript-imported data."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT session_id) AS sessions,"
+            " COALESCE(SUM(input_tokens), 0) AS input_tok,"
+            " COALESCE(SUM(output_tokens), 0) AS output_tok,"
+            " COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tok,"
+            " COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tok,"
+            " MIN(ts) AS earliest,"
+            " MAX(ts) AS latest"
+            " FROM events WHERE origin = 'import'"
+        ).fetchone()
+        by_source = conn.execute(
+            "SELECT source, COUNT(DISTINCT session_id) AS sessions, COUNT(*) AS events"
+            " FROM events WHERE origin = 'import' GROUP BY source"
+        ).fetchall()
+    total_tok = (
+        (row["input_tok"] or 0) + (row["output_tok"] or 0)
+        + (row["cache_read_tok"] or 0) + (row["cache_write_tok"] or 0)
+    )
+    return {
+        "sessions": row["sessions"] or 0,
+        "tokens": {
+            "input": row["input_tok"] or 0,
+            "output": row["output_tok"] or 0,
+            "cache_read": row["cache_read_tok"] or 0,
+            "cache_write": row["cache_write_tok"] or 0,
+            "total": total_tok,
+        },
+        "earliest": row["earliest"],
+        "latest": row["latest"],
+        "by_source": [
+            {"source": r["source"], "sessions": r["sessions"], "events": r["events"]}
+            for r in by_source
+        ],
+    }
+
+
+def complete_imported_sessions() -> dict[str, Any]:
+    """Mark import-only sessions as completed.
+
+    Transcripts don't carry lifecycle-end events so imported sessions
+    stay 'active' forever.  This closes them using the timestamp of
+    their most recent event as ended_at.
+    """
+    with _write_lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT s.id, MAX(e.ts) AS last_ts"
+            " FROM sessions s"
+            " JOIN events e ON e.session_id = s.id"
+            " WHERE s.status = 'active'"
+            "   AND NOT EXISTS ("
+            "     SELECT 1 FROM events e2"
+            "     WHERE e2.session_id = s.id AND (e2.origin = 'hook' OR e2.origin IS NULL)"
+            "   )"
+            " GROUP BY s.id"
+        ).fetchall()
+        for r in rows:
+            conn.execute(
+                "UPDATE sessions SET status = 'completed', ended_at = ? WHERE id = ?",
+                (r["last_ts"], r["id"]),
+            )
+    return {"completed": len(rows)}
 
 
 def stats() -> dict[str, Any]:

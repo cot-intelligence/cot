@@ -459,6 +459,24 @@ export async function search(q: string, limit = 40): Promise<SearchResult[]> {
   return data.results;
 }
 
+export interface ImportSummary {
+  sessions: number;
+  tokens: {
+    input: number;
+    output: number;
+    cache_read: number;
+    cache_write: number;
+    total: number;
+  };
+  earliest: string | null;
+  latest: string | null;
+  by_source: { source: string; sessions: number; events: number }[];
+}
+
+export async function getImportSummary(): Promise<ImportSummary> {
+  return json<ImportSummary>(await fetch('/v1/import/summary'));
+}
+
 async function ingest(source: AgentId, payload: Record<string, unknown>) {
   await fetch(`/v1/ingest/${source}`, {
     method: 'POST',

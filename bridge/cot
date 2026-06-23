@@ -1119,6 +1119,34 @@ def _cmd_install(args: list[str]) -> int:
     )
     if "codex" in agents:
         print("cot: run /hooks in Codex to review and trust the new hooks.")
+
+    # Auto-import historical transcripts after hook setup.
+    print("cot: importing historical transcripts…")
+    try:
+        origins = _fetch_session_origins()
+        offsets = _import_offsets_load()
+        total = 0
+        for agent in agents:
+            count = _import_agent(agent, None, offsets, origins, verbose=False)
+            total += count
+        _import_offsets_save(offsets)
+        if total:
+            try:
+                req = urllib.request.Request(
+                    f"{COT_ENDPOINT}/v1/sessions/complete-imported",
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                    data=b"{}",
+                )
+                urllib.request.urlopen(req, timeout=10)
+            except (urllib.error.URLError, TimeoutError, OSError):
+                pass
+            print(f"cot: imported {total} events from existing transcripts")
+        else:
+            print("cot: no new transcripts to import")
+    except Exception as exc:
+        print(f"cot: transcript import skipped ({exc})", file=sys.stderr)
+
     return 0
 
 
@@ -1180,6 +1208,497 @@ def _cmd_audit(args: list[str]) -> int:
         return 1
 
 
+# ---------------------------------------------------------------------------
+# Passive transcript import (Plan 01)
+# ---------------------------------------------------------------------------
+
+IMPORT_OFFSETS_PATH = STATE_DIR / "import_offsets.json"
+
+
+def _import_offsets_load() -> dict[str, int]:
+    if not IMPORT_OFFSETS_PATH.exists():
+        return {}
+    try:
+        return json.loads(IMPORT_OFFSETS_PATH.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _import_offsets_save(data: dict[str, int]) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    IMPORT_OFFSETS_PATH.write_text(json.dumps(data))
+
+
+def _import_read_new_lines(path: Path, offsets: dict[str, int]) -> tuple[list[str], int]:
+    """Read new complete lines from *path* past the stored offset.
+
+    Returns (lines, new_offset). Incomplete trailing lines (writer mid-flush)
+    are not consumed — the offset stops at the last newline.
+    """
+    key = str(path)
+    start = offsets.get(key, 0)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return [], start
+    if size < start:
+        start = 0
+    if size == start:
+        return [], start
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            fh.seek(start)
+            chunk = fh.read()
+    except OSError:
+        return [], start
+    # Only consume up to the last newline so partial writes are retried.
+    last_nl = chunk.rfind("\n")
+    if last_nl < 0:
+        return [], start
+    consumed = chunk[: last_nl + 1]
+    new_offset = start + len(consumed.encode("utf-8"))
+    lines = [ln for ln in consumed.splitlines() if ln.strip()]
+    return lines, new_offset
+
+
+def _safe_transcript_root(root: Path) -> Path | None:
+    try:
+        resolved = root.resolve(strict=True)
+        home = Path.home().resolve(strict=True)
+        resolved.relative_to(home)
+        return resolved
+    except (OSError, ValueError):
+        return None
+
+
+def _claude_transcript_root() -> Path:
+    env = os.environ.get("COT_CLAUDE_HOME")
+    return Path(env) if env else Path.home() / ".claude"
+
+
+def _cursor_transcript_root() -> Path:
+    env = os.environ.get("COT_CURSOR_HOME")
+    return Path(env) if env else Path.home() / ".cursor"
+
+
+def _codex_transcript_root() -> Path:
+    env = os.environ.get("COT_CODEX_HOME")
+    return Path(env) if env else Path.home() / ".codex"
+
+
+def _discover_transcripts(agent: str) -> list[Path]:
+    if agent == "claude":
+        root = _safe_transcript_root(_claude_transcript_root())
+        if not root:
+            return []
+        return sorted(root.glob("projects/**/*.jsonl"))
+    if agent == "cursor":
+        root = _safe_transcript_root(_cursor_transcript_root())
+        if not root:
+            return []
+        return sorted(root.glob("projects/**/agent-transcripts/**/*.jsonl"))
+    if agent == "codex":
+        root = _safe_transcript_root(_codex_transcript_root())
+        if not root:
+            return []
+        return sorted(root.glob("sessions/**/*.jsonl"))
+    return []
+
+
+def _claude_line_to_events(obj: dict, session_id: str) -> list[dict]:
+    """Map a single Claude transcript JSONL line to hook-shaped payloads."""
+    events: list[dict] = []
+    message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+    role = obj.get("role") or message.get("role") or obj.get("type")
+    content = obj.get("content")
+    if content is None:
+        content = message.get("content")
+    ts = obj.get("timestamp")
+    uuid = obj.get("uuid") or ""
+    sid = obj.get("sessionId") or session_id
+    cwd = obj.get("cwd")
+    model = message.get("model") or obj.get("model")
+    usage = message.get("usage") if isinstance(message.get("usage"), dict) else None
+    base = {
+        "session_id": sid,
+        "cwd": cwd,
+        "_import": True,
+        "timestamp": ts,
+    }
+
+    if role == "user":
+        text = _text_from_blocks(content) if isinstance(content, list) else str(content or "")
+        if text and not _is_interruption(text):
+            events.append({
+                **base,
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": text,
+                "_dedup_key": f"{uuid}:prompt" if uuid else None,
+            })
+        if isinstance(content, list):
+            atts = _message_attachments(content)
+            if atts and text:
+                events.append({
+                    **base,
+                    "_attach_to_prompt": True,
+                    "text": text,
+                    "attachments": atts,
+                })
+    elif role == "assistant":
+        if isinstance(content, list):
+            for i, block in enumerate(content):
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "thinking":
+                    think = block.get("thinking")
+                    if think:
+                        events.append({
+                            **base,
+                            "hook_event_name": "afterAgentThought",
+                            "_synthetic_category": "thought",
+                            "thought": str(think),
+                            "model": model,
+                            "usage": usage if i == 0 else None,
+                            "_dedup_key": f"{uuid}:think:{i}" if uuid else None,
+                        })
+                elif btype == "text":
+                    text = block.get("text")
+                    if text:
+                        events.append({
+                            **base,
+                            "hook_event_name": "afterAgentResponse",
+                            "_synthetic_category": "response",
+                            "response": str(text),
+                            "model": model,
+                            "usage": usage if i == 0 else None,
+                            "_dedup_key": f"{uuid}:resp:{i}" if uuid else None,
+                        })
+                elif btype == "tool_use":
+                    tool_name = block.get("name") or ""
+                    tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
+                    tool_id = block.get("id") or ""
+                    events.append({
+                        **base,
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": tool_name,
+                        "tool_input": tool_input,
+                        "model": model,
+                        "_dedup_key": f"{uuid}:pre:{tool_id or i}" if uuid else None,
+                    })
+                elif btype == "tool_result":
+                    tool_use_id = block.get("tool_use_id") or ""
+                    result_content = block.get("content")
+                    result_text = ""
+                    if isinstance(result_content, str):
+                        result_text = result_content
+                    elif isinstance(result_content, list):
+                        result_text = _text_from_blocks(result_content)
+                    # Find the matching tool_use to get the tool name
+                    tool_name = ""
+                    matched_input = {}
+                    for prev in content:
+                        if (isinstance(prev, dict) and prev.get("type") == "tool_use"
+                                and prev.get("id") == tool_use_id):
+                            tool_name = prev.get("name") or ""
+                            matched_input = prev.get("input") if isinstance(prev.get("input"), dict) else {}
+                            break
+                    is_error = block.get("is_error", False)
+                    hook_name = "PostToolUseFailure" if is_error else "PostToolUse"
+                    events.append({
+                        **base,
+                        "hook_event_name": hook_name,
+                        "tool_name": tool_name,
+                        "tool_input": matched_input,
+                        "tool_response": result_text,
+                        "model": model,
+                        "_dedup_key": f"{uuid}:post:{tool_use_id or i}" if uuid else None,
+                    })
+        else:
+            text = str(content or "").strip()
+            if text:
+                events.append({
+                    **base,
+                    "hook_event_name": "afterAgentResponse",
+                    "_synthetic_category": "response",
+                    "response": text,
+                    "model": model,
+                    "usage": usage,
+                    "_dedup_key": f"{uuid}:resp" if uuid else None,
+                })
+
+    return events
+
+
+def _cursor_line_to_events(obj: dict, session_id: str) -> list[dict]:
+    """Map a Cursor transcript line. Reuses Claude logic since format is similar."""
+    return _claude_line_to_events(obj, session_id)
+
+
+def _codex_line_to_events(obj: dict, session_id: str) -> list[dict]:
+    """Map a Codex rollout JSONL line to hook-shaped payloads."""
+    events: list[dict] = []
+    ts = obj.get("timestamp")
+    kind = obj.get("type")
+    payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+    base = {"session_id": session_id, "_import": True, "timestamp": ts}
+    line_id = obj.get("id") or ""
+
+    if kind == "response_item":
+        pt = payload.get("type")
+        if pt == "message" and payload.get("role") == "assistant":
+            text_val = _text_from_blocks(payload.get("content"))
+            if not text_val:
+                return events
+            model = payload.get("model") or obj.get("model")
+            phase = payload.get("phase") or ""
+            if phase == "final_answer":
+                events.append({
+                    **base,
+                    "hook_event_name": "afterAgentResponse",
+                    "_synthetic_category": "response",
+                    "response": text_val,
+                    "model": model,
+                    "_dedup_key": f"{line_id}:resp" if line_id else None,
+                })
+            else:
+                events.append({
+                    **base,
+                    "hook_event_name": "afterAgentThought",
+                    "_synthetic_category": "thought",
+                    "thought": text_val,
+                    "model": model,
+                    "_dedup_key": f"{line_id}:think" if line_id else None,
+                })
+        elif pt == "message" and payload.get("role") == "user":
+            content = payload.get("content")
+            text_val = _text_from_blocks(content) if isinstance(content, list) else str(content or "")
+            if text_val and not _is_interruption(text_val):
+                events.append({
+                    **base,
+                    "hook_event_name": "UserPromptSubmit",
+                    "prompt": text_val,
+                    "_dedup_key": f"{line_id}:prompt" if line_id else None,
+                })
+        elif pt == "web_search_call":
+            action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+            query = action.get("query") or payload.get("query") or ""
+            if query:
+                events.append({
+                    **base,
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "WebSearch",
+                    "tool_input": {"query": str(query)},
+                    "tool_response": {"status": payload.get("status"), "action": action},
+                    "_dedup_key": f"{line_id}:web" if line_id else None,
+                })
+
+    return events
+
+
+def _session_id_from_claude_path(path: Path) -> str | None:
+    """Claude transcripts often have the session id in the first few lines."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i > 5:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                sid = obj.get("sessionId") or obj.get("session_id")
+                if sid:
+                    return str(sid)
+    except OSError:
+        pass
+    return path.stem
+
+
+def _session_id_from_codex_path(path: Path) -> str:
+    """Codex rollout filenames are rollout-<timestamp>-<uuid>.jsonl."""
+    import re
+    m = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", path.stem)
+    if m:
+        return m.group(1)
+    return path.stem
+
+
+def _fetch_session_origins() -> dict[str, str]:
+    try:
+        req = urllib.request.Request(
+            f"{COT_ENDPOINT}/v1/sessions/origins",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return data.get("origins") or {}
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+        return {}
+
+
+def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
+                  origins: dict[str, str], *, verbose: bool = True) -> int:
+    """Import transcripts for one agent. Returns count of events posted."""
+    transcripts = _discover_transcripts(agent)
+    if verbose and not transcripts:
+        print(f"cot import: no {agent} transcripts found", file=sys.stderr)
+        return 0
+
+    line_parser = {
+        "claude": _claude_line_to_events,
+        "cursor": _cursor_line_to_events,
+        "codex": _codex_line_to_events,
+    }[agent]
+
+    source = agent
+    posted = 0
+    for path in transcripts:
+        # Derive session id
+        if agent == "claude":
+            sid = _session_id_from_claude_path(path)
+        elif agent == "codex":
+            sid = _session_id_from_codex_path(path)
+        else:
+            sid = _session_id_from_claude_path(path) or path.stem
+
+        if not sid:
+            continue
+
+        # v1: skip sessions that already have hook events
+        if origins.get(sid) == "hook":
+            continue
+
+        # Apply --since filter on file mtime as a cheap pre-filter
+        if since:
+            try:
+                mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+                cutoff = datetime.fromisoformat(since.replace("Z", "+00:00"))
+                if cutoff.tzinfo is None:
+                    cutoff = cutoff.replace(tzinfo=timezone.utc)
+                if mtime < cutoff:
+                    continue
+            except (OSError, ValueError):
+                pass
+
+        lines, new_offset = _import_read_new_lines(path, offsets)
+        if not lines:
+            offsets[str(path)] = new_offset
+            continue
+
+        if verbose:
+            print(f"cot import: {agent} {path.name} ({len(lines)} new lines)")
+
+        for line in lines:
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            events = line_parser(obj, sid)
+            for ev in events:
+                # Strip None dedup keys
+                if ev.get("_dedup_key") is None:
+                    ev.pop("_dedup_key", None)
+                _post(f"{COT_ENDPOINT}/v1/ingest/{source}", ev)
+                posted += 1
+
+        offsets[str(path)] = new_offset
+
+    return posted
+
+
+def _cmd_import(args: list[str]) -> int:
+    import argparse
+    parser = argparse.ArgumentParser(prog="cot import",
+                                     description="Import historical agent transcripts")
+    parser.add_argument("--agent", action="append", choices=["claude", "cursor", "codex"],
+                        help="Agent(s) to import (default: all)")
+    parser.add_argument("--since", help="Only import transcripts modified after YYYY-MM-DD")
+    parsed = parser.parse_args(args)
+
+    agents = parsed.agent or ["claude", "cursor", "codex"]
+    origins = _fetch_session_origins()
+    offsets = _import_offsets_load()
+    total = 0
+
+    for agent in agents:
+        count = _import_agent(agent, parsed.since, offsets, origins)
+        total += count
+
+    _import_offsets_save(offsets)
+
+    # Mark import-only sessions as completed — transcripts don't carry
+    # lifecycle end events, so without this they'd stay "active" forever.
+    if total > 0:
+        try:
+            req = urllib.request.Request(
+                f"{COT_ENDPOINT}/v1/sessions/complete-imported",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                data=b"{}",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                closed = result.get("completed", 0)
+                if closed:
+                    print(f"cot import: marked {closed} imported sessions as completed")
+        except (urllib.error.URLError, TimeoutError, OSError):
+            pass
+
+    print(f"cot import: done — {total} events posted")
+    return 0
+
+
+def _cmd_watch(args: list[str]) -> int:
+    import argparse
+    import time as _time
+
+    parser = argparse.ArgumentParser(prog="cot watch",
+                                     description="Watch for new transcript lines")
+    parser.add_argument("--agent", action="append", choices=["claude", "cursor", "codex"],
+                        help="Agent(s) to watch (default: all)")
+    parser.add_argument("--interval", type=int, default=10,
+                        help="Seconds between poll cycles (default: 10)")
+    parsed = parser.parse_args(args)
+
+    agents = parsed.agent or ["claude", "cursor", "codex"]
+    interval = max(2, parsed.interval)
+
+    print(f"cot watch: monitoring {', '.join(agents)} (poll every {interval}s)")
+    print(f"cot watch: endpoint {COT_ENDPOINT}")
+
+    # Initial import pass
+    origins = _fetch_session_origins()
+    offsets = _import_offsets_load()
+    for agent in agents:
+        count = _import_agent(agent, None, offsets, origins)
+        if count:
+            print(f"cot watch: initial import — {count} {agent} events")
+    _import_offsets_save(offsets)
+
+    # Tail loop — refresh origins every 10 cycles so newly-hooked sessions
+    # are skipped promptly (avoids duplicating hook data from transcripts).
+    cycle = 0
+    try:
+        while True:
+            _time.sleep(interval)
+            cycle += 1
+            if cycle % 10 == 0:
+                origins = _fetch_session_origins()
+            offsets = _import_offsets_load()
+            for agent in agents:
+                count = _import_agent(agent, None, offsets, origins, verbose=False)
+                if count:
+                    print(f"cot watch: +{count} {agent} events")
+            _import_offsets_save(offsets)
+    except KeyboardInterrupt:
+        print("\ncot watch: stopped")
+        return 0
+
+
 def main() -> int:
     if len(sys.argv) >= 2 and sys.argv[1] == "install":
         return _cmd_install(sys.argv[2:])
@@ -1189,11 +1708,17 @@ def main() -> int:
         return _cmd_retention(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "audit":
         return _cmd_audit(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "import":
+        return _cmd_import(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "watch":
+        return _cmd_watch(sys.argv[2:])
     if len(sys.argv) < 3 or sys.argv[1] != "hook":
         print(
             "Usage:\n"
             "  cot hook <claude|cursor|codex>   # reads a hook payload from stdin\n"
             "  cot install [claude cursor codex]  # wire up agent hook configs\n"
+            "  cot import [--agent X] [--since]   # import historical transcripts\n"
+            "  cot watch [--agent X] [--interval]  # tail transcripts continuously\n"
             "  cot status                         # show endpoint + installed hooks\n"
             "  cot retention [status|dry-run]     # manage local cleanup policy\n"
             "  cot audit [limit]                  # show cot self-audit events",

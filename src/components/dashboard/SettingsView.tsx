@@ -21,7 +21,7 @@ import {
   type VersionInfo,
 } from '../../lib/api';
 import { formatRelative } from '../../lib/categoryMeta';
-import { readSavedAgent } from '../../lib/settings';
+import { readSavedAgents } from '../../lib/settings';
 import { sourceLabel } from '../../lib/sourceLabels';
 import { useTheme } from '../../lib/theme';
 import { FadeIn } from '../ui/FadeIn';
@@ -49,7 +49,7 @@ export function SettingsView({
   const [cleanupResult, setCleanupResult] = useState<RetentionCleanupResult | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [retentionBusy, setRetentionBusy] = useState(false);
-  const savedAgent = readSavedAgent();
+  const savedAgents = readSavedAgents();
 
   useEffect(() => {
     let active = true;
@@ -191,7 +191,7 @@ export function SettingsView({
             <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg bg-surface p-4 shadow-soft">
               <div className="space-y-1">
                 <p className="font-mono text-sm font-bold text-fg">
-                  {savedAgent ? 'Reconfigure cot' : 'Configure cot'}
+                  {savedAgents.length > 0 ? 'Reconfigure cot' : 'Configure cot'}
                 </p>
                 <p className="font-mono text-xs text-fg/45">
                   Re-run the wizard to switch agents or re-verify setup.

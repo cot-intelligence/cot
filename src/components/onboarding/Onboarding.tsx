@@ -10,25 +10,50 @@ import { ThemeToggle } from '../ui/ThemeToggle';
 const STEPS: StepMeta[] = [
   { id: 'select', label: 'Select' },
   { id: 'connect', label: 'Connect' },
-  { id: 'verify', label: 'Verify' },
+  { id: 'summary', label: 'Summary' },
 ];
 
-const STORAGE_KEY = 'cot.onboarding.agent';
+const STORAGE_KEY = 'cot.onboarding.agents';
+
+function readSavedAgents(): AgentId[] {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      const legacy = window.localStorage.getItem('cot.onboarding.agent');
+      if (legacy === 'claude' || legacy === 'cursor' || legacy === 'codex') return [legacy];
+      return [];
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) {
+      return parsed.filter(
+        (x): x is AgentId => x === 'claude' || x === 'cursor' || x === 'codex',
+      );
+    }
+  } catch {
+    /* ignore */
+  }
+  return [];
+}
 
 interface OnboardingProps {
-  onComplete: (agent: AgentId, origin: { x: number; y: number }) => void;
+  onComplete: (agents: AgentId[], origin: { x: number; y: number }) => void;
 }
 
 export function Onboarding({ onComplete }: OnboardingProps) {
   const [step, setStep] = useState(0);
-  const [agent, setAgent] = useState<AgentId | null>(() => {
-    const saved = window.localStorage.getItem(STORAGE_KEY);
-    return saved === 'claude' || saved === 'cursor' || saved === 'codex' ? saved : null;
-  });
+  const [agents, setAgents] = useState<AgentId[]>(readSavedAgents);
+  const [manualConnect, setManualConnect] = useState(false);
 
-  const selectAgent = (id: AgentId) => {
-    setAgent(id);
-    window.localStorage.setItem(STORAGE_KEY, id);
+  const toggleAgent = (id: AgentId) => {
+    setAgents((prev) => {
+      const next = prev.includes(id) ? prev.filter((a) => a !== id) : [...prev, id];
+      try {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
   };
 
   return (
@@ -63,23 +88,25 @@ export function Onboarding({ onComplete }: OnboardingProps) {
               transition={{ duration: 0.4, ease: [0.25, 0.1, 0.25, 1] }}>
               {step === 0 && (
                 <ChooseAgent
-                  selected={agent}
-                  onSelect={selectAgent}
-                  onContinue={() => agent && setStep(1)}
+                  selected={agents}
+                  onToggle={toggleAgent}
+                  onContinue={() => agents.length > 0 && setStep(1)}
                 />
               )}
-              {step === 1 && agent && (
+              {step === 1 && agents.length > 0 && (
                 <ConnectHooks
-                  agentId={agent}
+                  agents={agents}
                   onBack={() => setStep(0)}
                   onContinue={() => setStep(2)}
+                  autoSkip={!manualConnect}
                 />
               )}
-              {step === 2 && agent && (
+              {step === 2 && agents.length > 0 && (
                 <Verify
-                  agentId={agent}
-                  onBack={() => setStep(1)}
-                  onFinish={(origin) => onComplete(agent, origin)}
+                  agents={agents}
+                  onBack={() => setStep(0)}
+                  onSetup={() => { setManualConnect(true); setStep(1); }}
+                  onFinish={(origin) => onComplete(agents, origin)}
                 />
               )}
             </motion.div>

@@ -518,6 +518,21 @@ def unarchive_session(session_id: str) -> dict[str, Any]:
     return {"ok": True, "archived": False}
 
 
+@app.get("/v1/sessions/origins")
+def get_session_origins() -> dict[str, Any]:
+    return {"origins": db.session_origins()}
+
+
+@app.get("/v1/import/summary")
+def get_import_summary() -> dict[str, Any]:
+    return db.import_summary()
+
+
+@app.post("/v1/sessions/complete-imported")
+def complete_imported_sessions() -> dict[str, Any]:
+    return db.complete_imported_sessions()
+
+
 @app.get("/v1/connections")
 def get_connections() -> dict[str, Any]:
     return {"connections": db.connections()}
