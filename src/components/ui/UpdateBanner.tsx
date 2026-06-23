@@ -80,7 +80,7 @@ export function UpdateBanner() {
                   target="_blank"
                   rel="noreferrer"
                   className="mt-1 inline-block font-mono text-xs underline underline-offset-2 transition-opacity hover:opacity-80">
-                  View release notes
+                  Update instructions
                 </a>
               )}
             </div>

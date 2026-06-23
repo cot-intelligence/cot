@@ -600,7 +600,7 @@ function VersionStatus({
             target="_blank"
             rel="noreferrer"
             className="border border-vermilion px-3 py-1.5 font-mono text-[0.6rem] font-bold uppercase tracking-widest text-vermilion transition-colors hover:bg-vermilion hover:text-cream">
-            Release notes
+            Update instructions
           </a>
         )}
         <button
