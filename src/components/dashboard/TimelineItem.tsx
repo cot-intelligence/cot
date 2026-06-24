@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { TimelineItem } from '../../lib/api';
-import { formatDuration, formatTime, getCategoryMeta } from '../../lib/categoryMeta';
+import { formatDateTime, formatDuration, getCategoryMeta } from '../../lib/categoryMeta';
 
 interface TimelineItemRowProps {
   item: TimelineItem;
@@ -88,7 +88,7 @@ export function TimelineItemRow({ item }: TimelineItemRowProps) {
           <div className="min-w-0 space-y-1">
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-[0.55rem] tabular-nums text-fg/40">
-                {formatTime(item.start_ts || item.ts)}
+                {formatDateTime(item.start_ts || item.ts)}
               </span>
               <span className={`font-mono text-[0.6rem] font-bold uppercase tracking-widest ${meta.color}`}>
                 {meta.label}

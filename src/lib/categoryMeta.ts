@@ -59,7 +59,7 @@ export function formatRelative(value: string | number | null | undefined): strin
   if (min < 60) return `${min}m ago`;
   const hr = Math.floor(min / 60);
   if (hr < 24) return `${hr}h ago`;
-  return d.toLocaleDateString();
+  return d.toLocaleDateString([], { timeZone: userTimeZone() });
 }
 
 export function formatTime(value: string | number | null | undefined): string {
@@ -67,7 +67,38 @@ export function formatTime(value: string | number | null | undefined): string {
   if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '—';
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  return d.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    timeZone: userTimeZone(),
+    timeZoneName: 'short',
+  });
+}
+
+export function formatDateTime(value: string | number | null | undefined): string {
+  const iso = toTimestampString(value);
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString([], {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    timeZone: userTimeZone(),
+    timeZoneName: 'short',
+  });
+}
+
+function userTimeZone(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function formatDuration(ms: number | null | undefined, seconds?: number | null): string {

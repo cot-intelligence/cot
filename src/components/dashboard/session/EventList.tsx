@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { TimelineItem } from '../../../lib/api';
-import { formatDuration, formatTime, getCategoryMeta } from '../../../lib/categoryMeta';
+import { formatDateTime, formatDuration, getCategoryMeta } from '../../../lib/categoryMeta';
 import { itemLane, type SubagentRun } from '../../../lib/sessionView';
 import { Icon, type IconName } from '../../ui/icons';
 import { AttachmentBadge } from './AttachmentTags';
@@ -58,7 +58,7 @@ export function EventList({ items, selectedId, onSelect, runs, scrollKey }: Even
                     {item.answers_event_id != null && <QaBadge variant="answer" />}
                   </span>
                   <span className="shrink-0 font-mono text-[0.6rem] tabular-nums text-fg/45">
-                    {formatTime(item.start_ts || item.ts)}
+                    {formatDateTime(item.start_ts || item.ts)}
                   </span>
                 </span>
                 <span className="flex items-center gap-1.5">

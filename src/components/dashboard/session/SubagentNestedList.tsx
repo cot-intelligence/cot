@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { TimelineItem } from '../../../lib/api';
-import { formatDuration, formatTime } from '../../../lib/categoryMeta';
+import { formatDateTime, formatDuration } from '../../../lib/categoryMeta';
 import { actionsInRun, runsOverlap, type SubagentRun } from '../../../lib/sessionView';
 import { Icon } from '../../ui/icons';
 import { EventList } from './EventList';
@@ -65,7 +65,7 @@ export function SubagentNestedList({ items, runs, selectedId, onSelect }: Subage
                   </span>
                 )}
                 <span className="shrink-0 font-mono text-[0.55rem] tabular-nums text-fg/35">
-                  {formatTime(run.start)}
+                  {formatDateTime(run.start)}
                 </span>
               </button>
               {open && (

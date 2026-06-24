@@ -76,7 +76,7 @@ dev action:
 
     case "{{action}}" in
       up)
-        docker compose up --build -d
+        env COT_DOCKER_UID="$(id -u)" COT_DOCKER_GID="$(id -g)" docker compose up --build -d
         wait_for_health
         env COT_ENDPOINT="${endpoint}" COT_AGENTS="${agents}" just bridge install
         printf '%s\n' "cot dev is up at ${endpoint}"

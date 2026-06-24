@@ -1,5 +1,5 @@
 import type { TimelineItem } from '../../../lib/api';
-import { formatDuration, formatTime, getCategoryMeta } from '../../../lib/categoryMeta';
+import { formatDateTime, formatDuration, getCategoryMeta } from '../../../lib/categoryMeta';
 import { formatModel } from '../../../lib/modelMeta';
 import { conversationMessage, parseDetail, type EditChunk } from '../../../lib/sessionView';
 import { Icon } from '../../ui/icons';
@@ -335,7 +335,7 @@ export function EventDetailPanel({ item, onViewInAll, onJump }: EventDetailPanel
           </span>
           <QaPill item={item} />
           <span className="font-mono text-[0.62rem] tabular-nums text-fg/45">
-            {formatTime(item.start_ts || item.ts)}
+            {formatDateTime(item.start_ts || item.ts)}
           </span>
           {item.duration_ms != null && item.duration_ms > 0 && (
             <span className="font-mono text-[0.62rem] tabular-nums text-fg/45">

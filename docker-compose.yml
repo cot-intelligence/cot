@@ -21,15 +21,27 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+    user: "${COT_DOCKER_UID:-1000}:${COT_DOCKER_GID:-1000}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     expose:
       - "8000"
     volumes:
       - ./backend/app:/app/app
       - ./bridge:/app/bridge
-      - ${HOME}/.cot:/root/.cot
+      - ${HOME}/.cot:/data
     environment:
-      - COT_DB_PATH=/root/.cot/cot.db
+      - COT_DB_PATH=/data/cot.db
 
   # Production: static dashboard served by nginx.
   web:
