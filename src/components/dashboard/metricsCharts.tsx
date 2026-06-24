@@ -1,6 +1,8 @@
 // GitHub-style daily contribution heatmap. (Other charts use Recharts via
 // chartTheme.tsx; this stays custom since Recharts has no calendar heatmap.)
 
+import { formatMetricsDay } from '../../lib/format';
+
 const HEAT_LEVELS = [
   'bg-fg/[0.07]',
   'bg-vermilion/25',
@@ -79,7 +81,7 @@ export function ContributionHeatmap({
                 cell ? (
                   <span
                     key={ri}
-                    title={`${cell.key}: ${cell.count.toLocaleString()} events`}
+                    title={`${formatMetricsDay(cell.key)}: ${cell.count.toLocaleString()} events`}
                     className={`aspect-square rounded-[2px] ${HEAT_LEVELS[level(cell.count)]} ${
                       cell.count ? 'ring-1 ring-inset ring-vermilion/10' : ''
                     }`}

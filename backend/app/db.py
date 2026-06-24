@@ -15,6 +15,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .normalize import categorize, normalize
 from .pricing import cost_for
@@ -1471,8 +1472,56 @@ def _batched_session_summaries(
     return summaries
 
 
-def metrics() -> dict[str, Any]:
+def _resolve_tz(tz: str | None) -> ZoneInfo | None:
+    if not tz or not tz.strip():
+        return None
+    try:
+        return ZoneInfo(tz.strip())
+    except ZoneInfoNotFoundError:
+        return None
+
+
+def _metrics_time_buckets(
+    conn: sqlite3.Connection,
+    tz: ZoneInfo | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Bucket event counts by calendar day and clock hour."""
+    if tz is None:
+        by_day = [
+            {"day": r["d"], "events": r["n"]}
+            for r in conn.execute(
+                "SELECT substr(ts,1,10) d, COUNT(*) n FROM events"
+                " WHERE ts IS NOT NULL GROUP BY d ORDER BY d"
+            ).fetchall()
+        ]
+        by_hour = [
+            {"hour": int(r["h"]), "events": r["n"]}
+            for r in conn.execute(
+                "SELECT substr(ts,12,2) h, COUNT(*) n FROM events"
+                " WHERE ts IS NOT NULL AND substr(ts,12,2) != '' GROUP BY h ORDER BY h"
+            ).fetchall()
+        ]
+        return by_day, by_hour
+
+    day_counts: dict[str, int] = {}
+    hour_counts: dict[int, int] = {}
+    for r in conn.execute("SELECT ts FROM events WHERE ts IS NOT NULL"):
+        dt = _parse_ts(r["ts"])
+        if dt is None:
+            continue
+        local = dt.astimezone(tz)
+        day = local.strftime("%Y-%m-%d")
+        day_counts[day] = day_counts.get(day, 0) + 1
+        hour = local.hour
+        hour_counts[hour] = hour_counts.get(hour, 0) + 1
+    by_day = [{"day": d, "events": n} for d, n in sorted(day_counts.items())]
+    by_hour = [{"hour": h, "events": n} for h, n in sorted(hour_counts.items())]
+    return by_day, by_hour
+
+
+def metrics(tz: str | None = None) -> dict[str, Any]:
     """Cross-session aggregates for the metrics dashboard."""
+    zone = _resolve_tz(tz)
     with _connect() as conn:
         one = lambda sql, *p: conn.execute(sql, p).fetchone()  # noqa: E731
         rows = lambda sql, *p: conn.execute(sql, p).fetchall()  # noqa: E731
@@ -1499,22 +1548,8 @@ def metrics() -> dict[str, Any]:
         )
         tokens = _tokens_dict(tok)
 
-        by_day = [
-            {"day": r["d"], "events": r["n"]}
-            for r in rows(
-                "SELECT substr(ts,1,10) d, COUNT(*) n FROM events"
-                " WHERE ts IS NOT NULL GROUP BY d ORDER BY d"
-            )
-        ]
+        by_day, by_hour = _metrics_time_buckets(conn, zone)
         busiest_day = max(by_day, key=lambda x: x["events"]) if by_day else None
-
-        by_hour = [
-            {"hour": int(r["h"]), "events": r["n"]}
-            for r in rows(
-                "SELECT substr(ts,12,2) h, COUNT(*) n FROM events"
-                " WHERE ts IS NOT NULL AND substr(ts,12,2) != '' GROUP BY h ORDER BY h"
-            )
-        ]
         peak_hour = max(by_hour, key=lambda x: x["events"])["hour"] if by_hour else None
 
         by_category = [

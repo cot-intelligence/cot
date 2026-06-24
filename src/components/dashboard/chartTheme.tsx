@@ -15,7 +15,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { compact } from '../../lib/format';
+import { compact, formatMetricsDay, hourLabel } from '../../lib/format';
 import { CHART_COLORS, type Datum } from './chartConstants';
 
 export type { Datum };
@@ -61,7 +61,7 @@ export function DailyArea({ data }: { data: { day: string; events: number }[] })
         <XAxis
           dataKey="day"
           tick={{ fill: AXIS, fontSize: 9, fontFamily: MONO }}
-          tickFormatter={(d: string) => d.slice(5)}
+          tickFormatter={(d: string) => formatMetricsDay(d)}
           axisLine={{ stroke: AXIS }}
           tickLine={false}
           minTickGap={24}
@@ -119,7 +119,7 @@ export function AreaTrend({ data, height = 120 }: { data: { label: string; value
 export function HourBars({ data, peak }: { data: { hour: number; events: number }[]; peak: number | null }) {
   const byHour = new Map(data.map((d) => [d.hour, d.events]));
   const filled = Array.from({ length: 24 }, (_, h) => ({
-    name: `${h}:00`,
+    name: hourLabel(h),
     hour: h,
     value: byHour.get(h) ?? 0,
   }));
@@ -130,7 +130,7 @@ export function HourBars({ data, peak }: { data: { hour: number; events: number 
         <XAxis
           dataKey="hour"
           tick={{ fill: AXIS, fontSize: 9, fontFamily: MONO }}
-          tickFormatter={(h: number) => (h % 6 === 0 ? `${h}` : '')}
+          tickFormatter={(h: number) => (h % 6 === 0 ? hourLabel(h) : '')}
           axisLine={{ stroke: AXIS }}
           tickLine={false}
           interval={0}

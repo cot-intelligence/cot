@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { getMetrics, type Metrics } from '../../lib/api';
-import { usePolling } from '../../lib/usePolling';
-import { formatDuration, formatRelative, getCategoryMeta } from '../../lib/categoryMeta';
+import { formatDuration, formatRelative, getCategoryMeta, userTimeZone } from '../../lib/categoryMeta';
+import { compact, formatCost, formatMetricsDay, hourLabel } from '../../lib/format';
 import { formatModel } from '../../lib/modelMeta';
 import { sourceLabel } from '../../lib/sourceLabels';
+import { usePolling } from '../../lib/usePolling';
 import { FadeIn } from '../ui/FadeIn';
 import { Icon, type IconName } from '../ui/icons';
 import { MetricsSkeleton } from '../ui/Skeleton';
@@ -17,13 +18,6 @@ interface MetricsViewProps {
   onHistory?: () => void;
 }
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-import { compact, hourLabel, formatCost } from '../../lib/format';
-function niceDay(iso: string): string {
-  const [, m, d] = iso.split('-');
-  return `${MONTHS[Number(m) - 1]} ${Number(d)}`;
-}
 function shortPath(p: string | null): string {
   if (!p) return '(unknown)';
   const parts = p.split('/').filter(Boolean);
@@ -96,7 +90,8 @@ function ChartBox({ label, children }: { label: string; children: React.ReactNod
 }
 
 export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
-  const { data: m, error } = usePolling<Metrics>(() => getMetrics(), 5000);
+  const tz = userTimeZone();
+  const { data: m, error } = usePolling<Metrics>(() => getMetrics(tz), 5000);
   const [shareOpen, setShareOpen] = useState(false);
 
   if (!m) {
@@ -197,7 +192,7 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
                 {fun.busiest_day && (
                   <span className="font-mono text-[0.62rem] text-fg/55">
                     busiest{' '}
-                    <span className="font-bold text-fg/80">{niceDay(fun.busiest_day.day)}</span> ·{' '}
+                    <span className="font-bold text-fg/80">{formatMetricsDay(fun.busiest_day.day)}</span> ·{' '}
                     {compact(fun.busiest_day.events)}
                   </span>
                 )}
@@ -219,7 +214,7 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
               <Spotlight
                 accent="text-cobalt"
                 kicker="Busiest day"
-                value={fun.busiest_day ? niceDay(fun.busiest_day.day) : '—'}
+                value={fun.busiest_day ? formatMetricsDay(fun.busiest_day.day) : '—'}
                 sub={fun.busiest_day ? `${compact(fun.busiest_day.events)} events` : 'no data'}
               />
               <Spotlight

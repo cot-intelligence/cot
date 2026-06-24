@@ -610,8 +610,8 @@ def get_hook_status() -> dict[str, Any]:
 
 
 @app.get("/v1/metrics")
-def get_metrics() -> dict[str, Any]:
-    return db.metrics()
+def get_metrics(tz: str | None = Query(None)) -> dict[str, Any]:
+    return db.metrics(tz)
 
 
 @app.get("/v1/metrics/history")

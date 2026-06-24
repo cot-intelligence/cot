@@ -93,7 +93,7 @@ export function formatDateTime(value: string | number | null | undefined): strin
   });
 }
 
-function userTimeZone(): string | undefined {
+export function userTimeZone(): string | undefined {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
   } catch {

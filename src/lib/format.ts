@@ -9,6 +9,13 @@ export function hourLabel(h: number): string {
   return `${h % 12 === 0 ? 12 : h % 12}${p}`;
 }
 
+/** Format a YYYY-MM-DD bucket key for display in the user's locale. */
+export function formatMetricsDay(isoDay: string): string {
+  const [y, m, d] = isoDay.split('-').map(Number);
+  if (!y || !m || !d) return isoDay;
+  return new Date(y, m - 1, d).toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
 export function formatCost(usd: number): string {
   if (usd >= 1000) return `$${(usd / 1000).toFixed(1)}k`;
   if (usd >= 100) return `$${usd.toFixed(0)}`;

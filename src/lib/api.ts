@@ -331,8 +331,11 @@ export interface Metrics {
   };
 }
 
-export async function getMetrics(): Promise<Metrics> {
-  return json<Metrics>(await fetch('/v1/metrics'));
+export async function getMetrics(tz?: string): Promise<Metrics> {
+  const params = new URLSearchParams();
+  if (tz) params.set('tz', tz);
+  const qs = params.toString();
+  return json<Metrics>(await fetch(`/v1/metrics${qs ? `?${qs}` : ''}`));
 }
 
 export interface MetricsHistoryItem {
