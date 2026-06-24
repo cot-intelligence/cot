@@ -1,5 +1,6 @@
 import type { SessionSummary } from '../../../lib/api';
 import { formatDuration, formatRelative } from '../../../lib/categoryMeta';
+import { formatCost } from '../../../lib/format';
 import { AgentMark } from '../../ui/AgentMark';
 
 interface SessionMetaProps {
@@ -48,6 +49,14 @@ export function SessionMeta({ summary }: SessionMetaProps) {
         {summary.event_count} events
         {' · '}
         {summary.tool_count} tools
+        {summary.has_cost && (
+          <>
+            {' · '}
+            <span className="text-vermilion/80" title="Estimated cost (cache-aware)">
+              {formatCost(summary.cost_usd)}
+            </span>
+          </>
+        )}
       </p>
     </header>
   );

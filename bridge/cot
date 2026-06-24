@@ -6,7 +6,9 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timezone
 import json
+import mimetypes
 import os
+import re
 import shutil
 import struct
 import sys
@@ -154,39 +156,204 @@ def _img_dims(raw: bytes) -> tuple[int | None, int | None]:
     return None, None
 
 
-def _message_attachments(content: list) -> list[dict]:
-    """Metadata for non-text user attachments (images / documents): kind,
-    media_type, byte size, and pixel dimensions — never the raw bytes."""
+def _kind_for_media_type(media_type: str | None) -> str:
+    return "image" if media_type and media_type.startswith("image/") else "document"
+
+
+def _meta_from_bytes(meta: dict, raw: bytes) -> None:
+    meta["size_bytes"] = len(raw)
+    if meta.get("kind") == "image":
+        w, h = _img_dims(raw)
+        if w:
+            meta["width"], meta["height"] = w, h
+
+
+def _decode_data_url(value: str) -> tuple[str | None, bytes | None]:
+    if not value.startswith("data:") or "," not in value:
+        return None, None
+    header, data = value.split(",", 1)
+    media_type = header[5:].split(";", 1)[0] or None
+    if ";base64" not in header:
+        return media_type, None
+    try:
+        return media_type, base64.b64decode(data)
+    except Exception:
+        return media_type, None
+
+
+def _uploaded_documents_from_text(text: str) -> list[dict]:
+    """Cursor records chat uploads as an uploaded_documents text preamble."""
+    match = re.search(r"<uploaded_documents>(.*?)</uploaded_documents>", text, re.S)
+    if not match:
+        return []
     out: list[dict] = []
-    for block in content:
-        if not isinstance(block, dict):
+    for raw_line in match.group(1).splitlines():
+        line = raw_line.strip()
+        if not line.startswith("- "):
             continue
-        bt = block.get("type")
-        if bt not in ("image", "document"):
+        m = re.match(r"-\s+(.+?)(?:\s+\(([^)]+)\))?$", line)
+        if not m:
             continue
-        src = block.get("source") if isinstance(block.get("source"), dict) else {}
-        meta: dict = {"kind": bt, "media_type": src.get("media_type")}
-        name = block.get("title") or src.get("name")
+        path_text = m.group(1).strip()
+        name = (m.group(2) or Path(path_text).name).strip()
+        media_type = mimetypes.guess_type(name)[0] or mimetypes.guess_type(path_text)[0]
+        meta: dict = {"kind": _kind_for_media_type(media_type), "media_type": media_type}
         if name:
             meta["name"] = name
-        data = src.get("data")
-        if isinstance(data, str):
-            try:
-                raw = base64.b64decode(data)
-                meta["size_bytes"] = len(raw)
-                if bt == "image":
-                    w, h = _img_dims(raw)
-                    if w:
-                        meta["width"], meta["height"] = w, h
-            except Exception:
-                pass
+            ext = Path(name).suffix.lstrip(".").lower()
+            if ext:
+                meta["extension"] = ext
+        try:
+            p = Path(path_text).expanduser()
+            if p.is_file():
+                meta["size_bytes"] = p.stat().st_size
+        except OSError:
+            pass
         out.append(meta)
     return out
 
 
-def _text_from_blocks(content) -> str:
+def _codex_files_from_text(text: str) -> list[dict]:
+    """Codex records some uploads only as a leading Files-mentioned preamble."""
+    stripped = text.lstrip()
+    if not stripped.startswith("# Files mentioned by the user:"):
+        return []
+    header = stripped.split("## My request for Codex:", 1)[0]
+    out: list[dict] = []
+    for raw_line in header.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("## "):
+            continue
+        entry = line[3:].strip()
+        if ": " not in entry:
+            continue
+        name, path_text = entry.rsplit(": ", 1)
+        name = name.strip()
+        path_text = path_text.strip()
+        media_type = mimetypes.guess_type(name)[0] or mimetypes.guess_type(path_text)[0]
+        meta: dict = {"kind": _kind_for_media_type(media_type), "media_type": media_type}
+        if name:
+            meta["name"] = name
+            ext = Path(name).suffix.lstrip(".").lower()
+            if ext:
+                meta["extension"] = ext
+        try:
+            p = Path(path_text).expanduser()
+            if p.is_file():
+                meta["size_bytes"] = p.stat().st_size
+        except OSError:
+            pass
+        out.append(meta)
+    return out
+
+
+def _file_attachment_meta(attachment: dict) -> dict | None:
+    if attachment.get("type") != "file":
+        return None
+    filename = attachment.get("filename")
+    content = attachment.get("content") if isinstance(attachment.get("content"), dict) else {}
+    file_info = content.get("file") if isinstance(content.get("file"), dict) else {}
+    path_text = str(file_info.get("filePath") or filename or "")
+    name = Path(path_text).name if path_text else ""
+    media_type = mimetypes.guess_type(name)[0] or mimetypes.guess_type(path_text)[0]
+    meta: dict = {"kind": _kind_for_media_type(media_type), "media_type": media_type}
+    if name:
+        meta["name"] = name
+        ext = Path(name).suffix.lstrip(".").lower()
+        if ext:
+            meta["extension"] = ext
+    if isinstance(file_info.get("content"), str):
+        meta["size_bytes"] = len(file_info["content"].encode("utf-8"))
+    elif path_text:
+        try:
+            p = Path(path_text).expanduser()
+            if p.is_file():
+                meta["size_bytes"] = p.stat().st_size
+        except OSError:
+            pass
+    return meta
+
+
+def _file_attachment_matches_text(attachment: dict, text: str | None) -> bool:
+    if not text:
+        return False
+    if "@" not in text:
+        return False
+    filename = str(attachment.get("filename") or "")
+    if filename and re.search(rf"@['\"]?{re.escape(filename)}(?:['\"]|\s|$)", text):
+        return True
+    name = Path(filename).name if filename else ""
+    return bool(name and re.search(rf"@['\"]?[^'\"]*{re.escape(name)}(?:['\"]|\s|$)", text))
+
+
+def _message_attachments(content: list) -> list[dict]:
+    """Metadata for non-text user attachments (images / documents): kind,
+    media_type, byte size, and pixel dimensions — never the raw bytes."""
+    out: list[dict] = []
+    has_structured_upload = any(
+        isinstance(block, dict) and block.get("type") in ("image", "document", "input_image", "input_file")
+        for block in content
+    )
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        bt = block.get("type")
+        if bt in ("text", "input_text"):
+            text = block.get("text")
+            if isinstance(text, str):
+                out.extend(_uploaded_documents_from_text(text))
+                if not has_structured_upload:
+                    out.extend(_codex_files_from_text(text))
+            continue
+        if bt not in ("image", "document", "input_image", "input_file"):
+            continue
+        src = block.get("source") if isinstance(block.get("source"), dict) else {}
+        media_type = src.get("media_type") or block.get("media_type") or block.get("mime_type")
+        raw: bytes | None = None
+        if bt == "input_image":
+            media_type, raw = _decode_data_url(str(block.get("image_url") or ""))
+        elif bt == "input_file":
+            media_type, raw = _decode_data_url(str(block.get("file_data") or ""))
+        kind = "image" if bt in ("image", "input_image") else "document"
+        if media_type and bt == "input_file":
+            kind = _kind_for_media_type(media_type)
+        meta: dict = {"kind": kind, "media_type": media_type}
+        name = block.get("title") or block.get("filename") or src.get("name")
+        if name:
+            meta["name"] = name
+            ext = Path(str(name)).suffix.lstrip(".").lower()
+            if ext:
+                meta["extension"] = ext
+        data = src.get("data")
+        if isinstance(data, str):
+            try:
+                raw = base64.b64decode(data)
+            except Exception:
+                raw = None
+        if raw is not None:
+            _meta_from_bytes(meta, raw)
+        out.append(meta)
+    return out
+
+
+def _clean_user_text(text: str) -> str:
+    """Remove agent-added upload wrappers while preserving the user's request."""
+    out = text.strip()
+    user_query = re.search(r"<user_query>\s*(.*?)\s*</user_query>", out, re.S)
+    if user_query:
+        out = user_query.group(1).strip()
+    marker = "## My request for Codex:"
+    if marker in out:
+        out = out.split(marker, 1)[1].strip()
+    out = re.sub(r"<uploaded_documents>.*?</uploaded_documents>", "", out, flags=re.S).strip()
+    out = re.sub(r"<image\b[^>]*>\s*</image>", "", out, flags=re.S).strip()
+    return out
+
+
+def _text_from_blocks(content, *, clean_user: bool = False) -> str:
     if isinstance(content, str):
-        return content.strip()
+        text = content.strip()
+        return _clean_user_text(text) if clean_user else text
     if not isinstance(content, list):
         return ""
     parts: list[str] = []
@@ -198,7 +365,8 @@ def _text_from_blocks(content) -> str:
                     parts.append(str(t))
         elif isinstance(block, str) and block:
             parts.append(block)
-    return "\n".join(parts).strip()
+    text = "\n".join(parts).strip()
+    return _clean_user_text(text) if clean_user else text
 
 
 def _is_interruption(text: str | None) -> bool:
@@ -216,13 +384,15 @@ def _is_interruption(text: str | None) -> bool:
 
 
 def _merge_usage(acc: dict | None, usage: dict) -> dict:
-    """Sum Codex per-turn token deltas. Keys mirror the rollout ``token_count``
-    payload; normalize.py maps them onto the stored token columns."""
+    """Sum per-turn token deltas. Handles both Claude and Codex key names;
+    normalize.py maps them onto the stored token columns."""
     out = dict(acc) if isinstance(acc, dict) else {}
     for key in (
         "input_tokens",
-        "cached_input_tokens",
         "output_tokens",
+        "cached_input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
         "reasoning_output_tokens",
         "total_tokens",
     ):
@@ -269,6 +439,9 @@ def _scan_transcript(transcript_path: str, session_id: str) -> dict:
     # assistant thought/response before the interruption marker).
     msgs: list[dict] = []
     attachments: list[tuple] = []
+    user_prompts: dict[str, str] = {}
+    pending_usage: dict | None = None
+    seen_msg_ids: set[str] = set()
     for line in new_text.splitlines():
         line = line.strip()
         if not line:
@@ -285,8 +458,11 @@ def _scan_transcript(transcript_path: str, session_id: str) -> dict:
         ts = obj.get("timestamp")
 
         if role == "assistant" or obj.get("type") == "assistant":
-            # Extended-thinking blocks carry the chain of thought; surface them as
-            # thoughts so reasoning shows up alongside the final response.
+            msg_id = message.get("id")
+            if msg_id and msg_id in seen_msg_ids:
+                continue
+            if msg_id:
+                seen_msg_ids.add(msg_id)
             if isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "thinking":
@@ -295,22 +471,37 @@ def _scan_transcript(transcript_path: str, session_id: str) -> dict:
                             msgs.append({"kind": "thought", "ts": ts, "text": str(think),
                                          "model": None, "usage": None, "interrupted": False})
             text_val = _text_from_blocks(content) if isinstance(content, list) else (content or "")
+            model = message.get("model") or obj.get("model")
+            usage = message.get("usage") if isinstance(message.get("usage"), dict) else None
             if text_val:
-                model = message.get("model") or obj.get("model")
-                usage = message.get("usage") if isinstance(message.get("usage"), dict) else None
+                if pending_usage:
+                    usage = _merge_usage(pending_usage, usage) if usage else pending_usage
+                    pending_usage = None
                 msgs.append({"kind": "response", "ts": ts, "text": str(text_val),
                              "model": model, "usage": usage, "interrupted": False})
+            elif usage:
+                pending_usage = _merge_usage(pending_usage, usage)
         elif role == "user" and isinstance(content, list):
-            if _is_interruption(_text_from_blocks(content)) and msgs:
+            user_text = _text_from_blocks(content, clean_user=True)
+            uuid = obj.get("uuid")
+            if uuid and user_text:
+                user_prompts[str(uuid)] = user_text
+            if _is_interruption(user_text) and msgs:
                 msgs[-1]["interrupted"] = True
             atts = _message_attachments(content)
             if atts:
-                texts = [
-                    b.get("text", "")
-                    for b in content
-                    if isinstance(b, dict) and b.get("type") in ("text", "input_text")
-                ]
-                attachments.append((ts, "\n".join(texts).strip(), atts))
+                attachments.append((ts, user_text, atts))
+        elif obj.get("type") == "attachment":
+            att = obj.get("attachment") if isinstance(obj.get("attachment"), dict) else {}
+            meta = _file_attachment_meta(att)
+            parent_uuid = obj.get("parentUuid")
+            parent_text = user_prompts.get(str(parent_uuid)) if parent_uuid else None
+            if meta and _file_attachment_matches_text(att, parent_text):
+                attachments.append((ts, parent_text, [meta]))
+
+    if pending_usage and msgs:
+        last = msgs[-1]
+        last["usage"] = _merge_usage(pending_usage, last["usage"]) if last["usage"] else pending_usage
 
     thoughts = [(m["ts"], m["text"], m["usage"], m["interrupted"]) for m in msgs if m["kind"] == "thought"]
     responses = [(m["ts"], m["text"], m["model"], m["usage"], m["interrupted"]) for m in msgs if m["kind"] == "response"]
@@ -371,7 +562,7 @@ def _scan_codex_transcript(transcript_path: str, session_id: str) -> dict:
             elif pt == "message" and payload.get("role") == "user":
                 content = payload.get("content")
                 if isinstance(content, list):
-                    user_text = _text_from_blocks(content)
+                    user_text = _text_from_blocks(content, clean_user=True)
                     if _is_interruption(user_text) and msgs:
                         msgs[-1]["interrupted"] = True
                     atts = _message_attachments(content)
@@ -577,11 +768,12 @@ def _scan_cursor_artifacts(transcript_path: str, session_id: str, response_text:
     blocks without pre/post tool hooks. Recover both in one transcript pass so
     one artifact scanner does not consume another scanner's offset."""
     new_text = _read_transcript_delta(transcript_path, session_id)
-    out: dict[str, list] = {"plans": [], "questions": []}
+    out: dict[str, list] = {"plans": [], "questions": [], "attachments": []}
     if not new_text:
         return out
     plans: list[dict] = []
     questions: list[dict] = []
+    attachments: list[tuple] = []
     for line in new_text.splitlines():
         line = line.strip()
         if not line:
@@ -596,6 +788,11 @@ def _scan_cursor_artifacts(transcript_path: str, session_id: str, response_text:
             content = message.get("content")
         if not isinstance(content, list):
             continue
+        role = obj.get("role") or message.get("role") or obj.get("type")
+        if role == "user":
+            atts = _message_attachments(content)
+            if atts:
+                attachments.append((obj.get("timestamp"), _text_from_blocks(content, clean_user=True), atts))
         for block in content:
             if not isinstance(block, dict):
                 continue
@@ -622,6 +819,7 @@ def _scan_cursor_artifacts(transcript_path: str, session_id: str, response_text:
                 )
     out["plans"] = plans
     out["questions"] = questions
+    out["attachments"] = attachments
     return out
 
 
@@ -641,6 +839,18 @@ def _emit_cursor_artifacts(body: dict, source: str) -> bool:
     scanned = _scan_cursor_artifacts(transcript, session_id, str(body.get("text") or body.get("response") or ""))
     plans = scanned.get("plans", [])
     questions = scanned.get("questions", [])
+    for ts, text, atts in scanned.get("attachments", []):
+        _post(
+            f"{COT_ENDPOINT}/v1/ingest/{source}",
+            {
+                "session_id": session_id,
+                "cwd": body.get("cwd"),
+                "_attach_to_prompt": True,
+                "text": text,
+                "attachments": atts,
+                "timestamp": ts or body.get("timestamp"),
+            },
+        )
     for q in questions:
         for hook_name, response in (("preToolUse", {}), ("postToolUse", q["response"])):
             _post(
@@ -1327,7 +1537,7 @@ def _claude_line_to_events(obj: dict, session_id: str) -> list[dict]:
     }
 
     if role == "user":
-        text = _text_from_blocks(content) if isinstance(content, list) else str(content or "")
+        text = _text_from_blocks(content, clean_user=True) if isinstance(content, list) else _clean_user_text(str(content or ""))
         if text and not _is_interruption(text):
             events.append({
                 **base,
@@ -1346,10 +1556,15 @@ def _claude_line_to_events(obj: dict, session_id: str) -> list[dict]:
                 })
     elif role == "assistant":
         if isinstance(content, list):
+            usage_placed = False
             for i, block in enumerate(content):
                 if not isinstance(block, dict):
                     continue
                 btype = block.get("type")
+                block_usage = None
+                if usage and not usage_placed:
+                    block_usage = usage
+                    usage_placed = True
                 if btype == "thinking":
                     think = block.get("thinking")
                     if think:
@@ -1359,7 +1574,7 @@ def _claude_line_to_events(obj: dict, session_id: str) -> list[dict]:
                             "_synthetic_category": "thought",
                             "thought": str(think),
                             "model": model,
-                            "usage": usage if i == 0 else None,
+                            "usage": block_usage,
                             "_dedup_key": f"{uuid}:think:{i}" if uuid else None,
                         })
                 elif btype == "text":
@@ -1371,7 +1586,7 @@ def _claude_line_to_events(obj: dict, session_id: str) -> list[dict]:
                             "_synthetic_category": "response",
                             "response": str(text),
                             "model": model,
-                            "usage": usage if i == 0 else None,
+                            "usage": block_usage,
                             "_dedup_key": f"{uuid}:resp:{i}" if uuid else None,
                         })
                 elif btype == "tool_use":
@@ -1384,6 +1599,7 @@ def _claude_line_to_events(obj: dict, session_id: str) -> list[dict]:
                         "tool_name": tool_name,
                         "tool_input": tool_input,
                         "model": model,
+                        "usage": block_usage,
                         "_dedup_key": f"{uuid}:pre:{tool_id or i}" if uuid else None,
                     })
                 elif btype == "tool_result":
@@ -1472,7 +1688,7 @@ def _codex_line_to_events(obj: dict, session_id: str) -> list[dict]:
                 })
         elif pt == "message" and payload.get("role") == "user":
             content = payload.get("content")
-            text_val = _text_from_blocks(content) if isinstance(content, list) else str(content or "")
+            text_val = _text_from_blocks(content, clean_user=True) if isinstance(content, list) else _clean_user_text(str(content or ""))
             if text_val and not _is_interruption(text_val):
                 events.append({
                     **base,
@@ -1480,6 +1696,15 @@ def _codex_line_to_events(obj: dict, session_id: str) -> list[dict]:
                     "prompt": text_val,
                     "_dedup_key": f"{line_id}:prompt" if line_id else None,
                 })
+            if isinstance(content, list):
+                atts = _message_attachments(content)
+                if atts and text_val:
+                    events.append({
+                        **base,
+                        "_attach_to_prompt": True,
+                        "text": text_val,
+                        "attachments": atts,
+                    })
         elif pt == "web_search_call":
             action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
             query = action.get("query") or payload.get("query") or ""

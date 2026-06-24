@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import string
 import threading
@@ -16,11 +17,25 @@ from pathlib import Path
 from typing import Any
 
 from .normalize import categorize, normalize
+from .pricing import cost_for
 
 _write_lock = threading.Lock()
 
 _SESSION_END_HOOKS = {"Stop", "stop", "SessionEnd", "sessionEnd"}
 _SESSION_START_HOOKS = {"SessionStart", "sessionStart"}
+
+
+def _clean_upload_wrapper_text(text: str | None) -> str:
+    out = str(text or "").strip()
+    user_query = re.search(r"<user_query>\s*(.*?)\s*</user_query>", out, re.S)
+    if user_query:
+        out = user_query.group(1).strip()
+    marker = "## My request for Codex:"
+    if marker in out:
+        out = out.split(marker, 1)[1].strip()
+    out = re.sub(r"<uploaded_documents>.*?</uploaded_documents>", "", out, flags=re.S).strip()
+    out = re.sub(r"<image\b[^>]*>\s*</image>", "", out, flags=re.S).strip()
+    return out
 _CURSOR_GRANULAR_HOOKS = {
     "beforeShellExecution",
     "afterShellExecution",
@@ -117,7 +132,10 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
+CREATE INDEX IF NOT EXISTS idx_events_session_category ON events(session_id, category);
+CREATE INDEX IF NOT EXISTS idx_events_session_model ON events(session_id, model);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS idx_sessions_archived_source ON sessions(archived, source);
 
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -200,12 +218,20 @@ def _event_params(
 
 
 def _tokens_dict(row: sqlite3.Row) -> dict[str, int]:
+    return _tokens_from_parts(row["i"], row["o"], row["cr"], row["cw"])
+
+
+def _tokens_from_parts(i: Any, o: Any, cr: Any, cw: Any) -> dict[str, int]:
+    i = int(i or 0)
+    o = int(o or 0)
+    cr = int(cr or 0)
+    cw = int(cw or 0)
     return {
-        "input": row["i"],
-        "output": row["o"],
-        "cache_read": row["cr"],
-        "cache_write": row["cw"],
-        "total": row["i"] + row["o"] + row["cr"] + row["cw"],
+        "input": i,
+        "output": o,
+        "cache_read": cr,
+        "cache_write": cw,
+        "total": i + o + cr + cw,
     }
 
 
@@ -216,7 +242,9 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000;")
-    conn.execute("PRAGMA journal_mode=DELETE;")
+    journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+    if str(journal_mode).lower() != "delete":
+        conn.execute("PRAGMA journal_mode=DELETE;")
     conn.execute("PRAGMA foreign_keys=ON;")
     return conn
 
@@ -1291,15 +1319,19 @@ def _duration_seconds(first: Any, last: Any) -> float | None:
     return round((last_dt - first_dt).total_seconds(), 2)
 
 
+def _summary_title(detail: Any) -> str | None:
+    if not detail:
+        return None
+    text = str(detail).strip().replace("\n", " ")
+    return text if len(text) <= 80 else text[:79] + "…"
+
+
 def _first_prompt(conn: sqlite3.Connection, session_id: str) -> str | None:
     row = conn.execute(
         "SELECT detail FROM events WHERE session_id=? AND category='prompt' ORDER BY id ASC LIMIT 1",
         (session_id,),
     ).fetchone()
-    if not row or not row["detail"]:
-        return None
-    text = str(row["detail"]).strip().replace("\n", " ")
-    return text if len(text) <= 80 else text[:79] + "…"
+    return _summary_title(row["detail"] if row else None)
 
 
 def _category_counts(conn: sqlite3.Connection, session_id: str) -> dict[str, int]:
@@ -1335,6 +1367,22 @@ def _session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, An
         " FROM events WHERE session_id = ?",
         (row["id"],),
     ).fetchone()
+    # Per-model token sums for cost calculation.
+    model_rows = conn.execute(
+        "SELECT model,"
+        " COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o,"
+        " COALESCE(SUM(cache_read_tokens),0) cr, COALESCE(SUM(cache_write_tokens),0) cw"
+        " FROM events WHERE session_id = ? AND model IS NOT NULL AND model != ''"
+        " GROUP BY model",
+        (row["id"],),
+    ).fetchall()
+    cost_usd = 0.0
+    has_cost = False
+    for mr in model_rows:
+        c = cost_for(mr["model"], mr["i"], mr["o"], mr["cr"], mr["cw"])
+        if c is not None:
+            cost_usd += c
+            has_cost = True
     return {
         "id": row["id"],
         "source": row["source"],
@@ -1351,7 +1399,76 @@ def _session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, An
         "title": _first_prompt(conn, row["id"]),
         "category_counts": _category_counts(conn, row["id"]),
         "tokens": _tokens_dict(tok),
+        "cost_usd": round(cost_usd, 6),
+        "has_cost": has_cost,
     }
+
+
+def _batched_session_summaries(
+    conn: sqlite3.Connection, rows: list[sqlite3.Row]
+) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    session_ids = [r["id"] for r in rows]
+    placeholders = ",".join("?" for _ in session_ids)
+
+    category_counts: dict[str, dict[str, int]] = {sid: {} for sid in session_ids}
+    for r in conn.execute(
+        f"SELECT session_id, category, COUNT(*) AS n FROM events"
+        f" WHERE session_id IN ({placeholders}) AND category IS NOT NULL"
+        f" GROUP BY session_id, category",
+        session_ids,
+    ).fetchall():
+        category_counts.setdefault(r["session_id"], {})[r["category"]] = r["n"]
+
+    model_rows_by_session: dict[str, list[sqlite3.Row]] = {sid: [] for sid in session_ids}
+    for r in conn.execute(
+        f"SELECT session_id, model,"
+        f" COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o,"
+        f" COALESCE(SUM(cache_read_tokens),0) cr,"
+        f" COALESCE(SUM(cache_write_tokens),0) cw"
+        f" FROM events"
+        f" WHERE session_id IN ({placeholders})"
+        f" AND model IS NOT NULL AND model != ''"
+        f" GROUP BY session_id, model"
+        f" ORDER BY session_id, model",
+        session_ids,
+    ).fetchall():
+        model_rows_by_session.setdefault(r["session_id"], []).append(r)
+
+    summaries: list[dict[str, Any]] = []
+    for row in rows:
+        last_ts = row["last_ts"]
+        model_rows = model_rows_by_session.get(row["id"], [])
+        cost_usd = 0.0
+        has_cost = False
+        for mr in model_rows:
+            c = cost_for(mr["model"], mr["i"], mr["o"], mr["cr"], mr["cw"])
+            if c is not None:
+                cost_usd += c
+                has_cost = True
+        summaries.append(
+            {
+                "id": row["id"],
+                "source": row["source"],
+                "cwd": row["cwd"],
+                "models": [mr["model"] for mr in model_rows],
+                "archived": bool(row["archived"]),
+                "status": _live_status(last_ts),
+                "started_at": _format_ts(row["started_at"]) or str(row["started_at"] or ""),
+                "ended_at": _format_ts(row["ended_at"]),
+                "last_activity": _format_ts(last_ts),
+                "event_count": row["event_count"] or 0,
+                "tool_count": row["tool_count"] or 0,
+                "duration_seconds": _duration_seconds(row["first_ts"], last_ts),
+                "title": _summary_title(row["prompt_detail"]),
+                "category_counts": category_counts.get(row["id"], {}),
+                "tokens": _tokens_from_parts(row["i"], row["o"], row["cr"], row["cw"]),
+                "cost_usd": round(cost_usd, 6),
+                "has_cost": has_cost,
+            }
+        )
+    return summaries
 
 
 def metrics() -> dict[str, Any]:
@@ -1414,21 +1531,33 @@ def metrics() -> dict[str, Any]:
                 " GROUP BY tool ORDER BY n DESC LIMIT 12"
             )
         ]
-        by_model = [
-            {
+        model_rows_raw = rows(
+            "SELECT model, COUNT(*) n, SUM(output_tokens) o,"
+            " COALESCE(SUM(input_tokens),0) i_tok,"
+            " COALESCE(SUM(output_tokens),0) o_tok,"
+            " COALESCE(SUM(cache_read_tokens),0) cr_tok,"
+            " COALESCE(SUM(cache_write_tokens),0) cw_tok,"
+            " COALESCE(SUM(input_tokens),0) + COALESCE(SUM(output_tokens),0)"
+            " + COALESCE(SUM(cache_read_tokens),0) + COALESCE(SUM(cache_write_tokens),0) t"
+            " FROM events"
+            " WHERE model IS NOT NULL AND model != '' GROUP BY model ORDER BY n DESC"
+        )
+        cost_total = 0.0
+        unpriced_models: list[str] = []
+        by_model: list[dict[str, Any]] = []
+        for r in model_rows_raw:
+            c = cost_for(r["model"], r["i_tok"], r["o_tok"], r["cr_tok"], r["cw_tok"])
+            if c is not None:
+                cost_total += c
+            else:
+                unpriced_models.append(r["model"])
+            by_model.append({
                 "model": r["model"],
                 "events": r["n"],
                 "output_tokens": r["o"] or 0,
                 "total_tokens": r["t"] or 0,
-            }
-            for r in rows(
-                "SELECT model, COUNT(*) n, SUM(output_tokens) o,"
-                " COALESCE(SUM(input_tokens),0) + COALESCE(SUM(output_tokens),0)"
-                " + COALESCE(SUM(cache_read_tokens),0) + COALESCE(SUM(cache_write_tokens),0) t"
-                " FROM events"
-                " WHERE model IS NOT NULL AND model != '' GROUP BY model ORDER BY n DESC"
-            )
-        ]
+                "cost": round(c, 6) if c is not None else None,
+            })
         by_source = [
             {"source": r["source"], "sessions": r["s"], "events": r["e"]}
             for r in rows(
@@ -1506,9 +1635,12 @@ def metrics() -> dict[str, Any]:
                     att_images += 1
                 elif a.get("kind") == "document":
                     att_docs += 1
-                mt = a.get("media_type") or a.get("kind") or "file"
-                fmt = mt.split("/")[-1].upper() if "/" in mt else str(mt).upper()
-                att_by_type[fmt] = att_by_type.get(fmt, 0) + 1
+                mt = a.get("media_type")
+                ext = a.get("extension") or Path(str(a.get("name") or "")).suffix.lstrip(".")
+                raw_type = mt or ext
+                if raw_type:
+                    fmt = raw_type.split("/")[-1].upper() if "/" in raw_type else str(raw_type).upper()
+                    att_by_type[fmt] = att_by_type.get(fmt, 0) + 1
         attachments_summary = {
             "total": att_total,
             "prompts_with": att_prompts,
@@ -1533,6 +1665,18 @@ def metrics() -> dict[str, Any]:
                 "permissions": permissions,
             },
             "tokens": tokens,
+            "cost": {
+                "total": round(cost_total, 6),
+                "by_model": [
+                    {
+                        "model": m["model"],
+                        "tokens": m["total_tokens"],
+                        "cost": m["cost"],
+                    }
+                    for m in by_model
+                ],
+                "unpriced_models": unpriced_models,
+            },
             "by_day": by_day,
             "by_hour": by_hour,
             "by_category": by_category,
@@ -1625,26 +1769,38 @@ def list_sessions(
     if q:
         clauses.append("(s.id LIKE ? OR s.cwd LIKE ?)")
         params.extend([f"%{q}%", f"%{q}%"])
-    # Hide empty "launch-and-quit" sessions — only SessionStart/SessionEnd, no
-    # real work (no prompt, tool, or response). These are created by Claude's
-    # launcher bootstrapping in the home dir and add only noise.
-    clauses.append(
-        "EXISTS (SELECT 1 FROM events ev WHERE ev.session_id = s.id"
-        " AND ev.category IS NOT NULL AND ev.category != 'lifecycle')"
-    )
     where = f"WHERE {' AND '.join(clauses)}"
     params.append(limit)
     with _connect() as conn:
         rows = conn.execute(
-            f"SELECT s.* FROM sessions s"
-            f" LEFT JOIN (SELECT session_id, MAX(ts) AS last_ts FROM events GROUP BY session_id) e"
-            f"   ON e.session_id = s.id"
+            f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
+            f" s.status, s.archived, s.created_at,"
+            f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
+            f" e.i, e.o, e.cr, e.cw,"
+            f" (SELECT fp.detail FROM events fp"
+            f"  WHERE fp.session_id = s.id AND fp.category = 'prompt'"
+            f"  ORDER BY fp.id ASC LIMIT 1) AS prompt_detail"
+            f" FROM sessions s"
+            f" JOIN ("
+            f"   SELECT session_id,"
+            f"     COUNT(*) AS event_count,"
+            f"     SUM(CASE WHEN tool IS NOT NULL THEN 1 ELSE 0 END) AS tool_count,"
+            f"     MIN(ts) AS first_ts,"
+            f"     MAX(ts) AS last_ts,"
+            f"     COALESCE(SUM(input_tokens),0) AS i,"
+            f"     COALESCE(SUM(output_tokens),0) AS o,"
+            f"     COALESCE(SUM(cache_read_tokens),0) AS cr,"
+            f"     COALESCE(SUM(cache_write_tokens),0) AS cw"
+            f"   FROM events"
+            f"   GROUP BY session_id"
+            f"   HAVING SUM(CASE WHEN category IS NOT NULL AND category != 'lifecycle' THEN 1 ELSE 0 END) > 0"
+            f" ) e ON e.session_id = s.id"
             f" {where}"
             f" ORDER BY COALESCE(s.ended_at, e.last_ts, s.started_at) DESC"
             f" LIMIT ?",
             params,
         ).fetchall()
-        summaries = [_session_summary(conn, r) for r in rows]
+        summaries = _batched_session_summaries(conn, rows)
     # "active"/"completed" is recency-derived (see _live_status), so the status
     # filter is applied here rather than in SQL.
     if status:
@@ -1766,9 +1922,13 @@ def _event_row(row: sqlite3.Row) -> dict[str, Any]:
     return out
 
 
-def attach_to_prompt(session_id: str, text: str | None, attachments: list[dict]) -> bool:
-    """Merge file/image metadata onto the matching prompt event (by exact text,
-    else the latest prompt in the session) rather than creating a separate row."""
+def attach_to_prompt(
+    session_id: str,
+    text: str | None,
+    attachments: list[dict],
+    timestamp: Any | None = None,
+) -> bool:
+    """Merge file/image metadata onto the matching prompt event."""
     if not attachments:
         return False
     with _write_lock, _connect() as conn:
@@ -1780,6 +1940,46 @@ def attach_to_prompt(session_id: str, text: str | None, attachments: list[dict])
                 " ORDER BY id DESC LIMIT 1",
                 (session_id, text),
             ).fetchone()
+        if row is None and text:
+            clean_text = _clean_upload_wrapper_text(text)
+            candidates = conn.execute(
+                "SELECT id, detail, attachments FROM events"
+                " WHERE session_id=? AND category='prompt'"
+                " ORDER BY id DESC LIMIT 50",
+                (session_id,),
+            ).fetchall()
+            for candidate in candidates:
+                if _clean_upload_wrapper_text(candidate["detail"]) == clean_text:
+                    row = candidate
+                    break
+        if row is None and timestamp:
+            row = conn.execute(
+                "SELECT id, attachments FROM events"
+                " WHERE session_id=? AND category='prompt' AND ts=?"
+                " ORDER BY id DESC LIMIT 1",
+                (session_id, timestamp),
+            ).fetchone()
+        if row is None and timestamp:
+            target_ts = _parse_ts(timestamp)
+            if target_ts is not None:
+                candidates = conn.execute(
+                    "SELECT id, ts, attachments FROM events"
+                    " WHERE session_id=? AND category='prompt'"
+                    " ORDER BY ts DESC LIMIT 30",
+                    (session_id,),
+                ).fetchall()
+                best: sqlite3.Row | None = None
+                best_delta = 999999.0
+                for candidate in candidates:
+                    candidate_ts = _parse_ts(candidate["ts"])
+                    if candidate_ts is None:
+                        continue
+                    delta = abs((candidate_ts - target_ts).total_seconds())
+                    if delta < best_delta:
+                        best = candidate
+                        best_delta = delta
+                if best is not None and best_delta <= 5:
+                    row = best
         if row is None:
             row = conn.execute(
                 "SELECT id, attachments FROM events"
@@ -2232,30 +2432,28 @@ def complete_imported_sessions() -> dict[str, Any]:
 
 def stats() -> dict[str, Any]:
     with _connect() as conn:
-        sessions = conn.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"]
-        events = conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"]
-        tool_calls = conn.execute(
-            "SELECT COUNT(*) AS n FROM events WHERE tool IS NOT NULL"
-        ).fetchone()["n"]
         by_source = {
             r["source"]: r["n"]
             for r in conn.execute(
                 "SELECT source, COUNT(*) AS n FROM sessions GROUP BY source"
             ).fetchall()
         }
+        sessions = sum(by_source.values())
         # Effective status is recency-derived, so count live sessions from each
         # session's most recent event rather than the stored flag.
-        last_rows = conn.execute(
-            "SELECT session_id, MAX(ts) AS last_ts FROM events GROUP BY session_id"
+        event_rows = conn.execute(
+            "SELECT session_id, MAX(ts) AS last_ts,"
+            " COUNT(*) AS events,"
+            " SUM(CASE WHEN tool IS NOT NULL THEN 1 ELSE 0 END) AS tools,"
+            " (julianday(MAX(ts)) - julianday(MIN(ts))) * 86400 AS duration"
+            " FROM events GROUP BY session_id"
         ).fetchall()
-        active = sum(1 for r in last_rows if _live_status(r["last_ts"]) == "active")
+        active = sum(1 for r in event_rows if _live_status(r["last_ts"]) == "active")
         by_status = {"active": active, "completed": max(sessions - active, 0)}
-        avg_row = conn.execute(
-            "SELECT AVG(d) AS a FROM ("
-            " SELECT (julianday(MAX(ts)) - julianday(MIN(ts))) * 86400 AS d"
-            " FROM events GROUP BY session_id)"
-        ).fetchone()
-        avg_duration = round(avg_row["a"], 2) if avg_row and avg_row["a"] is not None else None
+        events = sum(r["events"] or 0 for r in event_rows)
+        tool_calls = sum(r["tools"] or 0 for r in event_rows)
+        durations = [r["duration"] for r in event_rows if r["duration"] is not None]
+        avg_duration = round(sum(durations) / len(durations), 2) if durations else None
         return {
             "sessions": sessions,
             "events": events,

@@ -19,7 +19,7 @@ interface MetricsViewProps {
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-import { compact, hourLabel } from '../../lib/format';
+import { compact, hourLabel, formatCost } from '../../lib/format';
 function niceDay(iso: string): string {
   const [, m, d] = iso.split('-');
   return `${MONTHS[Number(m) - 1]} ${Number(d)}`;
@@ -28,12 +28,6 @@ function shortPath(p: string | null): string {
   if (!p) return '(unknown)';
   const parts = p.split('/').filter(Boolean);
   return parts.length <= 2 ? p : `…/${parts.slice(-2).join('/')}`;
-}
-function formatBytes(b: number): string {
-  if (!b) return '0 B';
-  if (b >= 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
-  if (b >= 1024) return `${Math.round(b / 1024)} KB`;
-  return `${b} B`;
 }
 
 // --- line-based building blocks (no cards) ---
@@ -172,11 +166,16 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
 
         {/* Headline stat strip */}
         <FadeIn delay={0.03}>
-          <Grid cols="grid-cols-2 sm:grid-cols-4">
+          <Grid cols="grid-cols-2 sm:grid-cols-5">
             <Stat label="Sessions" value={compact(t.sessions)} hint={`${t.active_sessions} active now`} />
             <Stat label="Events" value={compact(t.events)} />
             <Stat label="Tool calls" value={compact(t.tool_calls)} />
-            <Stat label="Tokens" value={compact(m.tokens.total)} hint="Claude only" />
+            <Stat label="Tokens" value={compact(m.tokens.total)} />
+            <Stat
+              label="Est. cost"
+              value={m.cost.total > 0 ? formatCost(m.cost.total) : '—'}
+              hint={m.cost.unpriced_models.length ? `${m.cost.unpriced_models.length} model${m.cost.unpriced_models.length === 1 ? '' : 's'} unpriced` : undefined}
+            />
           </Grid>
         </FadeIn>
 
@@ -271,7 +270,10 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
                             />
                             <span className="truncate">{formatModel(model.model)}</span>
                           </span>
-                          <span className="shrink-0 text-fg/45">{compact(model.events)}</span>
+                          <span className="flex shrink-0 items-center gap-2 text-fg/45">
+                            {model.cost != null && <span className="text-vermilion/70">{formatCost(model.cost)}</span>}
+                            <span>{compact(model.events)}</span>
+                          </span>
                         </div>
                       ))}
                     </div>
@@ -346,22 +348,7 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
         <FadeIn delay={0.115}>
           <Section n="08" title="Attachments">
             {m.attachments.total > 0 ? (
-              <div className="space-y-3">
-                <div className="flex flex-wrap items-baseline gap-x-7 gap-y-1">
-                  <span className="font-mono text-sm font-bold tabular-nums text-fg">
-                    {compact(m.attachments.total)}{' '}
-                    <span className="text-[0.55rem] font-normal uppercase tracking-widest text-fg/45">
-                      {m.attachments.total === 1 ? 'file' : 'files'}
-                    </span>
-                  </span>
-                  <span className="font-mono text-[0.62rem] text-fg/55">
-                    {formatBytes(m.attachments.total_bytes)} total
-                  </span>
-                  <span className="font-mono text-[0.62rem] text-fg/55">
-                    {m.attachments.by_type.length} type
-                    {m.attachments.by_type.length === 1 ? '' : 's'}
-                  </span>
-                </div>
+              <div>
                 {m.attachments.by_type.length > 0 && (
                   <div className="flex min-h-[5rem] items-center justify-center border border-fg/15 bg-panel/40 px-4 py-5">
                     <WordCloud data={m.attachments.by_type} />
@@ -369,7 +356,7 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
                 )}
               </div>
             ) : (
-              <p className="font-mono text-xs text-fg/40">No files attached to prompts yet.</p>
+              <p className="font-mono text-xs text-fg/40">No files attached yet.</p>
             )}
           </Section>
         </FadeIn>

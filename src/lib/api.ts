@@ -42,6 +42,8 @@ export interface SessionSummary {
     cache_write: number;
     total: number;
   };
+  cost_usd: number;
+  has_cost: boolean;
 }
 
 export interface TimelineItem {
@@ -289,11 +291,17 @@ export interface Metrics {
   by_hour: { hour: number; events: number }[];
   by_category: { category: string; events: number }[];
   by_tool: { tool: string; events: number }[];
+  cost: {
+    total: number;
+    by_model: { model: string; tokens: number; cost: number | null }[];
+    unpriced_models: string[];
+  };
   by_model: {
     model: string;
     events: number;
     output_tokens: number;
     total_tokens: number;
+    cost: number | null;
   }[];
   by_source: { source: AgentId; sessions: number; events: number }[];
   by_project: { cwd: string; sessions: number; events: number; last_activity: string | null }[];

@@ -458,6 +458,7 @@ async def ingest(source: str, request: Request) -> dict[str, Any]:
             str(body.get("session_id") or ""),
             body.get("text"),
             body.get("attachments") or [],
+            body.get("timestamp"),
         )
         return {"ok": True, "attached": attached}
 
