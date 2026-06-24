@@ -1,6 +1,6 @@
 import type { Metrics } from './api';
 import { getCategoryMeta } from './categoryMeta';
-import { compact, hourLabel } from './format';
+import { compact, formatCost, formatMetricsDay, hourLabel } from './format';
 import { formatModel } from './modelMeta';
 import { sourceLabel } from './sourceLabels';
 
@@ -24,6 +24,8 @@ export interface ChartSeries {
   label: string;
   kind: 'line' | 'bars' | 'pie';
   data?: number[];
+  /** X-axis captions aligned with `data` points. */
+  labels?: string[];
   items?: { name: string; value: number }[];
   /** Centre caption for a pie (e.g. 'models'). */
   unit?: string;
@@ -55,6 +57,7 @@ export function buildStats(m: Metrics): ShareStat[] {
     { key: 'events', label: 'Events', value: compact(t.events) },
     { key: 'tool_calls', label: 'Tool calls', value: compact(t.tool_calls) },
     { key: 'tokens', label: 'Tokens', value: compact(m.tokens.total) },
+    m.cost.total > 0 ? { key: 'cost', label: 'Est. cost', value: formatCost(m.cost.total) } : null,
     { key: 'projects', label: 'Projects', value: compact(t.projects) },
     { key: 'active_days', label: 'Active days', value: String(activeDays) },
     { key: 'files', label: 'Files touched', value: compact(fun.files_touched) },
@@ -84,19 +87,28 @@ const sum = (a: number[]) => a.reduce((n, v) => n + v, 0);
 export function buildChartSeries(m: Metrics): { line: ChartSeries[]; dist: ChartSeries[] } {
   const hourly = Array.from({ length: 24 }, () => 0);
   for (const h of m.by_hour) hourly[h.hour] = h.events;
-  const daily = m.by_day.slice(-30).map((d) => d.events);
+  const hourLabels = Array.from({ length: 24 }, (_, h) => hourLabel(h));
+  const daySlice = m.by_day.slice(-30);
+  const daily = daySlice.map((d) => d.events);
+  const dayLabels = daySlice.map((d) => formatMetricsDay(d.day));
   const cats = m.by_category.slice(0, 6).map((c) => ({ name: getCategoryMeta(c.category).label, value: c.events }));
   const models = m.by_model.map((x) => ({ name: formatModel(x.model), value: x.events }));
   const sources = m.by_source.map((x) => ({ name: sourceLabel(x.source), value: x.events }));
 
   const line: ChartSeries[] = ([
-    { key: 'line:hour', label: 'By hour', kind: 'line', data: hourly },
-    { key: 'line:day', label: 'By day', kind: 'line', data: daily },
+    { key: 'line:hour', label: 'By hour', kind: 'line', data: hourly, labels: hourLabels },
+    { key: 'line:day', label: 'By day', kind: 'line', data: daily, labels: dayLabels },
   ] as ChartSeries[]).filter((s) => (s.data?.length ?? 0) > 1 && sum(s.data ?? []) > 0);
 
   const dist: ChartSeries[] = ([
-    { key: 'bars:day', label: 'Daily', kind: 'bars', data: daily },
-    { key: 'bars:cat', label: 'Categories', kind: 'bars', data: cats.map((c) => c.value) },
+    { key: 'bars:day', label: 'Daily', kind: 'bars', data: daily, labels: dayLabels },
+    {
+      key: 'bars:cat',
+      label: 'Categories',
+      kind: 'bars',
+      data: cats.map((c) => c.value),
+      labels: cats.map((c) => c.name),
+    },
     { key: 'pie:models', label: 'Models', kind: 'pie', items: models, unit: 'models' },
     { key: 'pie:source', label: 'Sources', kind: 'pie', items: sources, unit: 'agents' },
   ] as ChartSeries[]).filter((s) =>
@@ -243,6 +255,43 @@ function chartLabel(
   ls(ctx, 0);
 }
 
+function axisTickIndices(n: number, maxTicks = 5): number[] {
+  if (n <= 0) return [];
+  if (n <= maxTicks) return Array.from({ length: n }, (_, i) => i);
+  const out = new Set<number>([0, n - 1]);
+  for (let t = 1; t < maxTicks - 1; t++) {
+    out.add(Math.round((t * (n - 1)) / (maxTicks - 1)));
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+function fitLabel(ctx: CanvasRenderingContext2D, text: string, maxW: number, px = 8): string {
+  ctx.font = `700 ${px}px 'JetBrains Mono', monospace`;
+  let s = text;
+  while (s.length > 1 && ctx.measureText(s).width > maxW) s = s.slice(0, -1);
+  if (s !== text && s.length > 1) s = `${s.slice(0, -1)}…`;
+  return s;
+}
+
+function drawAxisLabels(
+  ctx: CanvasRenderingContext2D,
+  positions: { x: number; text: string }[],
+  baselineY: number,
+  P: Palette,
+) {
+  if (!positions.length) return;
+  ctx.font = `700 8px 'JetBrains Mono', monospace`;
+  ctx.fillStyle = P.faint;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (const { x, text } of positions) {
+    if (!text) continue;
+    ctx.fillText(text, x, baselineY);
+  }
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+
 function lineChart(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -252,17 +301,20 @@ function lineChart(
   data: number[],
   color: string,
   P: Palette,
+  labels?: string[],
 ) {
+  const labelH = labels?.length ? 16 : 0;
+  const plotH = h - labelH;
   const max = Math.max(...data, 1);
   const n = data.length;
-  const px = (i: number) => x + (n <= 1 ? 0 : (i / (n - 1)) * w);
-  const py = (v: number) => y + h - Math.max(0.02, v / max) * h;
+  const px = (i: number) => x + (n <= 1 ? w / 2 : (i / (n - 1)) * w);
+  const py = (v: number) => y + plotH - Math.max(0.02, v / max) * plotH;
 
   ctx.strokeStyle = P.hair;
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(x, y + h + 0.5);
-  ctx.lineTo(x + w, y + h + 0.5);
+  ctx.moveTo(x, y + plotH + 0.5);
+  ctx.lineTo(x + w, y + plotH + 0.5);
   ctx.stroke();
 
   ctx.beginPath();
@@ -283,6 +335,20 @@ function lineChart(
   ctx.beginPath();
   ctx.arc(lx, lyy, 1.6, 0, Math.PI * 2);
   ctx.fill();
+
+  if (labels?.length) {
+    const ticks = axisTickIndices(n, n > 12 ? 5 : Math.min(n, 6));
+    const slotW = n <= 1 ? w : w / (n - 1);
+    drawAxisLabels(
+      ctx,
+      ticks.map((i) => ({
+        x: px(i),
+        text: fitLabel(ctx, labels[i] ?? '', slotW + 4),
+      })),
+      y + plotH + 4,
+      P,
+    );
+  }
 }
 
 function barChart(
@@ -295,7 +361,10 @@ function barChart(
   color: string,
   colorSoft: string,
   P: Palette,
+  labels?: string[],
 ) {
+  const labelH = labels?.length ? 16 : 0;
+  const plotH = h - labelH;
   const max = Math.max(...data, 1);
   const n = data.length || 1;
   const gap = 3;
@@ -304,19 +373,32 @@ function barChart(
   ctx.strokeStyle = P.hair;
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(x, y + h + 0.5);
-  ctx.lineTo(x + w, y + h + 0.5);
+  ctx.moveTo(x, y + plotH + 0.5);
+  ctx.lineTo(x + w, y + plotH + 0.5);
   ctx.stroke();
 
-  const grad = ctx.createLinearGradient(0, y, 0, y + h);
+  const grad = ctx.createLinearGradient(0, y, 0, y + plotH);
   grad.addColorStop(0, color);
   grad.addColorStop(1, colorSoft);
   data.forEach((v, i) => {
-    const bh = Math.max(2, (v / max) * h);
+    const bh = Math.max(2, (v / max) * plotH);
     const bx = x + i * (bw + gap);
     ctx.fillStyle = grad;
-    ctx.fillRect(bx, y + h - bh, bw, bh);
+    ctx.fillRect(bx, y + plotH - bh, bw, bh);
   });
+
+  if (labels?.length) {
+    const ticks = axisTickIndices(n, n > 8 ? 5 : n);
+    drawAxisLabels(
+      ctx,
+      ticks.map((i) => ({
+        x: x + i * (bw + gap) + bw / 2,
+        text: fitLabel(ctx, labels[i] ?? '', bw + gap),
+      })),
+      y + plotH + 4,
+      P,
+    );
+  }
 }
 
 /** Donut chart + legend for a categorical breakdown. */
@@ -642,7 +724,7 @@ export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions
   // Bottom-left: vermilion line (sequential series).
   const lineS = opts.lineSeries;
   chartLabel(ctx, left.x, labelY, left.x + left.w, lineS.label.toUpperCase(), 'LINE', VERMILION, P);
-  lineChart(ctx, left.x, plotTop, left.w, plotH, lineS.data ?? [0], VERMILION, P);
+  lineChart(ctx, left.x, plotTop, left.w, plotH, lineS.data ?? [0], VERMILION, P, lineS.labels);
 
   // Bottom-right: a distribution — bars or a donut.
   const distS = opts.distSeries;
@@ -651,19 +733,122 @@ export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions
     donutChart(ctx, { x: rightC.x, y: plotTop, w: rightC.w, h: plotH }, distS.items, distS.unit ?? 'items', P);
   } else {
     chartLabel(ctx, rightC.x, labelY, rightC.x + rightC.w, distS.label.toUpperCase(), 'BARS', COBALT, P);
-    barChart(ctx, rightC.x, plotTop, rightC.w, plotH, distS.data ?? [], COBALT, 'rgba(43,92,230,0.45)', P);
+    barChart(
+      ctx,
+      rightC.x,
+      plotTop,
+      rightC.w,
+      plotH,
+      distS.data ?? [],
+      COBALT,
+      'rgba(43,92,230,0.45)',
+      P,
+      distS.labels,
+    );
   }
 
   cross(ctx, x0, chartsTop - 13, 4, 1, 'rgba(255,69,0,0.7)');
   cross(ctx, x1, chartsTop - 13, 4, 1, 'rgba(43,92,230,0.7)');
 }
 
-/** Compose the share copy from the headline + first few selected stats. */
-export function buildShareText(opts: CardOptions): string {
-  const parts = opts.stats
-    .slice(0, 3)
-    .map((s) => `${s.value} ${s.label.toLowerCase()}`)
-    .join(' · ');
-  const lead = opts.title.trim() || 'My coding footprint';
-  return `${lead}, traced with cot${parts ? `: ${parts}` : ''}. Self-hosted agent observability → cot.run`;
+/** Compose the share copy from the headline + selected stats + cot tagline. */
+export type SharePlatform = 'x' | 'linkedin';
+
+const SHARE_HOOKS = [
+  'The agents have been putting in work.',
+  'Checked my coding footprint — worth sharing.',
+  'This is what my AI workflow actually looks like.',
+  'Another week in the traces.',
+  'Ship mode: quantified.',
+];
+
+const COT_TAGLINES = [
+  'Every prompt, every tool call — still on your machine. cot.run',
+  'Your agents leave footprints. cot keeps them local. cot.run',
+  'Like a flight recorder, but for Claude, Cursor, and Codex. cot.run',
+  'See everything your coding agents did. Nothing leaves your laptop. cot.run',
+  'Hooks in, traces out. All local. cot.run',
+  'Who ran what, when, and how much it cost — on your machine. cot.run',
+  'Agent observability without the SaaS bill. cot.run',
+  'Your Claude, Cursor, and Codex sessions — finally in one place. cot.run',
+  'Prompts, tools, tokens, timelines — traced locally. cot.run',
+  'Know what your agents actually did today. cot.run',
+  'Spoiler: your traces never left localhost. cot.run',
+  'If it happened in your IDE, cot probably caught it. cot.run',
+  'Turn agent chaos into a readable timeline. cot.run',
+  'Ship faster, debug smarter, keep the receipts local. cot.run',
+  'The dashboard for people who code with agents daily. cot.run',
+  'Self-hosted observability — your traces, your SQLite, your rules. cot.run',
+  'Every session traced. Zero cloud required. cot.run',
+  'What if you could replay your agent’s whole day? cot.run',
+];
+
+function shareSeed(opts: CardOptions): number {
+  let n = opts.title.length;
+  for (const s of opts.stats) n += s.key.length + s.value.length;
+  return Math.abs(n);
+}
+
+function truncateShareText(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit - 1).trimEnd()}…`;
+}
+
+export function buildShareText(opts: CardOptions, platform: SharePlatform = 'x'): string {
+  const seed = shareSeed(opts);
+  const customTitle = opts.title.trim();
+  const hook =
+    customTitle && customTitle.toLowerCase() !== 'my coding footprint'
+      ? customTitle
+      : SHARE_HOOKS[seed % SHARE_HOOKS.length];
+  const tagline = COT_TAGLINES[seed % COT_TAGLINES.length];
+  const limit = platform === 'x' ? 270 : 2800;
+
+  for (let count = Math.min(opts.stats.length, 4); count >= 1; count--) {
+    const highlights = opts.stats
+      .slice(0, count)
+      .map((s) => `${s.value} ${s.label.toLowerCase()}`)
+      .join(' · ');
+    const body = [hook, highlights, tagline].filter(Boolean).join('\n\n');
+    if (body.length <= limit) return body;
+  }
+  return truncateShareText([hook, tagline].join('\n\n'), limit);
+}
+
+function canvasPngBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/png');
+  });
+}
+
+/** Copy PNG to clipboard. Starts write synchronously so the user-gesture is preserved. */
+export async function copyCanvasImage(canvas: HTMLCanvasElement): Promise<boolean> {
+  if (!navigator.clipboard?.write) return false;
+  try {
+    await navigator.clipboard.write([
+      new ClipboardItem({ 'image/png': canvasPngBlob(canvas) }),
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Copy PNG + caption. Falls back to image-only if the browser rejects multi-type clipboards. */
+export async function copyCanvasSharePayload(
+  canvas: HTMLCanvasElement,
+  text: string,
+): Promise<boolean> {
+  if (!navigator.clipboard?.write) return false;
+  try {
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        'image/png': canvasPngBlob(canvas),
+        'text/plain': Promise.resolve(new Blob([text], { type: 'text/plain' })),
+      }),
+    ]);
+    return true;
+  } catch {
+    return copyCanvasImage(canvas);
+  }
 }

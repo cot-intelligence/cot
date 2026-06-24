@@ -6,6 +6,8 @@ import {
   buildStats,
   CARD_H,
   CARD_W,
+  copyCanvasImage,
+  copyCanvasSharePayload,
   type CardTheme,
   type ChartSeries,
   DEFAULT_KEYS,
@@ -117,14 +119,7 @@ export function ShareCardModal({ metrics, onClose }: ShareCardModalProps) {
   const copyImage = async (): Promise<boolean> => {
     const canvas = canvasRef.current;
     if (!canvas) return false;
-    try {
-      const blob = await canvasToBlob(canvas);
-      if (!blob) return false;
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-      return true;
-    } catch {
-      return false;
-    }
+    return copyCanvasImage(canvas);
   };
 
   const run = async (action: Action) => {
@@ -135,35 +130,34 @@ export function ShareCardModal({ metrics, onClose }: ShareCardModalProps) {
         setHint('Card saved as cot-metrics.png.');
       } else if (action === 'copy') {
         const ok = await copyImage();
-        setHint(ok ? 'Card image copied to clipboard.' : 'Clipboard blocked — saving instead.');
+        setHint(ok ? 'Card copied — paste (⌘V) anywhere.' : 'Clipboard blocked — saving instead.');
         if (!ok) await downloadImage();
       } else {
-        // X / LinkedIn: save the image, prefill the post, let the user attach it.
-        await downloadImage();
-        const copied = await copyImage();
-        const text = buildShareText(options);
-        if (action === 'x') {
-          window.open(
-            `https://x.com/intent/tweet?text=${encodeURIComponent(text)}`,
-            '_blank',
-            'noopener,noreferrer',
-          );
-        } else {
-          try {
-            await navigator.clipboard.writeText(text);
-          } catch {
-            /* no-op */
-          }
-          window.open(
-            `https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent('https://cot.run')}`,
-            '_blank',
-            'noopener,noreferrer',
-          );
-        }
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const text = buildShareText(options, action);
+        const copied =
+          action === 'x'
+            ? await copyCanvasImage(canvas)
+            : await copyCanvasSharePayload(canvas, text);
+
+        const composeUrl =
+          action === 'x'
+            ? `https://x.com/intent/tweet?text=${encodeURIComponent(text)}`
+            : 'https://www.linkedin.com/feed/?shareActive=true';
+        window.open(composeUrl, '_blank', 'noopener,noreferrer');
+
+        if (!copied) await downloadImage();
+
         setHint(
           copied
-            ? 'Card downloaded & copied — paste or attach it in the post that opened.'
-            : 'Card downloaded — attach it in the post that opened.',
+            ? action === 'x'
+              ? 'Card copied — paste (⌘V) into the X compose tab (caption is already filled in).'
+              : 'Card copied — paste (⌘V) into the LinkedIn compose tab.'
+            : action === 'x'
+              ? 'X compose opened — attach cot-metrics.png from Downloads.'
+              : 'LinkedIn compose opened — attach cot-metrics.png from Downloads.',
         );
       }
     } finally {
@@ -310,7 +304,6 @@ export function ShareCardModal({ metrics, onClose }: ShareCardModalProps) {
                 busy={busy === 'x'}
                 onClick={() => run('x')}
                 icon={<XLogo />}
-                accent
               />
               <ActionButton
                 label="LinkedIn"
@@ -334,7 +327,7 @@ export function ShareCardModal({ metrics, onClose }: ShareCardModalProps) {
 
             <p className="min-h-[1rem] font-mono text-[0.6rem] text-fg/45">
               {hint ??
-                'Social sites can’t auto-attach images — the card is saved & copied so you can drop it into the post.'}
+                'Copy or share copies the card image — paste (⌘V) into X or LinkedIn compose.'}
             </p>
           </div>
         </div>
@@ -391,24 +384,18 @@ function ActionButton({
   icon,
   onClick,
   busy,
-  accent,
 }: {
   label: string;
   icon: React.ReactNode;
   onClick: () => void;
   busy: boolean;
-  accent?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={busy}
-      className={`flex items-center justify-center gap-2 border px-3 py-2.5 font-mono text-[0.62rem] font-bold uppercase tracking-widest transition-colors disabled:opacity-60 ${
-        accent
-          ? 'border-vermilion bg-vermilion text-cream hover:opacity-90'
-          : 'border-fg/25 text-fg/75 hover:border-fg/55 hover:text-fg'
-      }`}>
+      className="flex items-center justify-center gap-2 border border-fg/25 px-3 py-2.5 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/75 transition-colors hover:border-fg/55 hover:text-fg disabled:opacity-60">
       {busy ? <span className="font-mono">…</span> : icon}
       {label}
     </button>
