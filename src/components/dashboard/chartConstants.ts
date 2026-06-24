@@ -4,7 +4,7 @@
 export const CHART_COLORS = [
   '#FF4500', // vermilion
   '#2B5CE6', // cobalt
-  '#3A4D39', // olive
+  '#3A4D39', // olive (light; UI uses theme-aware --olive via Tailwind)
   '#E0991F', // amber
   '#7A5CC8', // violet
   '#1FA88F', // teal

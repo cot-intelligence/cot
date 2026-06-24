@@ -2,6 +2,7 @@ import type { SessionSummary } from '../../../lib/api';
 import { formatDuration, formatRelative } from '../../../lib/categoryMeta';
 import { formatCost } from '../../../lib/format';
 import { AgentMark } from '../../ui/AgentMark';
+import { SessionHash } from '../../ui/SessionHash';
 
 interface SessionMetaProps {
   summary: SessionSummary;
@@ -33,6 +34,8 @@ export function SessionMeta({ summary }: SessionMetaProps) {
           }`}>
           {summary.status}
         </span>
+        <span className="text-fg/25">·</span>
+        <SessionHash id={summary.id} />
       </div>
 
       <h1 className="font-serif text-xl font-bold leading-snug text-fg sm:text-2xl">

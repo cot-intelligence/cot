@@ -8,7 +8,7 @@ export default {
         ink: { DEFAULT: '#111111', light: '#333333', lighter: '#666666' },
         vermilion: { DEFAULT: '#FF4500' },
         cobalt: { DEFAULT: '#2B5CE6' },
-        olive: { DEFAULT: '#3A4D39' },
+        olive: 'rgb(var(--olive) / <alpha-value>)',
         // Semantic, theme-aware tokens (light/dark via CSS vars).
         bg: 'rgb(var(--bg) / <alpha-value>)',
         fg: 'rgb(var(--fg) / <alpha-value>)',

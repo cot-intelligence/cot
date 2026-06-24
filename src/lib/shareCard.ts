@@ -109,7 +109,8 @@ export function buildChartSeries(m: Metrics): { line: ChartSeries[]; dist: Chart
 // Brand palette — lifted straight from the website's Tailwind config.
 const VERMILION = '#FF4500';
 const COBALT = '#2B5CE6';
-const OLIVE = '#3A4D39';
+const OLIVE_LIGHT = '#3A4D39';
+const OLIVE_DARK = '#7DB87A';
 const CREAM = '#F4F0EA';
 const SURFACE = '#FBFAF7';
 const INK = '#111111';
@@ -330,7 +331,7 @@ function donutChart(
   const colors = [
     VERMILION,
     COBALT,
-    OLIVE,
+    P.dark ? OLIVE_DARK : OLIVE_LIGHT,
     P.dark ? 'rgba(244,240,234,0.5)' : 'rgba(17,17,17,0.5)',
     P.dark ? 'rgba(244,240,234,0.28)' : 'rgba(17,17,17,0.28)',
   ];
