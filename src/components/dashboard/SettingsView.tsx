@@ -26,6 +26,7 @@ import { sourceLabel } from '../../lib/sourceLabels';
 import { useTheme } from '../../lib/theme';
 import { FadeIn } from '../ui/FadeIn';
 import { AgentMark } from '../ui/AgentMark';
+import { ExportModal } from './ExportModal';
 
 interface SettingsViewProps {
   sidebarOpen: boolean;
@@ -49,6 +50,7 @@ export function SettingsView({
   const [cleanupResult, setCleanupResult] = useState<RetentionCleanupResult | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [retentionBusy, setRetentionBusy] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const savedAgents = readSavedAgents();
 
   useEffect(() => {
@@ -301,6 +303,29 @@ export function SettingsView({
           </Section>
         </FadeIn>
 
+        <FadeIn delay={0.12}>
+          <Section
+            title="Data export"
+            description="Export sessions, audit logs, or metrics to JSON or CSV.">
+            <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg bg-surface p-4 shadow-soft">
+              <div className="space-y-1">
+                <p className="font-mono text-sm font-bold text-fg">
+                  Export your data
+                </p>
+                <p className="font-mono text-xs text-fg/45">
+                  Filter by source, dates, models, tokens and more.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setExportOpen(true)}
+                className="shrink-0 border border-fg bg-fg px-5 py-2.5 font-mono text-[0.65rem] font-bold uppercase tracking-widest text-bg shadow-soft transition-opacity hover:opacity-90">
+                Open export
+              </button>
+            </div>
+          </Section>
+        </FadeIn>
+
         <FadeIn delay={0.135}>
           <Section
             title="Retention & audit"
@@ -467,6 +492,8 @@ export function SettingsView({
           </Section>
         </FadeIn>
       </div>
+
+      {exportOpen && <ExportModal onClose={() => setExportOpen(false)} />}
     </div>
   );
 }

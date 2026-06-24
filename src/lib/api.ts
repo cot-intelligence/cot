@@ -481,6 +481,38 @@ export interface ImportSummary {
   by_source: { source: string; sessions: number; events: number }[];
 }
 
+export interface ExportFilters {
+  session_ids?: string[];
+  source?: string;
+  cwd?: string;
+  models?: string[];
+  started_after?: string;
+  started_before?: string;
+  ended_after?: string;
+  ended_before?: string;
+  status?: string;
+  min_tokens?: number;
+  min_cost?: number;
+  min_events?: number;
+  fields?: string[];
+  limit?: number;
+}
+
+export interface ExportResult {
+  sessions: Record<string, unknown>[];
+  count: number;
+}
+
+export async function exportSessions(filters: ExportFilters): Promise<ExportResult> {
+  return json<ExportResult>(
+    await fetch('/v1/export', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(filters),
+    }),
+  );
+}
+
 export async function getImportSummary(): Promise<ImportSummary> {
   return json<ImportSummary>(await fetch('/v1/import/summary'));
 }

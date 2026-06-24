@@ -16,10 +16,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from . import __version__, db
 from .normalize import normalize
@@ -627,6 +628,60 @@ def search(q: str = "", limit: int = 40) -> dict[str, Any]:
     if len(q) < 2:
         return {"results": []}
     return {"results": db.search(q, max(1, min(limit, 100)))}
+
+
+class ExportRequest(BaseModel):
+    session_ids: list[str] | None = None
+    source: str | None = None
+    cwd: str | None = None
+    models: list[str] | None = None
+    started_after: str | None = None
+    started_before: str | None = None
+    ended_after: str | None = None
+    ended_before: str | None = None
+    status: str | None = None
+    min_tokens: int | None = None
+    min_cost: float | None = None
+    min_events: int | None = None
+    fields: list[str] | None = None
+    limit: int = 10000
+
+
+def _pick_fields(row: dict[str, Any], fields: list[str]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for f in fields:
+        parts = f.split(".")
+        val: Any = row
+        for p in parts:
+            if isinstance(val, dict):
+                val = val.get(p)
+            else:
+                val = None
+                break
+        out[f] = val
+    return out
+
+
+@app.post("/v1/export")
+def export_sessions(body: ExportRequest) -> dict[str, Any]:
+    sessions = db.export_sessions(
+        session_ids=body.session_ids,
+        source=body.source,
+        cwd=body.cwd,
+        models=body.models,
+        started_after=body.started_after,
+        started_before=body.started_before,
+        ended_after=body.ended_after,
+        ended_before=body.ended_before,
+        status=body.status,
+        min_tokens=body.min_tokens,
+        min_cost=body.min_cost,
+        min_events=body.min_events,
+        limit=max(1, min(body.limit, 50000)),
+    )
+    if body.fields:
+        sessions = [_pick_fields(s, body.fields) for s in sessions]
+    return {"sessions": sessions, "count": len(sessions)}
 
 
 @app.get("/v1/sessions/{session_id}")

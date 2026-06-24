@@ -1754,6 +1754,101 @@ def set_archived(session_id: str, archived: bool) -> bool:
         return cur.rowcount > 0
 
 
+def export_sessions(
+    *,
+    session_ids: list[str] | None = None,
+    source: str | None = None,
+    cwd: str | None = None,
+    models: list[str] | None = None,
+    started_after: str | None = None,
+    started_before: str | None = None,
+    ended_after: str | None = None,
+    ended_before: str | None = None,
+    status: str | None = None,
+    min_tokens: int | None = None,
+    min_cost: float | None = None,
+    min_events: int | None = None,
+    limit: int = 10000,
+) -> list[dict[str, Any]]:
+    """Filtered session export. Returns full session summaries matching all
+    supplied filters (AND logic). No limit cap — the caller decides."""
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if session_ids:
+        placeholders = ",".join("?" for _ in session_ids)
+        clauses.append(f"s.id IN ({placeholders})")
+        params.extend(session_ids)
+    if source:
+        clauses.append("s.source = ?")
+        params.append(source)
+    if cwd:
+        clauses.append("s.cwd LIKE ?")
+        params.append(f"%{cwd}%")
+    if started_after:
+        clauses.append("s.started_at >= ?")
+        params.append(started_after)
+    if started_before:
+        clauses.append("s.started_at <= ?")
+        params.append(started_before)
+    if ended_after:
+        clauses.append("s.ended_at >= ?")
+        params.append(ended_after)
+    if ended_before:
+        clauses.append("s.ended_at <= ?")
+        params.append(ended_before)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
+            f" s.status, s.archived, s.created_at,"
+            f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
+            f" e.i, e.o, e.cr, e.cw,"
+            f" (SELECT fp.detail FROM events fp"
+            f"  WHERE fp.session_id = s.id AND fp.category = 'prompt'"
+            f"  ORDER BY fp.id ASC LIMIT 1) AS prompt_detail"
+            f" FROM sessions s"
+            f" JOIN ("
+            f"   SELECT session_id,"
+            f"     COUNT(*) AS event_count,"
+            f"     SUM(CASE WHEN tool IS NOT NULL THEN 1 ELSE 0 END) AS tool_count,"
+            f"     MIN(ts) AS first_ts,"
+            f"     MAX(ts) AS last_ts,"
+            f"     COALESCE(SUM(input_tokens),0) AS i,"
+            f"     COALESCE(SUM(output_tokens),0) AS o,"
+            f"     COALESCE(SUM(cache_read_tokens),0) AS cr,"
+            f"     COALESCE(SUM(cache_write_tokens),0) AS cw"
+            f"   FROM events"
+            f"   GROUP BY session_id"
+            f"   HAVING SUM(CASE WHEN category IS NOT NULL AND category != 'lifecycle' THEN 1 ELSE 0 END) > 0"
+            f" ) e ON e.session_id = s.id"
+            f" {where}"
+            f" ORDER BY COALESCE(s.ended_at, e.last_ts, s.started_at) DESC"
+            f" LIMIT ?",
+            params,
+        ).fetchall()
+        summaries = _batched_session_summaries(conn, rows)
+
+    if status:
+        summaries = [s for s in summaries if s["status"] == status]
+    if min_tokens is not None:
+        summaries = [s for s in summaries if s["tokens"]["total"] >= min_tokens]
+    if min_cost is not None:
+        summaries = [s for s in summaries if s["cost_usd"] >= min_cost]
+    if min_events is not None:
+        summaries = [s for s in summaries if s["event_count"] >= min_events]
+    if models:
+        model_set = {m.lower() for m in models}
+        summaries = [
+            s for s in summaries
+            if any(m.lower() in model_set for m in s["models"])
+        ]
+    return summaries
+
+
 def list_sessions(
     limit: int = 50,
     status: str | None = None,

@@ -174,7 +174,6 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
             <Stat
               label="Est. cost"
               value={m.cost.total > 0 ? formatCost(m.cost.total) : '—'}
-              hint={m.cost.unpriced_models.length ? `${m.cost.unpriced_models.length} model${m.cost.unpriced_models.length === 1 ? '' : 's'} unpriced` : undefined}
             />
           </Grid>
         </FadeIn>
