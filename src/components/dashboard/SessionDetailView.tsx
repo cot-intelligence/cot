@@ -53,16 +53,21 @@ export function SessionDetailView({ sessionId, focusEventId }: SessionDetailView
   }
 
   return (
-    <div className="scroll-thin flex-1 overflow-y-auto p-6 sm:p-8">
-      <div className="mx-auto max-w-5xl space-y-10">
-        <SessionMeta summary={detail.summary} />
-        <SessionTabs
-          detail={detail}
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          focusEventId={focusEventId}
-        />
+    <div className="flex flex-1 flex-col overflow-hidden">
+      {/* Compact sticky header: session meta */}
+      <div className="shrink-0 border-b border-line/10 px-6 py-4 sm:px-8">
+        <div className="mx-auto max-w-7xl">
+          <SessionMeta summary={detail.summary} />
+        </div>
       </div>
+
+      {/* Tabs + content fill remaining height */}
+      <SessionTabs
+        detail={detail}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        focusEventId={focusEventId}
+      />
     </div>
   );
 }
