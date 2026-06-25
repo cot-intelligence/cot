@@ -7,7 +7,7 @@ import {
   type TimeSort,
 } from '../../../../lib/sessionView';
 import { Icon } from '../../../ui/icons';
-import { ChatTimeline, type ChatTimelineHandle } from '../ChatTimeline';
+import { ChatTimeline, type ChatTimelineHandle, type ExpansionRequest } from '../ChatTimeline';
 import { SubagentNestedList } from '../SubagentNestedList';
 
 interface TimelineTabProps {
@@ -22,6 +22,7 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [hiddenModels, setHiddenModels] = useState<Set<string>>(new Set());
   const [timeSort, setTimeSort] = useState<TimeSort>('asc');
+  const [expansionRequest, setExpansionRequest] = useState<ExpansionRequest>({ open: false, nonce: 0 });
   const [activeId, setActiveId] = useState<number | null>(focusEventId ?? null);
   const chatRef = useRef<ChatTimelineHandle>(null);
   const sidebarRef = useRef<HTMLDivElement>(null);
@@ -103,6 +104,10 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
     }
   }, [hidden, hiddenModels, categories, models]);
 
+  const setAllExpanded = useCallback((open: boolean) => {
+    setExpansionRequest((prev) => ({ open, nonce: prev.nonce + 1 }));
+  }, []);
+
   // Card click in chat body → highlight in sidebar
   const onCardClick = useCallback((id: number) => {
     setActiveId(id);
@@ -139,7 +144,7 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
           <span className="font-mono text-[0.58rem] tabular-nums text-fg/35">
             {sorted.length}/{items.length} events
           </span>
-          <div className="ml-auto flex items-center gap-1.5">
+          <div className="scroll-thin ml-auto flex min-w-0 items-center gap-1.5 overflow-x-auto">
             {/* Model pills */}
             {models.map((m) => {
               const on = !hiddenModels.has(m.model);
@@ -169,6 +174,17 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
               onToggleAll={toggleAll}
               total={items.length}
             />
+            <button
+              type="button"
+              onClick={() => setAllExpanded(!expansionRequest.open)}
+              title={expansionRequest.open ? 'Collapse all session events' : 'Expand all session events'}
+              aria-label={expansionRequest.open ? 'Collapse all session events' : 'Expand all session events'}
+              aria-pressed={expansionRequest.open}
+              className="flex shrink-0 items-center gap-1.5 rounded-md border border-line/15 px-2.5 py-1.5 font-mono text-[0.62rem] uppercase tracking-widest text-fg/70 transition-colors hover:border-line/30 hover:text-fg"
+            >
+              <Icon name={expansionRequest.open ? 'chevron-up' : 'chevron-down'} className="h-3 w-3" />
+              {expansionRequest.open ? 'Collapse' : 'Expand'}
+            </button>
             <button
               type="button"
               onClick={() => setTimeSort((s) => (s === 'asc' ? 'desc' : 'asc'))}
@@ -224,6 +240,7 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
                 items={sorted}
                 runs={runs}
                 sessionId={sessionId}
+                expansionRequest={expansionRequest}
                 onCardClick={onCardClick}
               />
             )}

@@ -13,7 +13,13 @@ interface ChatTimelineProps {
   items: TimelineItem[];
   runs: SubagentRun[];
   sessionId: string;
+  expansionRequest: ExpansionRequest;
   onCardClick?: (id: number) => void;
+}
+
+export interface ExpansionRequest {
+  open: boolean;
+  nonce: number;
 }
 
 type Segment =
@@ -21,7 +27,7 @@ type Segment =
   | { type: 'subagent'; run: SubagentRun; children: TimelineItem[] };
 
 export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
-  function ChatTimeline({ items, runs, sessionId, onCardClick }, ref) {
+  function ChatTimeline({ items, runs, sessionId, expansionRequest, onCardClick }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
     const cardRefs = useRef<Map<number, HTMLDivElement>>(new Map());
 
@@ -73,6 +79,10 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
       },
     }), []);
 
+    useEffect(() => {
+      if (!expansionRequest.open) setForceExpanded(new Set());
+    }, [expansionRequest]);
+
     const setCardRef = useCallback((id: number, el: HTMLDivElement | null) => {
       if (el) cardRefs.current.set(id, el);
       else cardRefs.current.delete(id);
@@ -93,6 +103,7 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
           item={item}
           sessionId={sessionId}
           forceOpen={forceExpanded.has(item.id)}
+          expansionRequest={expansionRequest}
           ref={(el) => setCardRef(item.id, el)}
         />
       );
@@ -117,6 +128,7 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
                 key={seg.run.item.id}
                 run={seg.run}
                 sessionId={sessionId}
+                expansionRequest={expansionRequest}
                 ref={(el) => setCardRef(seg.run.item.id, el)}
               >
                 {seg.children.map(renderEvent)}
@@ -139,10 +151,15 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
 const SubagentGroup = forwardRef<HTMLDivElement, {
   run: SubagentRun;
   sessionId: string;
+  expansionRequest: ExpansionRequest;
   children: React.ReactNode;
 }>(
-  function SubagentGroup({ run, children }, ref) {
+  function SubagentGroup({ run, expansionRequest, children }, ref) {
     const [open, setOpen] = useState(false);
+
+    useEffect(() => {
+      setOpen(expansionRequest.open);
+    }, [expansionRequest]);
 
     return (
       <div
@@ -266,13 +283,18 @@ const ActionCard = forwardRef<HTMLDivElement, {
   item: TimelineItem;
   sessionId: string;
   forceOpen?: boolean;
+  expansionRequest: ExpansionRequest;
 }>(
-  function ActionCard({ item, sessionId, forceOpen }, ref) {
+  function ActionCard({ item, sessionId, forceOpen, expansionRequest }, ref) {
     const [expanded, setExpanded] = useState(false);
     const open = expanded || forceOpen;
     const meta = getCategoryMeta(item.category);
     const isError = item.status === 'error' || item.status === 'blocked';
     const showTarget = item.category !== 'question' && Boolean(item.target);
+
+    useEffect(() => {
+      setExpanded(expansionRequest.open);
+    }, [expansionRequest]);
 
     return (
       <div
