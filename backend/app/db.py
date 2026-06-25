@@ -2278,6 +2278,106 @@ def export_sessions(
     return summaries
 
 
+def _export_event_row(row: sqlite3.Row) -> dict[str, Any]:
+    """Full event row for export — includes token counts and payload."""
+    out: dict[str, Any] = {
+        "id": row["id"],
+        "hook": row["hook"],
+        "tool": row["tool"],
+        "phase": row["phase"],
+        "ts": _format_ts(row["ts"]),
+        "source": row["source"],
+        "category": row["category"],
+        "title": row["title"],
+        "detail": row["detail"],
+        "target": row["target"],
+        "status": row["status"],
+        "duration_ms": row["duration_ms"],
+        "model": row["model"],
+        "tokens": {
+            "input": row["input_tokens"] or 0,
+            "output": row["output_tokens"] or 0,
+            "cache_read": row["cache_read_tokens"] or 0,
+            "cache_write": row["cache_write_tokens"] or 0,
+        },
+        "attachments": json.loads(row["attachments"]) if row["attachments"] else None,
+    }
+    if row["payload"]:
+        try:
+            out["payload"] = json.loads(row["payload"])
+        except (json.JSONDecodeError, TypeError):
+            out["payload"] = None
+    return out
+
+
+def _export_events(session_id: str) -> list[dict[str, Any]]:
+    """Full event list for export with token counts and payloads."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
+            (session_id,),
+        ).fetchall()
+    return [_export_event_row(r) for r in rows]
+
+
+def enrich_sessions(
+    summaries: list[dict[str, Any]],
+    include: list[str],
+) -> list[dict[str, Any]]:
+    """Attach additional detail sections to each session summary.
+
+    Supported include keys: events, components, conversation, clarifications.
+    """
+    if not include:
+        return summaries
+    want = set(include)
+    for s in summaries:
+        sid = s["id"]
+        cached_events: list[dict[str, Any]] | None = None
+
+        if "events" in want:
+            cached_events = _export_events(sid)
+            s["events"] = cached_events
+
+        if "components" in want:
+            s["components"] = session_components(sid)
+
+        if "conversation" in want:
+            if cached_events is None:
+                cached_events = _export_events(sid)
+            s["conversation"] = [
+                {
+                    "role": e["category"],
+                    "ts": e["ts"],
+                    "content": e.get("detail"),
+                    "model": e.get("model"),
+                    "tool": e.get("tool"),
+                    "target": e.get("target"),
+                    "duration_ms": e.get("duration_ms"),
+                    "tokens": e.get("tokens"),
+                    "attachments": e.get("attachments"),
+                }
+                for e in cached_events
+                if e.get("category") in (
+                    "prompt", "response", "thought", "plan",
+                    "question", "file_edit", "file_read",
+                    "shell", "mcp", "web", "context_read",
+                    "memory", "subagent",
+                )
+            ]
+
+        if "clarifications" in want:
+            with _connect() as conn:
+                ev_rows = conn.execute(
+                    "SELECT id, category, detail, ts, hook, tool FROM events"
+                    " WHERE session_id=? ORDER BY ts ASC, id ASC",
+                    (sid,),
+                ).fetchall()
+            clars, _ = _build_clarifications(ev_rows)
+            s["clarifications"] = clars
+    return summaries
+
+
 def list_sessions(
     limit: int = 50,
     status: str | None = None,

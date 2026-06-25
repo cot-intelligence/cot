@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import type { AgentId } from '../../lib/agents';
+import { getHookStatus } from '../../lib/api';
 import { Stepper, type StepMeta } from './Stepper';
 import { ChooseAgent } from './steps/ChooseAgent';
 import { ConnectHooks } from './steps/ConnectHooks';
 import { Verify } from './steps/Verify';
+import { PostInstall } from './steps/PostInstall';
 import { ThemeToggle } from '../ui/ThemeToggle';
 
 const STEPS: StepMeta[] = [
@@ -35,6 +37,8 @@ function readSavedAgents(): AgentId[] {
   return [];
 }
 
+const AGENT_IDS: AgentId[] = ['claude', 'cursor', 'codex'];
+
 interface OnboardingProps {
   onComplete: (agents: AgentId[], origin: { x: number; y: number }) => void;
 }
@@ -43,6 +47,31 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   const [step, setStep] = useState(0);
   const [agents, setAgents] = useState<AgentId[]>(readSavedAgents);
   const [manualConnect, setManualConnect] = useState(false);
+  const [scriptInstalled, setScriptInstalled] = useState<AgentId[] | null>(null);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    getHookStatus()
+      .then((hooks) => {
+        if (!active) return;
+        const installed = AGENT_IDS.filter((id) => {
+          const agent = hooks.agents.find((a) => a.source === id);
+          return agent && agent.health !== 'not_installed' && agent.health !== 'missing_hooks';
+        });
+        if (installed.length > 0) {
+          try {
+            window.localStorage.setItem(STORAGE_KEY, JSON.stringify(installed));
+          } catch { /* ignore */ }
+          setScriptInstalled(installed);
+        }
+        setChecking(false);
+      })
+      .catch(() => {
+        if (active) setChecking(false);
+      });
+    return () => { active = false; };
+  }, []);
 
   const toggleAgent = (id: AgentId) => {
     setAgents((prev) => {
@@ -55,6 +84,40 @@ export function Onboarding({ onComplete }: OnboardingProps) {
       return next;
     });
   };
+
+  if (checking) return null;
+
+  if (scriptInstalled) {
+    return (
+      <div className="relative flex min-h-screen flex-col">
+        <div className="pointer-events-none absolute inset-0 grid-bg" aria-hidden="true" />
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-[60vh] glow-vermilion" aria-hidden="true" />
+
+        <header className="relative z-10 flex items-center justify-between gap-4 px-6 py-5 sm:px-10">
+          <a
+            href="/"
+            className="font-serif text-2xl font-bold italic tracking-tighter text-fg">
+            cot.
+          </a>
+          <ThemeToggle />
+        </header>
+
+        <main className="relative z-10 flex flex-1 items-center justify-center px-6 py-12 sm:px-10">
+          <div className="w-full max-w-2xl">
+            <PostInstall
+              agents={scriptInstalled}
+              onFinish={(origin) => onComplete(scriptInstalled, origin)}
+            />
+          </div>
+        </main>
+
+        <footer className="relative z-10 flex items-center justify-between px-6 py-5 font-mono text-[0.6rem] uppercase tracking-widest text-fg/25 sm:px-10">
+          <span>SELF-HOSTED</span>
+          <span>v1.0</span>
+        </footer>
+      </div>
+    );
+  }
 
   return (
     <div className="relative flex min-h-screen flex-col">

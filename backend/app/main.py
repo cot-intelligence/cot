@@ -683,6 +683,7 @@ class ExportRequest(BaseModel):
     min_cost: float | None = None
     min_events: int | None = None
     fields: list[str] | None = None
+    include: list[str] | None = None
     limit: int = 10000
 
 
@@ -718,8 +719,17 @@ def export_sessions(body: ExportRequest) -> dict[str, Any]:
         min_events=body.min_events,
         limit=max(1, min(body.limit, 50000)),
     )
+    include_keys: set[str] = set()
+    if body.include:
+        allowed = {"events", "components", "conversation", "clarifications"}
+        include_keys = {k for k in body.include if k in allowed}
+        if include_keys:
+            sessions = db.enrich_sessions(sessions, list(include_keys))
     if body.fields:
-        sessions = [_pick_fields(s, body.fields) for s in sessions]
+        sessions = [
+            {**_pick_fields(s, body.fields), **{k: s[k] for k in include_keys if k in s}}
+            for s in sessions
+        ]
     return {"sessions": sessions, "count": len(sessions)}
 
 

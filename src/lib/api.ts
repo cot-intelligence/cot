@@ -520,6 +520,8 @@ export interface ImportSummary {
   by_source: { source: string; sessions: number; events: number }[];
 }
 
+export type ExportInclude = 'events' | 'components' | 'conversation' | 'clarifications';
+
 export interface ExportFilters {
   session_ids?: string[];
   source?: string;
@@ -534,6 +536,7 @@ export interface ExportFilters {
   min_cost?: number;
   min_events?: number;
   fields?: string[];
+  include?: ExportInclude[];
   limit?: number;
 }
 

@@ -4,6 +4,7 @@ import {
   getSelfAudit,
   getMetrics,
   type ExportFilters,
+  type ExportInclude,
 } from '../../lib/api';
 import { Icon } from '../ui/icons';
 
@@ -60,6 +61,19 @@ const FIELD_MAP: Record<ExportDataType, FieldDef[]> = {
   metrics: [],
 };
 
+interface IncludeDef {
+  key: ExportInclude;
+  label: string;
+  hint: string;
+}
+
+const INCLUDE_OPTIONS: IncludeDef[] = [
+  { key: 'events', label: 'Events', hint: 'Full timeline of every tool call, prompt, and response' },
+  { key: 'components', label: 'Components', hint: 'Files edited/read, shell commands, MCP calls, subagents' },
+  { key: 'conversation', label: 'Conversation', hint: 'Structured prompt/response thread with roles' },
+  { key: 'clarifications', label: 'Clarifications', hint: 'Questions the agent asked and user answers' },
+];
+
 const SOURCE_OPTIONS = ['claude', 'cursor', 'codex'] as const;
 
 function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
@@ -99,6 +113,7 @@ export function ExportModal({ onClose }: ExportModalProps) {
   const [selectedFields, setSelectedFields] = useState<Set<string>>(
     () => new Set(SESSION_FIELDS.map((f) => f.key)),
   );
+  const [includeSections, setIncludeSections] = useState<Set<ExportInclude>>(new Set());
   const [exporting, setExporting] = useState(false);
   const [hint, setHint] = useState<string | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -132,7 +147,10 @@ export function ExportModal({ onClose }: ExportModalProps) {
     setHint(null);
     setSelectedFields(new Set(FIELD_MAP[type].map((f) => f.key)));
     if (type === 'metrics' && format === 'csv') setFormat('json');
-    if (type !== 'sessions') setFiltersOpen(false);
+    if (type !== 'sessions') {
+      setFiltersOpen(false);
+      setIncludeSections(new Set());
+    }
   };
 
   const toggleField = (key: string) => {
@@ -142,6 +160,16 @@ export function ExportModal({ onClose }: ExportModalProps) {
       else next.add(key);
       return next;
     });
+  };
+
+  const toggleInclude = (key: ExportInclude) => {
+    setIncludeSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    if (format === 'csv' && !includeSections.has(key)) setFormat('json');
   };
 
   const activeFilterCount = [
@@ -168,6 +196,8 @@ export function ExportModal({ onClose }: ExportModalProps) {
 
       if (dataType === 'sessions') {
         const filters: ExportFilters = { fields: selected };
+        if (includeSections.size > 0)
+          filters.include = Array.from(includeSections);
         if (sessionIds.trim())
           filters.session_ids = sessionIds.split(',').map((s) => s.trim()).filter(Boolean);
         if (source) filters.source = source;
@@ -288,7 +318,7 @@ export function ExportModal({ onClose }: ExportModalProps) {
                     key={f}
                     type="button"
                     onClick={() => setFormat(f)}
-                    disabled={f === 'csv' && dataType === 'metrics'}
+                    disabled={(f === 'csv' && dataType === 'metrics') || (f === 'csv' && includeSections.size > 0)}
                     className={`py-2 font-mono text-[0.6rem] font-bold uppercase tracking-widest transition-colors disabled:cursor-not-allowed disabled:opacity-30 ${
                       format === f
                         ? 'bg-fg text-bg'
@@ -306,7 +336,9 @@ export function ExportModal({ onClose }: ExportModalProps) {
             <div className="space-y-2">
               <div className="flex items-baseline justify-between">
                 <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/45">
-                  Fields
+                  Fields{includeSections.size > 0 && (
+                    <span className="ml-1.5 font-normal text-fg/25">summary</span>
+                  )}
                 </span>
                 <div className="flex items-baseline gap-3">
                   <button
@@ -359,7 +391,54 @@ export function ExportModal({ onClose }: ExportModalProps) {
             </div>
           )}
 
-          {/* Row 3: Filters (collapsible, sessions only) */}
+          {/* Row 3: Include (sessions only) */}
+          {dataType === 'sessions' && (
+            <div className="space-y-2">
+              <div className="flex items-baseline justify-between">
+                <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/45">
+                  Include
+                </span>
+                {includeSections.size > 0 && (
+                  <span className="font-mono text-[0.55rem] tabular-nums text-cobalt">
+                    {includeSections.size} section{includeSections.size !== 1 ? 's' : ''}
+                  </span>
+                )}
+              </div>
+              <div className="grid gap-1.5 sm:grid-cols-2">
+                {INCLUDE_OPTIONS.map((opt) => {
+                  const on = includeSections.has(opt.key);
+                  return (
+                    <button
+                      key={opt.key}
+                      type="button"
+                      onClick={() => toggleInclude(opt.key)}
+                      aria-pressed={on}
+                      className={`flex flex-col items-start border px-3 py-2 text-left transition-colors ${
+                        on
+                          ? 'border-cobalt bg-cobalt/10'
+                          : 'border-fg/15 hover:border-fg/35'
+                      }`}>
+                      <span className={`font-mono text-[0.6rem] font-bold uppercase tracking-wider ${
+                        on ? 'text-cobalt' : 'text-fg/55'
+                      }`}>
+                        {opt.label}
+                      </span>
+                      <span className="font-mono text-[0.5rem] leading-snug text-fg/35">
+                        {opt.hint}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              {includeSections.size > 0 && format === 'csv' && (
+                <p className="font-mono text-[0.5rem] text-amber-500">
+                  Nested data requires JSON — format switched automatically.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Row 4: Filters (collapsible, sessions only) */}
           {dataType === 'sessions' && (
             <div className="border border-fg/10">
               <button
@@ -416,7 +495,9 @@ export function ExportModal({ onClose }: ExportModalProps) {
                 ? 'Full metrics snapshot, aggregated across all sessions.'
                 : dataType === 'audit'
                   ? 'All configuration audit events will be exported.'
-                  : 'All sessions will be exported. Use filters to narrow.')}
+                  : includeSections.size > 0
+                    ? `Full export with ${Array.from(includeSections).join(', ')}. Use filters to narrow.`
+                    : 'All sessions will be exported. Use filters to narrow.')}
             </p>
             <div className="flex shrink-0 gap-2">
               <button
