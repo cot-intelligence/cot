@@ -10,10 +10,13 @@ import mimetypes
 import os
 import re
 import shutil
+import socket
 import struct
+import subprocess
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -25,7 +28,7 @@ HOOK_STATUS_PATH = STATE_DIR / "hooks_status.json"
 HOOK_BACKUPS_PATH = STATE_DIR / "hook_backups.json"
 IMPORT_PARSER_VERSION_PATH = STATE_DIR / "import_parser_version"
 
-DEFAULT_ENDPOINT = "http://localhost:31337"
+DEFAULT_ENDPOINT = "http://127.0.0.1:31337"
 
 # Bump when the import line-parsers change in a way that should re-derive
 # already-imported rows. On change, the import path resets import-origin data
@@ -1408,6 +1411,20 @@ def _merge_hooks(existing: dict, template: dict, marker: str) -> dict:
     return merged
 
 
+def _remove_hooks(existing: dict, marker: str) -> dict:
+    """Remove only cot hook entries, preserving any user-managed hooks."""
+    cleaned = dict(existing) if isinstance(existing, dict) else {}
+    for event, entries in list(cleaned.items()):
+        if not isinstance(entries, list):
+            continue
+        kept = [entry for entry in entries if marker not in json.dumps(entry)]
+        if kept:
+            cleaned[event] = kept
+        else:
+            cleaned.pop(event, None)
+    return cleaned
+
+
 def _hooks_installed(agent: str) -> bool:
     return bool(_agent_hook_status(agent)["installed"])
 
@@ -1440,6 +1457,49 @@ def _install_agent(agent: str, action: str = "install") -> dict:
         }
     )
     return status
+
+
+def _uninstall_agent(agent: str, action: str = "uninstall") -> dict:
+    path, _ = _CONFIG_TARGETS[agent]
+    config, err = _read_json_file(path)
+    if err == "missing":
+        return {
+            "agent": agent,
+            "config_path": str(path),
+            "changed": False,
+            "backup_created": None,
+            "status": "ok",
+        }
+    if err:
+        return {
+            "agent": agent,
+            "config_path": str(path),
+            "changed": False,
+            "backup_created": None,
+            "status": "error",
+            "error": err,
+        }
+
+    existing = config.get("hooks") if isinstance(config.get("hooks"), dict) else {}
+    next_config = dict(config)
+    next_hooks = _remove_hooks(existing, f"hook {agent}")
+    if next_hooks:
+        next_config["hooks"] = next_hooks
+    else:
+        next_config.pop("hooks", None)
+
+    changed = next_config != config
+    backup = None
+    if changed:
+        backup = _backup_config(agent, path, action)
+        path.write_text(json.dumps(next_config, indent=2) + "\n")
+    return {
+        "agent": agent,
+        "config_path": str(path),
+        "changed": changed,
+        "backup_created": backup,
+        "status": "ok",
+    }
 
 
 def _write_hook_status() -> None:
@@ -1562,6 +1622,288 @@ def _cmd_status() -> int:
     status = {agent: _hooks_installed(agent) for agent in AGENTS}
     print(json.dumps({"endpoint": COT_ENDPOINT, "hooks": status}, indent=2))
     return 0
+
+
+def _container_name() -> str:
+    return os.environ.get("COT_CONTAINER") or "cot"
+
+
+def _docker_available() -> bool:
+    return shutil.which("docker") is not None
+
+
+def _docker_container_names(*filters: str) -> tuple[list[str], str | None]:
+    result = subprocess.run(
+        ["docker", "ps", "-a", *filters, "--format", "{{.Names}}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return [], (result.stderr or result.stdout).strip() or "Could not query Docker containers."
+    return [line for line in result.stdout.splitlines() if line], None
+
+
+def _collector_container_names(container: str) -> tuple[list[str], str | None]:
+    names, err = _docker_container_names()
+    if err:
+        return [], err
+    targets: list[str] = []
+    if container in names:
+        targets.append(container)
+    if container == "cot":
+        compose_names, err = _docker_container_names(
+            "--filter", "label=com.docker.compose.project=cot"
+        )
+        if err:
+            return [], err
+        for name in compose_names:
+            if name not in targets:
+                targets.append(name)
+    return targets, None
+
+
+def _docker_rm_collector(container: str) -> tuple[bool, str]:
+    if not _docker_available():
+        return False, "Docker is not installed or not on PATH."
+    targets, err = _collector_container_names(container)
+    if err:
+        return False, err
+    if not targets:
+        return True, f"No cot collector containers found for {container}."
+    result = subprocess.run(["docker", "rm", "-f", *targets], capture_output=True, text=True)
+    output = (result.stdout or result.stderr).strip()
+    if result.returncode == 0:
+        return True, f"Removed cot collector container(s): {', '.join(targets)}"
+    return False, output or f"Could not remove cot collector container(s): {', '.join(targets)}"
+
+
+def _docker_running_map(targets: list[str]) -> tuple[dict[str, bool], str | None]:
+    if not targets:
+        return {}, None
+    result = subprocess.run(
+        ["docker", "inspect", "--format", "{{.Name}}\t{{.State.Running}}", *targets],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return {}, (result.stderr or result.stdout).strip() or "Could not inspect cot containers."
+    states: dict[str, bool] = {}
+    for line in result.stdout.splitlines():
+        name, _, running = line.partition("\t")
+        states[name.lstrip("/")] = running.strip().lower() == "true"
+    return states, None
+
+
+def _docker_start_collectors(container: str) -> tuple[bool, str]:
+    if not _docker_available():
+        return False, "Docker is not installed or not on PATH."
+    targets, err = _collector_container_names(container)
+    if err:
+        return False, err
+    if not targets:
+        return False, ""
+    states, err = _docker_running_map(targets)
+    if err:
+        return False, err
+    stopped = [name for name in targets if not states.get(name, False)]
+    if not stopped:
+        return True, f"cot collector already running: {', '.join(targets)}"
+    result = subprocess.run(["docker", "start", *stopped], capture_output=True, text=True)
+    output = (result.stdout or result.stderr).strip()
+    if result.returncode == 0:
+        return True, f"Started cot collector container(s): {', '.join(stopped)}"
+    return False, output or f"Could not start cot collector container(s): {', '.join(stopped)}"
+
+
+def _docker_stop_collectors(container: str) -> tuple[bool, str]:
+    if not _docker_available():
+        return False, "Docker is not installed or not on PATH."
+    targets, err = _collector_container_names(container)
+    if err:
+        return False, err
+    if not targets:
+        return True, f"No cot collector containers found for {container}."
+    states, err = _docker_running_map(targets)
+    if err:
+        return False, err
+    running = [name for name in targets if states.get(name, False)]
+    if not running:
+        return True, f"cot collector already stopped: {', '.join(targets)}"
+    result = subprocess.run(["docker", "stop", *running], capture_output=True, text=True)
+    output = (result.stdout or result.stderr).strip()
+    if result.returncode == 0:
+        return True, f"Stopped cot collector container(s): {', '.join(running)}"
+    return False, output or f"Could not stop cot collector container(s): {', '.join(running)}"
+
+
+def _endpoint_port(endpoint: str) -> int:
+    try:
+        parsed = urllib.parse.urlparse(endpoint)
+        return int(parsed.port or DEFAULT_ENDPOINT.rsplit(":", 1)[1])
+    except (TypeError, ValueError):
+        return 31337
+
+
+def _endpoint_for_port(port: int) -> str:
+    return f"http://127.0.0.1:{port}"
+
+
+def _port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.2)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _write_endpoint_config(endpoint: str) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(json.dumps({"endpoint": endpoint}) + "\n")
+
+
+def _wait_for_health(endpoint: str, attempts: int = 60) -> bool:
+    for _ in range(attempts):
+        try:
+            urllib.request.urlopen(f"{endpoint}/health", timeout=1).read()
+            return True
+        except (urllib.error.URLError, TimeoutError, OSError):
+            import time
+            time.sleep(1)
+    return False
+
+
+def _docker_run_collector(container: str) -> tuple[bool, str]:
+    global COT_ENDPOINT
+    image = os.environ.get("COT_IMAGE") or "ghcr.io/cot-intelligence/cot:latest"
+    port = int(os.environ.get("COT_PORT") or _endpoint_port(COT_ENDPOINT))
+    for _ in range(101):
+        if not _port_in_use(port):
+            break
+        port += 1
+    endpoint = _endpoint_for_port(port)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [
+            "docker", "run", "-d",
+            "--name", container,
+            "--restart", "unless-stopped",
+            "--read-only",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges:true",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16m",
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "-p", f"127.0.0.1:{port}:31337",
+            "-v", f"{STATE_DIR}:/data",
+            "-e", "COT_DB_PATH=/data/cot.db",
+            image,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    output = (result.stdout or result.stderr).strip()
+    if result.returncode != 0:
+        return False, output or f"Could not start cot collector from {image}."
+    COT_ENDPOINT = endpoint
+    _write_endpoint_config(endpoint)
+    if _wait_for_health(endpoint):
+        return True, f"Started cot collector: {container} at {endpoint}"
+    return False, f"Started cot collector, but health check failed at {endpoint}."
+
+
+def _cmd_up(args: list[str]) -> int:
+    if args:
+        print("Usage: cot up", file=sys.stderr)
+        return 1
+    container = _container_name()
+    ok, message = _docker_start_collectors(container)
+    if ok:
+        print(f"cot: {message}")
+        print(f"cot: dashboard {COT_ENDPOINT}")
+        return 0
+    if message:
+        print(f"cot: {message}", file=sys.stderr)
+        return 1
+    ok, message = _docker_run_collector(container)
+    print(f"cot: {message}" if ok else f"cot: {message}", file=sys.stderr if not ok else sys.stdout)
+    return 0 if ok else 1
+
+
+def _cmd_down(args: list[str]) -> int:
+    if args:
+        print("Usage: cot down", file=sys.stderr)
+        return 1
+    container = _container_name()
+    ok, message = _docker_stop_collectors(container)
+    print(f"cot: {message}" if ok else f"cot: {message}", file=sys.stderr if not ok else sys.stdout)
+    if ok:
+        print(f"cot: local data and hooks are kept in {STATE_DIR}")
+        return 0
+    return 1
+
+
+def _cmd_uninstall_hooks(agents: list[str]) -> tuple[list[dict], bool]:
+    results: list[dict] = []
+    for agent in agents:
+        result = _uninstall_agent(agent)
+        results.append(result)
+        if result.get("status") == "ok":
+            if result.get("changed"):
+                print(f"cot: removed {agent} hooks -> {result['config_path']}")
+                if result.get("backup_created"):
+                    print(f"cot: backup saved -> {result['backup_created']['backup_path']}")
+            else:
+                print(f"cot: no {agent} hooks to remove")
+        else:
+            print(f"cot: failed to remove {agent} hooks: {result.get('error')}", file=sys.stderr)
+    ok = all(r.get("status") == "ok" for r in results)
+    return results, ok
+
+
+def _confirm_purge(assume_yes: bool) -> bool:
+    if assume_yes:
+        return True
+    if not sys.stdin.isatty():
+        print("cot: purge deletes ~/.cot and requires --yes when not interactive.", file=sys.stderr)
+        return False
+    print("cot purge will remove:")
+    print(f"  - Docker collector container: {_container_name()}")
+    print("  - cot hooks from Claude, Cursor, and Codex")
+    print(f"  - local cot state, bridge, and trace DB: {STATE_DIR}")
+    answer = input("Type 'purge' to continue: ").strip()
+    return answer == "purge"
+
+
+def _cmd_purge(args: list[str]) -> int:
+    assume_yes = False
+    if args:
+        if len(args) == 1 and args[0] in ("-y", "--yes"):
+            assume_yes = True
+        else:
+            print("Usage: cot purge [--yes]", file=sys.stderr)
+            return 1
+    if not _confirm_purge(assume_yes):
+        print("cot: purge cancelled")
+        return 1
+
+    container = _container_name()
+    down_ok, down_message = _docker_rm_collector(container)
+    print(f"cot: {down_message}" if down_ok else f"cot: {down_message}", file=sys.stderr if not down_ok else sys.stdout)
+
+    _, hooks_ok = _cmd_uninstall_hooks(list(AGENTS))
+
+    state_ok = True
+    if STATE_DIR.exists():
+        try:
+            shutil.rmtree(STATE_DIR)
+            print(f"cot: removed {STATE_DIR}")
+        except OSError as exc:
+            state_ok = False
+            print(f"cot: failed to remove {STATE_DIR}: {exc}", file=sys.stderr)
+    else:
+        print(f"cot: no local state directory at {STATE_DIR}")
+
+    if down_ok and hooks_ok and state_ok:
+        print("cot: purge complete")
+        return 0
+    return 1
 
 
 def _api_json(method: str, path: str, payload: dict | None = None) -> dict:
@@ -2634,6 +2976,12 @@ def main() -> int:
         return _cmd_install(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "status":
         return _cmd_status()
+    if len(sys.argv) >= 2 and sys.argv[1] == "up":
+        return _cmd_up(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "down":
+        return _cmd_down(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "purge":
+        return _cmd_purge(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "retention":
         return _cmd_retention(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "audit":
@@ -2656,6 +3004,9 @@ def main() -> int:
             "  cot recover-questions              # fill AskQuestion answers from transcripts\n"
             "  cot watch [--agent X] [--interval]  # tail transcripts continuously\n"
             "  cot status                         # show endpoint + installed hooks\n"
+            "  cot up                             # start/resume collector container\n"
+            "  cot down                           # stop collector container\n"
+            "  cot purge [--yes]                  # remove container, hooks, and ~/.cot\n"
             "  cot retention [status|dry-run]     # manage local cleanup policy\n"
             "  cot audit [limit]                  # show cot self-audit events",
             file=sys.stderr,

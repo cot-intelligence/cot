@@ -1,11 +1,11 @@
 # Single self-contained cot image: builds the dashboard and serves it together
 # with the collector API from one FastAPI/uvicorn process.
 #
-#   docker run -d -p 31337:31337 --read-only --cap-drop ALL \
+#   docker run -d -p 127.0.0.1:31337:31337 --read-only --cap-drop ALL \
 #     --security-opt no-new-privileges:true --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
 #     --user "$(id -u):$(id -g)" -v ~/.cot:/data ghcr.io/cot-intelligence/cot
 #
-# Then open http://localhost:31337 and point your agent hooks at it.
+# Then open http://127.0.0.1:31337 and point your agent hooks at it.
 
 # --- Stage 1: build the dashboard ---
 FROM node:22-alpine AS web
