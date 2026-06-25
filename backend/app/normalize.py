@@ -256,6 +256,53 @@ _SEARCH_TOOLS = frozenset(
     {"Glob", "Grep", "Search", "Codebase", "GrepSearch", "FileSearch", "ListDir"}
 )
 
+# Cursor (and some Codex) tool names that mean the same thing as a Claude tool.
+# Mapping them to the canonical name lets one ``_tool_event`` dispatch serve
+# every agent, so imported Cursor history lands in the right bucket instead of
+# falling through to ``other``.
+_TOOL_ALIASES = {
+    "ReadFile": "Read",
+    "StrReplace": "Edit",
+    "SearchReplace": "Edit",
+    "ApplyPatch": "apply_patch",
+    "SemanticSearch": "Search",
+    "ListDir": "Search",
+    "rg": "Bash",
+}
+
+# Every casing of the pre/post tool-use hooks across agents. A payload carrying
+# one of these plus a ``tool_name`` is a tool call regardless of source.
+_TOOL_HOOKS = frozenset(
+    {
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "preToolUse",
+        "postToolUse",
+        "postToolUseFailure",
+    }
+)
+
+
+def _canonical_tool(name: str | None) -> str:
+    return _TOOL_ALIASES.get(name or "", name or "")
+
+
+# Agent-internal / workflow tools that have no real-world side effect (todo
+# lists, mode switches, lint reads, plan-step bookkeeping). Mapping them to a
+# dedicated ``meta`` bucket keeps ``other`` meaningful (a true "uncategorized"
+# signal) instead of a catch-all. Keyed by canonical tool name -> display title.
+_META_TOOLS: dict[str, str] = {
+    "TodoWrite": "Update todos",
+    "AwaitShell": "Await shell",
+    "SwitchMode": "Switch mode",
+    "ReadLints": "Read lints",
+    "UpdateCurrentStep": "Update step",
+    "updateCurrentStep": "Update step",
+    "ToolSearch": "Tool search",
+    "update_plan": "Update plan",
+}
+
 
 def _tool_event(
     hook: str,
@@ -301,9 +348,15 @@ def _tool_event(
         }
 
     # Codex routes file edits through apply_patch; the patch body carries the
-    # target path rather than a discrete file_path field.
+    # target path rather than a discrete file_path field. Cursor's ApplyPatch
+    # (aliased here) sends the patch as a raw string tool_input, which
+    # _coerce_tool_input drops — fall back to the raw body in that case.
     if tool_name == "apply_patch":
         patch = tool_input.get("command")
+        if not patch:
+            raw_ti = body.get("tool_input")
+            if isinstance(raw_ti, str):
+                patch = raw_ti
         path = _extract_patch_path(patch) or path
         cat = "memory" if _matches(path, _MEMORY_PATTERNS) else "file_edit"
         return {
@@ -332,6 +385,52 @@ def _tool_event(
             "title": "Shell command",
             "target": _short(cmd, 120),
             "detail": _json_detail({"command": cmd, "response": tool_response}),
+            "status": status,
+            "duration_ms": duration_ms,
+        }
+    # Cursor's generic MCP invoker carries the server/tool in the input rather
+    # than encoded in the tool name (unlike Claude/Codex ``mcp__server__tool``).
+    if tool_name in ("CallMcpTool", "call_mcp_tool"):
+        server = tool_input.get("server") or ""
+        mcp_tool = tool_input.get("toolName") or tool_input.get("tool") or ""
+        if _is_browser_network_tool(mcp_tool):
+            args = _coerce_tool_input(tool_input.get("arguments"))
+            url = args.get("url") or _extract_network_url(body)
+            if url:
+                return _web_call(
+                    title="External network",
+                    target=str(url),
+                    detail={"input": tool_input, "response": tool_response},
+                    status=status,
+                    duration_ms=duration_ms,
+                )
+        if server and mcp_tool:
+            target = f"{server}/{mcp_tool}"
+        else:
+            target = mcp_tool or server or tool_name
+        return {
+            "category": "memory" if server == "memory" else "mcp",
+            "title": f"MCP {server or mcp_tool or 'call'}",
+            "target": target,
+            "detail": _json_detail({"input": tool_input, "response": tool_response}),
+            "status": status,
+            "duration_ms": duration_ms,
+        }
+    # Cursor plan-mode plan, recorded as a CreatePlan tool call in the
+    # transcript. Mirror the structured ``plan`` event the live bridge emits.
+    if tool_name == "CreatePlan":
+        todos = tool_input.get("todos")
+        return {
+            "category": "plan",
+            "title": _short(str(tool_input.get("name") or "Plan"), 120),
+            "target": None,
+            "detail": _json_detail(
+                {
+                    "overview": tool_input.get("overview") or "",
+                    "plan": tool_input.get("plan") or "",
+                    "todos": todos if isinstance(todos, list) else [],
+                }
+            ),
             "status": status,
             "duration_ms": duration_ms,
         }
@@ -409,6 +508,29 @@ def _tool_event(
             "category": "memory" if server == "memory" else "mcp",
             "title": f"MCP {label}",
             "target": target,
+            "detail": _json_detail({"input": tool_input, "response": tool_response}),
+            "status": status,
+            "duration_ms": duration_ms,
+        }
+    # Claude's Skill tool pulls a skill/context doc into the conversation.
+    if tool_name == "Skill":
+        skill = tool_input.get("name") or tool_input.get("skill") or tool_input.get("command")
+        return {
+            "category": "context_read",
+            "title": "Skill",
+            "target": _short(str(skill)) if skill else None,
+            "detail": _json_detail({"input": tool_input, "response": tool_response}),
+            "status": status,
+            "duration_ms": duration_ms,
+        }
+    # Data-driven fallback for agent-internal/workflow tools, so they land in
+    # the ``meta`` bucket rather than the catch-all ``other``.
+    meta_title = _META_TOOLS.get(tool_name)
+    if meta_title:
+        return {
+            "category": "meta",
+            "title": meta_title,
+            "target": None,
             "detail": _json_detail({"input": tool_input, "response": tool_response}),
             "status": status,
             "duration_ms": duration_ms,
@@ -532,11 +654,14 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
         }
 
     # --- Tool calls ---
-    tool_name = tool or body.get("tool_name") or ""
+    tool_name = _canonical_tool(tool or body.get("tool_name") or "")
     tool_input = _coerce_tool_input(body.get("tool_input"))
     tool_response = body.get("tool_response") or body.get("tool_output") or {}
 
-    if source in ("claude", "codex") and tool_name:
+    # A tool-use hook (any casing, any source) with a tool name is a tool call.
+    # Imported Cursor history rides Claude-style capitalized hooks, so gating
+    # this on source previously dropped every Cursor tool call into ``other``.
+    if tool_name and hook in _TOOL_HOOKS:
         res = _tool_event(hook, tool_name, tool_input, tool_response, body, duration_ms)
         if res is not None:
             return res
@@ -597,7 +722,7 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
                 "duration_ms": duration_ms,
             }
         if hook in ("preToolUse", "postToolUse", "postToolUseFailure"):
-            tn = body.get("tool_name") or tool or ""
+            tn = _canonical_tool(body.get("tool_name") or tool or "")
             if tn:
                 res = _tool_event(hook, tn, tool_input, tool_response, body, duration_ms)
                 if res is not None:

@@ -1,4 +1,5 @@
-import type { TimelineItem } from '../../../lib/api';
+import { useEffect, useState } from 'react';
+import { getEventDetail, type TimelineItem } from '../../../lib/api';
 import { formatDateTime, formatDuration, getCategoryMeta } from '../../../lib/categoryMeta';
 import { formatModel } from '../../../lib/modelMeta';
 import { conversationMessage, parseDetail, type EditChunk } from '../../../lib/sessionView';
@@ -244,6 +245,8 @@ function Body({ item }: { item: TimelineItem }) {
 
 interface EventDetailPanelProps {
   item: TimelineItem | null;
+  /** Session id, for lazy-loading a truncated event's full detail. */
+  sessionId?: string;
   onViewInAll?: () => void;
   /** Jump to another event in the session by id (used for Q&A cross-links). */
   onJump?: (eventId: number) => void;
@@ -312,7 +315,31 @@ function QaPill({ item }: { item: TimelineItem }) {
   return null;
 }
 
-export function EventDetailPanel({ item, onViewInAll, onJump }: EventDetailPanelProps) {
+export function EventDetailPanel({ item, sessionId, onViewInAll, onJump }: EventDetailPanelProps) {
+  // Lazy-load the full body for events whose list entry was truncated. Cached
+  // per event id so reselecting is instant; small/untruncated events skip the
+  // fetch entirely and render immediately.
+  const [fullById, setFullById] = useState<Record<number, { detail: string | null; attachments: TimelineItem['attachments'] }>>({});
+  const needsFull = Boolean(item?.detail_truncated && sessionId && fullById[item.id] === undefined);
+
+  useEffect(() => {
+    if (!needsFull || !item || !sessionId) return;
+    let cancelled = false;
+    getEventDetail(sessionId, item.id)
+      .then((res) => {
+        if (!cancelled) {
+          setFullById((prev) => ({ ...prev, [item.id]: { detail: res.detail, attachments: res.attachments } }));
+        }
+      })
+      .catch(() => {
+        // On failure, keep the preview rather than blocking the panel.
+        if (!cancelled) setFullById((prev) => ({ ...prev, [item.id]: { detail: item.detail, attachments: item.attachments } }));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [needsFull, item, sessionId]);
+
   if (!item) {
     return (
       <div className="flex h-full min-h-48 items-center justify-center p-8">
@@ -320,6 +347,11 @@ export function EventDetailPanel({ item, onViewInAll, onJump }: EventDetailPanel
       </div>
     );
   }
+
+  const resolved = item.detail_truncated && fullById[item.id]
+    ? { ...item, detail: fullById[item.id].detail, attachments: fullById[item.id].attachments ?? item.attachments }
+    : item;
+  const loadingFull = Boolean(item.detail_truncated && fullById[item.id] === undefined);
 
   const meta = getCategoryMeta(item.category);
   const isError = item.status === 'error' || item.status === 'blocked';
@@ -381,12 +413,17 @@ export function EventDetailPanel({ item, onViewInAll, onJump }: EventDetailPanel
         {showTarget && (
           <p className="break-all font-mono text-xs text-fg/60">{item.target}</p>
         )}
-        {item.attachments && item.attachments.length > 0 && (
-          <AttachmentTags attachments={item.attachments} />
+        {resolved.attachments && resolved.attachments.length > 0 && (
+          <AttachmentTags attachments={resolved.attachments} />
         )}
       </div>
       <QaBanner item={item} onJump={onJump} />
-      <Body item={item} />
+      {loadingFull && (
+        <p className="font-mono text-[0.62rem] uppercase tracking-widest text-fg/35">
+          Loading full detail…
+        </p>
+      )}
+      <Body item={resolved} />
     </div>
   );
 }

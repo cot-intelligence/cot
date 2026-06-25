@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { TimelineItem } from '../../../lib/api';
-import { formatDateTime, formatDuration, getCategoryMeta } from '../../../lib/categoryMeta';
+import { formatClock, formatDateTime, formatDuration, getCategoryMeta } from '../../../lib/categoryMeta';
 import { itemLane, type SubagentRun } from '../../../lib/sessionView';
 import { Icon, type IconName } from '../../ui/icons';
 import { AttachmentBadge } from './AttachmentTags';
@@ -34,7 +34,10 @@ export function EventList({ items, selectedId, onSelect, runs, scrollKey }: Even
         const isSubagent = runs ? itemLane(item, runs) === 'subagent' : false;
         const showTarget = item.category !== 'question' && Boolean(item.target);
         return (
-          <li key={item.id}>
+          // content-visibility lets the browser skip rendering off-screen rows
+          // (lightweight virtualization for long sessions); contain-intrinsic-size
+          // reserves an estimated height so the scrollbar stays stable.
+          <li key={item.id} className="[content-visibility:auto] [contain-intrinsic-size:auto_64px]">
             <button
               type="button"
               ref={active ? selectedRef : undefined}
@@ -48,7 +51,7 @@ export function EventList({ items, selectedId, onSelect, runs, scrollKey }: Even
               <span className="min-w-0 flex-1 space-y-1">
                 <span className="flex items-center justify-between gap-2">
                   <span className="flex min-w-0 items-center gap-1.5">
-                    <span className={`font-mono text-[0.62rem] font-bold uppercase tracking-widest ${meta.color}`}>
+                    <span className={`truncate font-mono text-[0.62rem] font-bold uppercase tracking-widest ${meta.color}`}>
                       {meta.label}
                     </span>
                     {isSubagent && <SubagentBadge />}
@@ -57,8 +60,15 @@ export function EventList({ items, selectedId, onSelect, runs, scrollKey }: Even
                     {item.is_question && <QaBadge variant="question" />}
                     {item.answers_event_id != null && <QaBadge variant="answer" />}
                   </span>
-                  <span className="shrink-0 font-mono text-[0.6rem] tabular-nums text-fg/45">
-                    {formatDateTime(item.start_ts || item.ts)}
+                  {/* Time + duration grouped in one shrink-0 cluster; full
+                      timestamp on hover keeps rows narrow and overlap-free. */}
+                  <span className="flex shrink-0 items-center gap-2 font-mono text-[0.6rem] tabular-nums text-fg/45">
+                    {item.duration_ms != null && item.duration_ms > 0 && (
+                      <span>{formatDuration(item.duration_ms)}</span>
+                    )}
+                    <span title={formatDateTime(item.start_ts || item.ts)}>
+                      {formatClock(item.start_ts || item.ts)}
+                    </span>
                   </span>
                 </span>
                 <span className="flex items-center gap-1.5">
@@ -73,11 +83,6 @@ export function EventList({ items, selectedId, onSelect, runs, scrollKey }: Even
                   </span>
                 )}
               </span>
-              {item.duration_ms != null && item.duration_ms > 0 && (
-                <span className="shrink-0 font-mono text-[0.62rem] tabular-nums text-fg/45">
-                  {formatDuration(item.duration_ms)}
-                </span>
-              )}
             </button>
           </li>
         );

@@ -18,7 +18,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .normalize import categorize, normalize
-from .pricing import cost_for
+from .pricing import cost_for, normalize_model
 
 _write_lock = threading.Lock()
 
@@ -247,6 +247,11 @@ def _connect() -> sqlite3.Connection:
     if str(journal_mode).lower() != "delete":
         conn.execute("PRAGMA journal_mode=DELETE;")
     conn.execute("PRAGMA foreign_keys=ON;")
+    # Keep sort/temp B-trees in RAM. The container runs read-only with a tiny
+    # (~16MB) /tmp tmpfs, so spilling a large session's ORDER BY to a temp file
+    # raised SQLITE_FULL ("database or disk is full"). Memory temp store avoids
+    # the tmpfs entirely; query working sets here are well within RAM.
+    conn.execute("PRAGMA temp_store=MEMORY;")
     return conn
 
 
@@ -662,13 +667,24 @@ def _choice_matches(label: str, option_id: str, response_text: str) -> bool:
     if any(len(_norm_choice(c)) >= 4 and _contains_positive(haystack, _norm_choice(c)) for c in candidates):
         return True
     oid = _norm_choice(option_id.replace("_", " "))
-    if len(oid) >= 6 and _contains_positive(haystack, oid):
+    # Option ids only count as a match when reasonably long; short ids are
+    # often common English words (e.g. "accept", "keep") that appear in prose
+    # by coincidence and produce false positives.
+    if len(oid) >= 8 and _contains_positive(haystack, oid):
         return True
     return False
 
 
+# The agent states its choice up front (acknowledgment + a "settling on X"
+# sentence); the long deliberation tail re-mentions every option and only adds
+# ambiguity. Bounding the match to this leading window keeps recall (the choice
+# is usually within a few sentences) without letting an essay trigger a wrong
+# match — and the uniqueness guard rejects anything still ambiguous.
+_ANSWER_REGION_CHARS = 700
+
+
 def _answer_region(text: str) -> str:
-    region = str(text or "")
+    region = str(text or "").strip()
     markers = (
         "\n---",
         "\n## Full picture",
@@ -681,7 +697,129 @@ def _answer_region(text: str) -> str:
         idx = region.find(marker)
         if idx >= 0:
             region = region[:idx]
-    return region
+    return region[:_ANSWER_REGION_CHARS]
+
+
+# Generic words that carry no option-identifying signal; dropped before the
+# title-token match so they don't inflate the overlap score.
+_TITLE_STOPWORDS = frozenset(
+    {
+        "the", "a", "an", "and", "or", "then", "with", "your", "you", "for",
+        "now", "via", "use", "using", "run", "not", "but", "its", "this",
+        "that", "into", "etc", "all", "any", "per", "are", "was", "will",
+    }
+)
+
+
+def _option_title(label: str) -> str:
+    """The short, identifying head of an option label — the part before the
+    first ':', em/en dash, or '(' — e.g. "Rebuild prod image + restart" out of
+    "Rebuild prod image + restart (Recommended): docker build ..."."""
+    t = str(label or "")
+    for sep in (":", " — ", " - ", " ("):
+        if sep in t:
+            t = t.split(sep, 1)[0]
+    return t.strip()
+
+
+def _word_tokens(text: str) -> list[str]:
+    return [w for w in re.split(r"[^a-z0-9]+", str(text or "").lower()) if w]
+
+
+def _title_tokens(title: str) -> list[str]:
+    return [w for w in _word_tokens(title) if len(w) >= 3 and w not in _TITLE_STOPWORDS]
+
+
+def _token_present(tok: str, resp_tokens: list[str]) -> bool:
+    """Prefix-tolerant match so "rebuild" matches "rebuilding", "image" matches
+    "images", etc. without a full stemmer."""
+    for rt in resp_tokens:
+        if len(rt) < 3:
+            continue
+        if rt.startswith(tok) or tok.startswith(rt):
+            return True
+    return False
+
+
+_TITLE_MATCH_MIN_RATIO = 0.6
+
+
+def _unique_title_match(options: list[Any], match_text: str, min_margin: float = 0.2) -> str | None:
+    """Recover a paraphrased selection by title-word overlap, committing only
+    to a *clear* winner.
+
+    Each option scores by the fraction of its title words present in the prose.
+    We return the top option only when it clears the ratio bar AND beats the
+    runner-up by ``min_margin`` — so a short generic label that coincidentally
+    edges out the real (longer) answer, or two near-tied options, abstains
+    rather than recording a wrong choice. Callers pass a smaller margin for the
+    high-signal decision region and a larger one for the noisier fallback."""
+    resp_tokens = _word_tokens(match_text)
+    if not resp_tokens:
+        return None
+    scored: list[tuple[float, int, str]] = []
+    for opt in options:
+        if not isinstance(opt, dict):
+            continue
+        label = str(opt.get("label") or "").strip()
+        oid = str(opt.get("id") or "").strip()
+        tt = _title_tokens(_option_title(label))
+        if len(tt) < 2:
+            scored.append((0.0, 0, label or oid))
+            continue
+        present = sum(1 for t in tt if _token_present(t, resp_tokens))
+        scored.append((present / len(tt), present, label or oid))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: (-x[0], -x[1]))
+    best_ratio, best_present, best_label = scored[0]
+    second_ratio = scored[1][0] if len(scored) > 1 else 0.0
+    if (
+        best_present >= 2
+        and best_ratio >= _TITLE_MATCH_MIN_RATIO
+        and best_ratio - second_ratio >= min_margin
+    ):
+        return best_label
+    return None
+
+
+# Phrases with which the agent explicitly restates the user's pick. The text
+# right after one of these is a high-signal "decision span" — far more reliable
+# than loose token overlap across the whole reply.
+_DECISION_ANCHORS = re.compile(
+    r"\b(?:went with|going with|go with|i'?ll go with|let'?s go with|you chose|"
+    r"i chose|we chose|chose|settling on|settle on|decided (?:on|to)|decided|"
+    r"picked|selected|opting for|opted for)\b"
+    r"|^\s*(?:got it|ok|okay|sounds good|perfect|great)\b[\s,:\u2014-]",
+    re.I | re.M,
+)
+_DECISION_SPAN_CHARS = 200
+
+
+def _decision_region(text: str) -> str:
+    """Concatenate the short spans that follow each decision phrase. Empty when
+    the reply states no explicit choice (e.g. it defers to more questions)."""
+    s = str(text or "")
+    spans = [s[m.start() : m.start() + _DECISION_SPAN_CHARS] for m in _DECISION_ANCHORS.finditer(s)]
+    return " ".join(spans)
+
+
+def _match_question(options: list[Any], region: str, min_margin: float = 0.2) -> list[str]:
+    """Match options against a region: exact label/id hits first, then the
+    margin-based title-token fallback (commits only on a clear winner)."""
+    labels: list[str] = []
+    for opt in options:
+        if not isinstance(opt, dict):
+            continue
+        label = str(opt.get("label") or "").strip()
+        oid = str(opt.get("id") or "").strip()
+        if _choice_matches(label, oid, region):
+            labels.append(label or oid)
+    if not labels:
+        single = _unique_title_match(options, region, min_margin)
+        if single:
+            labels = [single]
+    return labels
 
 
 def _cursor_question_response(tool_input: dict[str, Any], response_text: str) -> dict[str, Any]:
@@ -693,7 +831,8 @@ def _cursor_question_response(tool_input: dict[str, Any], response_text: str) ->
     free-form answers.
     """
     questions = tool_input.get("questions") if isinstance(tool_input.get("questions"), list) else []
-    match_text = _answer_region(response_text)
+    answer_region = _answer_region(response_text)
+    decision_region = _decision_region(response_text)
     haystack = _norm_choice(response_text)
     mentions_skip = any(word in haystack for word in ("skipped", "unanswered", "still open"))
     answers: dict[str, dict[str, list[str]]] = {}
@@ -705,15 +844,12 @@ def _cursor_question_response(tool_input: dict[str, Any], response_text: str) ->
         qid = str(q.get("id") or "")
         if not qid:
             continue
-        labels: list[str] = []
         options = q.get("options") if isinstance(q.get("options"), list) else []
-        for opt in options:
-            if not isinstance(opt, dict):
-                continue
-            label = str(opt.get("label") or "").strip()
-            oid = str(opt.get("id") or "").strip()
-            if _choice_matches(label, oid, match_text):
-                labels.append(label or oid)
+        # Explicit decision span first (highest signal → smaller margin), then
+        # fall back to the leading reply region (noisier → larger margin).
+        labels = _match_question(options, decision_region, 0.15) if decision_region else []
+        if not labels:
+            labels = _match_question(options, answer_region, 0.25)
         if labels:
             answers[qid] = {"answers": labels}
         elif mentions_skip:
@@ -1008,7 +1144,83 @@ def _backfill_cursor_questions(conn: sqlite3.Connection) -> None:
             _insert_backfilled_cursor_question(conn, source, artifact)
 
 
-_MIGRATIONS_VERSION = "4"
+def _purge_import_for_hook_sessions(conn: sqlite3.Connection) -> None:
+    """A session captured live (hook events) must not also carry imported rows.
+
+    A timing race can let the importer ingest a transcript for a session that
+    also gets live hooks, producing duplicate events with mtime-based
+    timestamps mixed with real ones. Live hook data is authoritative (real
+    timestamps, proper Pre/Post pairs), so drop the imported approximation for
+    any session that has hook events, then reset that session's bounds to the
+    surviving (real) events."""
+    affected = [
+        r["session_id"]
+        for r in conn.execute(
+            "SELECT session_id FROM events GROUP BY session_id"
+            " HAVING SUM(CASE WHEN origin = 'hook' OR origin IS NULL THEN 1 ELSE 0 END) > 0"
+            "    AND SUM(CASE WHEN origin = 'import' THEN 1 ELSE 0 END) > 0"
+        ).fetchall()
+    ]
+    if not affected:
+        return
+    conn.executemany(
+        "DELETE FROM events WHERE session_id = ? AND origin = 'import'",
+        [(sid,) for sid in affected],
+    )
+    for sid in affected:
+        bounds = conn.execute(
+            "SELECT MIN(ts) mn, MAX(ts) mx FROM events WHERE session_id = ?", (sid,)
+        ).fetchone()
+        if bounds and bounds["mn"]:
+            conn.execute(
+                "UPDATE sessions SET started_at = ? WHERE id = ?", (bounds["mn"], sid)
+            )
+
+
+def _recategorize_other_tools(conn: sqlite3.Connection) -> None:
+    """Re-run categorize on stored ``other`` rows that carry a tool name, so
+    newly-mapped tools (the ``meta`` bucket, Skill, etc.) move out of the
+    catch-all without a full re-import. Idempotent: rows that still resolve to
+    ``other`` are left untouched."""
+    rows = conn.execute(
+        "SELECT id, source, hook, tool, payload FROM events"
+        " WHERE category = 'other' AND tool IS NOT NULL AND tool != ''"
+    ).fetchall()
+    for row in rows:
+        try:
+            raw = json.loads(row["payload"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        cat = categorize(row["source"], row["hook"], raw, row["tool"])
+        if cat["category"] == "other":
+            continue
+        conn.execute(
+            "UPDATE events SET category=?, title=?, detail=?, target=?, status=?,"
+            " duration_ms=? WHERE id=?",
+            (
+                cat["category"],
+                cat["title"],
+                cat["detail"],
+                cat["target"],
+                cat["status"],
+                cat["duration_ms"],
+                row["id"],
+            ),
+        )
+
+
+def _question_response_obj(detail: Any) -> dict[str, Any] | None:
+    """Parse a stored question event's detail into its {input, response} object."""
+    if not isinstance(detail, str):
+        return None
+    try:
+        obj = json.loads(detail)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+_MIGRATIONS_VERSION = "8"
 
 
 def init_db() -> None:
@@ -1042,6 +1254,8 @@ def init_db() -> None:
         _merge_search_into_shell(conn)
         _dedup_cursor_subagent_starts(conn)
         _backfill_cursor_questions(conn)
+        _recategorize_other_tools(conn)
+        _purge_import_for_hook_sessions(conn)
         conn.execute(
             "UPDATE events SET origin = 'hook' WHERE origin IS NULL"
         )
@@ -1308,6 +1522,23 @@ def record_event(norm: dict[str, Any], raw: dict[str, Any]) -> tuple[str, int]:
                 " AND hook = 'subagentStart' AND target = ? AND phase = 'start'",
                 (sid, norm["target"]),
             )
+
+        # Hook data wins: if a live event arrives for a session that the importer
+        # had also ingested (timing race), drop the imported approximation and
+        # reset the session's start to the real events. No-op after the first.
+        if origin == "hook":
+            purged = conn.execute(
+                "DELETE FROM events WHERE session_id = ? AND origin = 'import'", (sid,)
+            ).rowcount
+            if purged:
+                bounds = conn.execute(
+                    "SELECT MIN(ts) mn FROM events WHERE session_id = ?", (sid,)
+                ).fetchone()
+                if bounds and bounds["mn"]:
+                    conn.execute(
+                        "UPDATE sessions SET started_at = ? WHERE id = ?",
+                        (bounds["mn"], sid),
+                    )
 
         return sid, int(cur.lastrowid)
 
@@ -1577,20 +1808,37 @@ def metrics(tz: str | None = None) -> dict[str, Any]:
             " FROM events"
             " WHERE model IS NOT NULL AND model != '' GROUP BY model ORDER BY n DESC"
         )
+        # Collapse raw model-id variants that mean the same model (e.g.
+        # claude-opus-4-8 and claude-opus-4-8-thinking-medium) onto one
+        # normalized key, so the breakdown shows one row per real model with
+        # combined events/tokens/cost instead of duplicate-looking rows.
+        agg: dict[str, dict[str, int]] = {}
+        for r in model_rows_raw:
+            key = normalize_model(r["model"]) or r["model"]
+            a = agg.setdefault(
+                key, {"events": 0, "out": 0, "i": 0, "o": 0, "cr": 0, "cw": 0, "total": 0}
+            )
+            a["events"] += r["n"]
+            a["out"] += r["o"] or 0
+            a["i"] += r["i_tok"]
+            a["o"] += r["o_tok"]
+            a["cr"] += r["cr_tok"]
+            a["cw"] += r["cw_tok"]
+            a["total"] += r["t"] or 0
         cost_total = 0.0
         unpriced_models: list[str] = []
         by_model: list[dict[str, Any]] = []
-        for r in model_rows_raw:
-            c = cost_for(r["model"], r["i_tok"], r["o_tok"], r["cr_tok"], r["cw_tok"])
+        for key, a in sorted(agg.items(), key=lambda kv: -kv[1]["events"]):
+            c = cost_for(key, a["i"], a["o"], a["cr"], a["cw"])
             if c is not None:
                 cost_total += c
             else:
-                unpriced_models.append(r["model"])
+                unpriced_models.append(key)
             by_model.append({
-                "model": r["model"],
-                "events": r["n"],
-                "output_tokens": r["o"] or 0,
-                "total_tokens": r["t"] or 0,
+                "model": key,
+                "events": a["events"],
+                "output_tokens": a["out"],
+                "total_tokens": a["total"],
                 "cost": round(c, 6) if c is not None else None,
             })
         by_source = [
@@ -2039,8 +2287,10 @@ def _event_row(row: sqlite3.Row) -> dict[str, Any]:
         "duration_ms": row["duration_ms"],
         "model": row["model"],
         "attachments": json.loads(row["attachments"]) if row["attachments"] else None,
-        "payload": row["payload"],
     }
+    # The raw payload blob is large (~half the session response) and unused by
+    # the dashboard — only composer_mode is needed, so extract it and drop the
+    # rest from the wire.
     if row["payload"]:
         try:
             body = json.loads(row["payload"])
@@ -2459,12 +2709,18 @@ def get_session_detail(session_id: str) -> dict[str, Any] | None:
             item.update(extra)
         if item.get("category") == "question":
             item["questions"] = _parse_questions(item.get("detail"))
+        # Lazy detail: the list never renders the full body (only the selected
+        # event does, via /events/{id}), so ship a preview and flag the rest.
+        _trim_detail_inplace(item)
     for item in tl:
         extra = annotations.get(item["id"])
         if extra:
             item.update(extra)
         if item.get("category") == "question":
             item["questions"] = _parse_questions(item.get("detail"))
+        # The merged timeline is consumed only to derive subagent run windows;
+        # its detail bodies are never rendered, so drop them entirely.
+        item["detail"] = None
 
     return {
         "summary": summary,
@@ -2472,6 +2728,36 @@ def get_session_detail(session_id: str) -> dict[str, Any] | None:
         "events": events,
         "timeline": tl,
         "clarifications": clarifications,
+    }
+
+
+_DETAIL_PREVIEW_CHARS = 4000
+
+
+def _trim_detail_inplace(item: dict[str, Any]) -> None:
+    """Shrink an oversized detail body to a preview, flagging that the full
+    text must be fetched on demand. Small bodies (the common conversation
+    case) are left intact so they render instantly without a follow-up call."""
+    detail = item.get("detail")
+    if isinstance(detail, str) and len(detail) > _DETAIL_PREVIEW_CHARS:
+        item["detail"] = detail[:_DETAIL_PREVIEW_CHARS]
+        item["detail_truncated"] = True
+
+
+def get_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:
+    """Full detail + attachments for a single event (lazy-loaded by the UI when
+    a truncated event is selected)."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT detail, attachments FROM events WHERE session_id=? AND id=?",
+            (session_id, event_id),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": event_id,
+        "detail": row["detail"],
+        "attachments": json.loads(row["attachments"]) if row["attachments"] else None,
     }
 
 
@@ -2530,6 +2816,158 @@ def import_summary() -> dict[str, Any]:
             {"source": r["source"], "sessions": r["sessions"], "events": r["events"]}
             for r in by_source
         ],
+    }
+
+
+def set_question_answer(
+    session_id: str,
+    title: str | None,
+    qids: list[str],
+    response: dict[str, Any],
+) -> int:
+    """Merge a recovered answer onto stored AskQuestion event(s).
+
+    The collector runs in Docker without access to the agent transcript files,
+    and stored transcript paths are host-absolute — so answer recovery from the
+    agent's follow-up prose happens on the host (the bridge) and is pushed here.
+    Matches the question by its (title, question-ids) signature and only fills
+    events whose response is still blank, so a real answer is never overwritten.
+    """
+    if not session_id or not isinstance(response, dict) or not response.get("answers"):
+        return 0
+    response = dict(response)
+    response.setdefault("answer_source", "assistant_summary")
+    wanted = (str(title or ""), tuple(str(q) for q in qids))
+    updated = 0
+    with _write_lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, detail FROM events WHERE session_id = ?"
+            " AND tool IN ('AskUserQuestion', 'AskQuestion', 'request_user_input')"
+            " AND hook IN ('PostToolUse', 'postToolUse')",
+            (session_id,),
+        ).fetchall()
+        for row in rows:
+            obj = _question_response_obj(row["detail"])
+            if obj is None:
+                continue
+            inp = obj.get("input") if isinstance(obj.get("input"), dict) else {}
+            if not inp or _question_signature(inp) != wanted:
+                continue
+            existing = obj.get("response")
+            if isinstance(existing, dict) and existing.get("answers"):
+                continue
+            obj["response"] = response
+            conn.execute(
+                "UPDATE events SET detail = ? WHERE id = ?",
+                (json.dumps(obj, indent=2, ensure_ascii=False, default=str), row["id"]),
+            )
+            updated += 1
+    return updated
+
+
+def clear_recovered_answers() -> int:
+    """Blank out heuristically-recovered AskQuestion answers (those tagged
+    ``answer_source: assistant_summary``) so they can be re-derived cleanly.
+
+    Real answers carried in the tool result (Claude/Codex) are never tagged
+    this way, so they are left intact."""
+    cleared = 0
+    with _write_lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, detail FROM events"
+            " WHERE tool IN ('AskUserQuestion', 'AskQuestion', 'request_user_input')"
+            " AND hook IN ('PostToolUse', 'postToolUse')"
+        ).fetchall()
+        for row in rows:
+            obj = _question_response_obj(row["detail"])
+            if obj is None:
+                continue
+            resp = obj.get("response")
+            if isinstance(resp, dict) and resp.get("answer_source") == "assistant_summary":
+                obj["response"] = {}
+                conn.execute(
+                    "UPDATE events SET detail = ? WHERE id = ?",
+                    (json.dumps(obj, indent=2, ensure_ascii=False, default=str), row["id"]),
+                )
+                cleared += 1
+    return cleared
+
+
+def reset_imported() -> dict[str, Any]:
+    """Drop all transcript-imported events and any sessions left with no events.
+
+    Live hook data (origin 'hook' or NULL) is untouched. Used by ``cot
+    reimport`` to clear out a previous import before re-ingesting transcripts
+    with the current parsers.
+    """
+    with _write_lock, _connect() as conn:
+        events = conn.execute(
+            "SELECT COUNT(*) n FROM events WHERE origin = 'import'"
+        ).fetchone()["n"]
+        conn.execute("DELETE FROM events WHERE origin = 'import'")
+        cur = conn.execute(
+            "DELETE FROM sessions WHERE NOT EXISTS ("
+            " SELECT 1 FROM events e WHERE e.session_id = sessions.id)"
+        )
+        deleted_sessions = cur.rowcount
+    result = {
+        "deleted_events": int(events or 0),
+        "deleted_sessions": int(deleted_sessions or 0),
+    }
+    record_audit_event("import.reset", target="import", detail=result)
+    return result
+
+
+def import_quality() -> dict[str, Any]:
+    """Per-source ingestion quality + coverage, so regressions are visible and
+    the "which agent logs what" picture is explicit rather than implied.
+
+    Reports, per source: event count, how many are tool calls, how many fell
+    through to ``other`` (and the percentage), and token/model coverage. The
+    token coverage doubles as the per-agent capability table (e.g. Cursor logs
+    no tokens, so its coverage is ~0 by data, not by bug)."""
+    with _connect() as conn:
+        src_rows = conn.execute(
+            "SELECT source,"
+            " COUNT(*) events,"
+            " SUM(CASE WHEN tool IS NOT NULL AND tool != '' THEN 1 ELSE 0 END) tool_events,"
+            " SUM(CASE WHEN category = 'other' THEN 1 ELSE 0 END) other,"
+            " SUM(CASE WHEN model IS NOT NULL AND model != '' THEN 1 ELSE 0 END) with_model,"
+            " SUM(CASE WHEN COALESCE(input_tokens,0)+COALESCE(output_tokens,0)"
+            "  +COALESCE(cache_read_tokens,0)+COALESCE(cache_write_tokens,0) > 0"
+            "  THEN 1 ELSE 0 END) with_tokens"
+            " FROM events GROUP BY source ORDER BY events DESC"
+        ).fetchall()
+        cat_rows = conn.execute(
+            "SELECT category, COUNT(*) n FROM events WHERE category IS NOT NULL"
+            " GROUP BY category ORDER BY n DESC"
+        ).fetchall()
+        origin_rows = conn.execute(
+            "SELECT origin, COUNT(*) n FROM events GROUP BY origin"
+        ).fetchall()
+
+    def pct(part: Any, whole: Any) -> float:
+        whole = int(whole or 0)
+        return round(100.0 * int(part or 0) / whole, 1) if whole else 0.0
+
+    by_source = [
+        {
+            "source": r["source"],
+            "events": r["events"] or 0,
+            "tool_events": r["tool_events"] or 0,
+            "other": r["other"] or 0,
+            "other_pct": pct(r["other"], r["events"]),
+            "with_model": r["with_model"] or 0,
+            "with_tokens": r["with_tokens"] or 0,
+            "token_coverage_pct": pct(r["with_tokens"], r["events"]),
+        }
+        for r in src_rows
+    ]
+    return {
+        "generated_at": _now(),
+        "by_source": by_source,
+        "by_category": [{"category": r["category"], "events": r["n"]} for r in cat_rows],
+        "by_origin": {r["origin"] or "hook": r["n"] for r in origin_rows},
     }
 
 

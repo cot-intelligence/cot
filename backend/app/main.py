@@ -530,9 +530,48 @@ def get_import_summary() -> dict[str, Any]:
     return db.import_summary()
 
 
+@app.get("/v1/import/report")
+def get_import_report() -> dict[str, Any]:
+    """Ingestion quality + per-source coverage (category mix, % other,
+    token/model coverage). Surfaces parsing regressions and what each agent
+    actually logs."""
+    return db.import_quality()
+
+
 @app.post("/v1/sessions/complete-imported")
 def complete_imported_sessions() -> dict[str, Any]:
     return db.complete_imported_sessions()
+
+
+@app.post("/v1/import/reset")
+def reset_import() -> dict[str, Any]:
+    """Delete previously imported transcript data so it can be re-ingested with
+    the current parsers. Live hook events are preserved."""
+    return db.reset_imported()
+
+
+@app.post("/v1/questions/reset-recovered")
+def reset_recovered_answers() -> dict[str, Any]:
+    """Clear heuristically-recovered question answers so a fresh recovery pass
+    can re-derive them. Real tool-result answers are untouched."""
+    return {"ok": True, "cleared": db.clear_recovered_answers()}
+
+
+@app.post("/v1/questions/answer")
+async def set_question_answer(request: Request) -> dict[str, Any]:
+    """Merge a host-recovered AskQuestion answer onto stored question events.
+
+    Cursor never persists the selection, so the bridge recovers it from the
+    agent's follow-up prose (it can read the transcripts; the container can't)
+    and posts it here keyed by the question's signature."""
+    body = await _json_body(request)
+    updated = db.set_question_answer(
+        str(body.get("session_id") or ""),
+        body.get("title"),
+        body.get("qids") if isinstance(body.get("qids"), list) else [],
+        body.get("response") if isinstance(body.get("response"), dict) else {},
+    )
+    return {"ok": True, "updated": updated}
 
 
 @app.get("/v1/connections")
@@ -682,6 +721,16 @@ def export_sessions(body: ExportRequest) -> dict[str, Any]:
     if body.fields:
         sessions = [_pick_fields(s, body.fields) for s in sessions]
     return {"sessions": sessions, "count": len(sessions)}
+
+
+@app.get("/v1/sessions/{session_id}/events/{event_id}")
+def get_event_detail(session_id: str, event_id: int) -> dict[str, Any]:
+    """Full detail for one event, lazy-loaded when a truncated event is
+    selected so the session list payload stays small."""
+    detail = db.get_event_detail(session_id, event_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+    return detail
 
 
 @app.get("/v1/sessions/{session_id}")

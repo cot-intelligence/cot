@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -47,11 +48,92 @@ def _load_bundled() -> dict[str, dict[str, float]]:
         return {}
 
 
+def _overrides_path() -> Path:
+    """User-supplied rate overrides live next to the DB (``~/.cot`` by default),
+    which is the one host dir mounted into the container."""
+    env = os.environ.get("COT_DB_PATH")
+    base = Path(env).parent if env else Path.home() / ".cot"
+    return base / "pricing.overrides.json"
+
+
+def _load_overrides() -> dict[str, dict[str, float]]:
+    """Per-model rate overrides. Keys are normalized so they match lookups
+    regardless of how the user wrote the raw id. Each value may set any of
+    input/output/cache_read/cache_write (missing fields default to 0)."""
+    try:
+        with _overrides_path().open() as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for key, val in raw.items():
+        if not isinstance(val, dict):
+            continue
+        norm = normalize_model(key) or str(key).strip().lower()
+        out[norm] = {
+            k: float(val[k])
+            for k in ("input", "output", "cache_read", "cache_write")
+            if isinstance(val.get(k), (int, float))
+        }
+    return out
+
+
 def _ensure_loaded() -> dict[str, dict[str, float]]:
     global _rates
     if not _rates:
-        _rates = _load_bundled()
+        merged = _load_bundled()
+        # User overrides win over the bundled catalog.
+        merged.update(_load_overrides())
+        _rates = merged
     return _rates
+
+
+# --- Family-tier fallback ----------------------------------------------------
+#
+# No catalog (bundled or remote) will have a model the moment it ships. Rather
+# than report a brand-new point release as unpriced, fall back to the newest
+# priced model in the same family/tier (e.g. an unknown claude-opus-4-9 borrows
+# the latest claude-opus rate). This is the same call AgentsView made by hand
+# when it slotted opus-4-7 into the opus tier.
+
+_TIER_OF_RES = (
+    (re.compile(r"^claude-(opus|sonnet|haiku|fable)-"), lambda m: f"claude-{m.group(1)}"),
+    (re.compile(r"^gpt-(\d+)"), lambda m: f"gpt-{m.group(1)}"),
+    (re.compile(r"^gemini-.*-(pro|flash)$"), lambda m: f"gemini-{m.group(1)}"),
+    (re.compile(r"^gemini-"), lambda _m: "gemini"),
+    (re.compile(r"^composer-"), lambda _m: "composer"),
+)
+
+
+def _tier_of(model_key: str) -> str | None:
+    for pattern, fmt in _TIER_OF_RES:
+        match = pattern.match(model_key)
+        if match:
+            return fmt(match)
+    return None
+
+
+def _version_tuple(model_key: str) -> tuple[int, ...]:
+    """Sortable version from a normalized id, for picking the newest in a tier."""
+    return tuple(int(n) for n in re.findall(r"\d+", model_key)) or (0,)
+
+
+def _tier_fallback(norm: str, rates: dict[str, dict[str, float]]) -> dict[str, float] | None:
+    tier = _tier_of(norm)
+    if tier is None:
+        return None
+    best: dict[str, float] | None = None
+    best_version: tuple[int, ...] = ()
+    for key, rate in rates.items():
+        if _tier_of(key) != tier:
+            continue
+        version = _version_tuple(key)
+        if version >= best_version:
+            best_version = version
+            best = rate
+    return best
 
 
 def normalize_model(model: str | None) -> str | None:
@@ -106,6 +188,11 @@ def cost_for(
         return None
     rates = _ensure_loaded()
     entry = rates.get(norm)
+    if entry is None:
+        # Unknown exact id: borrow the newest rate in the same family/tier so
+        # brand-new point releases are still priced (approximately) rather than
+        # dropped as unpriced.
+        entry = _tier_fallback(norm, rates)
     if entry is None:
         if norm not in _unknown_logged:
             _unknown_logged.add(norm)

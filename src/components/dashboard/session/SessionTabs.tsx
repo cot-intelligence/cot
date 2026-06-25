@@ -55,7 +55,12 @@ export function SessionTabs({ detail, activeTab, onTabChange, focusEventId }: Se
 
       <div>
         {current === 'timeline' && (
-          <TimelineTab items={detail.events} runs={runs} focusEventId={focusEventId} />
+          <TimelineTab
+            items={detail.events}
+            runs={runs}
+            focusEventId={focusEventId}
+            sessionId={detail.summary.id}
+          />
         )}
         {current === 'insights' && (
           <Suspense

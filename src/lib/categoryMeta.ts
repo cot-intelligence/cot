@@ -27,6 +27,7 @@ export const CATEGORY_META: Record<string, CategoryMeta> = {
   permission: { label: 'Permission', color: 'text-vermilion', dot: 'bg-vermilion' },
   notification: { label: 'Notification', color: 'text-fg/50', dot: 'bg-fg/35' },
   lifecycle: { label: 'Lifecycle', color: 'text-fg/45', dot: 'bg-fg/30' },
+  meta: { label: 'Workflow / meta', color: 'text-fg/45', dot: 'bg-fg/30' },
   other: { label: 'Other', color: 'text-fg/45', dot: 'bg-fg/30' },
 };
 
@@ -73,6 +74,25 @@ export function formatTime(value: string | number | null | undefined): string {
     second: '2-digit',
     timeZone: userTimeZone(),
     timeZoneName: 'short',
+  });
+}
+
+/**
+ * Compact timestamp for dense lists: month-day + HH:MM, no seconds, year, or
+ * timezone. Keeps rows narrow; pair with `formatDateTime` in a `title` tooltip
+ * for the full value.
+ */
+export function formatClock(value: string | number | null | undefined): string {
+  const iso = toTimestampString(value);
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString([], {
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: userTimeZone(),
   });
 }
 

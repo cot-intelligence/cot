@@ -19,9 +19,11 @@ interface TimelineTabProps {
   runs: SubagentRun[];
   /** Event to select and scroll to on arrival (e.g. from a search result). */
   focusEventId?: number;
+  /** Session id, for lazy-loading a selected event's full detail. */
+  sessionId: string;
 }
 
-export function TimelineTab({ items, runs, focusEventId }: TimelineTabProps) {
+export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTabProps) {
   const [filter, setFilter] = useState('all');
   const [timeSort, setTimeSort] = useState<TimeSort>('desc');
   // null lets the effect below pick the first row in the current sort order.
@@ -141,6 +143,7 @@ export function TimelineTab({ items, runs, focusEventId }: TimelineTabProps) {
         <div className="scroll-thin max-h-[32rem] overflow-y-auto rounded-lg bg-surface p-4 shadow-soft sm:p-5">
           <EventDetailPanel
             item={selected}
+            sessionId={sessionId}
             onViewInAll={filter !== 'all' ? () => setFilter('all') : undefined}
             onJump={(id) => {
               setFilter('all');

@@ -18,6 +18,7 @@ export type EventCategory =
   | 'permission'
   | 'notification'
   | 'lifecycle'
+  | 'meta'
   | 'other';
 
 export interface SessionSummary {
@@ -65,6 +66,8 @@ export interface TimelineItem {
   end_ts: string | null;
   ongoing?: boolean;
   payload?: string | null;
+  /** True when `detail` is a preview; fetch the full body via getEventDetail. */
+  detail_truncated?: boolean;
   /** Set on structured prompt events where the agent asked the user. */
   is_question?: boolean;
   /** Whether a following answer event completed this prompt. */
@@ -442,6 +445,18 @@ export async function getSessions(filters: SessionFilters = {}): Promise<Session
 
 export async function getSessionDetail(id: string): Promise<SessionDetail> {
   return json<SessionDetail>(await fetch(`/v1/sessions/${id}`));
+}
+
+export interface EventDetail {
+  id: number;
+  detail: string | null;
+  attachments: Attachment[] | null;
+}
+
+/** Full detail body for one event, fetched on demand when its list entry was
+ * truncated (keeps the session list payload small). */
+export async function getEventDetail(sessionId: string, eventId: number): Promise<EventDetail> {
+  return json<EventDetail>(await fetch(`/v1/sessions/${sessionId}/events/${eventId}`));
 }
 
 export async function setSessionArchived(id: string, archived: boolean): Promise<void> {
