@@ -1,4 +1,4 @@
-import type { SessionSummary } from '../../../lib/api';
+import type { SessionLink, SessionLinks, SessionSummary } from '../../../lib/api';
 import { formatDuration, formatRelative } from '../../../lib/categoryMeta';
 import { formatCost } from '../../../lib/format';
 import { AgentMark } from '../../ui/AgentMark';
@@ -7,6 +7,7 @@ import { useCopy } from '../../ui/useCopy';
 
 interface SessionMetaProps {
   summary: SessionSummary;
+  links?: SessionLinks;
 }
 
 function DirectoryName({ cwd }: { cwd: string }) {
@@ -37,8 +38,9 @@ function DirectoryName({ cwd }: { cwd: string }) {
   );
 }
 
-export function SessionMeta({ summary }: SessionMetaProps) {
+export function SessionMeta({ summary, links }: SessionMetaProps) {
   const isActive = summary.status === 'active';
+  const parents = links?.parents ?? [];
 
   return (
     <header className="space-y-3">
@@ -85,6 +87,32 @@ export function SessionMeta({ summary }: SessionMetaProps) {
           </>
         )}
       </p>
+
+      {parents.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 font-mono text-[0.58rem] uppercase tracking-widest text-fg/35">
+          {parents.map((link) => (
+            <SessionLinkPill
+              key={`parent-${link.session_id}`}
+              link={link}
+              label="Approval review for"
+            />
+          ))}
+        </div>
+      )}
     </header>
+  );
+}
+
+function SessionLinkPill({ link, label }: { link: SessionLink; label?: string }) {
+  return (
+    <a
+      href={`#/session/${encodeURIComponent(link.session_id)}`}
+      title={link.title || link.session_id}
+      className="inline-flex min-w-0 items-center gap-1 rounded border border-cobalt/25 bg-cobalt/[0.04] px-1.5 py-0.5 text-cobalt transition-colors hover:border-cobalt/45 hover:bg-cobalt/[0.08]"
+    >
+      {label && <span className="text-fg/35">{label}</span>}
+      <span className="max-w-48 truncate">{link.title || link.session_id.slice(0, 8)}</span>
+      <span className="text-cobalt/45">{link.event_count} events</span>
+    </a>
   );
 }

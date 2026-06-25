@@ -1,25 +1,26 @@
 import { useState } from 'react';
 import type { TimelineItem } from '../../../lib/api';
 import { formatDateTime, formatDuration } from '../../../lib/categoryMeta';
-import { actionsInRun, runsOverlap, type SubagentRun } from '../../../lib/sessionView';
+import { eventsInRun, runsOverlap, type SubagentRun } from '../../../lib/sessionView';
 import { Icon } from '../../ui/icons';
 import { EventList } from './EventList';
 
 interface SubagentNestedListProps {
-  /** Action universe to nest (typically the unmerged session events). */
+  /** Event universe to nest (typically the unmerged session events). */
   items: TimelineItem[];
   runs: SubagentRun[];
-  selectedId: number | null;
+  selectedKey: string | null;
+  sessionId: string;
   onSelect: (item: TimelineItem) => void;
 }
 
 /**
- * Subagent runs as collapsible groups, each nesting the actions captured during
- * its window. Windows of parallel subagents overlap, so a shared action can
+ * Subagent runs as collapsible groups, each nesting the events captured during
+ * its window. Windows of parallel subagents overlap, so a shared event can
  * appear under more than one run — the hook data can't attribute it to a single
  * subagent.
  */
-export function SubagentNestedList({ items, runs, selectedId, onSelect }: SubagentNestedListProps) {
+export function SubagentNestedList({ items, runs, selectedKey, sessionId, onSelect }: SubagentNestedListProps) {
   const [collapsed, setCollapsed] = useState<Set<number>>(() => new Set());
   const parallel = runsOverlap(runs);
 
@@ -34,13 +35,13 @@ export function SubagentNestedList({ items, runs, selectedId, onSelect }: Subage
     <div>
       {parallel && (
         <p className="border-b border-line/10 px-3.5 py-2 font-mono text-[0.58rem] leading-relaxed text-fg/40">
-          Subagents ran in parallel — overlapping windows mean a shared action may appear under
+          Subagents ran in parallel — overlapping windows mean a shared event may appear under
           more than one.
         </p>
       )}
       <ul className="divide-y divide-line/10">
         {runs.map((run) => {
-          const actions = actionsInRun(items, run);
+          const events = eventsInRun(items, run);
           const open = !collapsed.has(run.item.id);
           return (
             <li key={run.item.id}>
@@ -57,7 +58,7 @@ export function SubagentNestedList({ items, runs, selectedId, onSelect }: Subage
                   {run.label}
                 </span>
                 <span className="shrink-0 font-mono text-[0.58rem] tabular-nums text-fg/45">
-                  {actions.length} action{actions.length === 1 ? '' : 's'}
+                  {events.length} event{events.length === 1 ? '' : 's'}
                 </span>
                 {run.durationMs != null && run.durationMs > 0 && (
                   <span className="shrink-0 font-mono text-[0.58rem] tabular-nums text-fg/35">
@@ -70,11 +71,11 @@ export function SubagentNestedList({ items, runs, selectedId, onSelect }: Subage
               </button>
               {open && (
                 <div className="border-l-2 border-cobalt/20 pl-1">
-                  {actions.length ? (
-                    <EventList items={actions} selectedId={selectedId} onSelect={onSelect} />
+                  {events.length ? (
+                    <EventList items={events} selectedKey={selectedKey} sessionId={sessionId} onSelect={onSelect} />
                   ) : (
                     <p className="px-3.5 py-3 font-mono text-[0.62rem] text-fg/35">
-                      No actions captured during this run.
+                      No events captured during this run.
                     </p>
                   )}
                 </div>

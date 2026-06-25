@@ -136,8 +136,8 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
   const slot1: 'source' | 'project' = groupBy === 'source' ? 'project' : 'source';
 
   return (
-    <div className="border border-fg/15 bg-bg">
-      <div className="flex flex-wrap items-center gap-2 border-b border-fg/15 p-3">
+    <div className="border border-line/10 bg-bg">
+      <div className="flex flex-wrap items-center gap-2 border-b border-line/10 p-3">
         <input
           type="search"
           placeholder="Search id or path…"
@@ -213,7 +213,7 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
                   tabIndex={0}
                   onClick={() => toggleGroup(g.key)}
                   onKeyDown={(e) => activateOnKey(e, () => toggleGroup(g.key))}
-                  className="flex cursor-pointer items-center gap-2.5 border-b border-fg/15 bg-surface/40 px-3 py-2.5 transition-colors hover:bg-surface focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-vermilion">
+                  className="flex cursor-pointer items-center gap-2.5 border-b border-line/10 bg-surface/40 px-3 py-2.5 transition-colors hover:bg-surface focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-vermilion">
                   <Icon
                     name={expanded ? 'chevron-down' : 'chevron-right'}
                     className="h-4 w-4 shrink-0 text-fg/40"

@@ -14,6 +14,7 @@ export interface ParsedDetail {
   url?: string;
   input?: unknown;
   output?: unknown;
+  agentResponse?: string;
   text?: string;
   raw: string;
 }
@@ -43,6 +44,22 @@ function collectEdits(o: Record<string, unknown>, input: Record<string, unknown>
     push(input.old_string ?? o.old_string, input.new_string ?? o.new_string);
   }
   return chunks;
+}
+
+function contentBlockText(value: unknown): string | undefined {
+  if (typeof value === 'string' && value.trim()) return value;
+  if (!value || typeof value !== 'object') return undefined;
+  const o = value as Record<string, unknown>;
+  const content = o.content;
+  if (!Array.isArray(content)) return undefined;
+  const parts = content
+    .map((block) => {
+      if (!block || typeof block !== 'object') return '';
+      const b = block as Record<string, unknown>;
+      return typeof b.text === 'string' ? b.text : '';
+    })
+    .filter((text) => text.trim());
+  return parts.length ? parts.join('\n\n') : undefined;
 }
 
 /** Robustly pull human-meaningful fields out of an event's stored detail blob. */
@@ -78,6 +95,13 @@ export function parseDetail(item: TimelineItem): ParsedDetail {
     (typeof o.url === 'string' && o.url) ||
     undefined;
 
+  const agentResponse =
+    (typeof o.last_assistant_message === 'string' && o.last_assistant_message.trim()
+      ? o.last_assistant_message
+      : undefined) ||
+    contentBlockText(o.response) ||
+    contentBlockText(o.tool_response) ||
+    contentBlockText(o.output);
   const output = o.response ?? o.result ?? o.output ?? o.tool_response ?? o.tool_output;
   const inputVal = o.input ?? o.arguments ?? o.tool_input;
 
@@ -88,6 +112,7 @@ export function parseDetail(item: TimelineItem): ParsedDetail {
     url: url || undefined,
     input: inputVal,
     output,
+    agentResponse,
     raw,
   };
 }
@@ -157,6 +182,14 @@ const ACTION_CATEGORIES = new Set([
   'memory',
 ]);
 
+const SUBAGENT_CONTENT_CATEGORIES = new Set([
+  ...ACTION_CATEGORIES,
+  'response',
+  'thought',
+  'plan',
+  'question',
+]);
+
 export type AgentLane = 'main' | 'subagent';
 
 /** A subagent's execution window plus display metadata. */
@@ -214,10 +247,27 @@ export function itemLane(item: TimelineItem, runs: SubagentRun[]): AgentLane {
   return runs.some((r) => inWindow(ts, r.start, r.end)) ? 'subagent' : 'main';
 }
 
+/** Session that owns an event row (parent session or an inlined review session). */
+export function eventSessionId(item: TimelineItem, parentSessionId: string): string {
+  return item.event_session_id ?? parentSessionId;
+}
+
+/** Stable key for selection/scrolling when parent and review sessions share event ids. */
+export function eventKey(item: TimelineItem, parentSessionId: string): string {
+  return `${eventSessionId(item, parentSessionId)}:${item.id}`;
+}
+
 /** Action events whose timestamp falls inside a single run's window. */
 export function actionsInRun(items: TimelineItem[], run: SubagentRun): TimelineItem[] {
   return items.filter(
     (it) => ACTION_CATEGORIES.has(it.category) && inWindow(eventTimestamp(it), run.start, run.end),
+  );
+}
+
+/** Events worth showing inside a subagent group. */
+export function eventsInRun(items: TimelineItem[], run: SubagentRun): TimelineItem[] {
+  return items.filter(
+    (it) => SUBAGENT_CONTENT_CATEGORIES.has(it.category) && inWindow(eventTimestamp(it), run.start, run.end),
   );
 }
 

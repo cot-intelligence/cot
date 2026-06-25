@@ -1,13 +1,14 @@
 import { useEffect, useRef } from 'react';
 import type { TimelineItem } from '../../../lib/api';
 import { formatClock, formatDateTime, formatDuration, getCategoryMeta } from '../../../lib/categoryMeta';
-import { itemLane, type SubagentRun } from '../../../lib/sessionView';
+import { itemLane, eventKey, type SubagentRun } from '../../../lib/sessionView';
 import { Icon, type IconName } from '../../ui/icons';
 import { AttachmentBadge } from './AttachmentTags';
 
 interface EventListProps {
   items: TimelineItem[];
-  selectedId: number | null;
+  selectedKey: string | null;
+  sessionId: string;
   onSelect: (item: TimelineItem) => void;
   /** Subagent run windows; used to tag rows that ran during a subagent. */
   runs?: SubagentRun[];
@@ -19,7 +20,7 @@ interface EventListProps {
   scrollKey?: string | number;
 }
 
-export function EventList({ items, selectedId, onSelect, runs, scrollKey }: EventListProps) {
+export function EventList({ items, selectedKey, sessionId, onSelect, runs, scrollKey }: EventListProps) {
   const selectedRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
@@ -30,14 +31,15 @@ export function EventList({ items, selectedId, onSelect, runs, scrollKey }: Even
     <ul className="divide-y divide-line/10">
       {items.map((item) => {
         const meta = getCategoryMeta(item.category);
-        const active = item.id === selectedId;
+        const key = eventKey(item, sessionId);
+        const active = key === selectedKey;
         const isSubagent = runs ? itemLane(item, runs) === 'subagent' : false;
         const showTarget = item.category !== 'question' && Boolean(item.target);
         return (
           // content-visibility lets the browser skip rendering off-screen rows
           // (lightweight virtualization for long sessions); contain-intrinsic-size
           // reserves an estimated height so the scrollbar stays stable.
-          <li key={item.id} className="[content-visibility:auto] [contain-intrinsic-size:auto_64px]">
+          <li key={key} className="[content-visibility:auto] [contain-intrinsic-size:auto_64px]">
             <button
               type="button"
               ref={active ? selectedRef : undefined}

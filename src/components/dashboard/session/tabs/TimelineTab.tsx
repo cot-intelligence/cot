@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TimelineItem } from '../../../../lib/api';
 import { formatClock, formatDateTime, getCategoryMeta } from '../../../../lib/categoryMeta';
 import {
+  eventKey,
   sortEventsByTime,
   type SubagentRun,
   type TimeSort,
@@ -23,7 +24,9 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
   const [hiddenModels, setHiddenModels] = useState<Set<string>>(new Set());
   const [timeSort, setTimeSort] = useState<TimeSort>('asc');
   const [expansionRequest, setExpansionRequest] = useState<ExpansionRequest>({ open: false, nonce: 0 });
-  const [activeId, setActiveId] = useState<number | null>(focusEventId ?? null);
+  const [activeKey, setActiveKey] = useState<string | null>(
+    focusEventId != null ? `${sessionId}:${focusEventId}` : null,
+  );
   const chatRef = useRef<ChatTimelineHandle>(null);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const sidebarRaf = useRef(0);
@@ -31,10 +34,11 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
   useEffect(() => {
     if (focusEventId != null) {
       setHidden(new Set());
-      setActiveId(focusEventId);
-      requestAnimationFrame(() => chatRef.current?.scrollToAndExpand(focusEventId));
+      const key = `${sessionId}:${focusEventId}`;
+      setActiveKey(key);
+      requestAnimationFrame(() => chatRef.current?.scrollToAndExpand(key));
     }
-  }, [focusEventId]);
+  }, [focusEventId, sessionId]);
 
   // Build per-category counts from the actual data
   const categories = useMemo(() => {
@@ -72,10 +76,10 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
 
   // Auto-select first if current is gone
   useEffect(() => {
-    if (!sorted.some((it) => it.id === activeId)) {
-      setActiveId(sorted[0]?.id ?? null);
+    if (!sorted.some((it) => eventKey(it, sessionId) === activeKey)) {
+      setActiveKey(sorted[0] ? eventKey(sorted[0], sessionId) : null);
     }
-  }, [sorted, activeId]);
+  }, [sorted, activeKey, sessionId]);
 
   const toggleFilter = useCallback((key: string) => {
     setHidden((prev) => {
@@ -109,26 +113,27 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
   }, []);
 
   // Card click in chat body → highlight in sidebar
-  const onCardClick = useCallback((id: number) => {
-    setActiveId(id);
+  const onCardClick = useCallback((key: string) => {
+    setActiveKey(key);
   }, []);
 
   // Sidebar click → scroll chat + expand
   const onSidebarSelect = useCallback((item: TimelineItem) => {
-    setActiveId(item.id);
-    chatRef.current?.scrollToAndExpand(item.id);
-  }, []);
+    const key = eventKey(item, sessionId);
+    setActiveKey(key);
+    chatRef.current?.scrollToAndExpand(key);
+  }, [sessionId]);
 
   // Smooth sidebar auto-scroll — debounced with rAF to prevent jumpiness
   useEffect(() => {
-    if (activeId == null || !sidebarRef.current) return;
+    if (activeKey == null || !sidebarRef.current) return;
     cancelAnimationFrame(sidebarRaf.current);
     sidebarRaf.current = requestAnimationFrame(() => {
-      const el = sidebarRef.current?.querySelector(`[data-sidebar-id="${activeId}"]`);
+      const el = sidebarRef.current?.querySelector(`[data-sidebar-key="${CSS.escape(activeKey)}"]`);
       el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     });
     return () => cancelAnimationFrame(sidebarRaf.current);
-  }, [activeId]);
+  }, [activeKey]);
 
   // Subagent nested mode: only when subagent is the sole visible category
   const hasSubagents = categories.some((c) => c.cat === 'subagent');
@@ -144,26 +149,28 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
           <span className="font-mono text-[0.58rem] tabular-nums text-fg/35">
             {sorted.length}/{items.length} events
           </span>
-          <div className="scroll-thin ml-auto flex min-w-0 items-center gap-1.5 overflow-x-auto">
+          <div className="ml-auto flex min-w-0 items-center gap-1.5">
             {/* Model pills */}
-            {models.map((m) => {
-              const on = !hiddenModels.has(m.model);
-              return (
-                <button
-                  key={m.model}
-                  type="button"
-                  onClick={() => toggleModel(m.model)}
-                  className={`rounded-full px-2 py-0.5 font-mono text-[0.55rem] tabular-nums transition-colors ${
-                    on
-                      ? 'bg-vermilion/10 text-vermilion'
-                      : 'bg-fg/5 text-fg/25 line-through decoration-fg/15'
-                  }`}
-                  title={m.model}
-                >
-                  {m.label}
-                </button>
-              );
-            })}
+            <div className="scroll-thin flex min-w-0 items-center gap-1.5 overflow-x-auto">
+              {models.map((m) => {
+                const on = !hiddenModels.has(m.model);
+                return (
+                  <button
+                    key={m.model}
+                    type="button"
+                    onClick={() => toggleModel(m.model)}
+                    className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[0.55rem] tabular-nums transition-colors ${
+                      on
+                        ? 'bg-vermilion/10 text-vermilion'
+                        : 'bg-fg/5 text-fg/25 line-through decoration-fg/15'
+                    }`}
+                    title={m.model}
+                  >
+                    {m.label}
+                  </button>
+                );
+              })}
+            </div>
             <FilterDropdown
               categories={categories}
               models={models}
@@ -210,13 +217,15 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
               <SubagentNestedList
                 items={items}
                 runs={runs}
-                selectedId={activeId}
+                selectedKey={activeKey}
+                sessionId={sessionId}
                 onSelect={onSidebarSelect}
               />
             ) : (
               <SidebarList
                 items={sorted}
-                activeId={activeId}
+                activeKey={activeKey}
+                sessionId={sessionId}
                 onSelect={onSidebarSelect}
               />
             )}
@@ -256,7 +265,7 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
             {hidden.size > 0 && ` · ${items.length - sorted.length} hidden`}
           </span>
           <span className="font-mono text-[0.55rem] tabular-nums text-fg/25">
-            {activeId != null && `#${activeId}`}
+            {activeKey != null && `#${activeKey.split(':').pop()}`}
           </span>
         </div>
       </div>
@@ -268,23 +277,26 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
 
 function SidebarList({
   items,
-  activeId,
+  activeKey,
+  sessionId,
   onSelect,
 }: {
   items: TimelineItem[];
-  activeId: number | null;
+  activeKey: string | null;
+  sessionId: string;
   onSelect: (item: TimelineItem) => void;
 }) {
   return (
-    <ul className="divide-y divide-line/8">
+    <ul className="divide-y divide-line/10">
       {items.map((item) => {
         const meta = getCategoryMeta(item.category);
-        const active = item.id === activeId;
+        const key = eventKey(item, sessionId);
+        const active = key === activeKey;
         return (
-          <li key={item.id} className="[content-visibility:auto] [contain-intrinsic-size:auto_44px]">
+          <li key={key} className="[content-visibility:auto] [contain-intrinsic-size:auto_44px]">
             <button
               type="button"
-              data-sidebar-id={item.id}
+              data-sidebar-key={key}
               onClick={() => onSelect(item)}
               className={`flex w-full items-start gap-2 border-l-2 px-3 py-1.5 text-left transition-colors ${
                 active
@@ -297,6 +309,8 @@ function SidebarList({
                 <span className="flex items-center justify-between gap-1">
                   <span className={`truncate font-mono text-[0.5rem] font-bold uppercase tracking-widest ${meta.color}`}>
                     {meta.label}
+                    {item.inlined_approval_review ? ' · review' : ''}
+                    {item.inlined_reviewed_session ? ' · reviewed' : ''}
                   </span>
                   <span className="shrink-0 font-mono text-[0.48rem] tabular-nums text-fg/25" title={formatDateTime(item.start_ts || item.ts)}>
                     {formatClock(item.start_ts || item.ts)}

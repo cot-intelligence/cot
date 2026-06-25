@@ -1,12 +1,21 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { getEventDetail, type TimelineItem } from '../../../lib/api';
 import { formatClock, formatDateTime, formatDuration, getCategoryMeta } from '../../../lib/categoryMeta';
-import { actionsInRun, conversationMessage, isConversationCategory, parseDetail, type EditChunk, type SubagentRun } from '../../../lib/sessionView';
+import {
+  conversationMessage,
+  eventKey,
+  eventSessionId,
+  eventsInRun,
+  isConversationCategory,
+  parseDetail,
+  type EditChunk,
+  type SubagentRun,
+} from '../../../lib/sessionView';
 import { MarkdownContent } from '../../ui/MarkdownContent';
 import { AttachmentTags } from './AttachmentTags';
 
 export interface ChatTimelineHandle {
-  scrollToAndExpand: (id: number) => void;
+  scrollToAndExpand: (key: string) => void;
 }
 
 interface ChatTimelineProps {
@@ -14,7 +23,7 @@ interface ChatTimelineProps {
   runs: SubagentRun[];
   sessionId: string;
   expansionRequest: ExpansionRequest;
-  onCardClick?: (id: number) => void;
+  onCardClick?: (key: string) => void;
 }
 
 export interface ExpansionRequest {
@@ -24,26 +33,37 @@ export interface ExpansionRequest {
 
 type Segment =
   | { type: 'event'; item: TimelineItem }
-  | { type: 'subagent'; run: SubagentRun; children: TimelineItem[] };
+  | { type: 'subagent'; run: SubagentRun; item: TimelineItem; resultItem: TimelineItem; children: TimelineItem[] };
 
 export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
   function ChatTimeline({ items, runs, sessionId, expansionRequest, onCardClick }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
-    const cardRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+    const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
     // Track which cards are force-expanded (via sidebar click)
-    const [forceExpanded, setForceExpanded] = useState<Set<number>>(new Set());
+    const [forceExpanded, setForceExpanded] = useState<Set<string>>(new Set());
+    const keyFor = useCallback((item: TimelineItem) => eventKey(item, sessionId), [sessionId]);
 
     // Build nested segments: group events that fall inside a subagent run
     const segments = useMemo(() => {
       if (!runs.length) return items.map((item): Segment => ({ type: 'event', item }));
 
-      const childIds = new Set<number>();
+      const childIds = new Set<string>();
       const runChildren = new Map<number, TimelineItem[]>();
+      const runResultItems = new Map<number, TimelineItem>();
       for (const run of runs) {
-        const children = actionsInRun(items, run);
+        const children = eventsInRun(items, run);
         runChildren.set(run.item.id, children);
-        for (const c of children) childIds.add(c.id);
+        for (const c of children) childIds.add(keyFor(c));
+
+        const resultItem = items.find(
+          (it) =>
+            it.category === 'subagent' &&
+            it.id !== run.item.id &&
+            it.target === run.item.target &&
+            it.phase === 'end',
+        );
+        if (resultItem) runResultItems.set(run.item.id, resultItem);
       }
 
       const result: Segment[] = [];
@@ -55,25 +75,31 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
           const run = runs.find((r) => r.item.id === item.id);
           if (run && !runInserted.has(run.item.id)) {
             runInserted.add(run.item.id);
-            result.push({ type: 'subagent', run, children: runChildren.get(run.item.id) ?? [] });
+            result.push({
+              type: 'subagent',
+              run,
+              item,
+              resultItem: runResultItems.get(run.item.id) ?? item,
+              children: runChildren.get(run.item.id) ?? [],
+            });
           }
           continue;
         }
         // Skip events claimed by a subagent group
-        if (childIds.has(item.id)) continue;
+        if (childIds.has(keyFor(item))) continue;
         result.push({ type: 'event', item });
       }
       return result;
-    }, [items, runs]);
+    }, [items, runs, keyFor]);
 
     useImperativeHandle(ref, () => ({
-      scrollToAndExpand(id: number) {
+      scrollToAndExpand(key: string) {
         setForceExpanded((prev) => {
           const next = new Set(prev);
-          next.add(id);
+          next.add(key);
           return next;
         });
-        const el = cardRefs.current.get(id);
+        const el = cardRefs.current.get(key);
         if (!el || !containerRef.current) return;
         el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       },
@@ -83,38 +109,42 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
       if (!expansionRequest.open) setForceExpanded(new Set());
     }, [expansionRequest]);
 
-    const setCardRef = useCallback((id: number, el: HTMLDivElement | null) => {
-      if (el) cardRefs.current.set(id, el);
-      else cardRefs.current.delete(id);
+    const setCardRef = useCallback((key: string, el: HTMLDivElement | null) => {
+      if (el) cardRefs.current.set(key, el);
+      else cardRefs.current.delete(key);
     }, []);
 
     const renderEvent = (item: TimelineItem) => {
+      const itemKey = keyFor(item);
+      const itemSessionId = eventSessionId(item, sessionId);
       const isConvo = isConversationCategory(item.category);
       return isConvo ? (
         <ConversationCard
-          key={item.id}
+          key={itemKey}
           item={item}
-          sessionId={sessionId}
-          ref={(el) => setCardRef(item.id, el)}
+          sessionId={itemSessionId}
+          eventKey={itemKey}
+          ref={(el) => setCardRef(itemKey, el)}
         />
       ) : (
         <ActionCard
-          key={item.id}
+          key={itemKey}
           item={item}
-          sessionId={sessionId}
-          forceOpen={forceExpanded.has(item.id)}
+          sessionId={itemSessionId}
+          eventKey={itemKey}
+          forceOpen={forceExpanded.has(itemKey)}
           expansionRequest={expansionRequest}
-          ref={(el) => setCardRef(item.id, el)}
+          ref={(el) => setCardRef(itemKey, el)}
         />
       );
     };
 
     const handleClick = useCallback((e: React.MouseEvent) => {
       if (!onCardClick) return;
-      const target = (e.target as HTMLElement).closest('[data-event-id]');
+      const target = (e.target as HTMLElement).closest('[data-event-key]');
       if (!target) return;
-      const id = Number(target.getAttribute('data-event-id'));
-      if (!Number.isNaN(id)) onCardClick(id);
+      const key = target.getAttribute('data-event-key');
+      if (key) onCardClick(key);
     }, [onCardClick]);
 
     return (
@@ -127,9 +157,20 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
               <SubagentGroup
                 key={seg.run.item.id}
                 run={seg.run}
+                resultItem={seg.resultItem}
                 sessionId={sessionId}
                 expansionRequest={expansionRequest}
-                ref={(el) => setCardRef(seg.run.item.id, el)}
+                forceOpen={
+                  forceExpanded.has(keyFor(seg.run.item)) ||
+                  forceExpanded.has(keyFor(seg.item)) ||
+                  forceExpanded.has(keyFor(seg.resultItem)) ||
+                  seg.children.some((child) => forceExpanded.has(keyFor(child)))
+                }
+                ref={(el) => {
+                  setCardRef(keyFor(seg.run.item), el);
+                  setCardRef(keyFor(seg.item), el);
+                  setCardRef(keyFor(seg.resultItem), el);
+                }}
               >
                 {seg.children.map(renderEvent)}
               </SubagentGroup>
@@ -150,15 +191,18 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
 
 const SubagentGroup = forwardRef<HTMLDivElement, {
   run: SubagentRun;
+  resultItem: TimelineItem;
   sessionId: string;
   expansionRequest: ExpansionRequest;
+  forceOpen?: boolean;
   children: React.ReactNode;
 }>(
-  function SubagentGroup({ run, expansionRequest, children }, ref) {
-    const [open, setOpen] = useState(false);
+  function SubagentGroup({ run, resultItem, sessionId, expansionRequest, forceOpen, children }, ref) {
+    const [expanded, setExpanded] = useState(false);
+    const open = expanded || forceOpen;
 
     useEffect(() => {
-      setOpen(expansionRequest.open);
+      setExpanded(expansionRequest.open);
     }, [expansionRequest]);
 
     return (
@@ -170,7 +214,7 @@ const SubagentGroup = forwardRef<HTMLDivElement, {
         {/* Header row — same height as ActionCard rows */}
         <button
           type="button"
-          onClick={() => setOpen((v) => !v)}
+          onClick={() => setExpanded((v) => !v)}
           className="flex w-full items-center gap-2 rounded-lg border border-cobalt/20 bg-cobalt/[0.03] px-3.5 py-2 text-left transition-colors hover:bg-cobalt/[0.06]"
         >
           <span className={`shrink-0 text-[0.55rem] text-cobalt/50 transition-transform ${open ? 'rotate-90' : ''}`}>
@@ -206,7 +250,8 @@ const SubagentGroup = forwardRef<HTMLDivElement, {
         {/* Nested children — indented with left accent */}
         {open && (
           <div className="ml-4 border-l-2 border-cobalt/15 pl-3 pt-1">
-            <div className="space-y-1">
+            <div className="space-y-1.5">
+              <SubagentResultCard item={resultItem} sessionId={sessionId} />
               {children}
             </div>
           </div>
@@ -216,20 +261,63 @@ const SubagentGroup = forwardRef<HTMLDivElement, {
   },
 );
 
+function SubagentResultCard({ item, sessionId }: { item: TimelineItem; sessionId: string }) {
+  const [full, setFull] = useState<{ detail: string | null; attachments: TimelineItem['attachments'] } | null>(null);
+  const needsFull = Boolean(item.detail_truncated && full === null);
+
+  useEffect(() => {
+    if (!needsFull) return;
+    let cancelled = false;
+    getEventDetail(sessionId, item.id)
+      .then((res) => { if (!cancelled) setFull({ detail: res.detail, attachments: res.attachments }); })
+      .catch(() => { if (!cancelled) setFull({ detail: item.detail, attachments: item.attachments }); });
+    return () => { cancelled = true; };
+  }, [needsFull, sessionId, item.id, item.detail, item.attachments]);
+
+  const resolved = full ? { ...item, detail: full.detail, attachments: full.attachments ?? item.attachments } : item;
+  const d = parseDetail(resolved);
+  const message = d.agentResponse?.trim();
+
+  if (!message && needsFull) {
+    return (
+      <p className="rounded-md bg-panel px-3 py-2 font-mono text-[0.62rem] uppercase tracking-widest text-fg/35">
+        Loading subagent response...
+      </p>
+    );
+  }
+  if (!message) return null;
+
+  return (
+    <ConversationCard
+      item={{
+        ...resolved,
+        category: 'response',
+        title: 'Agent response',
+        detail: message,
+        detail_truncated: false,
+      }}
+      sessionId={sessionId}
+      eventKey={eventKey(item, sessionId)}
+    />
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Conversation cards — always expanded, chat-bubble style             */
 /* ------------------------------------------------------------------ */
 
-const ConversationCard = forwardRef<HTMLDivElement, { item: TimelineItem; sessionId: string }>(
-  function ConversationCard({ item, sessionId }, ref) {
+const ConversationCard = forwardRef<HTMLDivElement, { item: TimelineItem; sessionId: string; eventKey: string }>(
+  function ConversationCard({ item, sessionId, eventKey: itemEventKey }, ref) {
     const meta = getCategoryMeta(item.category);
     const isPrompt = item.category === 'prompt' || item.category === 'question';
 
     return (
       <div
         ref={ref}
-        data-event-id={item.id}
+        data-event-key={itemEventKey}
         className={`scroll-mt-4 rounded-lg px-4 py-3 ${
+          item.inlined_approval_review ? 'border-l-2 border-cobalt/25 ' : ''
+        }${item.inlined_reviewed_session ? 'border-l-2 border-fg/15 ' : ''}${
           isPrompt
             ? 'border border-fg/10 bg-surface'
             : 'bg-transparent'
@@ -241,6 +329,16 @@ const ConversationCard = forwardRef<HTMLDivElement, { item: TimelineItem; sessio
           <span className={`font-mono text-[0.58rem] font-bold uppercase tracking-widest ${meta.color}`}>
             {isPrompt ? 'User' : item.category === 'thought' ? 'Thinking' : 'Agent'}
           </span>
+          {item.inlined_approval_review && (
+            <span className="rounded bg-cobalt/10 px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest text-cobalt">
+              Review
+            </span>
+          )}
+          {item.inlined_reviewed_session && (
+            <span className="rounded bg-fg/8 px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest text-fg/45">
+              Reviewed session
+            </span>
+          )}
           <span
             className="font-mono text-[0.5rem] tabular-nums text-fg/30"
             title={formatDateTime(item.start_ts || item.ts)}
@@ -282,10 +380,11 @@ const ConversationCard = forwardRef<HTMLDivElement, { item: TimelineItem; sessio
 const ActionCard = forwardRef<HTMLDivElement, {
   item: TimelineItem;
   sessionId: string;
+  eventKey: string;
   forceOpen?: boolean;
   expansionRequest: ExpansionRequest;
 }>(
-  function ActionCard({ item, sessionId, forceOpen, expansionRequest }, ref) {
+  function ActionCard({ item, sessionId, eventKey: itemEventKey, forceOpen, expansionRequest }, ref) {
     const [expanded, setExpanded] = useState(false);
     const open = expanded || forceOpen;
     const meta = getCategoryMeta(item.category);
@@ -299,8 +398,10 @@ const ActionCard = forwardRef<HTMLDivElement, {
     return (
       <div
         ref={ref}
-        data-event-id={item.id}
-        className="group scroll-mt-4 rounded-lg border border-line/6 transition-colors hover:border-line/15"
+        data-event-key={itemEventKey}
+        className={`group scroll-mt-4 rounded-lg border border-line/5 transition-colors hover:border-line/15 ${
+          item.inlined_approval_review ? 'border-l-2 border-l-cobalt/25' : ''
+        }${item.inlined_reviewed_session ? ' border-l-2 border-l-fg/15' : ''}`}
       >
         <button
           type="button"
@@ -311,6 +412,16 @@ const ActionCard = forwardRef<HTMLDivElement, {
           <span className={`shrink-0 font-mono text-[0.55rem] font-bold uppercase tracking-widest ${meta.color}`}>
             {meta.label}
           </span>
+          {item.inlined_approval_review && (
+            <span className="shrink-0 rounded bg-cobalt/10 px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest text-cobalt">
+              Review
+            </span>
+          )}
+          {item.inlined_reviewed_session && (
+            <span className="shrink-0 rounded bg-fg/8 px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest text-fg/45">
+              Reviewed session
+            </span>
+          )}
           <span className="min-w-0 flex-1 truncate font-mono text-[0.78rem] font-bold text-fg/80">
             {item.title}
           </span>
@@ -346,7 +457,7 @@ const ActionCard = forwardRef<HTMLDivElement, {
         </button>
 
         {open && (
-          <div className="border-t border-line/8 px-3.5 py-3">
+          <div className="border-t border-line/10 px-3.5 py-3">
             {showTarget && (
               <p className="mb-2 break-all font-mono text-xs text-fg/45 sm:hidden">{item.target}</p>
             )}

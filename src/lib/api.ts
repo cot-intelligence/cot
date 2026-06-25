@@ -80,6 +80,10 @@ export interface TimelineItem {
   questions?: QuestionPart[];
   /** Cursor composer mode when not the default "agent" (e.g. "plan"). */
   composer_mode?: string;
+  /** When set, this event was inlined from a linked approval-review session. */
+  event_session_id?: string;
+  inlined_approval_review?: boolean;
+  inlined_reviewed_session?: boolean;
 }
 
 export interface QuestionPart {
@@ -127,8 +131,25 @@ export interface Components {
   response_count: number;
 }
 
+export interface SessionLink {
+  type: 'approval_review';
+  session_id: string;
+  source: AgentId;
+  status: string;
+  started_at: string;
+  last_activity: string | null;
+  event_count: number;
+  title: string | null;
+}
+
+export interface SessionLinks {
+  parents: SessionLink[];
+  children: SessionLink[];
+}
+
 export interface SessionDetail {
   summary: SessionSummary;
+  links: SessionLinks;
   components: Components;
   events: TimelineItem[];
   timeline: TimelineItem[];

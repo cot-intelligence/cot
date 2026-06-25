@@ -24,6 +24,8 @@ _write_lock = threading.Lock()
 
 _SESSION_END_HOOKS = {"Stop", "stop", "SessionEnd", "sessionEnd"}
 _SESSION_START_HOOKS = {"SessionStart", "sessionStart"}
+_APPROVAL_REVIEW_PREFIX = "The following is the Codex agent history"
+_APPROVAL_REVIEW_RE = re.compile(r"\bReviewed Codex session id:\s*([0-9a-fA-F-]{36})\b")
 
 
 def _clean_upload_wrapper_text(text: str | None) -> str:
@@ -37,6 +39,14 @@ def _clean_upload_wrapper_text(text: str | None) -> str:
     out = re.sub(r"<uploaded_documents>.*?</uploaded_documents>", "", out, flags=re.S).strip()
     out = re.sub(r"<image\b[^>]*>\s*</image>", "", out, flags=re.S).strip()
     return out
+
+
+def _approval_review_origin_from_text(text: str | None) -> str | None:
+    body = str(text or "").lstrip()
+    if not body.startswith(_APPROVAL_REVIEW_PREFIX):
+        return None
+    match = _APPROVAL_REVIEW_RE.search(body)
+    return match.group(1).lower() if match else None
 _CURSOR_GRANULAR_HOOKS = {
     "beforeShellExecution",
     "afterShellExecution",
@@ -1575,6 +1585,142 @@ def _category_counts(conn: sqlite3.Connection, session_id: str) -> dict[str, int
     return {r["category"]: r["n"] for r in rows}
 
 
+def _approval_review_origin(conn: sqlite3.Connection, session_id: str) -> str | None:
+    rows = conn.execute(
+        "SELECT detail FROM events"
+        " WHERE session_id=? AND category='prompt' AND detail LIKE ?"
+        " ORDER BY id ASC",
+        (session_id, f"{_APPROVAL_REVIEW_PREFIX}%"),
+    ).fetchall()
+    for row in rows:
+        origin = _approval_review_origin_from_text(row["detail"])
+        if origin and origin != session_id:
+            return origin
+    return None
+
+
+def _session_link_item(conn: sqlite3.Connection, session_id: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    if row is None:
+        return None
+    agg = conn.execute(
+        "SELECT COUNT(*) AS events, MAX(ts) AS last_ts"
+        " FROM events WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    return {
+        "type": "approval_review",
+        "session_id": row["id"],
+        "source": row["source"],
+        "status": _live_status(agg["last_ts"]),
+        "started_at": _format_ts(row["started_at"]) or str(row["started_at"] or ""),
+        "last_activity": _format_ts(agg["last_ts"]),
+        "event_count": agg["events"] or 0,
+        "title": _first_prompt(conn, row["id"]),
+    }
+
+
+def _session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[dict[str, Any]]]:
+    parents: list[dict[str, Any]] = []
+    origin = _approval_review_origin(conn, session_id)
+    if origin:
+        item = _session_link_item(conn, origin)
+        if item:
+            parents.append(item)
+
+    children: list[dict[str, Any]] = []
+    rows = conn.execute(
+        "SELECT session_id, detail, MIN(ts) AS first_ts FROM events"
+        " WHERE category='prompt' AND detail LIKE ?"
+        " GROUP BY session_id, detail"
+        " ORDER BY first_ts ASC",
+        (f"{_APPROVAL_REVIEW_PREFIX}%",),
+    ).fetchall()
+    seen: set[str] = set()
+    for row in rows:
+        review_session_id = row["session_id"]
+        if review_session_id == session_id or review_session_id in seen:
+            continue
+        if _approval_review_origin_from_text(row["detail"]) != session_id:
+            continue
+        item = _session_link_item(conn, review_session_id)
+        if item:
+            children.append(item)
+            seen.add(review_session_id)
+
+    return {"parents": parents, "children": children}
+
+
+def _is_approval_history_dump(detail: str | None) -> bool:
+    return str(detail or "").lstrip().startswith(_APPROVAL_REVIEW_PREFIX)
+
+
+def _fetch_inlined_session_events(
+    conn: sqlite3.Connection,
+    session_id: str,
+    *,
+    skip_history_dump: bool,
+    inline_kind: str,
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
+        (session_id,),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if skip_history_dump and row["category"] == "prompt" and _is_approval_history_dump(row["detail"]):
+            continue
+        item: dict[str, Any] = {
+            **_event_row(row),
+            "start_ts": _format_ts(row["ts"]),
+            "end_ts": _format_ts(row["ts"]),
+            "ongoing": False,
+            "event_session_id": session_id,
+        }
+        if inline_kind == "approval_review":
+            item["inlined_approval_review"] = True
+        elif inline_kind == "reviewed_session":
+            item["inlined_reviewed_session"] = True
+        out.append(item)
+    return out
+
+
+def _merge_approval_review_events(
+    conn: sqlite3.Connection,
+    events: list[dict[str, Any]],
+    links: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Flatten linked approval-review sessions into one timeline.
+
+    Parent (reviewed) sessions get the review session's events inlined.
+    Review sessions get the original work session's events inlined."""
+    children = links.get("children") or []
+    parents = links.get("parents") or []
+    if not children and not parents:
+        return events
+    merged = list(events)
+    for link in children:
+        merged.extend(
+            _fetch_inlined_session_events(
+                conn,
+                link["session_id"],
+                skip_history_dump=True,
+                inline_kind="approval_review",
+            )
+        )
+    for link in parents:
+        merged.extend(
+            _fetch_inlined_session_events(
+                conn,
+                link["session_id"],
+                skip_history_dump=False,
+                inline_kind="reviewed_session",
+            )
+        )
+    merged.sort(key=lambda e: (e.get("ts") or "", e.get("id") or 0))
+    return merged
+
+
 def _session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     agg = conn.execute(
         "SELECT COUNT(*) AS events,"
@@ -2699,31 +2845,34 @@ def get_session_detail(session_id: str) -> dict[str, Any] | None:
             " WHERE session_id=? ORDER BY ts ASC, id ASC",
             (session_id,),
         ).fetchall()
-
-    clarifications, annotations = _build_clarifications(ev_rows)
-    events = events_list(session_id)
-    tl = timeline(session_id)
-    for item in events:
-        extra = annotations.get(item["id"])
-        if extra:
-            item.update(extra)
-        if item.get("category") == "question":
-            item["questions"] = _parse_questions(item.get("detail"))
-        # Lazy detail: the list never renders the full body (only the selected
-        # event does, via /events/{id}), so ship a preview and flag the rest.
-        _trim_detail_inplace(item)
-    for item in tl:
-        extra = annotations.get(item["id"])
-        if extra:
-            item.update(extra)
-        if item.get("category") == "question":
-            item["questions"] = _parse_questions(item.get("detail"))
-        # The merged timeline is consumed only to derive subagent run windows;
-        # its detail bodies are never rendered, so drop them entirely.
-        item["detail"] = None
+        links = _session_links(conn, session_id)
+        clarifications, annotations = _build_clarifications(ev_rows)
+        events = events_list(session_id)
+        tl = timeline(session_id)
+        for item in events:
+            extra = annotations.get(item["id"])
+            if extra:
+                item.update(extra)
+            if item.get("category") == "question":
+                item["questions"] = _parse_questions(item.get("detail"))
+            _trim_detail_inplace(item)
+        events = _merge_approval_review_events(conn, events, links)
+        for item in events:
+            if item.get("inlined_approval_review") or item.get("inlined_reviewed_session"):
+                _trim_detail_inplace(item)
+        for item in tl:
+            extra = annotations.get(item["id"])
+            if extra:
+                item.update(extra)
+            if item.get("category") == "question":
+                item["questions"] = _parse_questions(item.get("detail"))
+            # The merged timeline is consumed only to derive subagent run windows;
+            # its detail bodies are never rendered, so drop them entirely.
+            item["detail"] = None
 
     return {
         "summary": summary,
+        "links": links,
         "components": session_components(session_id),
         "events": events,
         "timeline": tl,
