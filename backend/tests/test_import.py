@@ -272,6 +272,69 @@ def test_pricing_variants_normalize_to_same_rate():
     assert a == b and a is not None
 
 
+# --- Hook install merge ------------------------------------------------------
+
+def test_hook_command_uses_home():
+    assert bridge._hook_command("claude") == "$HOME/.cot/bin/cot hook claude"
+
+
+def test_merge_hooks_does_not_false_positive_on_gryph():
+    existing = {
+        "SessionStart": [{
+            "hooks": [{
+                "type": "command",
+                "command": "gryph _hook claude-code SessionStart",
+            }],
+        }],
+    }
+    template = bridge._hook_templates()["claude"]
+    merged = bridge._merge_hooks(existing, template, "claude")
+    cmds = [
+        h["command"]
+        for entry in merged["SessionStart"]
+        for h in entry.get("hooks", [])
+    ]
+    assert any("gryph _hook claude-code" in c for c in cmds)
+    assert "$HOME/.cot/bin/cot hook claude" in cmds
+
+
+def test_merge_hooks_normalizes_legacy_absolute_path():
+    existing = {
+        "Stop": [{
+            "hooks": [{
+                "type": "command",
+                "command": "/Users/user/.cot/bin/cot hook claude",
+            }],
+        }],
+    }
+    template = bridge._hook_templates()["claude"]
+    merged = bridge._merge_hooks(existing, template, "claude")
+    cmd = merged["Stop"][0]["hooks"][0]["command"]
+    assert cmd == "$HOME/.cot/bin/cot hook claude"
+
+
+def test_remove_hooks_preserves_gryph():
+    existing = {
+        "SessionStart": [
+            {
+                "hooks": [{
+                    "type": "command",
+                    "command": "gryph _hook claude-code SessionStart",
+                }],
+            },
+            {
+                "hooks": [{
+                    "type": "command",
+                    "command": "$HOME/.cot/bin/cot hook claude",
+                }],
+            },
+        ],
+    }
+    cleaned = bridge._remove_hooks(existing, "claude")
+    assert len(cleaned["SessionStart"]) == 1
+    assert "gryph" in cleaned["SessionStart"][0]["hooks"][0]["command"]
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

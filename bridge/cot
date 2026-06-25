@@ -1217,9 +1217,65 @@ _CONFIG_TARGETS = {
 
 
 def _hook_command(agent: str) -> str:
-    """Absolute path to the installed bridge, so hooks fire regardless of the
-    PATH the agent happens to run them with."""
-    return f"{BRIDGE_PATH} hook {agent}"
+    """Portable bridge path — agents expand ``$HOME`` when invoking hook commands."""
+    return f"$HOME/.cot/bin/cot hook {agent}"
+
+
+def _cot_hook_signature(agent: str) -> str:
+    """Stable substring for detecting cot hook wiring without false positives."""
+    return f".cot/bin/cot hook {agent}"
+
+
+def _hook_commands_in_entry(entry: dict) -> list[str]:
+    cmds: list[str] = []
+    if not isinstance(entry, dict):
+        return cmds
+    for hook in entry.get("hooks") or []:
+        if isinstance(hook, dict) and isinstance(hook.get("command"), str):
+            cmds.append(hook["command"])
+    if isinstance(entry.get("command"), str):
+        cmds.append(entry["command"])
+    return cmds
+
+
+def _entry_has_cot_hook(entry: dict, agent: str) -> bool:
+    sig = _cot_hook_signature(agent)
+    return any(sig in cmd for cmd in _hook_commands_in_entry(entry))
+
+
+def _entries_have_cot_hook(entries: list, agent: str) -> bool:
+    return any(_entry_has_cot_hook(entry, agent) for entry in entries if isinstance(entry, dict))
+
+
+def _normalize_cot_hooks(entries: list, agent: str) -> list:
+    """Rewrite any cot hook command to the canonical ``$HOME`` form."""
+    cmd = _hook_command(agent)
+    sig = _cot_hook_signature(agent)
+    out: list = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            out.append(entry)
+            continue
+        if not _entry_has_cot_hook(entry, agent):
+            out.append(entry)
+            continue
+        new_entry = dict(entry)
+        if "hooks" in new_entry:
+            new_hooks = []
+            for hook in new_entry.get("hooks") or []:
+                if not isinstance(hook, dict):
+                    new_hooks.append(hook)
+                    continue
+                hook_cmd = hook.get("command", "")
+                if isinstance(hook_cmd, str) and sig in hook_cmd:
+                    new_hooks.append({**hook, "command": cmd})
+                else:
+                    new_hooks.append(hook)
+            new_entry["hooks"] = new_hooks
+        elif isinstance(new_entry.get("command"), str) and sig in new_entry["command"]:
+            new_entry["command"] = cmd
+        out.append(new_entry)
+    return out
 
 
 def _claude_style_hooks(agent: str, events: list[tuple[str, bool]]) -> dict:
@@ -1365,7 +1421,6 @@ def _backup_config(agent: str, path: Path, action: str) -> dict | None:
 def _agent_hook_status(agent: str) -> dict:
     path, _ = _CONFIG_TARGETS[agent]
     expected = _template_events(_hook_templates()[agent])
-    marker = f"hook {agent}"
     config, err = _read_json_file(path)
     exists = path.exists()
     valid_json = err is None
@@ -1374,7 +1429,7 @@ def _agent_hook_status(agent: str) -> dict:
     if valid_json:
         for name in expected:
             entries = hooks.get(name)
-            if isinstance(entries, list) and marker in json.dumps(entries):
+            if isinstance(entries, list) and _entries_have_cot_hook(entries, agent):
                 installed_hooks.append(name)
     missing_hooks = [name for name in expected if name not in installed_hooks]
     latest = _latest_backup(agent)
@@ -1402,29 +1457,29 @@ def _agent_hook_status(agent: str) -> dict:
     }
 
 
-def _merge_hooks(existing: dict, template: dict, marker: str) -> dict:
+def _merge_hooks(existing: dict, template: dict, agent: str) -> dict:
     """Add cot's command for each event without disturbing the user's own hooks.
-    Idempotent: if cot is already wired into an event (matched by ``marker``),
-    that event is left untouched."""
+    Idempotent: if cot is already wired into an event, normalize its command;
+    otherwise append cot alongside any existing hooks."""
     merged = dict(existing) if isinstance(existing, dict) else {}
     for event, entries in template.items():
         current = merged.get(event)
         if not isinstance(current, list):
             current = []
-        if marker in json.dumps(current):
-            merged[event] = current
+        if _entries_have_cot_hook(current, agent):
+            merged[event] = _normalize_cot_hooks(current, agent)
         else:
             merged[event] = current + entries
     return merged
 
 
-def _remove_hooks(existing: dict, marker: str) -> dict:
+def _remove_hooks(existing: dict, agent: str) -> dict:
     """Remove only cot hook entries, preserving any user-managed hooks."""
     cleaned = dict(existing) if isinstance(existing, dict) else {}
     for event, entries in list(cleaned.items()):
         if not isinstance(entries, list):
             continue
-        kept = [entry for entry in entries if marker not in json.dumps(entry)]
+        kept = [entry for entry in entries if not _entry_has_cot_hook(entry, agent)]
         if kept:
             cleaned[event] = kept
         else:
@@ -1446,7 +1501,7 @@ def _install_agent(agent: str, action: str = "install") -> dict:
 
     existing = config.get("hooks") if isinstance(config.get("hooks"), dict) else {}
     next_config = dict(config)
-    next_config["hooks"] = _merge_hooks(existing, template, f"hook {agent}")
+    next_config["hooks"] = _merge_hooks(existing, template, agent)
     if cursor_style:
         next_config.setdefault("version", 1)
     changed = next_config != config or err not in (None, "missing")
@@ -1489,7 +1544,7 @@ def _uninstall_agent(agent: str, action: str = "uninstall") -> dict:
 
     existing = config.get("hooks") if isinstance(config.get("hooks"), dict) else {}
     next_config = dict(config)
-    next_hooks = _remove_hooks(existing, f"hook {agent}")
+    next_hooks = _remove_hooks(existing, agent)
     if next_hooks:
         next_config["hooks"] = next_hooks
     else:
