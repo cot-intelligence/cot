@@ -1016,9 +1016,16 @@ def _emit_cursor_artifacts(body: dict, source: str) -> bool:
     # Emit every assistant text block from the transcript delta. Cursor's
     # afterAgentResponse hook carries only the turn-final text, so this is the
     # only place the intermediate commentary is available.
+    # Deduplicate consecutive identical texts: Cursor transcripts often repeat
+    # the same brief commentary across many assistant messages within a turn
+    # (e.g. 56 identical blocks), and the final response can appear twice.
     responses = scanned.get("responses", [])
+    deduped: list[str] = []
+    for r in responses:
+        if not deduped or _norm_choice(deduped[-1]) != _norm_choice(r):
+            deduped.append(r)
     body_text = str(body.get("text") or body.get("response") or "").strip()
-    emit_list = list(responses)
+    emit_list = list(deduped)
     # Safety net: if the hook's final text wasn't in the delta yet, include it
     # (deduped against the last transcript block).
     if body_text and (not emit_list or _norm_choice(emit_list[-1]) != _norm_choice(body_text)):
