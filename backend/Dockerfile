@@ -33,9 +33,9 @@ RUN pip install --no-cache-dir --no-compile -r requirements.txt \
 COPY --chown=cot:cot backend/app ./app
 COPY --chown=cot:cot bridge ./bridge
 
-EXPOSE 8000
+EXPOSE 31337
 USER cot:cot
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:31337/health', timeout=2).read()"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "31337"]

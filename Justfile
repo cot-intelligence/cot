@@ -5,7 +5,7 @@ status:
     #!/usr/bin/env sh
     set -eu
 
-    endpoint="${COT_ENDPOINT:-http://localhost:8000}"
+    endpoint="${COT_ENDPOINT:-http://localhost:31337}"
     bridge="${COT_BRIDGE:-${HOME}/.cot/bin/cot}"
 
     printf '%s\n' "Collector: ${endpoint}"
@@ -57,7 +57,7 @@ dev action:
     #!/usr/bin/env sh
     set -eu
 
-    endpoint="${COT_ENDPOINT:-http://localhost:8000}"
+    endpoint="${COT_ENDPOINT:-http://localhost:31337}"
     agents="${COT_AGENTS:-claude cursor codex}"
 
     wait_for_health() {
@@ -100,7 +100,7 @@ bridge action:
     #!/usr/bin/env sh
     set -eu
 
-    endpoint="${COT_ENDPOINT:-http://localhost:8000}"
+    endpoint="${COT_ENDPOINT:-http://localhost:31337}"
     agents="${COT_AGENTS:-claude cursor codex}"
     bridge="${COT_BRIDGE:-${HOME}/.cot/bin/cot}"
     agent_query=$(printf '%s' "${agents}" | tr ' ' ',')

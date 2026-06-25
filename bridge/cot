@@ -25,7 +25,7 @@ HOOK_STATUS_PATH = STATE_DIR / "hooks_status.json"
 HOOK_BACKUPS_PATH = STATE_DIR / "hook_backups.json"
 IMPORT_PARSER_VERSION_PATH = STATE_DIR / "import_parser_version"
 
-DEFAULT_ENDPOINT = "http://localhost:8000"
+DEFAULT_ENDPOINT = "http://localhost:31337"
 
 # Bump when the import line-parsers change in a way that should re-derive
 # already-imported rows. On change, the import path resets import-origin data

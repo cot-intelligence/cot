@@ -1,11 +1,11 @@
 # Single self-contained cot image: builds the dashboard and serves it together
 # with the collector API from one FastAPI/uvicorn process.
 #
-#   docker run -d -p 8000:8000 --read-only --cap-drop ALL \
+#   docker run -d -p 31337:31337 --read-only --cap-drop ALL \
 #     --security-opt no-new-privileges:true --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
 #     --user "$(id -u):$(id -g)" -v ~/.cot:/data ghcr.io/cot-intelligence/cot
 #
-# Then open http://localhost:8000 and point your agent hooks at it.
+# Then open http://localhost:31337 and point your agent hooks at it.
 
 # --- Stage 1: build the dashboard ---
 FROM node:22-alpine AS web
@@ -53,9 +53,9 @@ COPY --chown=cot:cot backend/app ./app
 COPY --chown=cot:cot bridge ./bridge
 COPY --chown=cot:cot --from=web /web/dist ./static
 
-EXPOSE 8000
+EXPOSE 31337
 USER cot:cot
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:31337/health', timeout=2).read()"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "31337"]

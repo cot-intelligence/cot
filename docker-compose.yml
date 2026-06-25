@@ -1,12 +1,12 @@
 services:
-  # Development: hot-reloading Vite server on host :8000 (same as install).
+  # Development: hot-reloading Vite server on host :31337 (same as install).
   # The collector API is internal-only on the compose network; Vite proxies /v1.
   dev:
     image: node:22-alpine
     working_dir: /app
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 4000"
     ports:
-      - "8000:4000"
+      - "31337:4000"
     volumes:
       - .:/app
       - node_modules_cache:/app/node_modules
@@ -27,7 +27,7 @@ services:
       - --host
       - 0.0.0.0
       - --port
-      - "8000"
+      - "31337"
       - --reload
     user: "${COT_DOCKER_UID:-1000}:${COT_DOCKER_GID:-1000}"
     cap_drop:
@@ -35,7 +35,7 @@ services:
     security_opt:
       - no-new-privileges:true
     expose:
-      - "8000"
+      - "31337"
     volumes:
       - ./backend/app:/app/app
       - ./bridge:/app/bridge
@@ -48,7 +48,7 @@ services:
     profiles: ["prod"]
     build: .
     ports:
-      - "8000:80"
+      - "31337:80"
 
 volumes:
   node_modules_cache:

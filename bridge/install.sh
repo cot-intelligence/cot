@@ -3,7 +3,7 @@ set -e
 
 # When piped from curl, $0 is "sh" — fetch the bridge script from the collector,
 # then optionally wire up agent hooks. Everything stays on this machine.
-COT_ENDPOINT="${COT_ENDPOINT:-http://localhost:8000}"
+COT_ENDPOINT="${COT_ENDPOINT:-http://localhost:31337}"
 COT_HOME="${HOME}/.cot"
 BIN_DIR="${COT_HOME}/bin"
 TARGET="${BIN_DIR}/cot"

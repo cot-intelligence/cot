@@ -154,7 +154,7 @@ def _repair_script(agents: list[str]) -> str:
     agent_args = " ".join(agents)
     return f"""#!/bin/sh
 set -e
-COT_ENDPOINT="${{COT_ENDPOINT:-http://localhost:8000}}"
+COT_ENDPOINT="${{COT_ENDPOINT:-http://localhost:31337}}"
 COT_HOME="${{HOME}}/.cot"
 TARGET="${{COT_HOME}}/bin/cot"
 mkdir -p "${{COT_HOME}}/bin"
