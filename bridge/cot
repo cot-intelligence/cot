@@ -1641,6 +1641,8 @@ def _cmd_install(args: list[str]) -> int:
         print("cot: run /hooks in Codex to review and trust the new hooks.")
 
     # Auto-import historical transcripts after hook setup.
+    if os.environ.get("COT_SKIP_IMPORT") in ("1", "true", "yes"):
+        return 0
     print("cot: importing historical transcripts…")
     try:
         _reindex_if_parser_changed()

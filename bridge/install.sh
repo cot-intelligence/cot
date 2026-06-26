@@ -259,12 +259,22 @@ if [ -n "${AGENTS}" ]; then
     HOOK_LABEL="Wiring hooks for:${AGENTS}"
     HOOK_ENV="COT_REPAIR=0"
   fi
-  if run_spinner "${HOOK_LABEL}" env COT_ENDPOINT="${COT_ENDPOINT}" ${HOOK_ENV} "${TARGET}" install ${AGENTS}; then
+  if run_spinner "${HOOK_LABEL}" env COT_ENDPOINT="${COT_ENDPOINT}" ${HOOK_ENV} COT_SKIP_IMPORT=1 "${TARGET}" install ${AGENTS}; then
     [ -z "${RUN_OUTPUT}" ] || printf '%s\n' "${RUN_OUTPUT}"
   else
     fail "Could not wire agent hooks."
     details "Error found" "${RUN_OUTPUT}"
     exit 1
+  fi
+
+  section "Import"
+  IMPORT_ARGS=""
+  for a in ${AGENTS}; do IMPORT_ARGS="${IMPORT_ARGS} --agent ${a}"; done
+  if run_spinner "Importing historical transcripts" env COT_ENDPOINT="${COT_ENDPOINT}" "${TARGET}" import ${IMPORT_ARGS}; then
+    [ -z "${RUN_OUTPUT}" ] || printf '%s\n' "${RUN_OUTPUT}"
+  else
+    warn "Transcript import had issues (non-fatal)."
+    details "Output" "${RUN_OUTPUT}"
   fi
 fi
 
