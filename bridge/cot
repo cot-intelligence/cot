@@ -486,26 +486,26 @@ def _scan_transcript(transcript_path: str, session_id: str) -> dict:
 
         if role == "assistant" or obj.get("type") == "assistant":
             msg_id = message.get("id")
-            if msg_id and msg_id in seen_msg_ids:
-                continue
-            if msg_id:
-                seen_msg_ids.add(msg_id)
             if isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "thinking":
                         think = block.get("thinking")
-                        if think:
+                        if think and not (msg_id and f"t:{msg_id}" in seen_msg_ids):
                             msgs.append({"kind": "thought", "ts": ts, "text": str(think),
                                          "model": None, "usage": None, "interrupted": False})
+                            if msg_id:
+                                seen_msg_ids.add(f"t:{msg_id}")
             text_val = _text_from_blocks(content) if isinstance(content, list) else (content or "")
             model = message.get("model") or obj.get("model")
             usage = message.get("usage") if isinstance(message.get("usage"), dict) else None
-            if text_val:
+            if text_val and not (msg_id and f"r:{msg_id}" in seen_msg_ids):
                 if pending_usage:
                     usage = _merge_usage(pending_usage, usage) if usage else pending_usage
                     pending_usage = None
                 msgs.append({"kind": "response", "ts": ts, "text": str(text_val),
                              "model": model, "usage": usage, "interrupted": False})
+                if msg_id:
+                    seen_msg_ids.add(f"r:{msg_id}")
             elif usage:
                 pending_usage = _merge_usage(pending_usage, usage)
         elif role == "user" and isinstance(content, list):
