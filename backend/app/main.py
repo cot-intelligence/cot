@@ -105,12 +105,76 @@ HOOK_LABELS = {
     "stop": "Session stopped",
 }
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# --- Local-only network hardening -------------------------------------------
+#
+# The collector binds to loopback and stores the developer's most sensitive data
+# (prompts, responses, shell commands, file paths, code). It is unauthenticated,
+# so the *browser* boundary must be enforced explicitly — otherwise any website
+# the user visits could read or destroy that data via the local API.
+#
+#   * Origins  : only loopback browser origins may read responses (no more "*").
+#   * Hosts    : only loopback Host headers are served, defeating DNS rebinding.
+#   * Writes   : a present, non-loopback Origin on a mutating request is rejected
+#                (CSRF defense), while header-less clients (the bridge) pass.
+#
+# Non-standard deployments (reverse proxy, custom hostnames) can widen these with
+# COT_ALLOWED_ORIGINS / COT_ALLOWED_HOSTS (comma-separated; "*" disables a guard).
+
+_LOCAL_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$")
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+
+
+def _configured_origins() -> list[str]:
+    raw = os.environ.get("COT_ALLOWED_ORIGINS", "")
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+
+def _is_allowed_origin(origin: str) -> bool:
+    allowed = _configured_origins()
+    if allowed:
+        return "*" in allowed or origin in allowed
+    return bool(_LOCAL_ORIGIN_RE.match(origin))
+
+
+def _allowed_hosts() -> list[str]:
+    raw = os.environ.get("COT_ALLOWED_HOSTS", "")
+    hosts = [h.strip() for h in raw.split(",") if h.strip()]
+    if hosts:
+        return hosts
+    # Loopback names/addresses, plus the docker-compose service hostname the Vite
+    # dev proxy targets. TrustedHostMiddleware strips the port before matching.
+    return ["localhost", "127.0.0.1", "[::1]", "api"]
+
+
+@app.middleware("http")
+async def _enforce_local_origin(request: Request, call_next):
+    """CSRF / DNS-rebind defense for state-changing requests.
+
+    Browsers attach an Origin header to cross-origin (and most same-origin)
+    writes; non-browser callers (the bridge, curl, health checks) send none and
+    are allowed through. A present but non-loopback Origin is rejected before the
+    handler runs, so a malicious page cannot trigger destructive actions
+    (retention wipe, import reset, settings changes) even though CORS already
+    prevents it from reading any response.
+    """
+    if request.method not in _SAFE_METHODS:
+        origin = request.headers.get("origin")
+        if origin and not _is_allowed_origin(origin):
+            return JSONResponse(
+                {"detail": "Cross-origin request forbidden"}, status_code=403
+            )
+    return await call_next(request)
+
+
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts())
+
+_cors_kwargs: dict[str, Any] = {"allow_methods": ["*"], "allow_headers": ["*"]}
+_explicit_origins = _configured_origins()
+if _explicit_origins:
+    _cors_kwargs["allow_origins"] = _explicit_origins
+else:
+    _cors_kwargs["allow_origin_regex"] = _LOCAL_ORIGIN_RE.pattern
+app.add_middleware(CORSMiddleware, **_cors_kwargs)
 
 def _bridge_dir() -> Path:
     here = Path(__file__).resolve()
