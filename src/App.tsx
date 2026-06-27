@@ -4,6 +4,7 @@ import { Dashboard } from './components/dashboard/Dashboard';
 import { Onboarding } from './components/onboarding/Onboarding';
 import { UpdateBanner } from './components/ui/UpdateBanner';
 import { setDocumentTitle } from './lib/documentTitle';
+import { identifyInstall } from './lib/analytics';
 import type { AgentId } from './lib/agents';
 
 type Origin = { x: number; y: number };
@@ -37,6 +38,10 @@ export function App() {
     if (!window.location.hash) {
       window.location.hash = '#/sessions';
     }
+  }, []);
+
+  useEffect(() => {
+    void identifyInstall();
   }, []);
 
   useEffect(() => {

@@ -206,6 +206,8 @@ export async function getVersionInfo(refresh = false): Promise<VersionInfo> {
 }
 
 export interface Settings {
+  /** Stable, anonymous per-install identifier for analytics segregation. */
+  install_id: string;
   telemetry_enabled: boolean;
   /** Hard-disabled for this deployment via COT_DISABLE_TELEMETRY. */
   telemetry_env_disabled: boolean;

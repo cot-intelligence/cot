@@ -19,6 +19,7 @@ export default defineConfig({
       '/install.sh': { target: apiTarget, changeOrigin: true },
       '/repair.sh': { target: apiTarget, changeOrigin: true },
       '/cot': { target: apiTarget, changeOrigin: true },
+      '/stats': { target: apiTarget, changeOrigin: true },
     },
   },
 });

@@ -10,15 +10,24 @@ import asyncio
 import json
 import os
 import platform as _platform
+import re
 import threading
 import time
 import urllib.request
 from pathlib import Path
 from typing import Any
 
+import urllib.error
+
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -342,6 +351,7 @@ async def _telemetry_loop() -> None:
 @app.get("/v1/settings")
 def get_settings() -> dict[str, Any]:
     return {
+        "install_id": db.get_install_id(),
         "telemetry_enabled": _telemetry_enabled(),
         "telemetry_env_disabled": _telemetry_env_disabled(),
         "telemetry_endpoint": _TELEMETRY_URL,
@@ -364,6 +374,86 @@ async def update_settings(request: Request) -> dict[str, Any]:
         if enabled and not _telemetry_env_disabled():
             threading.Thread(target=_send_telemetry, args=(True,), daemon=True).start()
     return get_settings()
+
+
+# --- First-party analytics proxy ---------------------------------------------
+#
+# The dashboard runs on 127.0.0.1, and our users are developers — so a hardcoded
+# cloud.umami.is script is reliably blocked by ad/tracker blockers
+# (ERR_BLOCKED_BY_CLIENT). Proxying the tracker script and its collect endpoint
+# through our own origin makes every request first-party, which defeats the
+# common blocklists. Best-effort: upstream failures (offline/air-gapped) return
+# a 502 the tracker silently ignores. Disable entirely with COT_DISABLE_ANALYTICS=1.
+
+_UMAMI_UPSTREAM = os.environ.get("COT_UMAMI_HOST", "https://cloud.umami.is").rstrip("/")
+_UMAMI_SCRIPT_TTL = 6 * 60 * 60  # cache the tracker JS for 6h
+_umami_script_cache: dict[str, Any] = {"body": None, "fetched_at": 0.0}
+
+
+def _analytics_env_disabled() -> bool:
+    return os.environ.get("COT_DISABLE_ANALYTICS") in ("1", "true", "yes")
+
+
+@app.get("/stats/script.js")
+def umami_script() -> Response:
+    if _analytics_env_disabled():
+        return Response(status_code=404)
+    now = time.time()
+    cache = _umami_script_cache
+    if cache["body"] is None or now - cache["fetched_at"] > _UMAMI_SCRIPT_TTL:
+        try:
+            req = urllib.request.Request(
+                f"{_UMAMI_UPSTREAM}/script.js",
+                headers={"User-Agent": f"cot/{__version__}"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                cache["body"] = resp.read()
+                cache["fetched_at"] = now
+        except Exception:
+            if cache["body"] is None:
+                return Response(status_code=502)
+    return Response(
+        content=cache["body"],
+        media_type="application/javascript",
+        headers={"Cache-Control": "public, max-age=21600"},
+    )
+
+
+@app.post("/stats/api/send")
+async def umami_send(request: Request) -> Response:
+    if _analytics_env_disabled():
+        return Response(status_code=404)
+    body = await request.body()
+    # Umami rejects requests without a User-Agent and derives the visitor from
+    # it, so the original client UA/IP must be forwarded — otherwise every event
+    # looks like it came from this server.
+    ua = request.headers.get("user-agent", f"cot/{__version__}")
+    fwd = request.headers.get("x-forwarded-for") or (
+        request.client.host if request.client else ""
+    )
+    cache_token = request.headers.get("x-umami-cache")
+    content_type = request.headers.get("content-type", "application/json")
+
+    def _forward() -> tuple[int, bytes, str]:
+        headers = {"Content-Type": content_type, "User-Agent": ua}
+        if fwd:
+            headers["X-Forwarded-For"] = fwd
+        if cache_token:
+            headers["x-umami-cache"] = cache_token
+        req = urllib.request.Request(
+            f"{_UMAMI_UPSTREAM}/api/send", data=body, method="POST", headers=headers
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, resp.read(), resp.headers.get("Content-Type", "text/plain")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read(), exc.headers.get("Content-Type", "text/plain")
+
+    try:
+        status, content, ctype = await asyncio.to_thread(_forward)
+    except Exception:
+        return Response(status_code=502)
+    return Response(content=content, status_code=status, media_type=ctype)
 
 
 @app.get("/v1/audit/self")
