@@ -48,8 +48,10 @@ TEXT_KEYS = {
     "message": "Sanitized event message.",
     "last_agent_message": "Sanitized final agent message.",
     "justification": "Sanitized approval justification.",
-    "output": "Sanitized tool output.",
-    "tool_response": "Sanitized tool output.",
+}
+OUTPUT_TEXT_KEYS = {
+    "output",
+    "tool_response",
 }
 DROP_KEYS = {
     "encrypted_content",
@@ -269,25 +271,16 @@ def _scrub_paths(value: str, *, cwd: Path | None, home: Path) -> str:
     return out
 
 
-def _sanitize_command(value: str) -> str:
-    if "pytest" in value:
-        return "python -m pytest backend/tests/test_import.py"
-    if "pnpm" in value:
-        return "pnpm test"
-    if "git" in value:
-        return "git status --short"
-    return "echo sanitized-command"
+def _sanitize_command(value: str, *, cwd: Path | None, home: Path) -> str:
+    out = _scrub_secrets(value)
+    return _scrub_paths(out, cwd=cwd, home=home)
 
 
-def _sanitize_patch(value: str) -> str:
+def _sanitize_patch(value: str, *, cwd: Path | None, home: Path) -> str:
     if "*** Begin Patch" not in value:
         return value
-    return (
-        "*** Begin Patch\n"
-        "*** Update File: backend/tests/fixtures/core_ingest/example.py\n"
-        "+sanitized change\n"
-        "*** End Patch"
-    )
+    out = _scrub_secrets(value)
+    return _scrub_paths(out, cwd=cwd, home=home)
 
 
 def _sanitize_json_string(value: str, *, cwd: Path | None, home: Path, redact_text: bool) -> str:
@@ -307,8 +300,10 @@ def _sanitize_str(
     home: Path,
     redact_text: bool,
 ) -> str:
+    if "*** Begin Patch" in value:
+        return _sanitize_patch(value, cwd=cwd, home=home)
     if key in ("command", "cmd"):
-        return _sanitize_command(value)
+        return _sanitize_command(value, cwd=cwd, home=home)
     if key in ("cwd", "workdir"):
         return "/workspace/cot"
     if key in ("url", "uri"):
@@ -317,13 +312,20 @@ def _sanitize_str(
         return "sanitized search query"
     if key in ("arguments", "input") and value.lstrip().startswith("{"):
         return _sanitize_json_string(value, cwd=cwd, home=home, redact_text=redact_text)
-    if "*** Begin Patch" in value:
-        return _sanitize_patch(value)
+    if redact_text and key in OUTPUT_TEXT_KEYS:
+        return "Sanitized tool output."
     if redact_text and key in TEXT_KEYS:
         return TEXT_KEYS[key]
 
     out = _scrub_secrets(value)
     if key in PATH_KEYS or _pathish(out):
+        out = _scrub_paths(out, cwd=cwd, home=home)
+    return out
+
+
+def _sanitize_key(key: str, *, cwd: Path | None, home: Path) -> str:
+    out = _scrub_secrets(key)
+    if _pathish(out):
         out = _scrub_paths(out, cwd=cwd, home=home)
     return out
 
@@ -340,14 +342,15 @@ def _sanitize_obj(
         for key, value in obj.items():
             if key in DROP_KEYS:
                 continue
+            out_key = _sanitize_key(str(key), cwd=cwd, home=home)
             if key in ("session_id", "conversation_id") and isinstance(value, str):
                 # The caller overwrites fixture-specific session ids after this pass.
-                out[key] = value
+                out[out_key] = value
                 continue
             if isinstance(value, str):
-                out[key] = _sanitize_str(key, value, cwd=cwd, home=home, redact_text=redact_text)
+                out[out_key] = _sanitize_str(key, value, cwd=cwd, home=home, redact_text=redact_text)
             else:
-                out[key] = _sanitize_obj(value, cwd=cwd, home=home, redact_text=redact_text)
+                out[out_key] = _sanitize_obj(value, cwd=cwd, home=home, redact_text=redact_text)
         return out
     if isinstance(obj, list):
         return [_sanitize_obj(item, cwd=cwd, home=home, redact_text=redact_text) for item in obj]
@@ -373,26 +376,8 @@ def _normalize_timestamps(rows: list[dict[str, Any]], *, fill_missing: bool = Fa
 
 
 def _parser_relevant_history_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Keep the rollout rows consumed by the current Codex bridge parser."""
-    out: list[dict[str, Any]] = []
-    parsed_payload_types = {
-        "reasoning",
-        "web_search_call",
-        "function_call",
-        "custom_tool_call",
-        "function_call_output",
-        "custom_tool_call_output",
-    }
-    for row in rows:
-        if row.get("type") != "response_item":
-            continue
-        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-        payload_type = payload.get("type")
-        if payload_type in parsed_payload_types:
-            out.append(row)
-        elif payload_type == "message" and payload.get("role") in ("user", "assistant"):
-            out.append(row)
-    return out
+    """Preserve the rollout envelope; the bridge decides which rows to ingest."""
+    return rows
 
 
 def _set_session_ids(rows: list[dict[str, Any]], session_id: str) -> list[dict[str, Any]]:
