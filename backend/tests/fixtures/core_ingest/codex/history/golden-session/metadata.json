@@ -4,8 +4,8 @@
   "captured_at": "2026-06-01T10:00:00Z",
   "fixture_name": "codex-history-golden-session",
   "ingest_path": "history",
-  "notes": "Tracer-bullet Codex rollout fixture. Replace input.jsonl with a sanitized real rollout JSONL when available.",
-  "platform": "sanitized",
-  "sanitizer_version": "manual-v1",
+  "notes": "Generated from a local Codex rollout JSONL; review input.jsonl before committing.",
+  "platform": "sanitized-local",
+  "sanitizer_version": "capture-codex-golden-session-v1",
   "session_id": "codex-history-golden-session"
 }

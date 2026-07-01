@@ -164,6 +164,17 @@ def test_codex_function_call_and_output_pair():
     assert ("PostToolUse", "shell", "end") in triples, triples
 
 
+def test_codex_shell_command_is_shell():
+    lines = [
+        {"type": "response_item", "id": "l1", "timestamp": "2026-04-01T00:00:00Z",
+         "payload": {"type": "function_call", "name": "shell_command",
+                     "arguments": "{\"command\": \"git status --short\"}", "call_id": "c1"}},
+    ]
+    evs = _categories("codex", bridge._codex_line_to_events, lines)
+    cats = [n["category"] for _, n in evs]
+    assert cats == ["shell"], cats
+
+
 def test_codex_apply_patch_is_file_edit():
     lines = [
         {"type": "response_item", "id": "l1", "timestamp": "2026-04-01T00:00:00Z",
