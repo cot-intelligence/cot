@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import difflib
 import importlib.machinery
 import importlib.util
@@ -27,6 +28,7 @@ _FIXTURE_ROOT = _HERE / "fixtures" / "core_ingest"
 sys.path.insert(0, str(_BACKEND))
 
 from app import db  # noqa: E402
+import app.normalize as normalize_module  # noqa: E402
 from app.normalize import normalize  # noqa: E402
 
 
@@ -143,6 +145,25 @@ def _isolated_collector_db():
                 os.environ["COT_DISABLE_UPDATE_CHECK"] = old_updates
 
 
+@contextmanager
+def _deterministic_ingest_clock():
+    old_now = normalize_module._now
+    base = datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
+    counter = 0
+
+    def fake_now() -> str:
+        nonlocal counter
+        timestamp = base + timedelta(seconds=counter)
+        counter += 1
+        return timestamp.isoformat()
+
+    normalize_module._now = fake_now
+    try:
+        yield
+    finally:
+        normalize_module._now = old_now
+
+
 def _record_payload(source: str, payload: dict[str, Any]) -> None:
     if payload.get("_attach_to_prompt"):
         db.attach_to_prompt(
@@ -190,7 +211,7 @@ def _ingest_history_fixture(fixture: CoreIngestFixture) -> None:
 
 
 def render_projection(fixture: CoreIngestFixture) -> dict[str, Any]:
-    with _isolated_collector_db():
+    with _isolated_collector_db(), _deterministic_ingest_clock():
         if fixture.ingest_path == "live":
             _ingest_live_fixture(fixture)
         elif fixture.ingest_path == "history":

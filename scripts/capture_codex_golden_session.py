@@ -356,7 +356,7 @@ def _sanitize_obj(
     return obj
 
 
-def _normalize_timestamps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _normalize_timestamps(rows: list[dict[str, Any]], *, fill_missing: bool = False) -> list[dict[str, Any]]:
     source_times = [_parse_ts(row.get("timestamp")) for row in rows if row.get("timestamp")]
     source_times = [dt for dt in source_times if dt is not None]
     first = min(source_times) if source_times else None
@@ -366,7 +366,7 @@ def _normalize_timestamps(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ts = _parse_ts(cloned.get("timestamp"))
         if ts is not None and first is not None:
             cloned["timestamp"] = _format_z(BASE_TS + (ts - first))
-        else:
+        elif fill_missing:
             cloned["timestamp"] = _format_z(BASE_TS + timedelta(seconds=index))
         out.append(cloned)
     return out
@@ -469,7 +469,10 @@ def _capture(args: argparse.Namespace) -> int:
             _sanitize_obj(row, cwd=cwd, home=home, redact_text=args.redact_text)
             for row in live_rows
         ]
-        sanitized_live = _set_session_ids(_normalize_timestamps(sanitized_live), live_fixture.session_id)
+        sanitized_live = _set_session_ids(
+            _normalize_timestamps(sanitized_live, fill_missing=False),
+            live_fixture.session_id,
+        )
         _write_jsonl(live_fixture.input_path, sanitized_live)
         _update_metadata(
             args.live_fixture,
@@ -487,7 +490,7 @@ def _capture(args: argparse.Namespace) -> int:
             _sanitize_obj(row, cwd=cwd, home=home, redact_text=args.redact_text)
             for row in history_rows
         ]
-        sanitized_history = _normalize_timestamps(sanitized_history)
+        sanitized_history = _normalize_timestamps(sanitized_history, fill_missing=False)
         _write_jsonl(history_fixture.input_path, sanitized_history)
         _update_metadata(
             args.history_fixture,
