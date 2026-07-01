@@ -210,14 +210,23 @@ def _ingest_history_fixture(fixture: CoreIngestFixture) -> None:
             _record_payload(fixture.agent, event)
 
 
-def render_projection(fixture: CoreIngestFixture) -> dict[str, Any]:
+def _ingest_once(fixture: CoreIngestFixture) -> None:
+    if fixture.ingest_path == "live":
+        _ingest_live_fixture(fixture)
+    elif fixture.ingest_path == "history":
+        _ingest_history_fixture(fixture)
+    else:
+        raise AssertionError(f"Unsupported ingest path: {fixture.ingest_path}")
+
+
+def render_projection(fixture: CoreIngestFixture, *, passes: int = 1) -> dict[str, Any]:
+    """Ingest the fixture into an isolated collector and return its normalized
+    UI Ingest Projection. ``passes`` ingests the same input more than once in a
+    single collector so callers can assert import idempotency and live duplicate
+    suppression (re-ingest must not change the projection)."""
     with _isolated_collector_db(), _deterministic_ingest_clock():
-        if fixture.ingest_path == "live":
-            _ingest_live_fixture(fixture)
-        elif fixture.ingest_path == "history":
-            _ingest_history_fixture(fixture)
-        else:
-            raise AssertionError(f"Unsupported ingest path: {fixture.ingest_path}")
+        for _ in range(passes):
+            _ingest_once(fixture)
         projection = db.get_session_detail(fixture.session_id)
     if projection is None:
         raise AssertionError(f"{fixture.name} did not create session {fixture.session_id}")
