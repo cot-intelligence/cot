@@ -2469,7 +2469,7 @@ def _codex_map_tool(name: str, raw_args: object) -> tuple[str, object]:
     """Map a Codex tool name + raw args onto a canonical (tool_name, tool_input)
     that normalize.categorize understands (shell/file_edit/etc.)."""
     args = _codex_tool_args(raw_args)
-    if name in ("exec_command", "shell", "local_shell"):
+    if name in ("exec_command", "shell", "local_shell", "shell_command"):
         cmd = args.get("cmd") or args.get("command") or ""
         if isinstance(cmd, list):
             cmd = " ".join(str(c) for c in cmd)

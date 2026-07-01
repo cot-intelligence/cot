@@ -1,0 +1,11 @@
+{
+  "agent": "codex",
+  "agent_version": "unknown",
+  "captured_at": "2026-06-01T10:00:00Z",
+  "fixture_name": "codex-live-golden-session",
+  "ingest_path": "live",
+  "notes": "Generated from a local Codex live collector session; review input.jsonl before committing.",
+  "platform": "sanitized-local",
+  "sanitizer_version": "capture-codex-golden-session-v1",
+  "session_id": "codex-live-golden-session"
+}
