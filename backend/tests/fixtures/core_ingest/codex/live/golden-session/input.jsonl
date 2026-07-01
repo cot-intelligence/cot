@@ -1,0 +1,9 @@
+{"session_id":"codex-live-golden-session","hook_event_name":"SessionStart","timestamp":"2026-06-01T10:00:00Z","cwd":"/workspace/cot"}
+{"session_id":"codex-live-golden-session","hook_event_name":"UserPromptSubmit","timestamp":"2026-06-01T10:00:01Z","prompt":"Build a tiny Core Ingest contract test for Codex."}
+{"session_id":"codex-live-golden-session","hook_event_name":"afterAgentThought","timestamp":"2026-06-01T10:00:02Z","_synthetic_category":"thought","thought":"I should verify the UI projection after ingest."}
+{"session_id":"codex-live-golden-session","hook_event_name":"PreToolUse","timestamp":"2026-06-01T10:00:03Z","tool_name":"Bash","tool_input":{"command":"python -m pytest backend/tests/test_import.py"}}
+{"session_id":"codex-live-golden-session","hook_event_name":"PostToolUse","timestamp":"2026-06-01T10:00:04Z","tool_name":"Bash","tool_input":{"command":"python -m pytest backend/tests/test_import.py"},"tool_response":"24 passed"}
+{"session_id":"codex-live-golden-session","hook_event_name":"PreToolUse","timestamp":"2026-06-01T10:00:05Z","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: backend/tests/test_import.py\n+assert True\n*** End Patch"}}
+{"session_id":"codex-live-golden-session","hook_event_name":"PostToolUse","timestamp":"2026-06-01T10:00:06Z","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: backend/tests/test_import.py\n+assert True\n*** End Patch"},"tool_response":"Success. Updated the following files:\nM backend/tests/test_import.py"}
+{"session_id":"codex-live-golden-session","hook_event_name":"afterAgentResponse","timestamp":"2026-06-01T10:00:07Z","_synthetic_category":"response","response":"Added the tracer bullet test and refreshed the snapshot.","model":"gpt-5-codex"}
+{"session_id":"codex-live-golden-session","hook_event_name":"Stop","timestamp":"2026-06-01T10:00:08Z"}
