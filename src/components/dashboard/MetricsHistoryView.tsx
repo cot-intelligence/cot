@@ -15,9 +15,15 @@ interface MetricsHistoryViewProps {
 }
 
 interface GroupedEntry {
-  target: string;
+  key: string;
+  /** How to render the group + its occurrences. */
+  kind: GroupKind;
   occurrences: MetricsHistoryItem[];
 }
+
+/** command: a real shell command · tool: a structured search tool (Grep, Glob…)
+ * · web: a URL grouped by domain · query: a non-URL web target (WebSearch). */
+type GroupKind = 'command' | 'tool' | 'web' | 'query';
 
 type Tab = 'shell' | 'web';
 type SortKey = 'recent' | 'frequent';
@@ -25,7 +31,7 @@ type SortKey = 'recent' | 'frequent';
 const COLS = 6;
 
 const TD = 'px-3 py-3 align-middle';
-const SUB_TD = 'px-3 py-1 align-middle';
+const SUB_TD = 'px-3 py-2 align-middle';
 const TH =
   'px-3 py-2.5 text-left font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/40';
 
@@ -35,17 +41,79 @@ function shortPath(p: string | null): string {
   return parts.length <= 2 ? p : `…/${parts.slice(-2).join('/')}`;
 }
 
-function groupByTarget(items: MetricsHistoryItem[]): GroupedEntry[] {
-  const map = new Map<string, MetricsHistoryItem[]>();
+/** Structured search tools (Grep, Glob, …) land in the shell bucket but carry
+ * the tool name as their title rather than "Shell command". */
+function isToolItem(item: MetricsHistoryItem): boolean {
+  return !!item.title && item.title !== 'Shell command';
+}
+
+/** The leading program of a shell command — e.g. `cd src/` → `cd`,
+ * `FOO=1 sudo /usr/bin/git commit` → `git`. Falls back to the raw command. */
+function mainCommand(cmd: string): string {
+  const trimmed = (cmd || '').trim();
+  if (!trimmed) return '';
+  const tokens = trimmed.split(/\s+/);
+  let i = 0;
+  // Skip leading env-var assignments (FOO=bar) and a few transparent wrappers.
+  while (i < tokens.length && /^[A-Za-z_][\w]*=/.test(tokens[i])) i += 1;
+  while (
+    i < tokens.length &&
+    ['sudo', 'command', 'time', 'exec', 'nohup', 'env'].includes(tokens[i])
+  ) {
+    i += 1;
+  }
+  let first = (tokens[i] ?? trimmed).replace(/^[('"`]+/, '');
+  const slash = first.lastIndexOf('/');
+  if (slash >= 0) first = first.slice(slash + 1);
+  return first || trimmed;
+}
+
+/** Hostname of a URL (minus a leading `www.`), or null when the target isn't a
+ * web address (e.g. a WebSearch query). */
+function domainOf(target: string): string | null {
+  const raw = (target || '').trim();
+  if (!raw) return null;
+  const parse = (input: string): string | null => {
+    try {
+      const u = new URL(input);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+      return u.hostname.replace(/^www\./, '') || null;
+    } catch {
+      return null;
+    }
+  };
+  if (/^[a-z][\w+.-]*:\/\//i.test(raw)) return parse(raw);
+  // Bare host like `example.com/path` — retry with a protocol.
+  if (/^[^\s/]+\.[^\s/]+/.test(raw)) return parse(`https://${raw}`);
+  return null;
+}
+
+function groupKind(item: MetricsHistoryItem, tab: Tab): GroupKind {
+  if (tab === 'shell') return isToolItem(item) ? 'tool' : 'command';
+  return domainOf(item.target) ? 'web' : 'query';
+}
+
+function groupKeyFor(item: MetricsHistoryItem, tab: Tab): string {
+  if (tab === 'shell') {
+    return isToolItem(item) ? item.title! : mainCommand(item.target) || item.target;
+  }
+  return domainOf(item.target) ?? item.title ?? 'Search';
+}
+
+function groupItems(items: MetricsHistoryItem[], tab: Tab): GroupedEntry[] {
+  const map = new Map<string, GroupedEntry>();
   const order: string[] = [];
   for (const item of items) {
-    if (!map.has(item.target)) {
-      map.set(item.target, []);
-      order.push(item.target);
+    const key = groupKeyFor(item, tab);
+    let entry = map.get(key);
+    if (!entry) {
+      entry = { key, kind: groupKind(item, tab), occurrences: [] };
+      map.set(key, entry);
+      order.push(key);
     }
-    map.get(item.target)!.push(item);
+    entry.occurrences.push(item);
   }
-  return order.map((target) => ({ target, occurrences: map.get(target)! }));
+  return order.map((key) => map.get(key)!);
 }
 
 function sortGroups(groups: GroupedEntry[], sort: SortKey): GroupedEntry[] {
@@ -98,8 +166,8 @@ export function MetricsHistoryView({ onSelect, onBack }: MetricsHistoryViewProps
     const base = filter
       ? items.filter((i) => i.target.toLowerCase().includes(filter.toLowerCase()))
       : items;
-    return sortGroups(groupByTarget(base), sort);
-  }, [items, filter, sort]);
+    return sortGroups(groupItems(base, tab), sort);
+  }, [items, filter, sort, tab]);
 
   const totalRuns = grouped.reduce((n, g) => n + g.occurrences.length, 0);
 
@@ -197,7 +265,7 @@ export function MetricsHistoryView({ onSelect, onBack }: MetricsHistoryViewProps
                   <thead>
                     <tr className="border-b border-fg/15 bg-surface/40">
                       <th className={`${TH} w-9`} aria-hidden="true" />
-                      <th className={TH}>{tab === 'shell' ? 'Command' : 'URL'}</th>
+                      <th className={TH}>{tab === 'shell' ? 'Command' : 'Domain'}</th>
                       <th className={`${TH} text-right`}>Runs</th>
                       <th className={`${TH} hidden sm:table-cell`}>Agent</th>
                       <th className={`${TH} hidden md:table-cell`}>Project</th>
@@ -227,12 +295,11 @@ export function MetricsHistoryView({ onSelect, onBack }: MetricsHistoryViewProps
                     ) : (
                       grouped.map((group) => (
                         <GroupRows
-                          key={group.target}
+                          key={group.key}
                           group={group}
-                          tab={tab}
                           filter={filter}
-                          expanded={expanded.has(group.target)}
-                          onToggle={() => toggle(group.target)}
+                          expanded={expanded.has(group.key)}
+                          onToggle={() => toggle(group.key)}
                           onSelect={onSelect}
                         />
                       ))
@@ -248,16 +315,21 @@ export function MetricsHistoryView({ onSelect, onBack }: MetricsHistoryViewProps
   );
 }
 
+const KIND_ICON: Record<GroupKind, 'terminal' | 'search' | 'globe'> = {
+  command: 'terminal',
+  tool: 'search',
+  web: 'globe',
+  query: 'search',
+};
+
 function GroupRows({
   group,
-  tab,
   filter,
   expanded,
   onToggle,
   onSelect,
 }: {
   group: GroupedEntry;
-  tab: Tab;
   filter: string;
   expanded: boolean;
   onToggle: () => void;
@@ -265,10 +337,13 @@ function GroupRows({
 }) {
   const latest = group.occurrences[0];
   const count = group.occurrences.length;
-  const hasMore = count > 1;
+  // Even single-run groups expand — the header shows the command/domain, the
+  // panel shows the full command / URL that ran.
+  const hasMore = count >= 1;
   const openLatest = () => onSelect(latest.session_id, latest.event_id);
   const bg = groupBg(expanded);
   const groupBorder = expanded && hasMore ? '' : 'border-b border-fg/15';
+  const isShell = group.kind === 'command';
 
   return (
     <Fragment>
@@ -298,11 +373,17 @@ function GroupRows({
           )}
         </td>
         <td className={`${TD} ${bg}`}>
-          <span
-            className="block max-w-md truncate font-mono text-sm font-medium text-fg transition-colors duration-150 group-hover:text-vermilion sm:max-w-xl"
-            title={group.target}>
-            {tab === 'shell' && <span className="select-none text-vermilion/70">$ </span>}
-            {filter ? highlight(group.target, filter) : group.target}
+          <span className="flex max-w-md items-center gap-2 sm:max-w-xl">
+            {isShell ? (
+              <span className="select-none font-mono text-sm text-vermilion/70">$</span>
+            ) : (
+              <Icon name={KIND_ICON[group.kind]} className="h-3.5 w-3.5 shrink-0 text-fg/35" />
+            )}
+            <span
+              className="block truncate font-mono text-sm font-medium text-fg transition-colors duration-150 group-hover:text-vermilion"
+              title={group.key}>
+              {filter ? highlight(group.key, filter) : group.key}
+            </span>
           </span>
         </td>
         <td className={`${TD} text-right font-mono text-sm tabular-nums text-fg/70 ${bg}`}>
@@ -341,6 +422,8 @@ function GroupRows({
                     <OccurrenceRow
                       key={`${item.session_id}-${item.event_id}`}
                       item={item}
+                      kind={group.kind}
+                      filter={filter}
                       onSelect={onSelect}
                       isLast={i === count - 1}
                       bg={bg}
@@ -368,16 +451,21 @@ function ExpandPanel({ open, children }: { open: boolean; children: React.ReactN
 
 function OccurrenceRow({
   item,
+  kind,
+  filter,
   onSelect,
   isLast,
   bg,
 }: {
   item: MetricsHistoryItem;
+  kind: GroupKind;
+  filter: string;
   onSelect: (sessionId: string, eventId?: number) => void;
   isLast: boolean;
   bg: string;
 }) {
   const open = () => onSelect(item.session_id, item.event_id);
+  const text = item.target || (kind === 'tool' ? '(no query)' : '—');
 
   return (
     <tr
@@ -389,10 +477,20 @@ function OccurrenceRow({
         isLast ? '' : 'border-b border-fg/[0.06]'
       }`}>
       <td className={`w-9 ${bg}`} aria-hidden="true" />
-      <td className={`${SUB_TD} pl-6 ${bg}`}>
-        <span className="font-mono text-[0.58rem] tabular-nums text-fg/35">
-          {item.session_id.slice(0, 8)}
-        </span>
+      <td className={`${SUB_TD} pl-9 ${bg}`}>
+        <div className="flex max-w-md flex-col gap-0.5 sm:max-w-xl">
+          <span
+            className="block truncate font-mono text-[0.72rem] text-fg/75 transition-colors duration-150 group-hover:text-vermilion"
+            title={item.target || undefined}>
+            {kind === 'command' && item.target && (
+              <span className="select-none text-vermilion/60">$ </span>
+            )}
+            {filter && item.target ? highlight(text, filter) : text}
+          </span>
+          <span className="font-mono text-[0.55rem] tabular-nums text-fg/30">
+            {item.session_id.slice(0, 8)}
+          </span>
+        </div>
       </td>
       <td className={`${SUB_TD} ${bg}`} aria-hidden="true" />
       <td className={`${SUB_TD} hidden sm:table-cell ${bg}`}>
