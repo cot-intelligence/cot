@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import mimetypes
 import os
@@ -34,8 +35,10 @@ DEFAULT_ENDPOINT = "http://127.0.0.1:31337"
 # already-imported rows. On change, the import path resets import-origin data
 # and re-reads transcripts from scratch so the DB self-heals without a manual
 # reimport. (1 = original; 2 = dedicated cursor parser, tool results, mtime ts,
-# meta categorization.)
-IMPORT_PARSER_VERSION = "2"
+# meta categorization; 3 = codex token usage, cwd/model, interruptions, and a
+# SessionStart carrying sandbox/approval posture; 4 = codex environment_context
+# lifted into its own system event instead of leaking as a prompt.)
+IMPORT_PARSER_VERSION = "4"
 
 # Skip transcript files larger than this. Guards against a runaway/hostile file
 # exhausting memory; real transcripts are far smaller.
@@ -363,6 +366,37 @@ def _message_attachments(content: list) -> list[dict]:
     return out
 
 
+_ENV_CONTEXT_RE = re.compile(r"<environment_context>.*?</environment_context>", re.S)
+
+
+def _extract_env_context(text: str | None) -> tuple[str | None, str]:
+    """Split a Codex user message into (environment_context block, remainder).
+
+    Codex injects an ``<environment_context>`` block (cwd/shell/sandbox/perms) as
+    a synthetic user turn. It is not something the human typed, so it is lifted
+    out into its own system event rather than shown — or counted — as a prompt.
+    """
+    out = str(text or "")
+    match = _ENV_CONTEXT_RE.search(out)
+    if not match:
+        return None, out
+    block = match.group(0)
+    remainder = (out[: match.start()] + out[match.end():]).strip()
+    return block, remainder
+
+
+def _env_context_event(base: dict, block: str) -> dict:
+    """A system 'Environment context' event for the injected block. The stable
+    content-hash dedup key collapses the per-turn repeats to one per session."""
+    digest = hashlib.sha1(block.encode("utf-8", "replace")).hexdigest()[:16]
+    return {
+        **base,
+        "hook_event_name": "CodexEnvironmentContext",
+        "environment_context": block,
+        "_dedup_key": f"envctx:{digest}",
+    }
+
+
 def _clean_user_text(text: str) -> str:
     """Remove agent-added upload wrappers while preserving the user's request."""
     out = text.strip()
@@ -374,6 +408,9 @@ def _clean_user_text(text: str) -> str:
         out = out.split(marker, 1)[1].strip()
     out = re.sub(r"<uploaded_documents>.*?</uploaded_documents>", "", out, flags=re.S).strip()
     out = re.sub(r"<image\b[^>]*>\s*</image>", "", out, flags=re.S).strip()
+    # Codex injects an <environment_context> (cwd/shell/sandbox) block as a
+    # synthetic user turn; strip it so it never lands as a real user prompt.
+    out = re.sub(r"<environment_context>.*?</environment_context>", "", out, flags=re.S).strip()
     return out
 
 
@@ -1117,6 +1154,46 @@ def _find_codex_transcript(session_id: str) -> str | None:
     return str(max(matches, key=lambda p: p.stat().st_mtime))
 
 
+def _codex_read_session_posture(session_id: str) -> dict:
+    """Best-effort read of a live run's posture from the rollout head.
+
+    Codex omits sandbox/approval from its hook payloads but records it on the
+    ``session_meta`` / first ``turn_context`` lines, so enrich the live
+    SessionStart with whatever is already written. Returns ``{}`` if nothing is
+    available yet (the first turn_context may lag the SessionStart hook)."""
+    transcript = _find_codex_transcript(session_id)
+    if not transcript:
+        return {}
+    meta = turn = None
+    try:
+        with open(transcript, "r", encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i > 50 or (meta is not None and turn is not None):
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("type") == "session_meta" and meta is None:
+                    meta = obj.get("payload")
+                elif obj.get("type") == "turn_context" and turn is None:
+                    turn = obj.get("payload")
+    except OSError:
+        return {}
+    out: dict = {}
+    cfg = _codex_session_config(meta, turn)
+    if cfg:
+        out["codex"] = cfg
+        if cfg.get("model"):
+            out["model"] = cfg["model"]
+    if isinstance(meta, dict) and meta.get("cwd"):
+        out.setdefault("cwd", meta.get("cwd"))
+    return out
+
+
 def _emit_codex_responses(body: dict, source: str) -> None:
     """Codex stores commentary and assistant text in rollout JSONL transcripts.
 
@@ -1465,7 +1542,9 @@ def _merge_hooks(existing: dict, template: dict, agent: str) -> dict:
     for event, entries in template.items():
         current = merged.get(event)
         if not isinstance(current, list):
-            current = []
+            # A bare dict entry is a valid user hook in some configs — keep it
+            # rather than dropping it on merge.
+            current = [current] if isinstance(current, dict) else []
         if _entries_have_cot_hook(current, agent):
             merged[event] = _normalize_cot_hooks(current, agent)
         else:
@@ -2196,6 +2275,188 @@ def _discover_transcripts(agent: str) -> list[Path]:
     return []
 
 
+_SUBAGENT_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
+
+
+def _uuid_from(name: str) -> str | None:
+    m = _SUBAGENT_UUID_RE.search(name or "")
+    return m.group(0) if m else None
+
+
+def _subagent_label_from_file(path: Path, limit: int = 80) -> str | None:
+    """First human instruction in a subagent transcript, for the back-link pill.
+
+    The richer ``type · description`` label still comes from the parent's Task
+    span in the timeline; this is only a fallback when the pill has nothing."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for _ in range(5):
+                line = fh.readline()
+                if not line:
+                    break
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("role") != "user":
+                    continue
+                msg = obj.get("message")
+                text: str | None = msg if isinstance(msg, str) else None
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                    if isinstance(content, str):
+                        text = content
+                    elif isinstance(content, list):
+                        parts = [
+                            b.get("text")
+                            for b in content
+                            if isinstance(b, dict) and isinstance(b.get("text"), str)
+                        ]
+                        text = "\n".join(p for p in parts if p)
+                if text and text.strip():
+                    flat = " ".join(_clean_user_text(text).split())
+                    if not flat:
+                        continue
+                    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+    except OSError:
+        return None
+    return None
+
+
+def _discover_subagent_links(agent: str) -> list[dict]:
+    """child→parent subagent links from the on-disk transcript nesting.
+
+    Cursor (and Claude) nest a subagent's transcript under the launching
+    session's folder: ``.../<parentId>/subagents/<childId>.jsonl``. That path is
+    the deterministic parent pointer the hook payloads never carry, so we recover
+    it here. (Claude additionally stamps the parent ``sessionId`` *inside* its
+    subagent lines, so those already fold into the parent and yield no separate
+    child session — the child stem isn't a UUID, so it's skipped below.)"""
+    if agent == "cursor":
+        root = _safe_transcript_root(_cursor_transcript_root())
+        pattern = "projects/**/agent-transcripts/*/subagents/*.jsonl"
+    elif agent == "claude":
+        root = _safe_transcript_root(_claude_transcript_root())
+        pattern = "projects/**/subagents/*.jsonl"
+    else:
+        return []
+    if not root:
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for path in root.glob(pattern):
+        parent_id = _uuid_from(path.parent.parent.name)
+        child_id = _uuid_from(path.stem)
+        if not parent_id or not child_id or parent_id == child_id or child_id in seen:
+            continue
+        seen.add(child_id)
+        out.append(
+            {"child": child_id, "parent": parent_id, "label": _subagent_label_from_file(path)}
+        )
+    return out
+
+
+def _post_subagent_links(links: list[dict], *, verbose: bool = False) -> int:
+    """POST child→parent links to the collector. Returns the count applied."""
+    if not links:
+        return 0
+    try:
+        data = json.dumps({"links": links}, ensure_ascii=False, default=str).encode("utf-8")
+        req = urllib.request.Request(
+            f"{COT_ENDPOINT}/v1/subagent-links",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            applied = json.loads(resp.read().decode("utf-8")).get("applied", 0)
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        if verbose:
+            print(f"cot: subagent link sync failed: {exc}", file=sys.stderr)
+        return 0
+    if verbose and applied:
+        print(f"cot: linked {applied} subagent session(s) to their parent")
+    return applied
+
+
+def _sync_subagent_links(agents: list[str], *, verbose: bool = False) -> int:
+    """Post filesystem-derived subagent links so children embed under parents."""
+    links: list[dict] = []
+    for agent in agents:
+        links.extend(_discover_subagent_links(agent))
+    return _post_subagent_links(links, verbose=verbose)
+
+
+def _import_cursor_subagent_responses(path: Path, child_id: str) -> None:
+    """Post a subagent's prompt/thought/response events from its transcript,
+    dropping tool_use (the child's live tool hooks already captured those).
+
+    Idempotent: the parser stamps each line with a stable ``_dedup_key`` and
+    ``_import``, so the collector dedups on (session, key) with no time window —
+    re-running on every stop hook is safe."""
+    try:
+        mtime = path.stat().st_mtime
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return
+    state: dict = {}
+    path_str = str(path)
+    for lineno, raw in enumerate(lines):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        for ev in _cursor_line_to_events(
+            obj, child_id, lineno=lineno, mtime=mtime, state=state, path=path_str
+        ):
+            if ev.get("tool_name") is not None or ev.get("hook_event_name") == "PostToolUse":
+                continue
+            if ev.get("_dedup_key") is None:
+                ev.pop("_dedup_key", None)
+            _post(f"{COT_ENDPOINT}/v1/ingest/cursor", ev)
+
+
+def _reconcile_cursor_subagents(body: dict) -> None:
+    """Fold a Cursor session's finished subagents in *live*, so active sessions
+    don't depend on a running ``cot watch``/``cot import``.
+
+    Cursor fires tool hooks inside a subagent but never its response/thought/
+    prompt hooks, so the subagent's assistant text exists only in the child
+    transcript at ``<parent>/subagents/<child>.jsonl``. This runs on the
+    parent's ``subagentStop``/``stop`` hook — by which point the child
+    transcript is finalized on disk — to (1) link each child to this parent and
+    (2) import its responses (dropping tool_use, already captured live). The
+    subagents/ glob is skipped entirely for the common no-subagent turn, so it
+    adds no overhead there."""
+    transcript = body.get("transcript_path")
+    parent_id = body.get("session_id")
+    if not transcript or not parent_id:
+        return
+    try:
+        sub_dir = Path(transcript).parent / "subagents"
+    except (TypeError, ValueError):
+        return
+    if not sub_dir.is_dir():
+        return
+    links: list[dict] = []
+    for child_path in sorted(sub_dir.glob("*.jsonl")):
+        child_id = _uuid_from(child_path.stem)
+        if not child_id or child_id == parent_id:
+            continue
+        links.append({
+            "child": child_id,
+            "parent": parent_id,
+            "label": _subagent_label_from_file(child_path),
+        })
+        _import_cursor_subagent_responses(child_path, child_id)
+    _post_subagent_links(links)
+
+
 def _claude_line_to_events(
     obj: dict,
     session_id: str,
@@ -2503,6 +2764,64 @@ def _codex_reasoning_text(payload: dict) -> str:
     return "\n".join(parts).strip()
 
 
+def _codex_flush_pending(state: dict | None) -> list[dict]:
+    """Release the deferred Codex assistant message, if one is held.
+
+    Codex emits each turn's ``token_count`` and ``turn_aborted`` lines *after*
+    the assistant message, so the message is buffered in ``state`` until the
+    next message (or end-of-file) lets that usage / interrupted status fold onto
+    it. Returns ``[]`` for every other agent, which never sets ``_pending_msg``.
+    """
+    if not state:
+        return []
+    ev = state.pop("_pending_msg", None)
+    return [ev] if isinstance(ev, dict) else []
+
+
+def _codex_session_config(meta: dict | None, turn: dict | None) -> dict:
+    """Curated session posture from Codex ``session_meta`` + ``turn_context``.
+
+    Only the human-meaningful fields, and only when present: the CLI/build, the
+    model and reasoning effort, and the sandbox/approval posture the run was
+    granted. The raw permission_profile entry list is intentionally left out."""
+    meta = meta if isinstance(meta, dict) else {}
+    turn = turn if isinstance(turn, dict) else {}
+    cfg: dict = {}
+    for key, src in (
+        ("cli_version", meta),
+        ("originator", meta),
+        ("source", meta),
+        ("model_provider", meta),
+        ("model", turn),
+        ("effort", turn),
+        ("approval_policy", turn),
+        ("sandbox_policy", turn),
+    ):
+        val = src.get(key)
+        if val not in (None, "", [], {}):
+            cfg[key] = val
+    return cfg
+
+
+def _codex_session_start_event(session_id: str, ts, state: dict) -> dict:
+    """A SessionStart lifecycle event for an imported Codex session, carrying the
+    sandbox/approval posture that Codex only records on its metadata lines."""
+    ev: dict = {
+        "session_id": session_id,
+        "_import": True,
+        "timestamp": ts,
+        "hook_event_name": "SessionStart",
+        "cwd": state.get("cwd"),
+        "_dedup_key": "session:start",
+    }
+    cfg = _codex_session_config(state.get("_codex_meta"), state.get("_codex_turn"))
+    if cfg.get("model"):
+        ev["model"] = cfg["model"]
+    if cfg:
+        ev["codex"] = cfg
+    return ev
+
+
 def _codex_line_to_events(
     obj: dict,
     session_id: str,
@@ -2524,41 +2843,94 @@ def _codex_line_to_events(
     ts = obj.get("timestamp")
     kind = obj.get("type")
     payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
-    base = {"session_id": session_id, "_import": True, "timestamp": ts}
     line_id = obj.get("id") or ""
+
+    # Codex never repeats cwd/model on message lines; it records them once on
+    # session_meta and per-turn on turn_context. Capture them in per-file state
+    # so they can be stamped onto the events that follow.
+    if kind == "session_meta":
+        if payload.get("cwd"):
+            state["cwd"] = payload.get("cwd")
+        state["_codex_meta"] = payload
+        return events
+    if kind == "turn_context":
+        if payload.get("cwd"):
+            state["cwd"] = payload.get("cwd")
+        if payload.get("model"):
+            state["model"] = payload.get("model")
+        if not isinstance(state.get("_codex_turn"), dict):
+            state["_codex_turn"] = payload
+        # turn_context follows session_meta and carries the run's posture, so
+        # emit the SessionStart here, once, with everything gathered so far.
+        if not state.get("_session_started") and isinstance(state.get("_codex_meta"), dict):
+            state["_session_started"] = True
+            return [_codex_session_start_event(session_id, ts, state)]
+        return events
+    # Per-turn token usage and interruptions arrive on event_msg lines *after*
+    # the assistant message, so fold them onto the deferred pending message.
+    if kind == "event_msg":
+        ptype = payload.get("type")
+        pending = state.get("_pending_msg")
+        if ptype == "token_count" and isinstance(pending, dict):
+            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+            last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else None
+            if last:
+                pending["usage"] = _merge_usage(pending.get("usage"), last)
+        elif ptype == "turn_aborted" and isinstance(pending, dict):
+            pending["interrupted"] = True
+        return events
 
     if kind != "response_item":
         return events
+
+    base: dict = {"session_id": session_id, "_import": True, "timestamp": ts}
+    if state.get("cwd"):
+        base["cwd"] = state["cwd"]
 
     pt = payload.get("type")
     if pt == "message" and payload.get("role") == "assistant":
         text_val = _text_from_blocks(payload.get("content"))
         if not text_val:
             return events
-        model = payload.get("model") or obj.get("model")
+        model = payload.get("model") or obj.get("model") or state.get("model")
         phase = payload.get("phase") or ""
         if phase == "final_answer":
-            events.append({
+            ev = {
                 **base,
                 "hook_event_name": "afterAgentResponse",
                 "_synthetic_category": "response",
                 "response": text_val,
                 "model": model,
                 "_dedup_key": f"{line_id}:resp" if line_id else None,
-            })
+            }
         else:
-            events.append({
+            ev = {
                 **base,
                 "hook_event_name": "afterAgentThought",
                 "_synthetic_category": "thought",
                 "thought": text_val,
                 "model": model,
                 "_dedup_key": f"{line_id}:think" if line_id else None,
-            })
+            }
+        # Defer so a trailing token_count / turn_aborted line can fold usage and
+        # interrupted status onto this message before it is posted. The prior
+        # pending message (if any) is released now, preserving order.
+        flushed = _codex_flush_pending(state)
+        state["_pending_msg"] = ev
+        return flushed
     elif pt == "message" and payload.get("role") == "user":
         content = payload.get("content")
-        text_val = _text_from_blocks(content, clean_user=True) if isinstance(content, list) else _clean_user_text(str(content or ""))
-        if text_val and not _is_interruption(text_val):
+        raw_text = _text_from_blocks(content, clean_user=False) if isinstance(content, list) else str(content or "")
+        env_block, _ = _extract_env_context(raw_text)
+        if env_block:
+            events.append(_env_context_event(base, env_block))
+        text_val = _clean_user_text(raw_text)
+        if _is_interruption(text_val):
+            pending = state.get("_pending_msg")
+            if isinstance(pending, dict):
+                pending["interrupted"] = True
+            return events
+        if text_val:
             events.append({
                 **base,
                 "hook_event_name": "UserPromptSubmit",
@@ -2704,8 +3076,18 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
         if not sid:
             continue
 
-        # v1: skip sessions that already have hook events
-        if origins.get(sid) == "hook":
+        # Cursor subagent transcripts are always imported in "responses-only"
+        # mode: Cursor fires tool hooks inside a subagent (so the session is
+        # "hook" origin and the tool calls already exist live) but never its
+        # response/thought/prompt hooks, so the assistant text lives only in the
+        # transcript. We import that text and drop tool_use blocks — recovering
+        # responses without double-counting tools. This is decided structurally
+        # (path under /subagents/) rather than from the possibly-stale origins
+        # map, so `cot watch` can't briefly duplicate a fresh subagent's tools.
+        is_cursor_subagent = agent == "cursor" and path.parent.name == "subagents"
+        responses_only = is_cursor_subagent
+        # v1: skip other sessions already fully covered by live hooks.
+        if origins.get(sid) == "hook" and not is_cursor_subagent:
             continue
 
         # Apply --since filter on file mtime as a cheap pre-filter
@@ -2745,11 +3127,26 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
                 obj, sid, lineno=lineno, mtime=mtime, state=state, path=path_str
             )
             for ev in events:
+                # Subagent transcripts: live hooks already hold the tool calls,
+                # so import only the conversation text the hooks never deliver.
+                if responses_only and (
+                    ev.get("tool_name") is not None
+                    or ev.get("hook_event_name") == "PostToolUse"
+                ):
+                    continue
                 # Strip None dedup keys
                 if ev.get("_dedup_key") is None:
                     ev.pop("_dedup_key", None)
                 _post(f"{COT_ENDPOINT}/v1/ingest/{source}", ev)
                 posted += 1
+
+        # Release any message held back to absorb its trailing token_count /
+        # turn_aborted (Codex only; a no-op for the other parsers).
+        for ev in _codex_flush_pending(state):
+            if ev.get("_dedup_key") is None:
+                ev.pop("_dedup_key", None)
+            _post(f"{COT_ENDPOINT}/v1/ingest/{source}", ev)
+            posted += 1
 
         offsets[str(path)] = new_offset
 
@@ -2801,6 +3198,8 @@ def _cmd_import(args: list[str]) -> int:
     recovered = _recover_questions()
     if recovered:
         print(f"cot import: recovered {recovered} question answer(s)")
+
+    _sync_subagent_links(agents, verbose=True)
 
     print(f"cot import: done — {total} events posted")
     if parsed.report:
@@ -2981,6 +3380,8 @@ def _cmd_reimport(args: list[str]) -> int:
     if recovered:
         print(f"cot reimport: recovered {recovered} question answer(s)")
 
+    _sync_subagent_links(agents, verbose=True)
+
     _write_import_parser_version()
     print(f"cot reimport: done — {total} events posted")
     return 0
@@ -3013,6 +3414,7 @@ def _cmd_watch(args: list[str]) -> int:
         if count:
             print(f"cot watch: initial import — {count} {agent} events")
     _import_offsets_save(offsets)
+    _sync_subagent_links(agents)
     _write_import_parser_version()
 
     # Tail loop — refresh origins every 10 cycles so newly-hooked sessions
@@ -3030,6 +3432,10 @@ def _cmd_watch(args: list[str]) -> int:
                 if count:
                     print(f"cot watch: +{count} {agent} events")
             _import_offsets_save(offsets)
+            # Newly-finished subagents get embedded under their parent. Cheap
+            # filesystem glob; throttled so we don't post on every poll.
+            if cycle % 5 == 0:
+                _sync_subagent_links(agents)
     except KeyboardInterrupt:
         print("\ncot watch: stopped")
         return 0
@@ -3088,12 +3494,40 @@ def main() -> int:
         body = {"_raw": raw}
 
     hook = body.get("hook_event_name") or body.get("hook") or body.get("event") or ""
+    # Fold the sandbox/approval posture onto the live Codex SessionStart so it
+    # matches what the importer records (Codex keeps it out of the hook payload).
+    if source == "codex" and hook in ("SessionStart", "sessionStart"):
+        for key, val in _codex_read_session_posture(body.get("session_id") or "").items():
+            body.setdefault(key, val)
+    # Codex sometimes prepends its injected <environment_context> onto the very
+    # prompt it sends the hook. Lift it into its own system event so it is not
+    # mislabeled as something the user typed; suppress the prompt if nothing else
+    # remains after removing it.
+    suppress = False
+    if source == "codex" and hook in ("UserPromptSubmit", "beforeSubmitPrompt"):
+        prompt = body.get("prompt")
+        if isinstance(prompt, str):
+            env_block, remainder = _extract_env_context(prompt)
+            if env_block:
+                _post(
+                    f"{COT_ENDPOINT}/v1/ingest/{source}",
+                    _env_context_event(
+                        {
+                            "session_id": body.get("session_id"),
+                            "cwd": body.get("cwd"),
+                            "timestamp": body.get("timestamp"),
+                        },
+                        env_block,
+                    ),
+                )
+                body["prompt"] = remainder
+                suppress = not remainder
     redundant = source == "cursor" and hook in CURSOR_REDUNDANT_HOOKS
     # Cursor transcript-only artifacts are posted by _emit_cursor_artifacts. For
     # plan-mode turns it also posts the filled response, so skip the default
     # empty response in that case.
     handled = source == "cursor" and _emit_cursor_artifacts(body, source)
-    if not redundant and not handled:
+    if not redundant and not handled and not suppress:
         _post(f"{COT_ENDPOINT}/v1/ingest/{source}", body)
     if source == "claude":
         _emit_claude_responses(body, source)
@@ -3101,6 +3535,10 @@ def main() -> int:
             _log_launch(body)
     elif source == "codex":
         _emit_codex_responses(body, source)
+    elif source == "cursor" and hook in ("subagentStop", "stop"):
+        # A subagent just finished (or the turn ended): fold its transcript-only
+        # responses in now, so active sessions don't wait for cot watch/import.
+        _reconcile_cursor_subagents(body)
 
     response = _hook_response(source, body)
     if response is not None:

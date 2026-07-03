@@ -238,7 +238,7 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
 
                 {expanded &&
                   g.items.map((s) => (
-                    <SessionRow
+                    <BoardSessionRow
                       key={s.id}
                       session={s}
                       slot1={slot1}
@@ -261,7 +261,7 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
   );
 }
 
-interface SessionRowProps {
+interface BoardSessionRowProps {
   session: SessionSummary;
   slot1: 'source' | 'project';
   showArchived: boolean;
@@ -269,7 +269,7 @@ interface SessionRowProps {
   onArchive: (s: SessionSummary) => void;
 }
 
-function SessionRow({ session: s, slot1, showArchived, onSelect, onArchive }: SessionRowProps) {
+function BoardSessionRow({ session: s, slot1, showArchived, onSelect, onArchive }: BoardSessionRowProps) {
   return (
     <div
       role="button"

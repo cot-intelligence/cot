@@ -98,6 +98,34 @@ def _subagent_label(body: dict[str, Any], tool_input: dict[str, Any] | None = No
     return stype or desc or "Subagent"
 
 
+_ENV_CONTEXT_RE = re.compile(r"<environment_context>.*?</environment_context>", re.S)
+_UPLOADED_DOCS_RE = re.compile(r"<uploaded_documents>.*?</uploaded_documents>", re.S)
+_EMPTY_IMAGE_RE = re.compile(r"<image\b[^>]*>\s*</image>", re.S)
+_USER_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.S)
+_CODEX_REQUEST_MARKER = "## My request for Codex:"
+
+
+def clean_prompt_wrappers(text: Any) -> str:
+    """Strip agent-injected scaffolding so the stored prompt is the user's words.
+
+    Codex wraps clipboard/file uploads in a ``# Files mentioned by the user:`` …
+    ``## My request for Codex:`` preamble and injects ``<environment_context>``;
+    Cursor wraps the prompt in ``<user_query>``. None of that is what the human
+    typed, so it is removed here — the single chokepoint for every source and
+    both the hook and import paths."""
+    out = _ENV_CONTEXT_RE.sub("", str(text or "")).strip()
+    match = _USER_QUERY_RE.search(out)
+    if match:
+        out = match.group(1).strip()
+    # The Files-mentioned preamble (paths/clipboard refs) precedes this marker;
+    # keep only the request that follows it.
+    if _CODEX_REQUEST_MARKER in out:
+        out = out.split(_CODEX_REQUEST_MARKER, 1)[1].strip()
+    out = _UPLOADED_DOCS_RE.sub("", out).strip()
+    out = _EMPTY_IMAGE_RE.sub("", out).strip()
+    return out
+
+
 def _json_detail(obj: Any) -> str:
     return json.dumps(obj, indent=2, ensure_ascii=False, default=str)
 
@@ -552,6 +580,17 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
         except (TypeError, ValueError):
             duration_ms = None
 
+    # --- Environment context (agent-injected, not a user prompt) ---
+    if hook == "CodexEnvironmentContext":
+        return {
+            "category": "lifecycle",
+            "title": "Environment context",
+            "target": body.get("cwd"),
+            "detail": str(body.get("environment_context") or ""),
+            "status": "ok",
+            "duration_ms": duration_ms,
+        }
+
     # --- Prompts ---
     if hook in ("UserPromptSubmit", "beforeSubmitPrompt"):
         prompt = body.get("prompt") or body.get("user_message") or ""
@@ -559,7 +598,7 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
             "category": "prompt",
             "title": "User prompt",
             "target": None,
-            "detail": str(prompt),
+            "detail": clean_prompt_wrappers(prompt),
             "status": "ok",
             "duration_ms": duration_ms,
         }

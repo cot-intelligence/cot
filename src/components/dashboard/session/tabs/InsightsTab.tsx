@@ -128,9 +128,9 @@ export function InsightsTab({ detail }: InsightsTabProps) {
   ];
 
   const files = [
-    ...detail.components.files_edited.map((f) => ({ path: f.path!, count: f.count, kind: 'edit' as const })),
-    ...detail.components.files_read.map((f) => ({ path: f.path!, count: f.count, kind: 'read' as const })),
-  ];
+    ...detail.components.files_edited.map((f) => ({ path: f.path, count: f.count, kind: 'edit' as const })),
+    ...detail.components.files_read.map((f) => ({ path: f.path, count: f.count, kind: 'read' as const })),
+  ].filter((f): f is { path: string; count: number; kind: 'edit' | 'read' } => Boolean(f.path));
 
   return (
     <div className="space-y-7">

@@ -223,11 +223,14 @@ def _repair_agents(value: str | None) -> list[str]:
     return [a for a in AGENTS if a in requested]
 
 
-def _repair_script(agents: list[str]) -> str:
+def _repair_script(agents: list[str], endpoint: str | None = None) -> str:
     agent_args = " ".join(agents)
+    # Default to the URL this script was fetched from, so repair still targets
+    # the right collector when the installer picked a non-default port.
+    default_endpoint = (endpoint or "http://127.0.0.1:31337").rstrip("/")
     return f"""#!/bin/sh
 set -e
-COT_ENDPOINT="${{COT_ENDPOINT:-http://127.0.0.1:31337}}"
+COT_ENDPOINT="${{COT_ENDPOINT:-{default_endpoint}}}"
 COT_HOME="${{HOME}}/.cot"
 TARGET="${{COT_HOME}}/bin/cot"
 mkdir -p "${{COT_HOME}}/bin"
@@ -559,11 +562,11 @@ async def cleanup_retention(request: Request) -> dict[str, Any]:
 
 
 @app.get("/install.sh")
-def install_script(repair: bool = False, agents: str | None = None):
+def install_script(request: Request, repair: bool = False, agents: str | None = None):
     if repair:
         selected = _repair_agents(agents)
         return PlainTextResponse(
-            _repair_script(selected),
+            _repair_script(selected, endpoint=str(request.base_url)),
             media_type="text/x-shellscript",
             headers={"Content-Disposition": 'attachment; filename="cot-repair.sh"'},
         )
@@ -574,10 +577,10 @@ def install_script(repair: bool = False, agents: str | None = None):
 
 
 @app.get("/repair.sh")
-def repair_script(agents: str | None = None):
+def repair_script(request: Request, agents: str | None = None):
     selected = _repair_agents(agents)
     return PlainTextResponse(
-        _repair_script(selected),
+        _repair_script(selected, endpoint=str(request.base_url)),
         media_type="text/x-shellscript",
         headers={"Content-Disposition": 'attachment; filename="cot-repair.sh"'},
     )
@@ -677,6 +680,18 @@ def unarchive_session(session_id: str) -> dict[str, Any]:
 @app.get("/v1/sessions/origins")
 def get_session_origins() -> dict[str, Any]:
     return {"origins": db.session_origins()}
+
+
+@app.post("/v1/subagent-links")
+async def post_subagent_links(request: Request) -> dict[str, Any]:
+    """Record child→parent subagent links the bridge derives from the on-disk
+    transcript nesting, so subagent sessions embed under their launching parent."""
+    body = await _json_body(request)
+    links = body.get("links")
+    if not isinstance(links, list):
+        raise HTTPException(status_code=400, detail="Expected { links: [...] }")
+    applied = db.set_subagent_links(links)
+    return {"ok": True, "applied": applied, "received": len(links)}
 
 
 @app.get("/v1/import/summary")
@@ -781,7 +796,6 @@ def get_hook_status() -> dict[str, Any]:
                 "expected_hooks": expected_hooks,
                 "installed_hooks": installed_hooks,
                 "missing_hooks": missing_hooks,
-                "hooks": expected_hooks,
                 "labels": [_hook_label(h) for h in expected_hooks],
                 "installed_labels": [_hook_label(h) for h in installed_hooks],
                 "missing_labels": [_hook_label(h) for h in missing_hooks],

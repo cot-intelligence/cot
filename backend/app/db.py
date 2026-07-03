@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS events (
     cache_write_tokens  INTEGER,
     attachments TEXT,
     dedup_key   TEXT,
+    origin      TEXT,
     created_at  TEXT NOT NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -313,8 +314,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("status", "TEXT NOT NULL DEFAULT 'active'"),
         ("archived", "INTEGER NOT NULL DEFAULT 0"),
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
+        # A subagent session launched by a parent agent. Derived deterministically
+        # from the on-disk transcript nesting (.../<parent>/subagents/<child>.jsonl)
+        # so the child's work embeds under the parent instead of orphaning.
+        ("parent_session_id", "TEXT"),
+        ("subagent_label", "TEXT"),
     ):
         _add_column_if_missing(conn, "sessions", name, col_def, session_cols)
+    if "parent_session_id" in session_cols:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)"
+        )
 
     if "source" in session_cols:
         conn.execute(
@@ -1599,7 +1609,13 @@ def _approval_review_origin(conn: sqlite3.Connection, session_id: str) -> str | 
     return None
 
 
-def _session_link_item(conn: sqlite3.Connection, session_id: str) -> dict[str, Any] | None:
+def _session_link_item(
+    conn: sqlite3.Connection,
+    session_id: str,
+    *,
+    link_type: str = "approval_review",
+    label: str | None = None,
+) -> dict[str, Any] | None:
     row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
     if row is None:
         return None
@@ -1608,27 +1624,51 @@ def _session_link_item(conn: sqlite3.Connection, session_id: str) -> dict[str, A
         " FROM events WHERE session_id = ?",
         (session_id,),
     ).fetchone()
+    # Subagent sessions rarely have a user prompt; fall back to the label the
+    # importer derived from the parent's Task launch.
+    title = _first_prompt(conn, row["id"]) or label
     return {
-        "type": "approval_review",
+        "type": link_type,
         "session_id": row["id"],
         "source": row["source"],
         "status": _live_status(agg["last_ts"]),
         "started_at": _format_ts(row["started_at"]) or str(row["started_at"] or ""),
         "last_activity": _format_ts(agg["last_ts"]),
         "event_count": agg["events"] or 0,
-        "title": _first_prompt(conn, row["id"]),
+        "title": title,
+        "label": label,
     }
 
 
 def _session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[dict[str, Any]]]:
+    """Parent/child links for a session, unified across providers.
+
+    Two link kinds feed the same structure (and the same inline-merge path):
+    ``approval_review`` (Codex, derived from the parent id embedded in the
+    review prompt) and ``subagent`` (Cursor/Claude, derived from the on-disk
+    transcript nesting and stored on ``sessions.parent_session_id``)."""
     parents: list[dict[str, Any]] = []
     origin = _approval_review_origin(conn, session_id)
     if origin:
-        item = _session_link_item(conn, origin)
+        item = _session_link_item(conn, origin, link_type="approval_review")
+        if item:
+            parents.append(item)
+    self_row = conn.execute(
+        "SELECT parent_session_id, subagent_label FROM sessions WHERE id = ?",
+        (session_id,),
+    ).fetchone()
+    if self_row and self_row["parent_session_id"]:
+        item = _session_link_item(
+            conn,
+            self_row["parent_session_id"],
+            link_type="subagent",
+            label=self_row["subagent_label"],
+        )
         if item:
             parents.append(item)
 
     children: list[dict[str, Any]] = []
+    seen: set[str] = set()
     rows = conn.execute(
         "SELECT session_id, detail, MIN(ts) AS first_ts FROM events"
         " WHERE category='prompt' AND detail LIKE ?"
@@ -1636,17 +1676,31 @@ def _session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[
         " ORDER BY first_ts ASC",
         (f"{_APPROVAL_REVIEW_PREFIX}%",),
     ).fetchall()
-    seen: set[str] = set()
     for row in rows:
         review_session_id = row["session_id"]
         if review_session_id == session_id or review_session_id in seen:
             continue
         if _approval_review_origin_from_text(row["detail"]) != session_id:
             continue
-        item = _session_link_item(conn, review_session_id)
+        item = _session_link_item(conn, review_session_id, link_type="approval_review")
         if item:
             children.append(item)
             seen.add(review_session_id)
+    # Subagent children: sessions whose stored parent is this one.
+    for crow in conn.execute(
+        "SELECT id, subagent_label, started_at FROM sessions"
+        " WHERE parent_session_id = ? ORDER BY started_at ASC, id ASC",
+        (session_id,),
+    ).fetchall():
+        child_id = crow["id"]
+        if child_id == session_id or child_id in seen:
+            continue
+        item = _session_link_item(
+            conn, child_id, link_type="subagent", label=crow["subagent_label"]
+        )
+        if item:
+            children.append(item)
+            seen.add(child_id)
 
     return {"parents": parents, "children": children}
 
@@ -1681,40 +1735,55 @@ def _fetch_inlined_session_events(
             item["inlined_approval_review"] = True
         elif inline_kind == "reviewed_session":
             item["inlined_reviewed_session"] = True
+        elif inline_kind == "subagent":
+            item["inlined_subagent"] = True
         out.append(item)
     return out
 
 
-def _merge_approval_review_events(
+def _merge_linked_session_events(
     conn: sqlite3.Connection,
     events: list[dict[str, Any]],
     links: dict[str, list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
-    """Flatten linked approval-review sessions into one timeline.
+    """Flatten linked child sessions into one timeline, by link kind.
 
-    Parent (reviewed) sessions get the review session's events inlined.
-    Review sessions get the original work session's events inlined."""
+    - ``approval_review`` child: inline its events (skipping the history dump).
+    - ``subagent`` child: inline its events so they nest under the parent's
+      subagent run window (this is what gives Cursor parity with Claude, whose
+      subagent lines already fold into the parent).
+    - ``approval_review`` parent: inline the reviewed work session's events.
+
+    A ``subagent`` *parent* is intentionally not inlined: when viewing the child
+    subagent session we only show a back-link, never the parent's whole
+    timeline."""
     children = links.get("children") or []
     parents = links.get("parents") or []
     if not children and not parents:
         return events
     merged = list(events)
     for link in children:
-        merged.extend(
-            _fetch_inlined_session_events(
-                conn,
-                link["session_id"],
-                skip_history_dump=True,
-                inline_kind="approval_review",
+        if link.get("type") == "subagent":
+            merged.extend(
+                _fetch_inlined_session_events(
+                    conn, link["session_id"],
+                    skip_history_dump=False, inline_kind="subagent",
+                )
             )
-        )
+        else:
+            merged.extend(
+                _fetch_inlined_session_events(
+                    conn, link["session_id"],
+                    skip_history_dump=True, inline_kind="approval_review",
+                )
+            )
     for link in parents:
+        if link.get("type") == "subagent":
+            continue
         merged.extend(
             _fetch_inlined_session_events(
-                conn,
-                link["session_id"],
-                skip_history_dump=False,
-                inline_kind="reviewed_session",
+                conn, link["session_id"],
+                skip_history_dump=False, inline_kind="reviewed_session",
             )
         )
     merged.sort(key=lambda e: (e.get("ts") or "", e.get("id") or 0))
@@ -2183,6 +2252,38 @@ def set_archived(session_id: str, archived: bool) -> bool:
         return cur.rowcount > 0
 
 
+def set_subagent_links(links: list[dict[str, Any]]) -> int:
+    """Record child→parent subagent relationships.
+
+    The bridge derives these deterministically from the on-disk transcript
+    nesting (``.../<parent>/subagents/<child>.jsonl``), so a subagent's session
+    embeds under the parent that launched it instead of orphaning as a
+    title-less top-level session. Best-effort: a link is applied only once both
+    the child session exists and the parent differs from the child. Idempotent.
+    Returns the number of links newly applied or updated."""
+    applied = 0
+    with _write_lock, _connect() as conn:
+        for link in links or []:
+            child = str(link.get("child") or "").strip()
+            parent = str(link.get("parent") or "").strip()
+            if not child or not parent or child == parent:
+                continue
+            if conn.execute("SELECT 1 FROM sessions WHERE id = ?", (child,)).fetchone() is None:
+                continue
+            label = link.get("label")
+            cur = conn.execute(
+                "UPDATE sessions SET parent_session_id = ?,"
+                " subagent_label = COALESCE(?, subagent_label)"
+                " WHERE id = ?"
+                " AND (parent_session_id IS NULL OR parent_session_id != ?"
+                "      OR (? IS NOT NULL AND COALESCE(subagent_label,'') != ?))",
+                (parent, label, child, parent, label, label or ""),
+            )
+            if cur.rowcount:
+                applied += 1
+    return applied
+
+
 def export_sessions(
     *,
     session_ids: list[str] | None = None,
@@ -2387,6 +2488,8 @@ def list_sessions(
 ) -> list[dict[str, Any]]:
     clauses: list[str] = ["s.archived = ?"]
     params: list[Any] = [1 if archived else 0]
+    # Subagent sessions embed under their parent, so they don't list standalone.
+    clauses.append("s.parent_session_id IS NULL")
     if source:
         clauses.append("s.source = ?")
         params.append(source)
@@ -2934,6 +3037,126 @@ def _build_clarifications(
     return clarifications, annotations
 
 
+def _synthesize_child_subagent_spans(
+    events: list[dict[str, Any]],
+    timeline_items: list[dict[str, Any]],
+    links: dict[str, list[dict[str, Any]]],
+    parent_session_id: str,
+) -> None:
+    """Give every inlined child session exactly one ``subagent`` run group so
+    all providers render the same collapsible view.
+
+    Claude folds subagent work into the parent natively and emits real
+    ``subagent`` start/stop spans. Cursor subagents and Codex approval-reviews
+    live in *separate* child sessions whose events we inline (see
+    ``_merge_linked_session_events``). There are two cases:
+
+    - The parent already has a native span for the run (Cursor captured the
+      ``subagentStop`` hook). We **adopt** that span — stamping it with the
+      child session id — rather than fabricating a duplicate bar.
+    - No native span exists (older/interrupted Cursor runs, all Codex reviews).
+      We **fabricate** one bracketing the child's events.
+
+    Either way the span carries ``subagent_child_session`` (so the frontend
+    groups by origin session, not a fuzzy time window) and ``subagent_run_kind``
+    (so the header reads "Subagent" vs "Review")."""
+    children = links.get("children") or []
+    if not children:
+        return
+    # Bucket the already-inlined events by the child session they came from.
+    by_child: dict[str, list[dict[str, Any]]] = {}
+    for ev in events:
+        sid = ev.get("event_session_id")
+        if sid and sid != parent_session_id:
+            by_child.setdefault(sid, []).append(ev)
+
+    # Native subagent spans already in the timeline (from subagentStart/Stop).
+    # Adopt one per child instead of duplicating it.
+    native_spans = [
+        it
+        for it in timeline_items
+        if it.get("category") == "subagent" and not it.get("subagent_child_session")
+    ]
+    claimed: set[int] = set()
+
+    def _start_of(span: dict[str, Any]) -> str:
+        return span.get("start_ts") or span.get("ts") or ""
+
+    synthetic_id = -1
+    for link in children:
+        child_id = link.get("session_id")
+        if not child_id:
+            continue
+        child_events = by_child.get(child_id)
+        if not child_events:
+            continue
+        kind = "subagent" if link.get("type") == "subagent" else "approval_review"
+        starts = [
+            e.get("start_ts") or e.get("ts")
+            for e in child_events
+            if (e.get("start_ts") or e.get("ts"))
+        ]
+        ends = [
+            e.get("end_ts") or e.get("ts") or e.get("start_ts")
+            for e in child_events
+            if (e.get("end_ts") or e.get("ts") or e.get("start_ts"))
+        ]
+        if not starts:
+            continue
+        ts_first = min(starts)
+        ts_last = max(ends) if ends else ts_first
+        if kind == "approval_review":
+            label = "Approval review"
+        else:
+            label = (link.get("title") or link.get("label") or "Subagent").strip() or "Subagent"
+
+        # Adopt the native span launched for this run: the latest unclaimed span
+        # starting at/before the child (the launch point), else the earliest
+        # remaining one. Codex reviews never have a native span.
+        adopt_idx: int | None = None
+        if kind == "subagent":
+            cands = [i for i in range(len(native_spans)) if i not in claimed]
+            le = [i for i in cands if _start_of(native_spans[i]) <= ts_first]
+            if le:
+                adopt_idx = max(le, key=lambda i: _start_of(native_spans[i]))
+            elif cands:
+                adopt_idx = min(cands, key=lambda i: _start_of(native_spans[i]))
+        if adopt_idx is not None:
+            claimed.add(adopt_idx)
+            span = native_spans[adopt_idx]
+            span["subagent_child_session"] = child_id
+            span["subagent_run_kind"] = kind
+            # Keep the native window/duration; grouping is by child id, not time.
+            continue
+
+        # No native span — fabricate one bracketing the child's events.
+        dur = int((_duration_seconds(ts_first, ts_last) or 0) * 1000)
+        span = {
+            "id": synthetic_id,
+            "hook": None,
+            "tool": None,
+            "phase": "start",
+            "ts": ts_first,
+            "source": link.get("source"),
+            "category": "subagent",
+            "title": label,
+            "detail": None,
+            "target": f"child::{child_id}",
+            "status": "success",
+            "duration_ms": dur,
+            "model": None,
+            "attachments": None,
+            "start_ts": ts_first,
+            "end_ts": ts_last,
+            "ongoing": False,
+            "subagent_child_session": child_id,
+            "subagent_run_kind": kind,
+        }
+        synthetic_id -= 1
+        events.append(dict(span))
+        timeline_items.append(dict(span))
+
+
 def get_session_detail(session_id: str) -> dict[str, Any] | None:
     with _connect() as conn:
         row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
@@ -2956,10 +3179,19 @@ def get_session_detail(session_id: str) -> dict[str, Any] | None:
             if item.get("category") == "question":
                 item["questions"] = _parse_questions(item.get("detail"))
             _trim_detail_inplace(item)
-        events = _merge_approval_review_events(conn, events, links)
+        events = _merge_linked_session_events(conn, events, links)
         for item in events:
-            if item.get("inlined_approval_review") or item.get("inlined_reviewed_session"):
+            if (
+                item.get("inlined_approval_review")
+                or item.get("inlined_reviewed_session")
+                or item.get("inlined_subagent")
+            ):
                 _trim_detail_inplace(item)
+        # Cursor subagents and Codex reviews live in separate child sessions with
+        # no native subagent span in the parent. Fabricate one span per child so
+        # every provider renders the same collapsible run group (Claude already
+        # emits real spans and folds its subagent work in natively).
+        _synthesize_child_subagent_spans(events, tl, links, session_id)
         for item in tl:
             extra = annotations.get(item["id"])
             if extra:
@@ -3103,7 +3335,9 @@ def set_question_answer(
             if not inp or _question_signature(inp) != wanted:
                 continue
             existing = obj.get("response")
-            if isinstance(existing, dict) and existing.get("answers"):
+            # Any non-empty response is a real answer (dict with answers, or a
+            # plain string from the tool result) — only fill blanks.
+            if existing:
                 continue
             obj["response"] = response
             conn.execute(

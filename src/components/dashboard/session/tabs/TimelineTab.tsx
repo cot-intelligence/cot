@@ -311,6 +311,7 @@ function SidebarList({
                     {meta.label}
                     {item.inlined_approval_review ? ' · review' : ''}
                     {item.inlined_reviewed_session ? ' · reviewed' : ''}
+                    {item.inlined_subagent ? ' · subagent' : ''}
                   </span>
                   <span className="shrink-0 font-mono text-[0.48rem] tabular-nums text-fg/25" title={formatDateTime(item.start_ts || item.ts)}>
                     {formatClock(item.start_ts || item.ts)}

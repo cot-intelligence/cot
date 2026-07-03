@@ -204,6 +204,14 @@ export interface SubagentRun {
   status: string | null;
   durationMs: number | null;
   ongoing: boolean;
+  /** What the run represents: a launched subagent or an inlined review. */
+  kind: 'subagent' | 'review';
+  /**
+   * For synthetic spans (Cursor subagents, Codex reviews) the child session
+   * whose inlined events this run groups. Native Claude spans leave this unset
+   * and fall back to time-window membership.
+   */
+  childSessionId?: string;
 }
 
 function inWindow(ts: string, start: string, end: string | null): boolean {
@@ -219,7 +227,7 @@ function inWindow(ts: string, start: string, end: string | null): boolean {
 export function subagentRuns(timeline: TimelineItem[]): SubagentRun[] {
   return timeline
     .filter((it) => it.category === 'subagent' && (it.start_ts || it.ts))
-    .map((it) => ({
+    .map((it): SubagentRun => ({
       item: it,
       label: subagentLabel(it),
       start: toTimestampString(it.start_ts || it.ts),
@@ -227,6 +235,8 @@ export function subagentRuns(timeline: TimelineItem[]): SubagentRun[] {
       status: it.status ?? null,
       durationMs: it.duration_ms ?? null,
       ongoing: it.ongoing ?? it.end_ts == null,
+      kind: it.subagent_run_kind === 'approval_review' ? 'review' : 'subagent',
+      childSessionId: it.subagent_child_session,
     }))
     .sort((a, b) => a.start.localeCompare(b.start));
 }
@@ -266,6 +276,15 @@ export function actionsInRun(items: TimelineItem[], run: SubagentRun): TimelineI
 
 /** Events worth showing inside a subagent group. */
 export function eventsInRun(items: TimelineItem[], run: SubagentRun): TimelineItem[] {
+  // Synthetic spans (Cursor subagents, Codex reviews) own a whole child
+  // session: group by that session id so every event nests — including the
+  // child's own prompt and lifecycle rows that the category filter would drop.
+  if (run.childSessionId) {
+    return items.filter(
+      (it) => it.event_session_id === run.childSessionId && it.id !== run.item.id,
+    );
+  }
+  // Native Claude spans: members are whatever falls inside the time window.
   return items.filter(
     (it) => SUBAGENT_CONTENT_CATEGORIES.has(it.category) && inWindow(eventTimestamp(it), run.start, run.end),
   );

@@ -80,10 +80,16 @@ export interface TimelineItem {
   questions?: QuestionPart[];
   /** Cursor composer mode when not the default "agent" (e.g. "plan"). */
   composer_mode?: string;
-  /** When set, this event was inlined from a linked approval-review session. */
+  /** When set, this event was inlined from a linked session (review or subagent). */
   event_session_id?: string;
   inlined_approval_review?: boolean;
   inlined_reviewed_session?: boolean;
+  /** Inlined from a subagent session that this (parent) session launched. */
+  inlined_subagent?: boolean;
+  /** On a synthetic subagent span: the child session whose events it groups. */
+  subagent_child_session?: string;
+  /** On a synthetic subagent span: whether it groups a subagent or a review. */
+  subagent_run_kind?: 'subagent' | 'approval_review';
 }
 
 export interface QuestionPart {
@@ -132,7 +138,7 @@ export interface Components {
 }
 
 export interface SessionLink {
-  type: 'approval_review';
+  type: 'approval_review' | 'subagent';
   session_id: string;
   source: AgentId;
   status: string;
@@ -140,6 +146,7 @@ export interface SessionLink {
   last_activity: string | null;
   event_count: number;
   title: string | null;
+  label?: string | null;
 }
 
 export interface SessionLinks {
@@ -429,7 +436,6 @@ export interface HookStatusAgent {
   expected_hooks: string[];
   installed_hooks: string[];
   missing_hooks: string[];
-  hooks: string[];
   labels: string[];
   installed_labels: string[];
   missing_labels: string[];

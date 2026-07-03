@@ -35,6 +35,23 @@ type Segment =
   | { type: 'event'; item: TimelineItem }
   | { type: 'subagent'; run: SubagentRun; item: TimelineItem; resultItem: TimelineItem; children: TimelineItem[] };
 
+/**
+ * Inside a subagent group the run header already conveys provenance, so drop
+ * the per-event "Review"/"subagent" badge + accent — giving every provider the
+ * same clean nested look Claude has natively.
+ */
+function nestedChild(item: TimelineItem): TimelineItem {
+  if (!item.inlined_approval_review && !item.inlined_subagent && !item.inlined_reviewed_session) {
+    return item;
+  }
+  return {
+    ...item,
+    inlined_approval_review: false,
+    inlined_subagent: false,
+    inlined_reviewed_session: false,
+  };
+}
+
 export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
   function ChatTimeline({ items, runs, sessionId, expansionRequest, onCardClick }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -172,7 +189,7 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
                   setCardRef(keyFor(seg.resultItem), el);
                 }}
               >
-                {seg.children.map(renderEvent)}
+                {seg.children.map((child) => renderEvent(nestedChild(child)))}
               </SubagentGroup>
             ),
           )}
@@ -222,7 +239,7 @@ const SubagentGroup = forwardRef<HTMLDivElement, {
           </span>
           <span className="h-2 w-2 shrink-0 rounded-full bg-cobalt" />
           <span className="font-mono text-[0.58rem] font-bold uppercase tracking-widest text-cobalt">
-            Subagent
+            {run.kind === 'review' ? 'Review' : 'Subagent'}
           </span>
           <span className="min-w-0 flex-1 truncate font-mono text-[0.7rem] font-bold text-fg">
             {run.label}

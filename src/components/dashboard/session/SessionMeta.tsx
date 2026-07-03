@@ -38,9 +38,15 @@ function DirectoryName({ cwd }: { cwd: string }) {
   );
 }
 
+const PARENT_LABEL: Record<SessionLink['type'], string> = {
+  approval_review: 'Approval review for',
+  subagent: 'Subagent of',
+};
+
 export function SessionMeta({ summary, links }: SessionMetaProps) {
   const isActive = summary.status === 'active';
   const parents = links?.parents ?? [];
+  const subagentChildren = (links?.children ?? []).filter((l) => l.type === 'subagent');
 
   return (
     <header className="space-y-3">
@@ -94,8 +100,19 @@ export function SessionMeta({ summary, links }: SessionMetaProps) {
             <SessionLinkPill
               key={`parent-${link.session_id}`}
               link={link}
-              label="Approval review for"
+              label={PARENT_LABEL[link.type]}
             />
+          ))}
+        </div>
+      )}
+
+      {subagentChildren.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 font-mono text-[0.58rem] uppercase tracking-widest text-fg/35">
+          <span className="text-fg/30">
+            {subagentChildren.length} subagent{subagentChildren.length === 1 ? '' : 's'}
+          </span>
+          {subagentChildren.map((link) => (
+            <SessionLinkPill key={`child-${link.session_id}`} link={link} />
           ))}
         </div>
       )}
