@@ -31,7 +31,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import __version__, db
+from . import __version__, db, insights
 from .normalize import normalize
 
 app = FastAPI(title="cot collector", version=__version__)
@@ -827,6 +827,54 @@ def get_metrics_history(category: str = "shell", limit: int = 200) -> dict[str, 
         raise HTTPException(status_code=400, detail="category must be 'shell' or 'web'")
     limit = max(1, min(limit, 500))
     return {"items": db.metrics_history(category, limit)}
+
+
+@app.get("/v1/insights")
+def get_insights(
+    days: int = Query(30),
+    pillar: str | None = Query(None),
+    severity: str | None = Query(None),
+    status: str = Query("active"),
+) -> dict[str, Any]:
+    """Actionable findings across sessions; runs lifecycle reconcile on read."""
+    if pillar is not None and pillar not in insights.PILLARS:
+        raise HTTPException(status_code=400, detail=f"pillar must be one of {insights.PILLARS}")
+    if severity is not None and severity not in insights.SEVERITIES:
+        raise HTTPException(status_code=400, detail=f"severity must be one of {insights.SEVERITIES}")
+    if status not in insights.STATUSES and status != "all":
+        raise HTTPException(status_code=400, detail=f"status must be one of {insights.STATUSES} or 'all'")
+    result = insights.compute_insights(days=max(0, min(days, 365)))
+    items = result["insights"]
+    if status != "all":
+        items = [f for f in items if f["status"] == status]
+    if pillar:
+        items = [f for f in items if f["pillar"] == pillar]
+    if severity:
+        items = [f for f in items if f["severity"] == severity]
+    result["insights"] = items
+    return result
+
+
+@app.post("/v1/insights/{fingerprint}/dismiss")
+def dismiss_insight(fingerprint: str) -> dict[str, Any]:
+    if not insights.set_finding_status(fingerprint, "dismissed"):
+        raise HTTPException(status_code=404, detail="Finding not found")
+    return {"ok": True}
+
+
+@app.post("/v1/insights/{fingerprint}/restore")
+def restore_insight(fingerprint: str) -> dict[str, Any]:
+    if not insights.set_finding_status(fingerprint, "active"):
+        raise HTTPException(status_code=404, detail="Finding not found")
+    return {"ok": True}
+
+
+@app.get("/v1/sessions/{session_id}/insights")
+def get_session_insights(session_id: str) -> dict[str, Any]:
+    """Per-session findings, ephemeral (no lifecycle persistence)."""
+    if not insights.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return insights.compute_insights(session_id=session_id)
 
 
 @app.get("/v1/search")

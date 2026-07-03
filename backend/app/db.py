@@ -154,6 +154,25 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS insight_findings (
+    fingerprint TEXT PRIMARY KEY,
+    rule_id     TEXT NOT NULL,
+    pillar      TEXT NOT NULL,
+    tier        INTEGER NOT NULL DEFAULT 2,
+    severity    TEXT NOT NULL,
+    title       TEXT,
+    detail      TEXT,
+    recommendation TEXT,
+    evidence    TEXT,
+    status      TEXT NOT NULL DEFAULT 'active',
+    first_seen  TEXT NOT NULL,
+    last_seen   TEXT NOT NULL,
+    resolved_at TEXT,
+    dismissed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_findings_status ON insight_findings(status, pillar);
+
 CREATE TABLE IF NOT EXISTS audit_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     action      TEXT NOT NULL,

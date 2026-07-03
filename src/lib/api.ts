@@ -394,6 +394,75 @@ export async function getMetricsHistory(
   return data.items;
 }
 
+export type InsightPillar = 'usability' | 'cost' | 'security';
+export type InsightSeverity = 'info' | 'warn' | 'critical';
+export type InsightStatus = 'active' | 'resolved' | 'dismissed';
+
+export interface InsightEvidence {
+  session_id: string;
+  event_id: number | null;
+  label: string;
+  value: string | null;
+  ts: string | null;
+}
+
+/** A rule-based actionable finding (distinct from the narrative Insight in sessionInsights). */
+export interface ActionableInsight {
+  id: string;
+  fingerprint: string;
+  /** Human label for this rule type, used to group like findings in the UI. */
+  group_title: string;
+  pillar: InsightPillar;
+  tier: 1 | 2;
+  severity: InsightSeverity;
+  title: string;
+  detail: string;
+  recommendation: string;
+  metric: { value: number; unit: string; label: string } | null;
+  evidence: InsightEvidence[];
+  status: InsightStatus;
+  first_seen: string | null;
+  last_seen: string | null;
+  resolved_at: string | null;
+}
+
+export interface InsightsResponse {
+  generated_at: string;
+  window_days: number;
+  insights: ActionableInsight[];
+  counts: {
+    by_pillar: Record<InsightPillar, number>;
+    by_severity: Record<InsightSeverity, number>;
+    resolved_recently: number;
+  };
+}
+
+export async function getInsights(
+  days = 30,
+  status: InsightStatus | 'all' = 'active',
+): Promise<InsightsResponse> {
+  const params = new URLSearchParams({ days: String(days), status });
+  return json<InsightsResponse>(await fetch(`/v1/insights?${params.toString()}`));
+}
+
+export async function getSessionInsights(sessionId: string): Promise<InsightsResponse> {
+  return json<InsightsResponse>(
+    await fetch(`/v1/sessions/${encodeURIComponent(sessionId)}/insights`),
+  );
+}
+
+export async function dismissInsight(fingerprint: string): Promise<void> {
+  await json<{ ok: boolean }>(
+    await fetch(`/v1/insights/${encodeURIComponent(fingerprint)}/dismiss`, { method: 'POST' }),
+  );
+}
+
+export async function restoreInsight(fingerprint: string): Promise<void> {
+  await json<{ ok: boolean }>(
+    await fetch(`/v1/insights/${encodeURIComponent(fingerprint)}/restore`, { method: 'POST' }),
+  );
+}
+
 export interface Connection {
   source: AgentId;
   sessions: number;
