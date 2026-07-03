@@ -2790,6 +2790,24 @@ def timeline(session_id: str) -> list[dict[str, Any]]:
 
     spans: dict[str, dict[str, Any]] = {}
     items: list[dict[str, Any]] = []
+    # Claude subagents open with a PreToolUse(Agent) start keyed by tool_use_id
+    # and later fire a SubagentStop whose payload carries no tool_use_id, so it
+    # can't key-match. For background agents the PostToolUse(Agent) "launched"
+    # ack closes the span almost instantly, leaving a near-zero window plus an
+    # orphan SubagentStop. Track open subagent spans and finalized launches so
+    # the trailing SubagentStop attaches to its run (FIFO — no shared id).
+    open_subagent_keys: list[str] = []
+    pending_subagent_stops: list[dict[str, Any]] = []
+
+    def _is_subagent_stop(e: dict[str, Any]) -> bool:
+        return (e.get("hook") or "") in ("SubagentStop", "subagentStop")
+
+    def _extend(span: dict[str, Any], end_ts: str, status: Any) -> None:
+        if (end_ts or "") > (span.get("end_ts") or ""):
+            span["end_ts"] = end_ts
+            span["ongoing"] = False
+            span["duration_ms"] = int((_duration_seconds(span["start_ts"], end_ts) or 0) * 1000)
+            span["status"] = status or span.get("status")
 
     for ev in events:
         cat = ev.get("category") or "other"
@@ -2802,22 +2820,53 @@ def timeline(session_id: str) -> list[dict[str, Any]]:
 
         if phase == "start":
             spans[key] = {**ev, "start_ts": ev["ts"], "end_ts": None, "ongoing": True}
+            if cat == "subagent":
+                open_subagent_keys.append(key)
             continue
 
         if phase == "end" and key in spans:
             start = spans.pop(key)
+            if cat == "subagent" and key in open_subagent_keys:
+                open_subagent_keys.remove(key)
             dur = ev.get("duration_ms") or start.get("duration_ms")
             if dur is None:
                 dur = int((_duration_seconds(start["start_ts"], ev["ts"]) or 0) * 1000)
-            items.append({
+            merged = {
                 **start,
                 "end_ts": ev["ts"],
                 "ongoing": False,
                 "duration_ms": dur,
                 "detail": _merge_detail(start.get("detail"), ev.get("detail")),
                 "status": ev.get("status") or start.get("status"),
-            })
+            }
+            items.append(merged)
+            # A PostToolUse(Agent) end may just be the launch ack; keep the span
+            # so a later SubagentStop can extend it to real completion. The stop
+            # itself (Cursor keys match) is the true end and needs no extending.
+            if cat == "subagent" and not _is_subagent_stop(ev):
+                pending_subagent_stops.append(merged)
             continue
+
+        # Orphan subagent end (Claude SubagentStop): attach to its launch.
+        if cat == "subagent" and phase == "end":
+            if open_subagent_keys:
+                start = spans.pop(open_subagent_keys.pop(0))
+                dur = int((_duration_seconds(start["start_ts"], ev["ts"]) or 0) * 1000)
+                items.append({
+                    **start,
+                    "end_ts": ev["ts"],
+                    "ongoing": False,
+                    "duration_ms": dur,
+                    "status": ev.get("status") or start.get("status"),
+                })
+                continue
+            if pending_subagent_stops:
+                _extend(pending_subagent_stops.pop(0), ev["ts"], ev.get("status"))
+                continue
+            if _is_subagent_stop(ev):
+                # A SubagentStop with no captured launch: no window, no content,
+                # generic label. Drop it instead of rendering an empty group.
+                continue
 
         items.append({**ev, "start_ts": ev["ts"], "end_ts": ev["ts"], "ongoing": False})
 
