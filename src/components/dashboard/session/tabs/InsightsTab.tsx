@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import type { SessionDetail } from '../../../../lib/api';
+import { useEffect, useMemo, useState } from 'react';
+import { getSessionInsights, type ActionableInsight, type SessionDetail } from '../../../../lib/api';
 import { formatDuration, getCategoryMeta, toTimestampString } from '../../../../lib/categoryMeta';
 import { compact } from '../../../../lib/format';
 import { formatModel } from '../../../../lib/modelMeta';
@@ -52,11 +52,79 @@ function ChartBox({ label, children }: { label: string; children: React.ReactNod
   );
 }
 
+function FindingRow({ finding, sessionId }: { finding: ActionableInsight; sessionId: string }) {
+  const severityStyle =
+    finding.severity === 'critical'
+      ? 'bg-vermilion text-cream border-vermilion'
+      : finding.severity === 'warn'
+        ? 'border-vermilion/60 text-vermilion'
+        : 'border-cobalt/60 text-cobalt';
+  const focusEvent = (eventId: number | null) => {
+    const base = `#/session/${encodeURIComponent(sessionId)}`;
+    window.location.hash = eventId != null ? `${base}?e=${eventId}` : base;
+  };
+  return (
+    <div className="min-w-0 bg-bg px-4 py-3">
+      <div className="flex items-start gap-2.5">
+        <span
+          className={`shrink-0 border px-1.5 py-0.5 font-mono text-[0.5rem] font-bold uppercase tracking-widest ${severityStyle}`}>
+          {finding.severity}
+        </span>
+        <p className="min-w-0 flex-1 font-mono text-xs font-bold text-fg">{finding.title}</p>
+      </div>
+      <div className="mt-2 space-y-2">
+        <p className="break-words font-mono text-[0.68rem] leading-relaxed text-fg/70">
+          {finding.detail}
+        </p>
+        <p className="border-l-[3px] border-vermilion pl-2.5 font-mono text-[0.68rem] font-bold leading-relaxed text-fg/85">
+          {finding.recommendation}
+        </p>
+        {finding.evidence.length > 0 && (
+          <ul className="space-y-0.5 pt-0.5">
+            {finding.evidence.map((ev, i) => (
+              <li key={`${ev.event_id ?? i}`}>
+                <button
+                  type="button"
+                  onClick={() => focusEvent(ev.event_id)}
+                  className="group flex w-full items-center gap-2 text-left">
+                  <span className="min-w-0 flex-1 truncate font-mono text-[0.62rem] text-fg/55 transition-colors group-hover:text-vermilion">
+                    {ev.label}
+                  </span>
+                  {ev.value && (
+                    <span className="shrink-0 font-mono text-[0.55rem] text-fg/35">{ev.value}</span>
+                  )}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function InsightsTab({ detail }: InsightsTabProps) {
   const { summary: narrative, insights } = buildInsights(detail);
   const [open, setOpen] = useState(false);
+  const [findings, setFindings] = useState<ActionableInsight[] | null>(null);
 
   const s = detail.summary;
+
+  // One-shot fetch: the tab mounts lazily, so this doesn't touch the hot
+  // session-detail polling path.
+  useEffect(() => {
+    let active = true;
+    getSessionInsights(detail.summary.id)
+      .then((r) => {
+        if (active) setFindings(r.insights);
+      })
+      .catch(() => {
+        if (active) setFindings([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [detail.summary.id]);
   const c = s.category_counts ?? {};
   const events = detail.events;
   const cat = (k: string) => c[k] ?? 0;
@@ -143,6 +211,20 @@ export function InsightsTab({ detail }: InsightsTabProps) {
         <Stat label="Tool calls" value={compact(s.tool_count)} />
         <Stat label="Tokens" value={hasTokens ? compact(s.tokens.total) : '—'} accent={hasTokens} />
       </Grid>
+
+      {findings !== null && (
+        <Section n="00" title="Findings">
+          {findings.length ? (
+            <div className="grid grid-cols-[minmax(0,1fr)] gap-px bg-fg/10">
+              {findings.map((f) => (
+                <FindingRow key={f.fingerprint} finding={f} sessionId={s.id} />
+              ))}
+            </div>
+          ) : (
+            <p className="font-mono text-xs text-olive">No findings — clean session.</p>
+          )}
+        </Section>
+      )}
 
       <Section n="01" title="Activity">
         {computed.activity.length ? (
