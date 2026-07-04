@@ -197,6 +197,19 @@ def db_path() -> Path:
     return Path.home() / ".cot" / "cot.db"
 
 
+def db_size_bytes() -> int:
+    """On-disk size of the database, including a transient rollback journal.
+    DELETE journal mode means there is no persistent -wal/-shm to account for."""
+    p = db_path()
+    total = 0
+    for path in (p, p.with_name(p.name + "-journal")):
+        try:
+            total += path.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1434,6 +1447,7 @@ def retention_status() -> dict[str, Any]:
         "eligible_events": events if policy["enabled"] else 0,
         "preview_sessions": len(sessions),
         "preview_events": events,
+        "db_size_bytes": db_size_bytes(),
     }
 
 
@@ -1447,6 +1461,15 @@ def cleanup_retention(*, dry_run: bool = True) -> dict[str, Any]:
             deleted_sessions = len(sessions)
             deleted_events = events
             conn.executemany("DELETE FROM sessions WHERE id = ?", [(sid,) for sid in sessions])
+    reclaimed_bytes = 0
+    if deleted_sessions:
+        # Deletes leave free pages behind; VACUUM returns the space to the OS so
+        # the DB file actually shrinks. Must run outside a transaction.
+        before = db_size_bytes()
+        with _write_lock, _connect() as conn:
+            conn.isolation_level = None
+            conn.execute("VACUUM")
+        reclaimed_bytes = max(0, before - db_size_bytes())
     result = {
         "dry_run": dry_run,
         "policy": policy,
@@ -1455,6 +1478,7 @@ def cleanup_retention(*, dry_run: bool = True) -> dict[str, Any]:
         "eligible_events": events if policy["enabled"] else 0,
         "deleted_sessions": deleted_sessions,
         "deleted_events": deleted_events,
+        "reclaimed_bytes": reclaimed_bytes,
     }
     record_audit_event(
         "retention.cleanup",

@@ -21,6 +21,7 @@ import {
   type VersionInfo,
 } from '../../lib/api';
 import { formatRelative } from '../../lib/categoryMeta';
+import { formatBytes } from '../../lib/format';
 import { readSavedAgents } from '../../lib/settings';
 import { sourceLabel } from '../../lib/sourceLabels';
 import { useTheme } from '../../lib/theme';
@@ -33,6 +34,10 @@ interface SettingsViewProps {
   onSidebarOpenChange: (open: boolean) => void;
   onRunOnboarding: () => void;
 }
+
+// Above this on-disk size, suggest enabling retention if it's paused. The local
+// DB stores raw event payloads, so a busy machine can reach hundreds of MB.
+const DB_SIZE_NUDGE_BYTES = 500 * 1024 * 1024;
 
 export function SettingsView({
   sidebarOpen,
@@ -332,6 +337,11 @@ export function SettingsView({
             description="Local cleanup policy and cot's own configuration trail.">
             <div className="grid gap-3 sm:grid-cols-3">
               <Stat
+                label="Database size"
+                value={retention ? formatBytes(retention.db_size_bytes) : '—'}
+                warn={!!retention && retention.db_size_bytes >= DB_SIZE_NUDGE_BYTES}
+              />
+              <Stat
                 label="Policy"
                 value={
                   retention
@@ -346,11 +356,29 @@ export function SettingsView({
                 label="Dry-run sessions"
                 value={(retention?.preview_sessions ?? 0).toLocaleString()}
               />
-              <Stat
-                label="Dry-run events"
-                value={(retention?.preview_events ?? 0).toLocaleString()}
-              />
             </div>
+
+            {retention &&
+              !retention.policy.enabled &&
+              retention.db_size_bytes >= DB_SIZE_NUDGE_BYTES && (
+                <div className="rounded-lg border border-vermilion/40 bg-vermilion/5 p-4">
+                  <p className="font-mono text-xs leading-relaxed text-fg/70">
+                    Your local database is{' '}
+                    <span className="font-bold text-vermilion">
+                      {formatBytes(retention.db_size_bytes)}
+                    </span>{' '}
+                    and retention is paused, so traces accumulate indefinitely. Enable a
+                    policy below to prune old sessions and reclaim disk automatically.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={retentionBusy}
+                    onClick={() => setRetentionEnabled(true)}
+                    className="mt-3 border border-vermilion px-4 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-vermilion transition-colors hover:bg-vermilion hover:text-cream disabled:cursor-not-allowed disabled:opacity-40">
+                    Enable {retention.policy.days}-day retention
+                  </button>
+                </div>
+              )}
 
             <div className="space-y-4 rounded-lg bg-surface p-4 shadow-soft">
               <PreferenceRow
@@ -418,6 +446,9 @@ export function SettingsView({
                       : cleanupResult.deleted_sessions
                   ).toLocaleString()}{' '}
                   sessions.
+                  {!cleanupResult.dry_run && cleanupResult.reclaimed_bytes > 0 && (
+                    <> Reclaimed {formatBytes(cleanupResult.reclaimed_bytes)}.</>
+                  )}
                 </p>
               )}
             </div>

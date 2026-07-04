@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compact, hourLabel, formatMetricsDay, formatCost } from './format';
+import { compact, hourLabel, formatMetricsDay, formatCost, formatBytes } from './format';
 
 describe('compact', () => {
   it('passes small numbers through', () => {
@@ -45,6 +45,21 @@ describe('formatCost', () => {
   it('handles sub-cent and zero', () => {
     expect(formatCost(0.004)).toBe('<$0.01');
     expect(formatCost(0)).toBe('$0');
+  });
+});
+
+describe('formatBytes', () => {
+  it('handles zero and non-finite', () => {
+    expect(formatBytes(0)).toBe('0 B');
+    expect(formatBytes(-5)).toBe('0 B');
+    expect(formatBytes(NaN)).toBe('0 B');
+  });
+
+  it('scales through units with sensible precision', () => {
+    expect(formatBytes(512)).toBe('512 B');
+    expect(formatBytes(1536)).toBe('1.5 KB');
+    expect(formatBytes(419_430_400)).toBe('400 MB');
+    expect(formatBytes(1024 ** 3)).toBe('1 GB');
   });
 });
 

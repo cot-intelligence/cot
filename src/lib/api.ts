@@ -266,6 +266,7 @@ export interface RetentionStatus {
   eligible_events: number;
   preview_sessions: number;
   preview_events: number;
+  db_size_bytes: number;
 }
 
 export interface RetentionCleanupResult {
@@ -276,6 +277,7 @@ export interface RetentionCleanupResult {
   eligible_events: number;
   deleted_sessions: number;
   deleted_events: number;
+  reclaimed_bytes: number;
 }
 
 export async function getRetention(): Promise<RetentionStatus> {
