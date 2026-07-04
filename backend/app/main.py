@@ -27,6 +27,7 @@ from fastapi.responses import (
     JSONResponse,
     PlainTextResponse,
     Response,
+    StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -618,6 +619,7 @@ async def ingest(source: str, request: Request) -> dict[str, Any]:
             body.get("attachments") or [],
             body.get("timestamp"),
         )
+        _bump_revision()
         return {"ok": True, "attached": attached}
 
     norm = normalize(source, body)
@@ -631,6 +633,7 @@ async def ingest(source: str, request: Request) -> dict[str, Any]:
             "category": norm.get("category"),
         }
     session_id, event_id = db.record_event(norm, body)
+    _bump_revision()
     return {
         "ok": True,
         "session_id": session_id,
@@ -638,6 +641,52 @@ async def ingest(source: str, request: Request) -> dict[str, Any]:
         "hook": norm["hook"],
         "category": norm.get("category"),
     }
+
+
+# In-process change counter. A single uvicorn worker serves this collector, so a
+# plain integer is a sufficient "something changed" signal for the live stream —
+# the dashboard refetches through the existing endpoints when it advances,
+# instead of polling on a fixed timer.
+_revision = 0
+_revision_lock = threading.Lock()
+
+
+def _bump_revision() -> None:
+    global _revision
+    with _revision_lock:
+        _revision += 1
+
+
+@app.get("/v1/stream")
+async def stream(request: Request) -> StreamingResponse:
+    """Server-sent events: emit a `change` whenever new data is ingested, with a
+    periodic comment keepalive so idle connections and proxies stay open. Clients
+    hold one connection instead of each polling the DB every few seconds."""
+
+    async def gen() -> Any:
+        last = _revision
+        yield f"event: hello\ndata: {json.dumps({'revision': last})}\n\n"
+        idle = 0
+        while True:
+            if await request.is_disconnected():
+                break
+            current = _revision
+            if current != last:
+                last = current
+                idle = 0
+                yield f"event: change\ndata: {json.dumps({'revision': current})}\n\n"
+            else:
+                idle += 1
+                if idle >= 15:
+                    idle = 0
+                    yield ": keepalive\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/v1/stats")

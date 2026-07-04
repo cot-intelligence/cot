@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { getStreamSnapshot, subscribeStream } from './useServerRevision';
+
+// When the live stream is connected we still poll on this slow cadence as a
+// safety net (in case a change event is missed), but freshness comes from the
+// stream. When disconnected, the caller's own interval is used.
+const CONNECTED_FALLBACK_MS = 30000;
 
 export function usePolling<T>(
   fetcher: () => Promise<T>,
@@ -10,6 +16,12 @@ export function usePolling<T>(
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
+  const { revision, connected } = useSyncExternalStore(
+    subscribeStream,
+    getStreamSnapshot,
+    getStreamSnapshot,
+  );
+
   useEffect(() => {
     let active = true;
     const load = async () => {
@@ -20,13 +32,16 @@ export function usePolling<T>(
         if (active) setError(true);
       }
     };
+    // Fetch on mount, on every server revision bump, and whenever connectivity
+    // flips — so a `change` from the stream drives an immediate refetch.
     load();
-    if (intervalMs > 0) {
-      const t = window.setInterval(load, intervalMs);
+    const effective = connected ? Math.max(intervalMs, CONNECTED_FALLBACK_MS) : intervalMs;
+    if (effective > 0) {
+      const t = window.setInterval(load, effective);
       return () => { active = false; window.clearInterval(t); };
     }
     return () => { active = false; };
-  }, [intervalMs, ...deps]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [intervalMs, connected, revision, ...deps]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { data, error };
 }
