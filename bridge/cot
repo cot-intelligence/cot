@@ -21,6 +21,11 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+try:
+    import fcntl
+except ImportError:  # non-POSIX; spool falls back to lockless best-effort
+    fcntl = None
+
 STATE_DIR = Path.home() / ".cot"
 CONFIG_PATH = STATE_DIR / "config.json"
 TRANSCRIPT_OFFSETS = STATE_DIR / "transcript_offsets.json"
@@ -28,6 +33,18 @@ BRIDGE_PATH = STATE_DIR / "bin" / "cot"
 HOOK_STATUS_PATH = STATE_DIR / "hooks_status.json"
 HOOK_BACKUPS_PATH = STATE_DIR / "hook_backups.json"
 IMPORT_PARSER_VERSION_PATH = STATE_DIR / "import_parser_version"
+
+# When the collector is unreachable, ingest events are appended here as JSONL
+# ({"url", "payload"} per line) and replayed on the next successful contact, so
+# a stopped or restarting collector never silently drops a session's events.
+SPOOL_PATH = STATE_DIR / "spool.jsonl"
+SPOOL_LOCK_PATH = STATE_DIR / "spool.lock"
+# Hard cap on the spool. If the collector stays down long enough to exceed it,
+# the oldest events are dropped to bound disk use (recoverable via `cot import`).
+_MAX_SPOOL_BYTES = 50 * 1024 * 1024
+# Per-flush batch cap so a large backlog drains across several hook invocations
+# instead of blocking any single one on a long network drain.
+_SPOOL_FLUSH_BATCH = 500
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:31337"
 
@@ -100,7 +117,39 @@ def _save_offsets(data: dict[str, int]) -> None:
     TRANSCRIPT_OFFSETS.write_text(json.dumps(data))
 
 
-def _post(url: str, payload: dict) -> None:
+class _SpoolLock:
+    """Best-effort exclusive lock around spool reads/writes so concurrent hook
+    processes don't interleave appends or double-drain. A no-op where fcntl is
+    unavailable — duplicate replays are harmless because ingest is idempotent."""
+
+    def __init__(self) -> None:
+        self._fh = None
+
+    def __enter__(self) -> "_SpoolLock":
+        if fcntl is None:
+            return self
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            self._fh = open(SPOOL_LOCK_PATH, "w")
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        except OSError:
+            if self._fh is not None:
+                self._fh.close()
+                self._fh = None
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._fh is not None:
+            try:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._fh.close()
+                self._fh = None
+
+
+def _send_once(url: str, payload: dict, timeout: float) -> bool:
+    """POST one payload. Returns True on success, False if the collector could
+    not be reached (the only condition that should trigger spooling)."""
     data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -109,9 +158,97 @@ def _post(url: str, payload: dict) -> None:
         method="POST",
     )
     try:
-        urllib.request.urlopen(req, timeout=3)
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        print(f"cot: failed to post event: {exc}", file=sys.stderr)
+        urllib.request.urlopen(req, timeout=timeout)
+        return True
+    except urllib.error.HTTPError:
+        # The collector answered (4xx/5xx). Retrying won't help and the payload
+        # is likely malformed, so don't spool — treat as delivered.
+        return True
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
+
+
+def _spool_append(url: str, payload: dict) -> None:
+    """Queue an undelivered ingest event, trimming the oldest to stay under the
+    byte cap."""
+    record = json.dumps({"url": url, "payload": payload}, ensure_ascii=False, default=str)
+    line = record + "\n"
+    with _SpoolLock():
+        try:
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            existing = b""
+            if SPOOL_PATH.exists() and SPOOL_PATH.stat().st_size + len(line.encode("utf-8")) > _MAX_SPOOL_BYTES:
+                existing = SPOOL_PATH.read_bytes()
+                # Drop whole lines from the front until the new record fits.
+                budget = _MAX_SPOOL_BYTES - len(line.encode("utf-8"))
+                while len(existing) > budget:
+                    nl = existing.find(b"\n")
+                    if nl == -1:
+                        existing = b""
+                        break
+                    existing = existing[nl + 1:]
+                SPOOL_PATH.write_bytes(existing)
+            with SPOOL_PATH.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+        except OSError as exc:
+            print(f"cot: failed to spool event: {exc}", file=sys.stderr)
+
+
+def _spool_flush(timeout: float = 3.0) -> bool:
+    """Replay queued events in order. Stops at the first unreachable send and
+    rewrites the unsent remainder. Returns True if the collector was reachable
+    (spool empty or fully/partially drained), False if it is still down."""
+    with _SpoolLock():
+        try:
+            if not SPOOL_PATH.exists():
+                return True
+            raw = SPOOL_PATH.read_text(encoding="utf-8")
+        except OSError:
+            return True
+        lines = [ln for ln in raw.splitlines() if ln.strip()]
+        if not lines:
+            try:
+                SPOOL_PATH.unlink()
+            except OSError:
+                pass
+            return True
+        reachable = True
+        i = 0
+        for i in range(min(len(lines), _SPOOL_FLUSH_BATCH)):
+            try:
+                rec = json.loads(lines[i])
+            except json.JSONDecodeError:
+                continue  # skip a corrupt line rather than wedge the queue
+            if not _send_once(rec.get("url", ""), rec.get("payload", {}), timeout):
+                reachable = False
+                break
+        else:
+            i = min(len(lines), _SPOOL_FLUSH_BATCH)
+        remaining = lines[i:]
+        try:
+            if remaining:
+                SPOOL_PATH.write_text("\n".join(remaining) + "\n", encoding="utf-8")
+            else:
+                SPOOL_PATH.unlink()
+        except OSError:
+            pass
+        return reachable
+
+
+def _post(url: str, payload: dict) -> None:
+    is_ingest = "/v1/ingest/" in url
+    if is_ingest:
+        # Drain anything queued from a prior outage first so events stay ordered,
+        # and skip the live attempt entirely if the collector is still down.
+        if SPOOL_PATH.exists() and not _spool_flush():
+            _spool_append(url, payload)
+            return
+        if _send_once(url, payload, timeout=3):
+            return
+        _spool_append(url, payload)
+        return
+    if not _send_once(url, payload, timeout=3):
+        print(f"cot: failed to post event: {url}", file=sys.stderr)
 
 
 def _post_async(url: str, payload: dict) -> None:
@@ -1763,7 +1900,11 @@ def _cmd_install(args: list[str]) -> int:
 
 def _cmd_status() -> int:
     status = {agent: _hooks_installed(agent) for agent in AGENTS}
-    print(json.dumps({"endpoint": COT_ENDPOINT, "hooks": status}, indent=2))
+    out = {"endpoint": COT_ENDPOINT, "hooks": status}
+    queued = _spool_count()
+    if queued:
+        out["spooled_events"] = queued
+    print(json.dumps(out, indent=2))
     return 0
 
 
@@ -1959,6 +2100,7 @@ def _cmd_up(args: list[str]) -> int:
     ok, message = _docker_start_collectors(container)
     if ok:
         print(f"cot: {message}")
+        _drain_spool_on_resume()
         print(f"cot: dashboard {COT_ENDPOINT}")
         return 0
     if message:
@@ -1966,7 +2108,34 @@ def _cmd_up(args: list[str]) -> int:
         return 1
     ok, message = _docker_run_collector(container)
     print(f"cot: {message}" if ok else f"cot: {message}", file=sys.stderr if not ok else sys.stdout)
+    if ok:
+        _drain_spool_on_resume()
     return 0 if ok else 1
+
+
+def _drain_spool_on_resume() -> None:
+    """After the collector is back up, replay everything queued during the
+    outage. Loops because each flush drains at most one batch."""
+    if not SPOOL_PATH.exists():
+        return
+    total = 0
+    for _ in range(1000):  # bounded; 1000 * batch is far more than any real spool
+        before = _spool_count()
+        if before == 0 or not _spool_flush():
+            break
+        total += before - _spool_count()
+        if _spool_count() == 0:
+            break
+    if total:
+        print(f"cot: replayed {total} queued event(s)")
+
+
+def _spool_count() -> int:
+    try:
+        with SPOOL_PATH.open("r", encoding="utf-8") as fh:
+            return sum(1 for ln in fh if ln.strip())
+    except OSError:
+        return 0
 
 
 def _cmd_down(args: list[str]) -> int:
