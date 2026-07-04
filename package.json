@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "node scripts/run-node-tool.mjs vite",
     "build": "node scripts/run-node-tool.mjs vite build",
-    "preview": "npm run build && node scripts/run-node-tool.mjs vite preview"
+    "preview": "npm run build && node scripts/run-node-tool.mjs vite preview",
+    "test": "node scripts/run-node-tool.mjs vitest run",
+    "typecheck": "node scripts/run-node-tool.mjs tsc --noEmit"
   },
   "dependencies": {
     "framer-motion": "^11.5.4",
@@ -24,7 +26,8 @@
     "postcss": "latest",
     "tailwindcss": "3.4.17",
     "typescript": "^5.5.4",
-    "vite": "^8.0.16"
+    "vite": "^8.0.16",
+    "vitest": "^3.2.4"
   },
   "overrides": {
     "esbuild": "0.28.1"

@@ -1,0 +1,59 @@
+name: CI
+
+# Backend unit tests, frontend type check + unit tests, and a full end-to-end
+# smoke of the ingest pipe on every push and PR.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install backend deps + pytest
+        run: pip install -r backend/requirements.txt pytest
+      - name: pytest
+        run: python -m pytest backend/tests -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install deps
+        run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build collector image
+        run: docker build -f backend/Dockerfile -t cot-ci-api .
+      - name: Run scratch collector
+        run: |
+          docker run -d --name cot-ci-smoke \
+            -p 127.0.0.1:31399:31337 \
+            -e COT_DB_PATH=/tmp/cot-smoke.db \
+            cot-ci-api
+      - name: End-to-end smoke
+        run: python3 scripts/smoke_e2e.py http://127.0.0.1:31399
+      - name: Collector logs on failure
+        if: failure()
+        run: docker logs cot-ci-smoke || true

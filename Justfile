@@ -173,3 +173,48 @@ prod action:
         exit 2
         ;;
     esac
+
+# Unit tests + type check: backend pytest, frontend tsc, frontend vitest.
+test:
+    #!/usr/bin/env sh
+    set -eu
+
+    printf '%s\n' "== backend (pytest) =="
+    python3 -m pytest backend/tests -q
+
+    printf '\n%s\n' "== frontend (tsc) =="
+    node scripts/run-node-tool.mjs tsc --noEmit
+
+    printf '\n%s\n' "== frontend (vitest) =="
+    node scripts/run-node-tool.mjs vitest run
+
+# End-to-end smoke: throwaway collector on a scratch port + temp DB, drive the
+# real bridge with canned payloads for all three agents, assert the API output.
+# Never touches the live collector (31337) or ~/.cot/cot.db.
+smoke:
+    #!/usr/bin/env sh
+    set -eu
+
+    port="${COT_SMOKE_PORT:-31399}"
+    endpoint="http://127.0.0.1:${port}"
+    container="cot-smoke-$$"
+
+    cleanup() { docker rm -f "${container}" >/dev/null 2>&1 || true; }
+    trap cleanup EXIT INT TERM
+
+    printf '%s\n' "cot smoke: starting scratch collector on ${port}"
+    docker compose run --rm -d --name "${container}" \
+      -p "127.0.0.1:${port}:31337" -e COT_DB_PATH=/tmp/cot-smoke.db api >/dev/null
+
+    i=0
+    until curl -fsS "${endpoint}/health" >/dev/null 2>&1; do
+      i=$((i + 1))
+      if [ "${i}" -gt 30 ]; then
+        printf '%s\n' "smoke collector never became healthy at ${endpoint}" >&2
+        docker logs "${container}" 2>&1 | tail -40 >&2 || true
+        exit 1
+      fi
+      sleep 1
+    done
+
+    python3 scripts/smoke_e2e.py "${endpoint}"
