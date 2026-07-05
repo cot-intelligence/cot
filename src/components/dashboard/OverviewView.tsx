@@ -1,5 +1,18 @@
-import { useState } from 'react';
-import { getMetrics, type Metrics } from '../../lib/api';
+import { useEffect, useState } from 'react';
+import {
+  dismissInsight,
+  getAiAnalyses,
+  getInsights,
+  getMetrics,
+  getSettings,
+  restoreInsight,
+  type AiAnalysis,
+  type InsightPillar,
+  type InsightsResponse,
+  type InsightStatus,
+  type Metrics,
+  type Settings,
+} from '../../lib/api';
 import { formatDuration, formatRelative, getCategoryMeta, userTimeZone } from '../../lib/categoryMeta';
 import { compact, formatCost, formatMetricsDay, hourLabel } from '../../lib/format';
 import { formatModel } from '../../lib/modelMeta';
@@ -8,15 +21,31 @@ import { usePolling } from '../../lib/usePolling';
 import { FadeIn } from '../ui/FadeIn';
 import { Icon, type IconName } from '../ui/icons';
 import { MetricsSkeleton } from '../ui/Skeleton';
+import { AiInsightsSection } from './AiInsightsSection';
 import { CHART_COLORS, type Datum } from './chartConstants';
 import { DailyArea, DonutChart, HBars, HourBars } from './chartTheme';
+import { ExecutiveSummary } from './ExecutiveSummary';
+import { InsightStrip } from './insightStrip';
 import { ContributionHeatmap } from './metricsCharts';
 import { ShareCardModal } from './ShareCardModal';
 
-interface MetricsViewProps {
-  onSelect: (id: string) => void;
+interface OverviewViewProps {
+  onSelect: (id: string, eventId?: number) => void;
   onHistory?: () => void;
 }
+
+const WINDOWS: { label: string; days: number }[] = [
+  { label: '7D', days: 7 },
+  { label: '30D', days: 30 },
+  { label: '90D', days: 90 },
+  { label: 'All', days: 0 },
+];
+
+const STATUS_VIEWS: { key: InsightStatus; label: string }[] = [
+  { key: 'active', label: 'Active' },
+  { key: 'resolved', label: 'Resolved' },
+  { key: 'dismissed', label: 'Dismissed' },
+];
 
 function shortPath(p: string | null): string {
   if (!p) return '(unknown)';
@@ -46,11 +75,11 @@ function Grid({ cols, children }: { cols: string; children: React.ReactNode }) {
   return <div className={`grid gap-px bg-fg/10 ${cols}`}>{children}</div>;
 }
 
-function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+function Stat({ label, value, hint, accent }: { label: string; value: string; hint?: string; accent?: string }) {
   return (
     <div className="bg-bg px-4 py-3">
       <p className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">{label}</p>
-      <p className="mt-1 font-mono text-2xl font-bold tabular-nums text-fg">{value}</p>
+      <p className={`mt-1 font-mono text-2xl font-bold tabular-nums ${accent ?? 'text-fg'}`}>{value}</p>
       {hint && <p className="font-mono text-[0.55rem] text-fg/40">{hint}</p>}
     </div>
   );
@@ -89,17 +118,52 @@ function ChartBox({ label, children }: { label: string; children: React.ReactNod
   );
 }
 
-export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
+function pillarAnchor(pillar: InsightPillar): string {
+  return `insights-${pillar}`;
+}
+
+export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
   const tz = userTimeZone();
   const { data: m, error } = usePolling<Metrics>(() => getMetrics(tz), 5000);
   const [shareOpen, setShareOpen] = useState(false);
+
+  // Findings: windowed + status-filtered, unlike the all-time metrics.
+  const [days, setDays] = useState(30);
+  const [view, setView] = useState<InsightStatus>('active');
+  const [refreshKey, setRefreshKey] = useState(0);
+  const { data: ins } = usePolling<InsightsResponse>(
+    () => getInsights(days, 'all'),
+    60000,
+    [days, refreshKey],
+  );
+
+  // BYOK AI analysis state, shared between the AI section and the summary.
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [analyses, setAnalyses] = useState<AiAnalysis[]>([]);
+  useEffect(() => {
+    getSettings().then(setSettings).catch(() => {});
+    getAiAnalyses().then(setAnalyses).catch(() => {});
+  }, []);
+  const latestAi = analyses.find((a) => a.status === 'ok' && a.result) ?? null;
+
+  const onLifecycle = async (fingerprint: string, action: 'dismiss' | 'restore') => {
+    try {
+      await (action === 'dismiss' ? dismissInsight(fingerprint) : restoreInsight(fingerprint));
+    } finally {
+      setRefreshKey((k) => k + 1);
+    }
+  };
+
+  const jumpToPillar = (pillar: InsightPillar) => {
+    document.getElementById(pillarAnchor(pillar))?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
 
   if (!m) {
     if (error) {
       return (
         <div className="scroll-thin flex-1 overflow-y-auto">
           <p className="mx-auto max-w-5xl px-6 py-12 font-mono text-xs text-fg/40">
-            Collector offline — metrics unavailable.
+            Collector offline — overview unavailable.
           </p>
         </div>
       );
@@ -137,31 +201,88 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
     color: i === 0 ? CHART_COLORS[1] : CHART_COLORS[0],
   }));
 
+  const byStatus = (status: InsightStatus) =>
+    (ins?.insights ?? []).filter((f) => f.status === status);
+  const shown = byStatus(view);
+  const active = byStatus('active');
+  const criticals = active.filter((f) => f.severity === 'critical').length;
+  const pillarFindings = (pillar: InsightPillar) => shown.filter((f) => f.pillar === pillar);
+
+  const insightStrip = (pillar: InsightPillar) =>
+    ins ? (
+      <InsightStrip
+        findings={pillarFindings(pillar)}
+        view={view}
+        onSelect={onSelect}
+        onLifecycle={onLifecycle}
+      />
+    ) : (
+      <p className="font-mono text-xs text-fg/40">Computing findings…</p>
+    );
+
   return (
     <div className="scroll-thin flex-1 overflow-y-auto">
       <div className="mx-auto max-w-5xl space-y-7 px-6 py-8 sm:px-8">
-        <FadeIn className="flex items-start justify-between gap-4">
+        <FadeIn className="flex flex-wrap items-start justify-between gap-4">
           <div className="space-y-2">
             <h1 className="text-3xl font-extrabold uppercase tracking-tight text-fg">
-              Metrics <span className="font-serif lowercase italic text-vermilion">overview</span>
+              Overview{' '}
+              <span className="font-serif lowercase italic text-vermilion">metrics + insights</span>
             </h1>
             <p className="font-mono text-xs text-fg/50">
-              Aggregated insights across every traced session.
+              Everything across your traced sessions — numbers, findings, and what to do about them.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => setShareOpen(true)}
-            title="Share a metrics card"
-            className="flex shrink-0 items-center gap-2 border border-fg/25 px-3 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/75 shadow-brutal-sm transition-colors hover:border-vermilion hover:text-vermilion focus-visible:border-vermilion focus-visible:outline-none">
-            <Icon name="share" className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">Share</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-1" title="Findings window (metrics are all-time)">
+              {WINDOWS.map((w) => (
+                <button
+                  key={w.label}
+                  type="button"
+                  onClick={() => setDays(w.days)}
+                  aria-pressed={days === w.days}
+                  className={`border px-2.5 py-1.5 font-mono text-[0.6rem] font-bold uppercase tracking-widest transition-colors focus-visible:outline-none ${
+                    days === w.days
+                      ? 'border-vermilion bg-vermilion text-cream'
+                      : 'border-fg/20 text-fg/55 hover:border-fg/50 hover:text-fg'
+                  }`}>
+                  {w.label}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-1">
+              {STATUS_VIEWS.map((s) => {
+                const n = byStatus(s.key).length;
+                return (
+                  <button
+                    key={s.key}
+                    type="button"
+                    onClick={() => setView(s.key)}
+                    aria-pressed={view === s.key}
+                    className={`border px-2.5 py-1.5 font-mono text-[0.6rem] font-bold uppercase tracking-widest transition-colors focus-visible:outline-none ${
+                      view === s.key
+                        ? 'border-fg/60 bg-fg/10 text-fg'
+                        : 'border-fg/20 text-fg/55 hover:border-fg/50 hover:text-fg'
+                    }`}>
+                    {s.label} <span className="tabular-nums text-fg/45">{n}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <button
+              type="button"
+              onClick={() => setShareOpen(true)}
+              title="Share a metrics card"
+              className="flex shrink-0 items-center gap-2 border border-fg/25 px-3 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/75 shadow-brutal-sm transition-colors hover:border-vermilion hover:text-vermilion focus-visible:border-vermilion focus-visible:outline-none">
+              <Icon name="share" className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Share</span>
+            </button>
+          </div>
         </FadeIn>
 
         {/* Headline stat strip */}
         <FadeIn delay={0.03}>
-          <Grid cols="grid-cols-2 sm:grid-cols-5">
+          <Grid cols="grid-cols-2 sm:grid-cols-4 xl:grid-cols-7">
             <Stat label="Sessions" value={compact(t.sessions)} hint={`${t.active_sessions} active now`} />
             <Stat label="Events" value={compact(t.events)} />
             <Stat label="Tool calls" value={compact(t.tool_calls)} />
@@ -170,7 +291,24 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
               label="Est. cost"
               value={m.cost.total > 0 ? formatCost(m.cost.total) : '—'}
             />
+            <Stat
+              label="Findings"
+              value={ins ? String(active.length) : '…'}
+              hint={criticals ? `${criticals} critical` : undefined}
+              accent={criticals ? 'text-vermilion' : undefined}
+            />
+            <Stat
+              label="Fixed this week"
+              value={ins ? String(ins.counts.resolved_recently) : '…'}
+              accent="text-olive"
+            />
           </Grid>
+        </FadeIn>
+
+        <FadeIn delay={0.04}>
+          <Section n="00" title="Executive summary">
+            <ExecutiveSummary insights={ins ?? null} metrics={m} aiAnalysis={latestAi} onJump={jumpToPillar} />
+          </Section>
         </FadeIn>
 
         <FadeIn delay={0.05}>
@@ -240,8 +378,16 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
           </Section>
         </FadeIn>
 
+        <FadeIn delay={0.075}>
+          <div id={pillarAnchor('usability')} className="scroll-mt-6">
+            <Section n="04" title="Usability insights">
+              {insightStrip('usability')}
+            </Section>
+          </div>
+        </FadeIn>
+
         <FadeIn delay={0.08}>
-          <Section n="04" title="Breakdown">
+          <Section n="05" title="Breakdown">
             <Grid cols="md:grid-cols-2">
               <ChartBox label="Event categories">
                 <HBars data={categoryData} />
@@ -281,7 +427,7 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
         </FadeIn>
 
         <FadeIn delay={0.09}>
-          <Section n="05" title="Tokens & agents">
+          <Section n="06" title="Tokens & agents">
             <Grid cols="md:grid-cols-2">
               <ChartBox label={`Token usage — ${compact(m.tokens.total)} total`}>
                 <HBars data={tokenData} height={150} />
@@ -307,8 +453,16 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
           </Section>
         </FadeIn>
 
+        <FadeIn delay={0.095}>
+          <div id={pillarAnchor('cost')} className="scroll-mt-6">
+            <Section n="07" title="Cost insights">
+              {insightStrip('cost')}
+            </Section>
+          </div>
+        </FadeIn>
+
         <FadeIn delay={0.1}>
-          <Section n="06" title="Reliability">
+          <Section n="08" title="Reliability">
             <Grid cols="grid-cols-2 sm:grid-cols-4">
               <Stat label="Error rate" value={`${(fun.error_rate * 100).toFixed(1)}%`} />
               <Stat label="Errors" value={compact(t.errors)} />
@@ -321,9 +475,17 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
           </Section>
         </FadeIn>
 
+        <FadeIn delay={0.105}>
+          <div id={pillarAnchor('security')} className="scroll-mt-6">
+            <Section n="09" title="Security insights">
+              {insightStrip('security')}
+            </Section>
+          </div>
+        </FadeIn>
+
         {fun.busiest_day && (
           <FadeIn delay={0.11}>
-            <Section n="07" title="By the numbers">
+            <Section n="10" title="By the numbers">
               <Grid cols="grid-cols-2 sm:grid-cols-3">
                 <Fact icon="terminal" label="Shell commands" value={compact(fun.shell_commands)} onClick={onHistory} />
                 <Fact icon="file" label="Files touched" value={compact(fun.files_touched)} />
@@ -340,7 +502,7 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
         )}
 
         <FadeIn delay={0.115}>
-          <Section n="08" title="Attachments">
+          <Section n="11" title="Attachments">
             {m.attachments.total > 0 ? (
               <div>
                 {m.attachments.by_type.length > 0 && (
@@ -356,7 +518,7 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
         </FadeIn>
 
         <FadeIn delay={0.12}>
-          <Section n="09" title="Leaderboards">
+          <Section n="12" title="Leaderboards">
             <Grid cols="md:grid-cols-2">
               <div className="bg-bg p-4">
                 <p className="mb-3 font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">
@@ -403,6 +565,24 @@ export function MetricsView({ onSelect, onHistory }: MetricsViewProps) {
               </div>
             </Grid>
           </Section>
+        </FadeIn>
+
+        <FadeIn delay={0.125}>
+          <Section n="13" title="AI analysis">
+            <AiInsightsSection
+              days={days}
+              settings={settings}
+              analyses={analyses}
+              onRan={(a) => setAnalyses((prev) => [a, ...prev])}
+            />
+          </Section>
+        </FadeIn>
+
+        <FadeIn delay={0.13}>
+          <p className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/35">
+            Metrics are all-time · findings computed locally over the selected window · findings
+            auto-resolve when the signal stops · AI analysis only runs when you ask
+          </p>
         </FadeIn>
       </div>
 

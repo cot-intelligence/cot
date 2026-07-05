@@ -10,15 +10,12 @@ import { SessionDetailView } from './SessionDetailView';
 import { SessionList } from './SessionList';
 import { SettingsView } from './SettingsView';
 
-// Code-split: recharts (~heavy) only loads when the Metrics tab is opened.
-const MetricsView = lazy(() =>
-  import('./MetricsView').then((m) => ({ default: m.MetricsView })),
+// Code-split: recharts (~heavy) only loads when the Overview tab is opened.
+const OverviewView = lazy(() =>
+  import('./OverviewView').then((m) => ({ default: m.OverviewView })),
 );
 const MetricsHistoryView = lazy(() =>
   import('./MetricsHistoryView').then((m) => ({ default: m.MetricsHistoryView })),
-);
-const InsightsView = lazy(() =>
-  import('./InsightsView').then((m) => ({ default: m.InsightsView })),
 );
 
 interface DashboardProps {
@@ -28,17 +25,16 @@ interface DashboardProps {
 type DashboardRoute =
   | { view: 'list' }
   | { view: 'session'; sessionId: string; focusEventId?: number }
-  | { view: 'metrics' }
+  | { view: 'overview' }
   | { view: 'metrics-history' }
-  | { view: 'insights' }
   | { view: 'settings' };
 
 function parseHash(): DashboardRoute {
   const hash = window.location.hash.replace(/^#\/?/, '');
   if (hash === 'settings') return { view: 'settings' };
   if (hash === 'metrics-history') return { view: 'metrics-history' };
-  if (hash === 'metrics') return { view: 'metrics' };
-  if (hash === 'insights') return { view: 'insights' };
+  // Legacy #/metrics and #/insights merged into the unified Overview page.
+  if (hash === 'overview' || hash === 'metrics' || hash === 'insights') return { view: 'overview' };
   // #/session/<id> optionally followed by ?e=<eventId> to focus one event.
   const match = hash.match(/^session\/([^?]+)(?:\?e=(\d+))?$/);
   if (match?.[1]) {
@@ -51,8 +47,19 @@ function parseHash(): DashboardRoute {
   return { view: 'list' };
 }
 
+/** Rewrite legacy hashes to the canonical one (side effect kept out of parseHash). */
+function canonicalizeHash(): void {
+  const hash = window.location.hash.replace(/^#\/?/, '');
+  if (hash === 'metrics' || hash === 'insights') {
+    window.history.replaceState(null, '', '#/overview');
+  }
+}
+
 export function Dashboard({ onSetup }: DashboardProps) {
-  const [route, setRoute] = useState(parseHash);
+  const [route, setRoute] = useState(() => {
+    canonicalizeHash();
+    return parseHash();
+  });
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -65,7 +72,10 @@ export function Dashboard({ onSetup }: DashboardProps) {
   }, []);
 
   useEffect(() => {
-    const onHash = () => setRoute(parseHash());
+    const onHash = () => {
+      canonicalizeHash();
+      setRoute(parseHash());
+    };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
@@ -85,9 +95,8 @@ export function Dashboard({ onSetup }: DashboardProps) {
   useEffect(() => {
     if (route.view === 'list') setDocumentTitle('Sessions');
     else if (route.view === 'settings') setDocumentTitle('Settings');
-    else if (route.view === 'metrics') setDocumentTitle('Metrics');
+    else if (route.view === 'overview') setDocumentTitle('Overview');
     else if (route.view === 'metrics-history') setDocumentTitle('Activity History');
-    else if (route.view === 'insights') setDocumentTitle('Insights');
   }, [route.view]);
 
   const selectSession = useCallback((id: string, eventId?: number) => {
@@ -106,9 +115,9 @@ export function Dashboard({ onSetup }: DashboardProps) {
     window.location.hash = '#/settings';
   }, []);
 
-  const goMetrics = useCallback(() => {
-    setRoute({ view: 'metrics' });
-    window.location.hash = '#/metrics';
+  const goOverview = useCallback(() => {
+    setRoute({ view: 'overview' });
+    window.location.hash = '#/overview';
   }, []);
 
   const goMetricsHistory = useCallback(() => {
@@ -116,17 +125,11 @@ export function Dashboard({ onSetup }: DashboardProps) {
     window.location.hash = '#/metrics-history';
   }, []);
 
-  const goInsights = useCallback(() => {
-    setRoute({ view: 'insights' });
-    window.location.hash = '#/insights';
-  }, []);
-
   const selectedId = route.view === 'session' ? route.sessionId : null;
   const onSettings = route.view === 'settings';
-  const onMetrics = route.view === 'metrics';
+  const onOverview = route.view === 'overview';
   const onMetricsHistory = route.view === 'metrics-history';
-  const onInsights = route.view === 'insights';
-  const onList = !selectedId && !onSettings && !onMetrics && !onMetricsHistory && !onInsights;
+  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory;
 
   // Navigation entries shown in the palette, marked active for the current view.
   const paletteCommands = useMemo<PaletteCommand[]>(
@@ -140,12 +143,12 @@ export function Dashboard({ onSetup }: DashboardProps) {
         run: goSessions,
       },
       {
-        id: 'nav-metrics',
-        label: 'Go to Metrics',
-        icon: 'layers',
-        keywords: 'metrics charts analytics usage',
-        active: onMetrics,
-        run: goMetrics,
+        id: 'nav-overview',
+        label: 'Go to Overview',
+        icon: 'chart',
+        keywords: 'overview metrics charts analytics usage insights findings recommendations security cost usability',
+        active: onOverview,
+        run: goOverview,
       },
       {
         id: 'nav-metrics-history',
@@ -156,14 +159,6 @@ export function Dashboard({ onSetup }: DashboardProps) {
         run: goMetricsHistory,
       },
       {
-        id: 'nav-insights',
-        label: 'Go to Insights',
-        icon: 'warn',
-        keywords: 'insights findings recommendations actionable security cost usability',
-        active: onInsights,
-        run: goInsights,
-      },
-      {
         id: 'nav-settings',
         label: 'Go to Settings',
         icon: 'settings',
@@ -172,7 +167,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
         run: goSettings,
       },
     ],
-    [selectedId, onList, onMetrics, onMetricsHistory, onInsights, onSettings, goSessions, goMetrics, goMetricsHistory, goInsights, goSettings],
+    [selectedId, onList, onOverview, onMetricsHistory, onSettings, goSessions, goOverview, goMetricsHistory, goSettings],
   );
 
   // On a session, ⌘K opens scoped to it (clearable to search everything).
@@ -207,23 +202,12 @@ export function Dashboard({ onSetup }: DashboardProps) {
           </button>
           <button
             type="button"
-            onClick={goInsights}
-            aria-label="Insights"
-            aria-current={onInsights ? 'page' : undefined}
-            title="Insights"
-            className={`flex h-8 w-8 items-center justify-center border border-vermilion bg-vermilion text-cream transition-all focus-visible:outline-none focus-visible:border-vermilion ${
-              onInsights ? '' : 'brightness-90 hover:brightness-100'
-            }`}>
-            <Icon name="brain" className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            onClick={goMetrics}
-            aria-label="Metrics"
-            aria-current={onMetrics ? 'page' : undefined}
-            title="Metrics"
+            onClick={goOverview}
+            aria-label="Overview"
+            aria-current={onOverview ? 'page' : undefined}
+            title="Overview — metrics + insights"
             className={`flex h-8 w-8 items-center justify-center border border-cobalt bg-cobalt text-cream transition-all focus-visible:outline-none focus-visible:border-cobalt ${
-              onMetrics ? '' : 'brightness-90 hover:brightness-100'
+              onOverview ? '' : 'brightness-90 hover:brightness-100'
             }`}>
             <Icon name="chart" className="h-4 w-4" />
           </button>
@@ -259,19 +243,13 @@ export function Dashboard({ onSetup }: DashboardProps) {
         ) : onMetricsHistory ? (
           <main className="flex min-w-0 flex-1 flex-col bg-bg/80">
             <Suspense fallback={<MetricsSkeleton />}>
-              <MetricsHistoryView onSelect={selectSession} onBack={goMetrics} />
+              <MetricsHistoryView onSelect={selectSession} onBack={goOverview} />
             </Suspense>
           </main>
-        ) : onMetrics ? (
+        ) : onOverview ? (
           <main className="flex min-w-0 flex-1 flex-col bg-bg/80">
             <Suspense fallback={<MetricsSkeleton />}>
-              <MetricsView onSelect={selectSession} onHistory={goMetricsHistory} />
-            </Suspense>
-          </main>
-        ) : onInsights ? (
-          <main className="flex min-w-0 flex-1 flex-col bg-bg/80">
-            <Suspense fallback={<MetricsSkeleton />}>
-              <InsightsView onSelect={selectSession} />
+              <OverviewView onSelect={selectSession} onHistory={goMetricsHistory} />
             </Suspense>
           </main>
         ) : selectedId ? (

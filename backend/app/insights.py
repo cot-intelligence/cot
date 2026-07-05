@@ -9,8 +9,10 @@ Copy tone: security findings are review prompts, not verdicts — "Review",
 never "Breached". False positives are expected and cheap to dismiss.
 
 ## Adding a new rule
-1. Write a function taking a ``RuleContext`` and returning ``list[dict]``
-   (use ``_finding(...)`` to build each dict).
+1. Write a function taking a ``Snapshot`` and returning ``list[dict]``
+   (use ``_finding(...)`` to build each dict). Rules are pure functions of the
+   snapshot — they read ``snap.events`` (and the auxiliary views), never a DB
+   connection, so they can be tested with plain data.
 2. Decorate it with ``@rule(id="pillar.name", pillar=..., tier=...,
    aggregate_only=...)``.
 3. Put its thresholds in ``CONSTANTS[rule_id]``.
@@ -56,6 +58,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from . import db
+from .insight_lifecycle import FindingsStore
+from .insight_snapshot import Event, Snapshot, build_snapshot
 from .pricing import cost_for, normalize_model
 
 PILLARS = ("usability", "cost", "security")
@@ -112,26 +116,19 @@ GROUP_TITLES: dict[str, str] = {
 
 
 @dataclass
-class RuleContext:
-    conn: Any
-    cutoff: str | None  # ISO timestamp lower bound; None = no window
-    session_id: str | None  # set = per-session mode
-
-
-@dataclass
 class RuleMeta:
     id: str
     pillar: str
     tier: int
     aggregate_only: bool
-    fn: Callable[[RuleContext], list[dict[str, Any]]]
+    fn: Callable[[Snapshot], list[dict[str, Any]]]
 
 
 RULES: dict[str, RuleMeta] = {}
 
 
 def rule(*, id: str, pillar: str, tier: int, aggregate_only: bool = False):
-    def wrap(fn: Callable[[RuleContext], list[dict[str, Any]]]):
+    def wrap(fn: Callable[[Snapshot], list[dict[str, Any]]]):
         RULES[id] = RuleMeta(id=id, pillar=pillar, tier=tier, aggregate_only=aggregate_only, fn=fn)
         return fn
 
@@ -179,37 +176,42 @@ def _ev(row: Any, label: str, value: str | None = None) -> dict[str, Any]:
     }
 
 
-def _scope(ctx: RuleContext, extra: str = "") -> tuple[str, list[Any]]:
-    """Shared FROM/WHERE for event queries honoring window + session mode."""
-    sql = " FROM events e JOIN sessions s ON s.id = e.session_id WHERE s.archived = 0"
-    params: list[Any] = []
-    if ctx.cutoff:
-        sql += " AND e.ts >= ?"
-        params.append(ctx.cutoff)
-    if ctx.session_id:
-        sql += " AND e.session_id = ?"
-        params.append(ctx.session_id)
-    return sql + extra, params
-
-
 def _fmt_usd(v: float) -> str:
     return f"${v:.2f}"
+
+
+def _recent(events: list[Event], limit: int = 5000) -> list[Event]:
+    """Most-recent ``limit`` events, newest first — the Python equivalent of the
+    security rules' ``ORDER BY e.ts DESC LIMIT 5000`` bound on how much history
+    to pattern-match."""
+    ordered = sorted(events, key=lambda e: db.parse_ts(e.ts) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return ordered[:limit]
 
 
 # --- usability ----------------------------------------------------------------
 
 
 @rule(id="usability.automate_command", pillar="usability", tier=1, aggregate_only=True)
-def _automate_command(ctx: RuleContext) -> list[dict[str, Any]]:
+def _automate_command(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["usability.automate_command"]
-    scope, params = _scope(ctx, " AND e.category = 'shell' AND e.target IS NOT NULL")
-    rows = ctx.conn.execute(
-        "SELECT e.target t, COUNT(*) n, COUNT(DISTINCT e.session_id) s,"
-        " MAX(e.id) id, MAX(e.session_id) session_id, MAX(e.ts) ts"
-        + scope
-        + " GROUP BY e.target HAVING n >= ? ORDER BY n DESC LIMIT 20",
-        params + [c["min_repeats"]],
-    ).fetchall()
+    groups: dict[str, dict[str, Any]] = {}
+    for e in snap.events:
+        if e.category != "shell" or e.target is None:
+            continue
+        g = groups.setdefault(e.target, {"n": 0, "sessions": set(), "ids": [], "sids": [], "tss": []})
+        g["n"] += 1
+        g["sessions"].add(e.session_id)
+        g["ids"].append(e.id)
+        g["sids"].append(e.session_id)
+        g["tss"].append(e.ts)
+    rows = [
+        {"t": t, "n": g["n"], "s": len(g["sessions"]),
+         "id": max(g["ids"]), "session_id": max(g["sids"]), "ts": max(g["tss"])}
+        for t, g in groups.items()
+        if g["n"] >= c["min_repeats"]
+    ]
+    rows.sort(key=lambda r: r["n"], reverse=True)
+    rows = rows[:20]
     out = []
     for r in rows:
         cmd = (r["t"] or "").strip()
@@ -231,17 +233,12 @@ def _automate_command(ctx: RuleContext) -> list[dict[str, Any]]:
 
 
 @rule(id="usability.retry_loops", pillar="usability", tier=1)
-def _retry_loops(ctx: RuleContext) -> list[dict[str, Any]]:
+def _retry_loops(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["usability.retry_loops"]
-    scope, params = _scope(
-        ctx, " AND e.tool IS NOT NULL AND e.target IS NOT NULL AND e.status IS NOT NULL"
-    )
-    rows = ctx.conn.execute(
-        "SELECT e.id, e.session_id, e.tool, e.target, e.ts, e.status"
-        + scope
-        + " ORDER BY e.session_id, e.ts, e.id",
-        params,
-    ).fetchall()
+    rows = [
+        e for e in snap.events
+        if e.tool is not None and e.target is not None and e.status is not None
+    ]
     runs: dict[tuple[str, str, str], list[Any]] = {}
     best: dict[tuple[str, str, str], list[Any]] = {}
     for r in rows:
@@ -275,22 +272,23 @@ def _retry_loops(ctx: RuleContext) -> list[dict[str, Any]]:
 
 
 @rule(id="usability.permission_friction", pillar="usability", tier=1)
-def _permission_friction(ctx: RuleContext) -> list[dict[str, Any]]:
+def _permission_friction(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["usability.permission_friction"]
-    scope, params = _scope(ctx)
-    tool_calls = ctx.conn.execute(
-        "SELECT COUNT(*) n" + scope + " AND e.tool IS NOT NULL AND e.status IS NOT NULL", params
-    ).fetchone()["n"]
-    perm_scope, perm_params = _scope(ctx, " AND e.category = 'permission'")
-    perms = ctx.conn.execute("SELECT COUNT(*) n" + perm_scope, perm_params).fetchone()["n"]
+    tool_calls = sum(1 for e in snap.events if e.tool is not None and e.status is not None)
+    perm_events = [e for e in snap.events if e.category == "permission"]
+    perms = len(perm_events)
     out = []
     if perms >= c["min_events"] and tool_calls and perms / tool_calls > c["ratio"]:
-        rows = ctx.conn.execute(
-            "SELECT e.id, e.session_id, e.ts, e.tool, e.title, COUNT(*) n"
-            + perm_scope
-            + " GROUP BY COALESCE(e.tool, e.title) ORDER BY n DESC LIMIT 8",
-            perm_params,
-        ).fetchall()
+        groups: dict[Any, dict[str, Any]] = {}
+        for e in perm_events:
+            key = e.tool if e.tool is not None else e.title  # COALESCE(tool, title)
+            g = groups.get(key)
+            if g is None:
+                groups[key] = {"id": e.id, "session_id": e.session_id, "ts": e.ts,
+                               "tool": e.tool, "title": e.title, "n": 1}
+            else:
+                g["n"] += 1
+        rows = sorted(groups.values(), key=lambda r: r["n"], reverse=True)[:8]
         ratio = perms / tool_calls
         out.append(
             _finding(
@@ -309,27 +307,18 @@ def _permission_friction(ctx: RuleContext) -> list[dict[str, Any]]:
 
 
 @rule(id="usability.stalled_clarifications", pillar="usability", tier=1)
-def _stalled_clarifications(ctx: RuleContext) -> list[dict[str, Any]]:
+def _stalled_clarifications(snap: Snapshot) -> list[dict[str, Any]]:
     # AskUserQuestion-style tools; Claude-only signal today (noted, acceptable).
-    q_tools = ",".join("?" for _ in db._QUESTION_TOOLS)
-    scope, params = _scope(ctx, f" AND e.tool IN ({q_tools})")
-    rows = ctx.conn.execute(
-        "SELECT e.id, e.session_id, e.ts, e.detail, e.tool, e.hook"
-        + scope
-        + " ORDER BY e.session_id, e.ts, e.id",
-        params + list(db._QUESTION_TOOLS),
-    ).fetchall()
+    rows = [e for e in snap.events if e.tool in db.QUESTION_TOOLS]
     by_session: dict[str, list[Any]] = {}
     for r in rows:
         by_session.setdefault(r["session_id"], []).append(r)
     out = []
     for session_id, ev_rows in by_session.items():
-        last = ctx.conn.execute(
-            "SELECT MAX(ts) t FROM events WHERE session_id = ?", (session_id,)
-        ).fetchone()["t"]
-        if db._live_status(last) == "active":
+        last = snap.session_last_ts.get(session_id)
+        if db.live_status(last) == "active":
             continue  # user may still answer a running session
-        clars, _ = db._build_clarifications(ev_rows)
+        clars, _ = db.build_clarifications(ev_rows)
         open_qs = [q for q in clars if not q["answered"]]
         if not open_qs:
             continue
@@ -360,18 +349,28 @@ def _stalled_clarifications(ctx: RuleContext) -> list[dict[str, Any]]:
 
 
 @rule(id="usability.slow_commands", pillar="usability", tier=2)
-def _slow_commands(ctx: RuleContext) -> list[dict[str, Any]]:
+def _slow_commands(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["usability.slow_commands"]
-    scope, params = _scope(
-        ctx, " AND e.category = 'shell' AND e.target IS NOT NULL AND e.duration_ms >= ?"
-    )
-    rows = ctx.conn.execute(
-        "SELECT e.target t, COUNT(*) n, MAX(e.duration_ms) mx,"
-        " MAX(e.id) id, MAX(e.session_id) session_id, MAX(e.ts) ts"
-        + scope
-        + " GROUP BY e.target HAVING n >= ? ORDER BY mx DESC LIMIT 10",
-        params + [c["min_ms"], c["min_occurrences"]],
-    ).fetchall()
+    groups: dict[str, dict[str, Any]] = {}
+    for e in snap.events:
+        if e.category != "shell" or e.target is None:
+            continue
+        if e.duration_ms is None or e.duration_ms < c["min_ms"]:
+            continue
+        g = groups.setdefault(e.target, {"n": 0, "mx": 0, "ids": [], "sids": [], "tss": []})
+        g["n"] += 1
+        g["mx"] = max(g["mx"], e.duration_ms)
+        g["ids"].append(e.id)
+        g["sids"].append(e.session_id)
+        g["tss"].append(e.ts)
+    rows = [
+        {"t": t, "n": g["n"], "mx": g["mx"],
+         "id": max(g["ids"]), "session_id": max(g["sids"]), "ts": max(g["tss"])}
+        for t, g in groups.items()
+        if g["n"] >= c["min_occurrences"]
+    ]
+    rows.sort(key=lambda r: r["mx"], reverse=True)
+    rows = rows[:10]
     out = []
     for r in rows:
         secs = (r["mx"] or 0) / 1000
@@ -392,17 +391,27 @@ def _slow_commands(ctx: RuleContext) -> list[dict[str, Any]]:
 
 
 @rule(id="usability.reread_churn", pillar="usability", tier=2)
-def _reread_churn(ctx: RuleContext) -> list[dict[str, Any]]:
+def _reread_churn(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["usability.reread_churn"]
-    scope, params = _scope(
-        ctx, " AND e.category IN ('file_read','context_read') AND e.target IS NOT NULL"
-    )
-    rows = ctx.conn.execute(
-        "SELECT e.target t, e.session_id, COUNT(*) n, MAX(e.id) id, MAX(e.ts) ts"
-        + scope
-        + " GROUP BY e.session_id, e.target HAVING n >= ? ORDER BY n DESC LIMIT 10",
-        params + [c["min_reads"]],
-    ).fetchall()
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for e in snap.events:
+        if e.category not in ("file_read", "context_read") or e.target is None:
+            continue
+        g = groups.setdefault(
+            (e.session_id, e.target),
+            {"session_id": e.session_id, "t": e.target, "n": 0, "ids": [], "tss": []},
+        )
+        g["n"] += 1
+        g["ids"].append(e.id)
+        g["tss"].append(e.ts)
+    rows = [
+        {"t": g["t"], "session_id": g["session_id"], "n": g["n"],
+         "id": max(g["ids"]), "ts": max(g["tss"])}
+        for g in groups.values()
+        if g["n"] >= c["min_reads"]
+    ]
+    rows.sort(key=lambda r: r["n"], reverse=True)
+    rows = rows[:10]
     out = []
     for r in rows:
         out.append(
@@ -425,31 +434,34 @@ def _reread_churn(ctx: RuleContext) -> list[dict[str, Any]]:
 # --- cost ---------------------------------------------------------------------
 
 
-def _session_costs(ctx: RuleContext) -> tuple[dict[str, float], dict[str, str | None]]:
+def _session_costs(snap: Snapshot) -> tuple[dict[str, float], dict[str, str | None]]:
     """Per-session USD cost and session→cwd map, priced per model like metrics()."""
-    scope, params = _scope(ctx, " AND e.model IS NOT NULL AND e.model != ''")
-    rows = ctx.conn.execute(
-        "SELECT e.session_id sid, s.cwd cwd, e.model m,"
-        " COALESCE(SUM(e.input_tokens),0) i, COALESCE(SUM(e.output_tokens),0) o,"
-        " COALESCE(SUM(e.cache_read_tokens),0) cr, COALESCE(SUM(e.cache_write_tokens),0) cw"
-        + scope
-        + " GROUP BY e.session_id, e.model",
-        params,
-    ).fetchall()
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for e in snap.events:
+        if not e.model:
+            continue
+        g = groups.setdefault(
+            (e.session_id, e.model),
+            {"sid": e.session_id, "cwd": e.cwd, "m": e.model, "i": 0, "o": 0, "cr": 0, "cw": 0},
+        )
+        g["i"] += e.input_tokens
+        g["o"] += e.output_tokens
+        g["cr"] += e.cache_read_tokens
+        g["cw"] += e.cache_write_tokens
     costs: dict[str, float] = {}
     cwds: dict[str, str | None] = {}
-    for r in rows:
-        cwds[r["sid"]] = r["cwd"]
-        c = cost_for(r["m"], r["i"], r["o"], r["cr"], r["cw"])
+    for g in groups.values():
+        cwds[g["sid"]] = g["cwd"]
+        c = cost_for(g["m"], g["i"], g["o"], g["cr"], g["cw"])
         if c:
-            costs[r["sid"]] = costs.get(r["sid"], 0.0) + c
+            costs[g["sid"]] = costs.get(g["sid"], 0.0) + c
     return costs, cwds
 
 
 @rule(id="cost.expensive_project", pillar="cost", tier=1, aggregate_only=True)
-def _expensive_project(ctx: RuleContext) -> list[dict[str, Any]]:
+def _expensive_project(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["cost.expensive_project"]
-    costs, cwds = _session_costs(ctx)
+    costs, cwds = _session_costs(snap)
     total = sum(costs.values())
     if total < c["min_total_usd"]:
         return []
@@ -499,17 +511,16 @@ def _expensive_project(ctx: RuleContext) -> list[dict[str, Any]]:
 
 
 @rule(id="cost.unpriced_tokens", pillar="cost", tier=1)
-def _unpriced_tokens(ctx: RuleContext) -> list[dict[str, Any]]:
+def _unpriced_tokens(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["cost.unpriced_tokens"]
-    scope, params = _scope(ctx, " AND e.model IS NOT NULL AND e.model != ''")
-    rows = ctx.conn.execute(
-        "SELECT e.model m,"
-        " COALESCE(SUM(e.input_tokens),0) + COALESCE(SUM(e.output_tokens),0)"
-        " + COALESCE(SUM(e.cache_read_tokens),0) + COALESCE(SUM(e.cache_write_tokens),0) t"
-        + scope
-        + " GROUP BY e.model",
-        params,
-    ).fetchall()
+    totals: dict[str, int] = {}
+    for e in snap.events:
+        if not e.model:
+            continue
+        totals[e.model] = totals.get(e.model, 0) + (
+            e.input_tokens + e.output_tokens + e.cache_read_tokens + e.cache_write_tokens
+        )
+    rows = [{"m": m, "t": t} for m, t in totals.items()]
     unpriced: dict[str, int] = {}
     for r in rows:
         if cost_for(r["m"], 1, 1) is None:
@@ -537,28 +548,30 @@ def _unpriced_tokens(ctx: RuleContext) -> list[dict[str, Any]]:
 
 
 @rule(id="cost.cache_write_waste", pillar="cost", tier=1)
-def _cache_write_waste(ctx: RuleContext) -> list[dict[str, Any]]:
+def _cache_write_waste(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["cost.cache_write_waste"]
-    scope, params = _scope(ctx)
-    tot = ctx.conn.execute(
-        "SELECT COALESCE(SUM(e.cache_read_tokens),0) cr,"
-        " COALESCE(SUM(e.cache_write_tokens),0) cw" + scope,
-        params,
-    ).fetchone()
-    cw, cr = tot["cw"], tot["cr"]
+    cw = sum(e.cache_write_tokens for e in snap.events)
+    cr = sum(e.cache_read_tokens for e in snap.events)
     if cw < c["min_cache_write"]:
         return []
     ratio = cr / cw if cw else 0.0
     if ratio >= c["max_ratio"]:
         return []
-    rows = ctx.conn.execute(
-        "SELECT e.session_id, COALESCE(SUM(e.cache_write_tokens),0) cw,"
-        " COALESCE(SUM(e.cache_read_tokens),0) cr, MAX(e.ts) ts"
-        + scope
-        + " GROUP BY e.session_id ORDER BY cw DESC LIMIT 5",
-        params,
-    ).fetchall()
-    subject = ctx.session_id or "window"
+    groups: dict[str, dict[str, Any]] = {}
+    for e in snap.events:
+        g = groups.setdefault(e.session_id, {"session_id": e.session_id, "cw": 0, "cr": 0, "tss": []})
+        g["cw"] += e.cache_write_tokens
+        g["cr"] += e.cache_read_tokens
+        g["tss"].append(e.ts)
+    rows = sorted(
+        (
+            {"session_id": g["session_id"], "cw": g["cw"], "cr": g["cr"], "ts": max(g["tss"])}
+            for g in groups.values()
+        ),
+        key=lambda r: r["cw"],
+        reverse=True,
+    )[:5]
+    subject = snap.session_id or "window"
     return [
         _finding(
             "cost.cache_write_waste",
@@ -581,17 +594,21 @@ def _cache_write_waste(ctx: RuleContext) -> list[dict[str, Any]]:
 
 
 @rule(id="cost.model_mismatch", pillar="cost", tier=2, aggregate_only=True)
-def _model_mismatch(ctx: RuleContext) -> list[dict[str, Any]]:
+def _model_mismatch(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["cost.model_mismatch"]
-    scope, params = _scope(ctx, " AND e.model IS NOT NULL AND e.model != ''")
-    rows = ctx.conn.execute(
-        "SELECT e.model m, e.session_id sid,"
-        " COALESCE(SUM(e.input_tokens),0) i, COALESCE(SUM(e.output_tokens),0) o,"
-        " COALESCE(SUM(e.cache_read_tokens),0) cr, COALESCE(SUM(e.cache_write_tokens),0) cw"
-        + scope
-        + " GROUP BY e.model, e.session_id",
-        params,
-    ).fetchall()
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for e in snap.events:
+        if not e.model:
+            continue
+        g = groups.setdefault(
+            (e.model, e.session_id),
+            {"m": e.model, "sid": e.session_id, "i": 0, "o": 0, "cr": 0, "cw": 0},
+        )
+        g["i"] += e.input_tokens
+        g["o"] += e.output_tokens
+        g["cr"] += e.cache_read_tokens
+        g["cw"] += e.cache_write_tokens
+    rows = list(groups.values())
     total = 0.0
     opus_cost = 0.0
     opus_sessions: set[str] = set()
@@ -607,13 +624,11 @@ def _model_mismatch(ctx: RuleContext) -> list[dict[str, Any]]:
     share = opus_cost / total
     if share <= c["opus_share"]:
         return []
-    marks = ",".join("?" for _ in opus_sessions)
-    calls = ctx.conn.execute(
-        f"SELECT session_id, COUNT(*) n FROM events WHERE session_id IN ({marks})"
-        " AND tool IS NOT NULL AND status IS NOT NULL GROUP BY session_id",
-        list(opus_sessions),
-    ).fetchall()
-    counts = sorted(r["n"] for r in calls) or [0]
+    # Per-session tool-call counts across all events (sessions with no tool
+    # calls simply don't contribute, matching the old GROUP BY result set).
+    counts = sorted(
+        snap.session_tool_calls[sid] for sid in opus_sessions if sid in snap.session_tool_calls
+    ) or [0]
     median_calls = counts[len(counts) // 2]
     if median_calls >= c["median_tool_calls"]:
         return []  # heavy sessions genuinely need the big model
@@ -633,23 +648,27 @@ def _model_mismatch(ctx: RuleContext) -> list[dict[str, Any]]:
 
 
 @rule(id="cost.trend_anomaly", pillar="cost", tier=2, aggregate_only=True)
-def _trend_anomaly(ctx: RuleContext) -> list[dict[str, Any]]:
+def _trend_anomaly(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["cost.trend_anomaly"]
-    now = datetime.now(timezone.utc)
+    now = snap.now
     buckets = []
     for start_days, end_days in ((7, 0), (14, 7)):
         lo = (now - timedelta(days=start_days)).isoformat()
         hi = (now - timedelta(days=end_days)).isoformat()
-        rows = ctx.conn.execute(
-            "SELECT e.model m, COALESCE(SUM(e.input_tokens),0) i,"
-            " COALESCE(SUM(e.output_tokens),0) o, COALESCE(SUM(e.cache_read_tokens),0) cr,"
-            " COALESCE(SUM(e.cache_write_tokens),0) cw"
-            " FROM events e JOIN sessions s ON s.id = e.session_id"
-            " WHERE s.archived = 0 AND e.ts >= ? AND e.ts < ?"
-            " AND e.model IS NOT NULL AND e.model != '' GROUP BY e.model",
-            (lo, hi),
-        ).fetchall()
-        buckets.append(sum(cost_for(r["m"], r["i"], r["o"], r["cr"], r["cw"]) or 0.0 for r in rows))
+        by_model: dict[str, dict[str, int]] = {}
+        for e in snap.trend_events:
+            # String ts compare mirrors SQLite's `e.ts >= ? AND e.ts < ?`
+            # (int-storage legacy timestamps sort before text, so they drop out).
+            if not isinstance(e.ts, str) or not (lo <= e.ts < hi):
+                continue
+            t = by_model.setdefault(e.model, {"i": 0, "o": 0, "cr": 0, "cw": 0})
+            t["i"] += e.input_tokens
+            t["o"] += e.output_tokens
+            t["cr"] += e.cache_read_tokens
+            t["cw"] += e.cache_write_tokens
+        buckets.append(
+            sum(cost_for(m, t["i"], t["o"], t["cr"], t["cw"]) or 0.0 for m, t in by_model.items())
+        )
     recent, prior = buckets
     if prior <= 0 or recent < prior * c["multiple"] or recent - prior < c["min_usd"]:
         return []
@@ -742,12 +761,8 @@ def match_risky_command(command: str) -> tuple[str, str] | None:
 
 
 @rule(id="security.risky_commands", pillar="security", tier=1)
-def _risky_commands(ctx: RuleContext) -> list[dict[str, Any]]:
-    scope, params = _scope(ctx, " AND e.category = 'shell' AND e.target IS NOT NULL")
-    rows = ctx.conn.execute(
-        "SELECT e.id, e.session_id, e.ts, e.target" + scope + " ORDER BY e.ts DESC LIMIT 5000",
-        params,
-    ).fetchall()
+def _risky_commands(snap: Snapshot) -> list[dict[str, Any]]:
+    rows = _recent([e for e in snap.events if e.category == "shell" and e.target is not None])
     by_label: dict[str, dict[str, Any]] = {}
     for r in rows:
         hit = match_risky_command(r["target"])
@@ -777,16 +792,10 @@ def _risky_commands(ctx: RuleContext) -> list[dict[str, Any]]:
 
 
 @rule(id="security.sensitive_files", pillar="security", tier=1)
-def _sensitive_files(ctx: RuleContext) -> list[dict[str, Any]]:
-    scope, params = _scope(
-        ctx, " AND e.category IN ('file_read','file_edit') AND e.target IS NOT NULL"
+def _sensitive_files(snap: Snapshot) -> list[dict[str, Any]]:
+    rows = _recent(
+        [e for e in snap.events if e.category in ("file_read", "file_edit") and e.target is not None]
     )
-    rows = ctx.conn.execute(
-        "SELECT e.id, e.session_id, e.ts, e.target, e.category"
-        + scope
-        + " ORDER BY e.ts DESC LIMIT 5000",
-        params,
-    ).fetchall()
     by_path: dict[str, dict[str, Any]] = {}
     for r in rows:
         severity = match_sensitive_path(r["target"])
@@ -819,14 +828,8 @@ def _sensitive_files(ctx: RuleContext) -> list[dict[str, Any]]:
 
 
 @rule(id="security.secrets_exposure", pillar="security", tier=1)
-def _secrets_exposure(ctx: RuleContext) -> list[dict[str, Any]]:
-    scope, params = _scope(ctx, " AND e.category IN ('prompt','shell')")
-    rows = ctx.conn.execute(
-        "SELECT e.id, e.session_id, e.ts, e.category, e.target, e.title, e.detail"
-        + scope
-        + " ORDER BY e.ts DESC LIMIT 5000",
-        params,
-    ).fetchall()
+def _secrets_exposure(snap: Snapshot) -> list[dict[str, Any]]:
+    rows = _recent([e for e in snap.events if e.category in ("prompt", "shell")])
     by_secret: dict[str, dict[str, Any]] = {}
     for r in rows:
         text = " ".join(filter(None, (r["target"], r["title"], r["detail"])))
@@ -862,24 +865,18 @@ def _secrets_exposure(ctx: RuleContext) -> list[dict[str, Any]]:
 
 
 @rule(id="security.read_then_exfil", pillar="security", tier=2)
-def _read_then_exfil(ctx: RuleContext) -> list[dict[str, Any]]:
+def _read_then_exfil(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["security.read_then_exfil"]
-    scope, params = _scope(
-        ctx,
-        " AND ((e.category IN ('file_read','file_edit') AND e.target IS NOT NULL)"
-        " OR e.category IN ('shell','web'))",
-    )
-    rows = ctx.conn.execute(
-        "SELECT e.id, e.session_id, e.ts, e.category, e.target"
-        + scope
-        + " ORDER BY e.session_id, e.ts, e.id",
-        params,
-    ).fetchall()
+    rows = [
+        e for e in snap.events
+        if (e.category in ("file_read", "file_edit") and e.target is not None)
+        or e.category in ("shell", "web")
+    ]
     out = []
     window = timedelta(seconds=c["window_seconds"])
     pending: dict[str, list[tuple[datetime, str, Any]]] = {}  # session → sensitive reads
     for r in rows:
-        ts = db._parse_ts(r["ts"])
+        ts = db.parse_ts(r["ts"])
         if ts is None:
             continue
         sid = r["session_id"]
@@ -912,18 +909,10 @@ def _read_then_exfil(ctx: RuleContext) -> list[dict[str, Any]]:
 
 
 @rule(id="security.out_of_cwd_edits", pillar="security", tier=2)
-def _out_of_cwd_edits(ctx: RuleContext) -> list[dict[str, Any]]:
-    scope, params = _scope(
-        ctx,
-        " AND e.category = 'file_edit' AND e.target IS NOT NULL"
-        " AND s.cwd IS NOT NULL AND s.cwd != ''",
+def _out_of_cwd_edits(snap: Snapshot) -> list[dict[str, Any]]:
+    rows = _recent(
+        [e for e in snap.events if e.category == "file_edit" and e.target is not None and e.cwd]
     )
-    rows = ctx.conn.execute(
-        "SELECT e.id, e.session_id, e.ts, e.target, s.cwd"
-        + scope
-        + " ORDER BY e.ts DESC LIMIT 5000",
-        params,
-    ).fetchall()
     by_path: dict[str, dict[str, Any]] = {}
     for r in rows:
         target = os.path.normpath(r["target"])
@@ -953,17 +942,11 @@ def _out_of_cwd_edits(ctx: RuleContext) -> list[dict[str, Any]]:
 
 
 @rule(id="security.repeat_blocked", pillar="security", tier=2)
-def _repeat_blocked(ctx: RuleContext) -> list[dict[str, Any]]:
+def _repeat_blocked(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["security.repeat_blocked"]
-    scope, params = _scope(
-        ctx, " AND e.status IN ('blocked','error') AND e.target IS NOT NULL"
+    rows = _recent(
+        [e for e in snap.events if e.status in ("blocked", "error") and e.target is not None]
     )
-    rows = ctx.conn.execute(
-        "SELECT e.id, e.session_id, e.ts, e.target, e.status"
-        + scope
-        + " ORDER BY e.ts DESC LIMIT 5000",
-        params,
-    ).fetchall()
     by_target: dict[str, list[Any]] = {}
     for r in rows:
         risky = match_risky_command(r["target"]) or (
@@ -1043,14 +1026,16 @@ def _dedup(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(merged.values())
 
 
-def _reconcile(conn: Any, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Persist current findings and merge lifecycle state (aggregate mode only)."""
+def _reconcile(store: FindingsStore, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Persist current findings and merge lifecycle state (aggregate mode only).
+
+    Pure lifecycle logic over the :class:`FindingsStore` interface — all SQL
+    lives in the store, so this is exercisable with a fake store.
+    """
     findings = _dedup(findings)
-    now = db._now()
+    now = db.now()
     grace = timedelta(days=CONSTANTS["lifecycle"]["resolve_grace_days"])
-    stored = {
-        r["fingerprint"]: r for r in conn.execute("SELECT * FROM insight_findings").fetchall()
-    }
+    stored = store.load()
     out: list[dict[str, Any]] = []
     current: set[str] = set()
     for f in findings:
@@ -1058,24 +1043,12 @@ def _reconcile(conn: Any, findings: list[dict[str, Any]]) -> list[dict[str, Any]
         current.add(fp)
         prev = stored.get(fp)
         if prev is None:
-            conn.execute(
-                "INSERT INTO insight_findings (fingerprint, rule_id, pillar, tier, severity,"
-                " title, detail, recommendation, evidence, status, first_seen, last_seen)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
-                (fp, f["id"], f["pillar"], f["tier"], f["severity"], f["title"], f["detail"],
-                 f["recommendation"], json.dumps(f["evidence"]), now, now),
-            )
+            store.insert(f, now)
             f["status"], f["first_seen"], f["last_seen"] = "active", now, now
         else:
             # Re-detection: refresh the snapshot; reopen resolved, keep dismissed hidden.
             status = "active" if prev["status"] == "resolved" else prev["status"]
-            conn.execute(
-                "UPDATE insight_findings SET severity = ?, title = ?, detail = ?,"
-                " recommendation = ?, evidence = ?, status = ?, last_seen = ?,"
-                " resolved_at = NULL WHERE fingerprint = ?",
-                (f["severity"], f["title"], f["detail"], f["recommendation"],
-                 json.dumps(f["evidence"]), status, now, fp),
-            )
+            store.refresh(f, status, now)
             f["status"], f["first_seen"], f["last_seen"] = status, prev["first_seen"], now
         f["resolved_at"] = None
         out.append(f)
@@ -1083,18 +1056,11 @@ def _reconcile(conn: Any, findings: list[dict[str, Any]]) -> list[dict[str, Any]
         if fp in current:
             continue
         if r["status"] == "active":
-            last = db._parse_ts(r["last_seen"])
+            last = db.parse_ts(r["last_seen"])
             if last is not None and datetime.now(timezone.utc) - last >= grace:
-                conn.execute(
-                    "UPDATE insight_findings SET status = 'resolved', resolved_at = ?"
-                    " WHERE fingerprint = ?",
-                    (now, fp),
-                )
-                r = conn.execute(
-                    "SELECT * FROM insight_findings WHERE fingerprint = ?", (fp,)
-                ).fetchone()
+                r = store.resolve(fp, now)
         out.append(_stored_to_finding(r))
-    conn.commit()
+    store.commit()
     return out
 
 
@@ -1104,30 +1070,29 @@ def compute_insights(days: int = 30, session_id: str | None = None) -> dict[str,
     Aggregate mode (no session_id) persists findings and reconciles their
     lifecycle; per-session mode is ephemeral.
     """
-    with db._connect() as conn:
-        ctx = RuleContext(
-            conn=conn,
-            cutoff=None if session_id else _cutoff_iso(days),
-            session_id=session_id,
-        )
-        findings: list[dict[str, Any]] = []
-        for meta in RULES.values():
-            if session_id and meta.aggregate_only:
-                continue
-            findings.extend(meta.fn(ctx))
-        if session_id is None:
-            findings = _reconcile(conn, findings)
-        else:
-            findings = _dedup(findings)
-            for f in findings:
-                f["status"] = "active"
-                f["first_seen"] = f["last_seen"] = None
-                f["resolved_at"] = None
+    snap = build_snapshot(
+        cutoff=None if session_id else _cutoff_iso(days),
+        session_id=session_id,
+    )
+    findings: list[dict[str, Any]] = []
+    for meta in RULES.values():
+        if session_id and meta.aggregate_only:
+            continue
+        findings.extend(meta.fn(snap))
+    if session_id is None:
+        with db.insight_findings_repo() as store:
+            findings = _reconcile(store, findings)
+    else:
+        findings = _dedup(findings)
+        for f in findings:
+            f["status"] = "active"
+            f["first_seen"] = f["last_seen"] = None
+            f["resolved_at"] = None
     findings.sort(key=_severity_sort_key)
     active = [f for f in findings if f["status"] == "active"]
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
     return {
-        "generated_at": db._now(),
+        "generated_at": db.now(),
         "window_days": 0 if session_id else days,
         "insights": findings,
         "counts": {
@@ -1143,21 +1108,12 @@ def compute_insights(days: int = 30, session_id: str | None = None) -> dict[str,
 
 
 def session_exists(session_id: str) -> bool:
-    with db._connect() as conn:
-        return (
-            conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()
-            is not None
-        )
+    return db.session_exists(session_id)
 
 
 def set_finding_status(fingerprint: str, status: str) -> bool:
     """Manual lifecycle control: dismiss or restore. Returns False if unknown."""
     assert status in ("dismissed", "active")
-    now = db._now()
-    with db._write_lock, db._connect() as conn:
-        cur = conn.execute(
-            "UPDATE insight_findings SET status = ?, dismissed_at = ?"
-            " WHERE fingerprint = ?",
-            (status, now if status == "dismissed" else None, fingerprint),
-        )
-        return cur.rowcount > 0
+    return db.set_insight_finding_status(
+        fingerprint, status, db.now() if status == "dismissed" else None
+    )

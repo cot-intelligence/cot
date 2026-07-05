@@ -212,6 +212,8 @@ export async function getVersionInfo(refresh = false): Promise<VersionInfo> {
   return json<VersionInfo>(await fetch(`/v1/version${query}`));
 }
 
+export type AiProvider = 'anthropic' | 'openai';
+
 export interface Settings {
   /** Stable, anonymous per-install identifier for analytics segregation. */
   install_id: string;
@@ -219,13 +221,25 @@ export interface Settings {
   /** Hard-disabled for this deployment via COT_DISABLE_TELEMETRY. */
   telemetry_env_disabled: boolean;
   telemetry_endpoint: string;
+  ai_provider: AiProvider;
+  ai_model: string | null;
+  ai_default_model: string;
+  ai_configured: boolean;
+  /** Shape only (first4+last4); the raw key is never returned. */
+  ai_key_masked: string | null;
+  ai_key_source: 'env' | 'db' | null;
+  /** Hard-disabled for this deployment via COT_DISABLE_LLM. */
+  ai_env_disabled: boolean;
 }
 
 export async function getSettings(): Promise<Settings> {
   return json<Settings>(await fetch('/v1/settings'));
 }
 
-export async function updateSettings(patch: Partial<Settings>): Promise<Settings> {
+/** ai_api_key is write-only: accepted on PUT, never echoed back. */
+export async function updateSettings(
+  patch: Partial<Settings> & { ai_api_key?: string },
+): Promise<Settings> {
   return json<Settings>(
     await fetch('/v1/settings', {
       method: 'PUT',
@@ -463,6 +477,64 @@ export async function restoreInsight(fingerprint: string): Promise<void> {
   await json<{ ok: boolean }>(
     await fetch(`/v1/insights/${encodeURIComponent(fingerprint)}/restore`, { method: 'POST' }),
   );
+}
+
+export interface AiInsightItem {
+  title: string;
+  detail: string;
+  recommendation: string;
+  severity: InsightSeverity;
+}
+
+export interface AiAnalysisResult {
+  summary: string;
+  sections: {
+    usage: AiInsightItem[];
+    security: AiInsightItem[];
+    cost: AiInsightItem[];
+  };
+}
+
+export interface AiAnalysis {
+  id: number;
+  created_at: string;
+  provider: AiProvider;
+  model: string;
+  window_days: number;
+  input_summary: { findings: number; excerpts: number; payload_bytes: number } | null;
+  result: AiAnalysisResult | null;
+  status: 'ok' | 'error';
+  error: string | null;
+}
+
+/** Explicit BYOK analysis — costs the user provider credits; never polled. */
+export async function runAiAnalysis(days = 30): Promise<AiAnalysis> {
+  const res = await fetch('/v1/insights/analyze', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ days }),
+  });
+  if (!res.ok) {
+    // Surface the backend's error detail (bad key, provider failure) verbatim.
+    let detail = `analysis failed (${res.status})`;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      /* keep fallback */
+    }
+    throw new Error(detail);
+  }
+  const data = (await res.json()) as { analysis: AiAnalysis };
+  return data.analysis;
+}
+
+export async function getAiAnalyses(limit = 10): Promise<AiAnalysis[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const data = await json<{ analyses: AiAnalysis[] }>(
+    await fetch(`/v1/insights/analyses?${params.toString()}`),
+  );
+  return data.analyses;
 }
 
 export interface Connection {

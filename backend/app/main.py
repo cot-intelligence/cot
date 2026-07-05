@@ -32,7 +32,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import __version__, db, insights
+from . import __version__, ai_insights, db, insights
 from .normalize import normalize
 
 app = FastAPI(title="cot collector", version=__version__)
@@ -418,11 +418,21 @@ async def _telemetry_loop() -> None:
 
 @app.get("/v1/settings")
 def get_settings() -> dict[str, Any]:
+    provider = ai_insights.stored_provider()
+    cfg = ai_insights.resolve_config()
     return {
         "install_id": db.get_install_id(),
         "telemetry_enabled": _telemetry_enabled(),
         "telemetry_env_disabled": _telemetry_env_disabled(),
         "telemetry_endpoint": _TELEMETRY_URL,
+        "ai_provider": provider,
+        "ai_model": (db.get_setting("ai_model") or "").strip() or None,
+        "ai_default_model": ai_insights.default_model(provider),
+        "ai_configured": cfg is not None,
+        # Shape only (first4+last4); the raw key is never returned.
+        "ai_key_masked": insights.mask_secret(cfg.api_key) if cfg else None,
+        "ai_key_source": cfg.key_source if cfg else None,
+        "ai_env_disabled": ai_insights.env_disabled(),
     }
 
 
@@ -441,6 +451,33 @@ async def update_settings(request: Request) -> dict[str, Any]:
         # choice takes effect without waiting for the daily cycle.
         if enabled and not _telemetry_env_disabled():
             threading.Thread(target=_send_telemetry, args=(True,), daemon=True).start()
+    ai_changed = False
+    if "ai_provider" in body:
+        provider = str(body["ai_provider"] or "").strip().lower()
+        if provider not in ai_insights.PROVIDERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"ai_provider must be one of {ai_insights.PROVIDERS}",
+            )
+        db.set_setting("ai_provider", provider)
+        ai_changed = True
+    if "ai_model" in body:
+        db.set_setting("ai_model", str(body["ai_model"] or "").strip())
+        ai_changed = True
+    if "ai_api_key" in body:
+        # Write-only: stored, audited as a boolean, never echoed back.
+        db.set_setting("ai_api_key", str(body["ai_api_key"] or "").strip())
+        ai_changed = True
+    if ai_changed:
+        db.record_audit_event(
+            "settings.ai.updated",
+            target="ai",
+            detail={
+                "provider": db.get_setting("ai_provider", "anthropic"),
+                "model": (db.get_setting("ai_model") or "").strip() or None,
+                "key_set": bool((db.get_setting("ai_api_key") or "").strip()),
+            },
+        )
     return get_settings()
 
 
@@ -916,6 +953,47 @@ def restore_insight(fingerprint: str) -> dict[str, Any]:
     if not insights.set_finding_status(fingerprint, "active"):
         raise HTTPException(status_code=404, detail="Finding not found")
     return {"ok": True}
+
+
+class AnalyzeRequest(BaseModel):
+    days: int = 30
+
+
+@app.post("/v1/insights/analyze")
+def analyze_insights(req: AnalyzeRequest | None = None) -> dict[str, Any]:
+    """Explicit BYOK LLM analysis — costs the user money, so never polled.
+
+    Synchronous plain ``def``: FastAPI runs it in the threadpool, so the
+    10-120s provider call doesn't block the event loop.
+    """
+    days = max(0, min((req.days if req else 30), 365))
+    try:
+        analysis = ai_insights.run_analysis(days)
+    except ai_insights.AiDisabledError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ai_insights.AiNotConfiguredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ai_insights.AiProviderError as exc:
+        db.record_audit_event(
+            "insights.ai.analyzed", target="ai", status="error", detail={"error": str(exc)}
+        )
+        raise HTTPException(status_code=502, detail=str(exc))
+    db.record_audit_event(
+        "insights.ai.analyzed",
+        target="ai",
+        detail={
+            "provider": analysis["provider"],
+            "model": analysis["model"],
+            "window_days": analysis["window_days"],
+            "input_summary": analysis["input_summary"],
+        },
+    )
+    return {"analysis": analysis}
+
+
+@app.get("/v1/insights/analyses")
+def list_ai_analyses(limit: int = Query(10)) -> dict[str, Any]:
+    return {"analyses": db.list_ai_analyses(max(1, min(limit, 50)))}
 
 
 @app.get("/v1/sessions/{session_id}/insights")

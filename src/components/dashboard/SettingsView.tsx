@@ -56,6 +56,10 @@ export function SettingsView({
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [retentionBusy, setRetentionBusy] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [aiKeyInput, setAiKeyInput] = useState('');
+  const [aiModelInput, setAiModelInput] = useState('');
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
   const savedAgents = readSavedAgents();
 
   useEffect(() => {
@@ -69,7 +73,10 @@ export function SettingsView({
       });
     getSettings()
       .then((data) => {
-        if (active) setSettings(data);
+        if (active) {
+          setSettings(data);
+          setAiModelInput(data.ai_model ?? '');
+        }
       })
       .catch(() => {
         /* offline — leave settings empty */
@@ -105,6 +112,27 @@ export function SettingsView({
     const [ret, audit] = await Promise.all([getRetention(), getSelfAudit(8)]);
     setRetention(ret);
     setAuditEvents(audit);
+  };
+
+  const patchAi = async (patch: Parameters<typeof updateSettings>[0]) => {
+    setAiBusy(true);
+    setAiError(null);
+    try {
+      const next = await updateSettings(patch);
+      setSettings(next);
+      return next;
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : String(err));
+      return null;
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const saveAiKey = async () => {
+    const value = aiKeyInput.trim();
+    if (!value) return;
+    if (await patchAi({ ai_api_key: value })) setAiKeyInput('');
   };
 
   const setRetentionEnabled = async (enabled: boolean) => {
@@ -304,6 +332,98 @@ export function SettingsView({
                   />
                 </div>
               </PreferenceRow>
+            </div>
+          </Section>
+        </FadeIn>
+
+        <FadeIn delay={0.125}>
+          <Section
+            title="AI insights"
+            description="Bring your own key for AI analysis on the Overview page. Runs only when you ask; findings, metrics and masked excerpts are sent to your provider. The key stays local in ~/.cot.">
+            <div className="space-y-4">
+              {settings?.ai_env_disabled && (
+                <p className="font-mono text-xs text-vermilion">
+                  Disabled for this deployment via COT_DISABLE_LLM.
+                </p>
+              )}
+              <PreferenceRow label="Provider" hint="Which API your key belongs to.">
+                <div className="flex gap-1 rounded-md bg-panel p-1">
+                  {(['anthropic', 'openai'] as const).map((p) => (
+                    <ToggleChip
+                      key={p}
+                      label={p === 'anthropic' ? 'Anthropic' : 'OpenAI'}
+                      active={settings?.ai_provider === p}
+                      disabled={!settings || settings.ai_env_disabled || aiBusy}
+                      onClick={() => void patchAi({ ai_provider: p })}
+                    />
+                  ))}
+                </div>
+              </PreferenceRow>
+              <PreferenceRow
+                label="API key"
+                hint={
+                  settings?.ai_configured
+                    ? `Configured ${settings.ai_key_masked ?? ''}${
+                        settings.ai_key_source === 'env' ? ' — from environment variable' : ''
+                      }`
+                    : 'Not configured — analysis is disabled until you add one.'
+                }>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="password"
+                    value={aiKeyInput}
+                    onChange={(e) => setAiKeyInput(e.target.value)}
+                    placeholder={settings?.ai_provider === 'openai' ? 'sk-…' : 'sk-ant-…'}
+                    autoComplete="off"
+                    disabled={!settings || settings.ai_env_disabled || aiBusy}
+                    className="w-52 rounded-md bg-panel px-3 py-1.5 font-mono text-xs text-fg placeholder:text-fg/30 focus:outline-none focus:ring-1 focus:ring-vermilion disabled:cursor-not-allowed disabled:opacity-40"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void saveAiKey()}
+                    disabled={!settings || settings.ai_env_disabled || aiBusy || !aiKeyInput.trim()}
+                    className="rounded px-3 py-1.5 font-mono text-[0.65rem] font-bold uppercase tracking-widest bg-surface text-fg shadow-soft transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40">
+                    Save
+                  </button>
+                  {settings?.ai_configured && settings.ai_key_source === 'db' && (
+                    <button
+                      type="button"
+                      onClick={() => void patchAi({ ai_api_key: '' })}
+                      disabled={aiBusy}
+                      className="rounded px-3 py-1.5 font-mono text-[0.65rem] font-bold uppercase tracking-widest text-fg/45 transition-colors hover:text-vermilion disabled:cursor-not-allowed disabled:opacity-40">
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </PreferenceRow>
+              <PreferenceRow
+                label="Model"
+                hint={`Optional override — default is ${settings?.ai_default_model ?? '…'}.`}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="text"
+                    value={aiModelInput}
+                    onChange={(e) => setAiModelInput(e.target.value)}
+                    placeholder={settings?.ai_default_model}
+                    autoComplete="off"
+                    disabled={!settings || settings.ai_env_disabled || aiBusy}
+                    className="w-52 rounded-md bg-panel px-3 py-1.5 font-mono text-xs text-fg placeholder:text-fg/30 focus:outline-none focus:ring-1 focus:ring-vermilion disabled:cursor-not-allowed disabled:opacity-40"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void patchAi({ ai_model: aiModelInput.trim() })}
+                    disabled={
+                      !settings ||
+                      settings.ai_env_disabled ||
+                      aiBusy ||
+                      aiModelInput.trim() === (settings.ai_model ?? '')
+                    }
+                    className="rounded px-3 py-1.5 font-mono text-[0.65rem] font-bold uppercase tracking-widest bg-surface text-fg shadow-soft transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40">
+                    Save
+                  </button>
+                </div>
+              </PreferenceRow>
+              {aiError && <p className="font-mono text-xs text-vermilion">{aiError}</p>}
             </div>
           </Section>
         </FadeIn>

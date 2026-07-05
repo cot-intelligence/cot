@@ -12,9 +12,13 @@ import re
 import sqlite3
 import string
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Iterator
+
+if TYPE_CHECKING:
+    from .insight_snapshot import InsightInputs
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .normalize import categorize, normalize
@@ -185,6 +189,20 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_events_ts ON audit_events(ts);
+
+CREATE TABLE IF NOT EXISTS ai_analyses (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at    TEXT NOT NULL,
+    provider      TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    window_days   INTEGER NOT NULL,
+    input_summary TEXT,
+    result        TEXT,
+    status        TEXT NOT NULL DEFAULT 'ok',
+    error         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_analyses_created ON ai_analyses(created_at);
 """
 
 
@@ -1333,6 +1351,74 @@ def set_setting(key: str, value: str) -> None:
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
+
+
+def insert_ai_analysis(
+    provider: str,
+    model: str,
+    window_days: int,
+    input_summary: dict[str, Any] | None,
+    result: dict[str, Any] | None,
+    status: str = "ok",
+    error: str | None = None,
+) -> int:
+    now = _now()
+    with _write_lock, _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO ai_analyses (created_at, provider, model, window_days,"
+            " input_summary, result, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                now,
+                provider,
+                model,
+                int(window_days),
+                json.dumps(input_summary, ensure_ascii=False) if input_summary else None,
+                json.dumps(result, ensure_ascii=False) if result else None,
+                status,
+                error,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def get_ai_analysis(analysis_id: int) -> dict[str, Any] | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM ai_analyses WHERE id = ?", (analysis_id,)
+        ).fetchone()
+    return _ai_analysis_row(row) if row is not None else None
+
+
+def list_ai_analyses(limit: int = 10) -> list[dict[str, Any]]:
+    limit = max(1, min(limit, 50))
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM ai_analyses ORDER BY created_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [_ai_analysis_row(r) for r in rows]
+
+
+def _ai_analysis_row(r: Any) -> dict[str, Any]:
+    def _load(raw: str | None) -> Any:
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    return {
+        "id": r["id"],
+        "created_at": _format_ts(r["created_at"]) or r["created_at"],
+        "provider": r["provider"],
+        "model": r["model"],
+        "window_days": r["window_days"],
+        "input_summary": _load(r["input_summary"]),
+        "result": _load(r["result"]),
+        "status": r["status"],
+        "error": r["error"],
+    }
 
 
 def record_audit_event(
@@ -3606,3 +3692,161 @@ def stats() -> dict[str, Any]:
             "by_source": by_source,
             "by_status": by_status,
         }
+
+
+# --- insights store interface -------------------------------------------------
+# The insights layer (rules + lifecycle) used to reach past this module into
+# ``db._connect()`` and hand-roll ~40 SELECTs over events/sessions/insight_findings.
+# These functions keep that SQL here, in the store, and hand the insights layer
+# plain dicts and a findings repository instead.
+
+# Shared domain helpers the insights layer legitimately reuses, exposed under
+# public names so callers don't reach into private helpers.
+now = _now
+parse_ts = _parse_ts
+live_status = _live_status
+build_clarifications = _build_clarifications
+QUESTION_TOOLS = _QUESTION_TOOLS
+
+_INSIGHT_EVENT_COLUMNS = (
+    "e.id, e.session_id, e.ts, e.category, e.tool, e.target, e.status, e.hook,"
+    " e.title, e.detail, e.model, e.duration_ms,"
+    " e.input_tokens, e.output_tokens, e.cache_read_tokens, e.cache_write_tokens,"
+    " s.cwd"
+)
+
+
+def read_insight_inputs(
+    *, cutoff: str | None, session_id: str | None, trend_since: str | None
+) -> "InsightInputs":
+    """One read of the store for the insight rules.
+
+    Returns the working set (non-archived events, optionally windowed to
+    ``cutoff`` / narrowed to ``session_id``, joined to their session cwd) plus
+    the cross-cutting views rules need outside that window: per-session last
+    activity, per-session tool-call counts, and — when ``trend_since`` is set —
+    the priced events since then for the trend rule.
+    """
+    where = " WHERE s.archived = 0"
+    params: list[Any] = []
+    if cutoff:
+        where += " AND e.ts >= ?"
+        params.append(cutoff)
+    if session_id:
+        where += " AND e.session_id = ?"
+        params.append(session_id)
+    with _connect() as conn:
+        events = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT " + _INSIGHT_EVENT_COLUMNS
+                + " FROM events e JOIN sessions s ON s.id = e.session_id"
+                + where
+                + " ORDER BY e.session_id, e.ts, e.id",
+                params,
+            ).fetchall()
+        ]
+        session_last_ts = {
+            r["session_id"]: r["t"]
+            for r in conn.execute(
+                "SELECT session_id, MAX(ts) t FROM events GROUP BY session_id"
+            ).fetchall()
+        }
+        session_tool_calls = {
+            r["session_id"]: r["n"]
+            for r in conn.execute(
+                "SELECT session_id, COUNT(*) n FROM events"
+                " WHERE tool IS NOT NULL AND status IS NOT NULL GROUP BY session_id"
+            ).fetchall()
+        }
+        trend_events: list[dict[str, Any]] = []
+        if trend_since is not None:
+            trend_events = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT " + _INSIGHT_EVENT_COLUMNS
+                    + " FROM events e JOIN sessions s ON s.id = e.session_id"
+                    " WHERE s.archived = 0 AND e.ts >= ?"
+                    " AND e.model IS NOT NULL AND e.model != ''",
+                    (trend_since,),
+                ).fetchall()
+            ]
+    return {
+        "events": events,
+        "session_last_ts": session_last_ts,
+        "session_tool_calls": session_tool_calls,
+        "trend_events": trend_events,
+    }
+
+
+def session_exists(session_id: str) -> bool:
+    with _connect() as conn:
+        return (
+            conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            is not None
+        )
+
+
+class InsightFindingsRepo:
+    """Typed persistence for insight-finding lifecycle, bound to a single
+    connection so a reconcile pass is one transaction. All ``insight_findings``
+    SQL lives here."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def load(self) -> dict[str, Any]:
+        return {
+            r["fingerprint"]: r
+            for r in self._conn.execute("SELECT * FROM insight_findings").fetchall()
+        }
+
+    def insert(self, finding: Any, now: str) -> None:
+        self._conn.execute(
+            "INSERT INTO insight_findings (fingerprint, rule_id, pillar, tier, severity,"
+            " title, detail, recommendation, evidence, status, first_seen, last_seen)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+            (finding["fingerprint"], finding["id"], finding["pillar"], finding["tier"],
+             finding["severity"], finding["title"], finding["detail"],
+             finding["recommendation"], json.dumps(finding["evidence"]), now, now),
+        )
+
+    def refresh(self, finding: Any, status: str, now: str) -> None:
+        self._conn.execute(
+            "UPDATE insight_findings SET severity = ?, title = ?, detail = ?,"
+            " recommendation = ?, evidence = ?, status = ?, last_seen = ?,"
+            " resolved_at = NULL WHERE fingerprint = ?",
+            (finding["severity"], finding["title"], finding["detail"],
+             finding["recommendation"], json.dumps(finding["evidence"]), status, now,
+             finding["fingerprint"]),
+        )
+
+    def resolve(self, fingerprint: str, now: str) -> Any:
+        self._conn.execute(
+            "UPDATE insight_findings SET status = 'resolved', resolved_at = ?"
+            " WHERE fingerprint = ?",
+            (now, fingerprint),
+        )
+        return self._conn.execute(
+            "SELECT * FROM insight_findings WHERE fingerprint = ?", (fingerprint,)
+        ).fetchone()
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+
+@contextmanager
+def insight_findings_repo() -> Iterator[InsightFindingsRepo]:
+    """A findings repository over a single connection/transaction."""
+    with _connect() as conn:
+        yield InsightFindingsRepo(conn)
+
+
+def set_insight_finding_status(fingerprint: str, status: str, dismissed_at: str | None) -> bool:
+    """Manual lifecycle control (dismiss/restore). False if the fingerprint is unknown."""
+    with _write_lock, _connect() as conn:
+        cur = conn.execute(
+            "UPDATE insight_findings SET status = ?, dismissed_at = ? WHERE fingerprint = ?",
+            (status, dismissed_at, fingerprint),
+        )
+        return cur.rowcount > 0
