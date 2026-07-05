@@ -19,9 +19,9 @@ export function SessionList({ selectedId, onSelect, collapsed = false, onToggle 
   const [q, setQ] = useState('');
 
   const { data: sessions } = usePolling<SessionSummary[]>(
+    ['sessions', status, source, q],
     () => getSessions({ limit: 100, status: status || undefined, source: source || undefined, q: q || undefined }),
     3000,
-    [status, source, q],
   );
 
   if (collapsed) {

@@ -1,62 +1,35 @@
-import { useEffect, useRef, useState } from 'react';
-import { subscribeStream } from './useServerRevision';
+import { keepPreviousData, useQuery, type QueryKey } from '@tanstack/react-query';
 
-// The live stream drives freshness, so poll only rarely as a safety net (missed
-// events, reconnects). Never poll faster than this even if a caller asks.
+// Never poll faster than this even if a caller asks. The live stream (wired in
+// QueryProvider) drives freshness; the interval is only a safety net for missed
+// events / reconnects.
 const FALLBACK_MIN_MS = 15000;
-// Coalesce bursts of live-change signals into at most one refetch per window. A
-// busy session can emit many events per second; without this the dashboard would
-// refetch expensive queries on every one.
-const LIVE_COALESCE_MS = 1500;
 
+/**
+ * Cached, live-updating fetch backed by react-query.
+ *
+ * `queryKey` identifies the data in the shared cache — include every value the
+ * fetcher depends on (filters, ids, window) so changing one refetches, and so
+ * two views asking for the same thing share one entry. Revisiting a view then
+ * renders the cached result instantly while it revalidates in the background.
+ *
+ * Returns the same `{ data, error }` shape as before: `data` is the last
+ * successful result (kept across refetches and key changes), `error` is true
+ * when the current fetch failed.
+ */
 export function usePolling<T>(
+  queryKey: QueryKey,
   fetcher: () => Promise<T>,
   intervalMs: number,
-  deps: React.DependencyList = [],
 ): { data: T | null; error: boolean } {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState(false);
-  const fetcherRef = useRef(fetcher);
-  fetcherRef.current = fetcher;
-
-  useEffect(() => {
-    let active = true;
-    let lastLoad = 0;
-    let coalesceTimer: number | null = null;
-
-    const load = async () => {
-      lastLoad = Date.now();
-      try {
-        const d = await fetcherRef.current();
-        if (active) { setData(d); setError(false); }
-      } catch {
-        if (active) setError(true);
-      }
-    };
-
-    // Throttled reload driven by the live stream: at most one refetch per
-    // LIVE_COALESCE_MS, so a flood of change signals collapses to one fetch.
-    const requestReload = () => {
-      if (coalesceTimer !== null) return;
-      const wait = Math.max(0, LIVE_COALESCE_MS - (Date.now() - lastLoad));
-      coalesceTimer = window.setTimeout(() => {
-        coalesceTimer = null;
-        load();
-      }, wait);
-    };
-
-    load();
-    const unsubscribe = subscribeStream(requestReload);
-    const fallbackMs = intervalMs > 0 ? Math.max(intervalMs, FALLBACK_MIN_MS) : 0;
-    const fallback = fallbackMs > 0 ? window.setInterval(load, fallbackMs) : null;
-
-    return () => {
-      active = false;
-      if (coalesceTimer !== null) window.clearTimeout(coalesceTimer);
-      if (fallback !== null) window.clearInterval(fallback);
-      unsubscribe();
-    };
-  }, [intervalMs, ...deps]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  return { data, error };
+  const refetchInterval = intervalMs > 0 ? Math.max(intervalMs, FALLBACK_MIN_MS) : false;
+  const { data, isError } = useQuery<T>({
+    queryKey,
+    queryFn: fetcher,
+    refetchInterval,
+    // Show the previous result (e.g. while a filter change loads) instead of
+    // dropping back to a skeleton.
+    placeholderData: keepPreviousData,
+  });
+  return { data: data ?? null, error: isError };
 }

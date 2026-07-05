@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { getSessionDetail, type SessionDetail } from '../../lib/api';
+import { useQuery } from '@tanstack/react-query';
+import { getSessionDetail } from '../../lib/api';
 import { setDocumentTitle } from '../../lib/documentTitle';
 import { SessionDetailSkeleton } from '../ui/Skeleton';
 import { SessionMeta } from './session/SessionMeta';
@@ -12,8 +13,18 @@ interface SessionDetailViewProps {
 }
 
 export function SessionDetailView({ sessionId, focusEventId }: SessionDetailViewProps) {
-  const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [activeTab, setActiveTab] = useState('timeline');
+
+  // Cached per session id, so revisiting a session already viewed renders
+  // instantly instead of dropping back to the skeleton. A previously-unseen
+  // session has no cache entry yet, so it still shows the skeleton on first
+  // load. The live stream (QueryProvider) keeps an active session fresh; the
+  // interval is a safety-net fallback.
+  const { data: detail } = useQuery({
+    queryKey: ['sessionDetail', sessionId],
+    queryFn: () => getSessionDetail(sessionId),
+    refetchInterval: 15000,
+  });
 
   // Reset to the timeline on a new session, or when focusing a specific event.
   useEffect(() => {
@@ -28,25 +39,6 @@ export function SessionDetailView({ sessionId, focusEventId }: SessionDetailView
     const label = detail.summary.title?.trim() || detail.summary.id.slice(0, 16);
     setDocumentTitle(label);
   }, [detail, sessionId]);
-
-  useEffect(() => {
-    setDetail(null); // show the skeleton while a freshly-selected session loads
-    let active = true;
-    const load = async () => {
-      try {
-        const data = await getSessionDetail(sessionId);
-        if (active) setDetail(data);
-      } catch {
-        if (active) setDetail(null);
-      }
-    };
-    load();
-    const t = window.setInterval(load, 3000);
-    return () => {
-      active = false;
-      window.clearInterval(t);
-    };
-  }, [sessionId]);
 
   if (!detail) {
     return <SessionDetailSkeleton />;

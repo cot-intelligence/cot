@@ -45,8 +45,8 @@ export function SettingsView({
   onRunOnboarding,
 }: SettingsViewProps) {
   const { theme, setTheme } = useTheme();
-  const { data: health, error: healthError } = usePolling<Health>(() => getHealth(), 10000);
-  const { data: hookStatus, error: hookStatusError } = usePolling<HookStatus>(() => getHookStatus(), 10000);
+  const { data: health, error: healthError } = usePolling<Health>(['health'], () => getHealth(), 10000);
+  const { data: hookStatus, error: hookStatusError } = usePolling<HookStatus>(['hookStatus'], () => getHookStatus(), 10000);
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
   const [versionChecking, setVersionChecking] = useState(false);
   const [versionCheckError, setVersionCheckError] = useState<string | null>(null);

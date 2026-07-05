@@ -124,7 +124,7 @@ function pillarAnchor(pillar: InsightPillar): string {
 
 export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
   const tz = userTimeZone();
-  const { data: m, error } = usePolling<Metrics>(() => getMetrics(tz), 5000);
+  const { data: m, error } = usePolling<Metrics>(['metrics', tz], () => getMetrics(tz), 5000);
   const [shareOpen, setShareOpen] = useState(false);
 
   // Findings: windowed + status-filtered, unlike the all-time metrics.
@@ -132,9 +132,9 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
   const [view, setView] = useState<InsightStatus>('active');
   const [refreshKey, setRefreshKey] = useState(0);
   const { data: ins } = usePolling<InsightsResponse>(
+    ['insights', days, refreshKey],
     () => getInsights(days, 'all'),
     60000,
-    [days, refreshKey],
   );
 
   // BYOK AI analysis state, shared between the AI section and the summary.

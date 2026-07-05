@@ -33,7 +33,7 @@ function StatCard({
 }
 
 export function TelemetryPanel() {
-  const { data: stats } = usePolling<Stats>(() => getStats(), 3000);
+  const { data: stats } = usePolling<Stats>(['stats'], () => getStats(), 3000);
 
   const sourceHint = stats
     ? Object.entries(stats.by_source)
