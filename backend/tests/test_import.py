@@ -628,6 +628,68 @@ def _with_env(key, value):
     return restore
 
 
+def test_tiny_import_smoke_records_all_sources_without_golden_session():
+    """Tiny wiring smoke: parser -> normalize -> storage, no broad snapshot."""
+    with _tempfile.TemporaryDirectory() as tmp:
+        restore = _with_env("COT_DB_PATH", str(_Path(tmp) / "cot.db"))
+        try:
+            from app import db
+            db.init_db()
+
+            cases = [
+                ("cursor", "smoke-cursor", bridge._cursor_line_to_events, [
+                    {"role": "user", "message": {"content": [{"type": "text", "text": "<user_query>\nhi\n</user_query>"}]}},
+                    {"role": "assistant", "message": {"content": [
+                        {"type": "tool_use", "name": "Shell", "input": {"command": "ls"}},
+                    ]}},
+                ], _MTIME),
+                ("claude", "smoke-claude", bridge._claude_line_to_events, [
+                    {"type": "assistant", "uuid": "smoke-c1", "timestamp": "2026-06-01T00:00:00Z",
+                     "message": {"role": "assistant", "content": [
+                         {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "pwd"}},
+                     ]}},
+                    {"type": "user", "uuid": "smoke-c2", "timestamp": "2026-06-01T00:00:01Z",
+                     "message": {"role": "user", "content": [
+                         {"type": "tool_result", "tool_use_id": "t1", "content": "/repo", "is_error": False},
+                     ]}},
+                ], None),
+                ("codex", "smoke-codex", bridge._codex_line_to_events, [
+                    {"type": "response_item", "id": "smoke-z1", "timestamp": "2026-04-01T00:00:00Z",
+                     "payload": {"type": "function_call", "name": "exec_command",
+                                 "arguments": "{\"cmd\": \"pwd\"}", "call_id": "cz1"}},
+                    {"type": "response_item", "id": "smoke-z2", "timestamp": "2026-04-01T00:00:01Z",
+                     "payload": {"type": "function_call_output", "call_id": "cz1",
+                                 "output": "/repo", "status": "completed"}},
+                ], None),
+            ]
+
+            def ingest_once():
+                for agent, sid, parser, lines, mtime in cases:
+                    state: dict = {}
+                    for lineno, obj in enumerate(lines):
+                        for ev in parser(obj, sid, lineno=lineno, mtime=mtime, state=state, path=f"/{sid}.jsonl"):
+                            db.record_event(normalize(agent, ev), ev)
+                    for ev in bridge._codex_flush_pending(state):
+                        db.record_event(normalize(agent, ev), ev)
+
+            ingest_once()
+            ingest_once()
+
+            with db._connect() as conn:
+                rows = conn.execute(
+                    "SELECT source, category, COUNT(*) n FROM events"
+                    " WHERE session_id LIKE 'smoke-%'"
+                    " GROUP BY source, category ORDER BY source, category"
+                ).fetchall()
+            got = {(r["source"], r["category"]): r["n"] for r in rows}
+            assert got[("cursor", "prompt")] == 1, got
+            assert got[("cursor", "shell")] == 1, got
+            assert got[("claude", "shell")] == 2, got
+            assert got[("codex", "shell")] == 2, got
+        finally:
+            restore()
+
+
 def test_discover_subagent_links_from_cursor_nesting():
     parent = "11111111-1111-1111-1111-111111111111"
     child = "22222222-2222-2222-2222-222222222222"
