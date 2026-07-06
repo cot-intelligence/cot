@@ -232,6 +232,50 @@ def test_claude_tool_result_error_status():
 
 # --- Codex ------------------------------------------------------------------
 
+def test_codex_adapter_emits_canonical_tool_call_and_result():
+    state: dict = {}
+    call = {"type": "response_item", "id": "l1", "timestamp": "2026-04-01T00:00:00Z",
+            "payload": {"type": "function_call", "name": "exec_command",
+                        "arguments": "{\"cmd\": \"pwd\"}", "call_id": "c1"}}
+    output = {"type": "response_item", "id": "l2", "timestamp": "2026-04-01T00:00:01Z",
+              "payload": {"type": "function_call_output", "call_id": "c1",
+                          "output": "/home", "status": "completed"}}
+
+    events = []
+    events.extend(bridge._codex_line_to_ingest_events(call, "SID", state=state))
+    events.extend(bridge._codex_line_to_ingest_events(output, "SID", state=state))
+
+    assert [ev["kind"] for ev in events] == ["tool_call", "tool_call"], events
+    assert events[0]["phase"] == "start"
+    assert events[0]["tool_name"] == "Bash"
+    assert events[0]["tool_input"] == {"command": "pwd"}
+    assert events[1]["phase"] == "end"
+    assert events[1]["tool_response"] == "/home"
+    assert all("hook_event_name" not in ev and "_dedup_key" not in ev for ev in events), events
+
+
+def test_codex_canonical_pending_response_folds_token_usage():
+    state: dict = {}
+    lines = [
+        {"type": "response_item", "id": "m1", "timestamp": "2026-04-01T00:00:00Z",
+         "payload": {"type": "message", "role": "assistant", "phase": "final_answer",
+                     "content": [{"type": "output_text", "text": "done"}]}},
+        {"type": "event_msg", "timestamp": "2026-04-01T00:00:01Z",
+         "payload": {"type": "token_count", "info": {"last_token_usage": {
+             "input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 20}}}},
+    ]
+    assert bridge._codex_line_to_ingest_events(lines[0], "SID", state=state) == []
+    assert bridge._codex_line_to_ingest_events(lines[1], "SID", state=state) == []
+    flushed = bridge._codex_flush_pending_ingest_events(state)
+    assert len(flushed) == 1, flushed
+    event = flushed[0]
+    assert event["kind"] == "response", event
+    assert event["text"] == "done", event
+    assert event["usage"]["input_tokens"] == 100, event
+    assert event["usage"]["cached_input_tokens"] == 40, event
+    assert "hook_event_name" not in event and "_synthetic_category" not in event, event
+
+
 def test_codex_function_call_and_output_pair():
     lines = [
         {"type": "response_item", "id": "l1", "timestamp": "2026-04-01T00:00:00Z",

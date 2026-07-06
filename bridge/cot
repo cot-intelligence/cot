@@ -391,9 +391,10 @@ def _env_context_event(base: dict, block: str) -> dict:
     digest = hashlib.sha1(block.encode("utf-8", "replace")).hexdigest()[:16]
     return {
         **base,
-        "hook_event_name": "CodexEnvironmentContext",
+        "kind": "session_metadata",
+        "metadata_type": "environment_context",
         "environment_context": block,
-        "_dedup_key": f"envctx:{digest}",
+        "dedup_key": f"envctx:{digest}",
     }
 
 
@@ -2657,6 +2658,8 @@ def _ingest_event_to_hook_payload(event: dict) -> dict:
         out["usage"] = event.get("usage")
     if event.get("interrupted"):
         out["interrupted"] = True
+    if event.get("codex"):
+        out["codex"] = event.get("codex")
 
     kind = event.get("kind")
     if kind == "prompt":
@@ -2686,6 +2689,13 @@ def _ingest_event_to_hook_payload(event: dict) -> dict:
         out["_attach_to_prompt"] = True
         out["text"] = event.get("text") or ""
         out["attachments"] = event.get("attachments") or []
+    elif kind == "session_metadata":
+        metadata_type = event.get("metadata_type")
+        if metadata_type == "environment_context":
+            out["hook_event_name"] = "CodexEnvironmentContext"
+            out["environment_context"] = event.get("environment_context") or ""
+        elif metadata_type == "session_start":
+            out["hook_event_name"] = "SessionStart"
     else:
         out.update(event.get("payload") if isinstance(event.get("payload"), dict) else {})
 
@@ -2858,7 +2868,7 @@ def _codex_reasoning_text(payload: dict) -> str:
     return "\n".join(parts).strip()
 
 
-def _codex_flush_pending(state: dict | None) -> list[dict]:
+def _codex_flush_pending_ingest_events(state: dict | None) -> list[dict]:
     """Release the deferred Codex assistant message, if one is held.
 
     Codex emits each turn's ``token_count`` and ``turn_aborted`` lines *after*
@@ -2870,6 +2880,10 @@ def _codex_flush_pending(state: dict | None) -> list[dict]:
         return []
     ev = state.pop("_pending_msg", None)
     return [ev] if isinstance(ev, dict) else []
+
+
+def _codex_flush_pending(state: dict | None) -> list[dict]:
+    return _ingest_events_to_hook_payloads(_codex_flush_pending_ingest_events(state))
 
 
 def _codex_session_config(meta: dict | None, turn: dict | None) -> dict:
@@ -2902,11 +2916,12 @@ def _codex_session_start_event(session_id: str, ts, state: dict) -> dict:
     sandbox/approval posture that Codex only records on its metadata lines."""
     ev: dict = {
         "session_id": session_id,
-        "_import": True,
+        "origin": "import",
         "timestamp": ts,
-        "hook_event_name": "SessionStart",
+        "kind": "session_metadata",
+        "metadata_type": "session_start",
         "cwd": state.get("cwd"),
-        "_dedup_key": "session:start",
+        "dedup_key": "session:start",
     }
     cfg = _codex_session_config(state.get("_codex_meta"), state.get("_codex_turn"))
     if cfg.get("model"):
@@ -2916,7 +2931,7 @@ def _codex_session_start_event(session_id: str, ts, state: dict) -> dict:
     return ev
 
 
-def _codex_line_to_events(
+def _codex_line_to_ingest_events(
     obj: dict,
     session_id: str,
     *,
@@ -2925,7 +2940,7 @@ def _codex_line_to_events(
     state: dict | None = None,
     path: str = "",
 ) -> list[dict]:
-    """Map a Codex rollout JSONL line to hook-shaped payloads.
+    """Map a Codex rollout JSONL line to canonical ingest events.
 
     Beyond messages and web searches, Codex records tool activity as
     ``function_call`` / ``custom_tool_call`` items with their results in
@@ -2977,7 +2992,7 @@ def _codex_line_to_events(
     if kind != "response_item":
         return events
 
-    base: dict = {"session_id": session_id, "_import": True, "timestamp": ts}
+    base: dict = {"session_id": session_id, "origin": "import", "timestamp": ts}
     if state.get("cwd"):
         base["cwd"] = state["cwd"]
 
@@ -2991,25 +3006,23 @@ def _codex_line_to_events(
         if phase == "final_answer":
             ev = {
                 **base,
-                "hook_event_name": "afterAgentResponse",
-                "_synthetic_category": "response",
-                "response": text_val,
+                "kind": "response",
+                "text": text_val,
                 "model": model,
-                "_dedup_key": f"{line_id}:resp" if line_id else None,
+                "dedup_key": f"{line_id}:resp" if line_id else None,
             }
         else:
             ev = {
                 **base,
-                "hook_event_name": "afterAgentThought",
-                "_synthetic_category": "thought",
-                "thought": text_val,
+                "kind": "thought",
+                "text": text_val,
                 "model": model,
-                "_dedup_key": f"{line_id}:think" if line_id else None,
+                "dedup_key": f"{line_id}:think" if line_id else None,
             }
         # Defer so a trailing token_count / turn_aborted line can fold usage and
         # interrupted status onto this message before it is posted. The prior
         # pending message (if any) is released now, preserving order.
-        flushed = _codex_flush_pending(state)
+        flushed = _codex_flush_pending_ingest_events(state)
         state["_pending_msg"] = ev
         return flushed
     elif pt == "message" and payload.get("role") == "user":
@@ -3027,16 +3040,16 @@ def _codex_line_to_events(
         if text_val:
             events.append({
                 **base,
-                "hook_event_name": "UserPromptSubmit",
-                "prompt": text_val,
-                "_dedup_key": f"{line_id}:prompt" if line_id else None,
+                "kind": "prompt",
+                "text": text_val,
+                "dedup_key": f"{line_id}:prompt" if line_id else None,
             })
         if isinstance(content, list):
             atts = _message_attachments(content)
             if atts and text_val:
                 events.append({
                     **base,
-                    "_attach_to_prompt": True,
+                    "kind": "attachment",
                     "text": text_val,
                     "attachments": atts,
                 })
@@ -3045,10 +3058,9 @@ def _codex_line_to_events(
         if text_val:
             events.append({
                 **base,
-                "hook_event_name": "afterAgentThought",
-                "_synthetic_category": "thought",
-                "thought": text_val,
-                "_dedup_key": f"{line_id}:reason" if line_id else None,
+                "kind": "thought",
+                "text": text_val,
+                "dedup_key": f"{line_id}:reason" if line_id else None,
             })
     elif pt == "web_search_call":
         action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
@@ -3056,11 +3068,13 @@ def _codex_line_to_events(
         if query:
             events.append({
                 **base,
-                "hook_event_name": "PostToolUse",
+                "kind": "tool_call",
+                "phase": "instant",
+                "status": "ok",
                 "tool_name": "WebSearch",
                 "tool_input": {"query": str(query)},
                 "tool_response": {"status": payload.get("status"), "action": action},
-                "_dedup_key": f"{line_id}:web" if line_id else None,
+                "dedup_key": f"{line_id}:web" if line_id else None,
             })
     elif pt in ("function_call", "custom_tool_call"):
         name = payload.get("name") or ""
@@ -3072,10 +3086,12 @@ def _codex_line_to_events(
         dk = f"{call_id}:pre" if call_id else (f"{line_id}:pre" if line_id else None)
         events.append({
             **base,
-            "hook_event_name": "PreToolUse",
+            "kind": "tool_call",
+            "phase": "start",
+            "status": "ok",
             "tool_name": tool_name,
             "tool_input": tool_input,
-            "_dedup_key": dk,
+            "dedup_key": dk,
         })
     elif pt in ("function_call_output", "custom_tool_call_output"):
         call_id = payload.get("call_id") or ""
@@ -3084,18 +3100,36 @@ def _codex_line_to_events(
         tool_name, tool_input = state.get(call_id, ("", {}))
         status = payload.get("status")
         is_error = status not in (None, "completed", "success")
-        hook_name = "PostToolUseFailure" if is_error else "PostToolUse"
         dk = f"{call_id}:post" if call_id else (f"{line_id}:post" if line_id else None)
         events.append({
             **base,
-            "hook_event_name": hook_name,
+            "kind": "tool_call",
+            "phase": "end",
+            "status": "error" if is_error else "ok",
             "tool_name": tool_name,
             "tool_input": tool_input,
             "tool_response": out_text,
-            "_dedup_key": dk,
+            "dedup_key": dk,
         })
 
     return events
+
+
+def _codex_line_to_events(
+    obj: dict,
+    session_id: str,
+    *,
+    lineno: int = 0,
+    mtime: float | None = None,
+    state: dict | None = None,
+    path: str = "",
+) -> list[dict]:
+    """Map a Codex rollout JSONL line to current collector hook payloads."""
+    return _ingest_events_to_hook_payloads(
+        _codex_line_to_ingest_events(
+            obj, session_id, lineno=lineno, mtime=mtime, state=state, path=path
+        )
+    )
 
 
 def _session_id_from_claude_path(path: Path) -> str | None:
