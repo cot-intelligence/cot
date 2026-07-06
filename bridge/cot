@@ -2457,7 +2457,7 @@ def _reconcile_cursor_subagents(body: dict) -> None:
     _post_subagent_links(links)
 
 
-def _claude_line_to_events(
+def _claude_line_to_ingest_events(
     obj: dict,
     session_id: str,
     *,
@@ -2466,12 +2466,11 @@ def _claude_line_to_events(
     state: dict | None = None,
     path: str = "",
 ) -> list[dict]:
-    """Map a single Claude transcript JSONL line to hook-shaped payloads.
+    """Map a single Claude transcript JSONL line to canonical ingest events.
 
     ``state`` carries tool_use id -> (name, input) across lines so the
     ``tool_result`` blocks — which Claude writes in the *following* user
-    message, not alongside the call — can be paired back to their tool name and
-    emitted as PostToolUse events (with the result body and error status).
+    message, not alongside the call — can be paired back to their tool name.
     """
     state = state if state is not None else {}
     events: list[dict] = []
@@ -2489,7 +2488,7 @@ def _claude_line_to_events(
     base = {
         "session_id": sid,
         "cwd": cwd,
-        "_import": True,
+        "origin": "import",
         "timestamp": ts,
     }
 
@@ -2509,30 +2508,31 @@ def _claude_line_to_events(
                     result_text = ""
                 tool_name, matched_input = state.get(tool_use_id, ("", {}))
                 is_error = block.get("is_error", False)
-                hook_name = "PostToolUseFailure" if is_error else "PostToolUse"
                 events.append({
                     **base,
-                    "hook_event_name": hook_name,
+                    "kind": "tool_call",
+                    "phase": "end",
+                    "status": "error" if is_error else "ok",
                     "tool_name": tool_name,
                     "tool_input": matched_input,
                     "tool_response": result_text,
                     "model": model,
-                    "_dedup_key": f"{uuid}:post:{tool_use_id or i}" if uuid else None,
+                    "dedup_key": f"{uuid}:post:{tool_use_id or i}" if uuid else None,
                 })
         text = _text_from_blocks(content, clean_user=True) if isinstance(content, list) else _clean_user_text(str(content or ""))
         if text and not _is_interruption(text):
             events.append({
                 **base,
-                "hook_event_name": "UserPromptSubmit",
-                "prompt": text,
-                "_dedup_key": f"{uuid}:prompt" if uuid else None,
+                "kind": "prompt",
+                "text": text,
+                "dedup_key": f"{uuid}:prompt" if uuid else None,
             })
         if isinstance(content, list):
             atts = _message_attachments(content)
             if atts and text:
                 events.append({
                     **base,
-                    "_attach_to_prompt": True,
+                    "kind": "attachment",
                     "text": text,
                     "attachments": atts,
                 })
@@ -2552,24 +2552,22 @@ def _claude_line_to_events(
                     if think:
                         events.append({
                             **base,
-                            "hook_event_name": "afterAgentThought",
-                            "_synthetic_category": "thought",
-                            "thought": str(think),
+                            "kind": "thought",
+                            "text": str(think),
                             "model": model,
                             "usage": block_usage,
-                            "_dedup_key": f"{uuid}:think:{i}" if uuid else None,
+                            "dedup_key": f"{uuid}:think:{i}" if uuid else None,
                         })
                 elif btype == "text":
                     text = block.get("text")
                     if text:
                         events.append({
                             **base,
-                            "hook_event_name": "afterAgentResponse",
-                            "_synthetic_category": "response",
-                            "response": str(text),
+                            "kind": "response",
+                            "text": str(text),
                             "model": model,
                             "usage": block_usage,
-                            "_dedup_key": f"{uuid}:resp:{i}" if uuid else None,
+                            "dedup_key": f"{uuid}:resp:{i}" if uuid else None,
                         })
                 elif btype == "tool_use":
                     tool_name = block.get("name") or ""
@@ -2579,27 +2577,45 @@ def _claude_line_to_events(
                         state[tool_id] = (tool_name, tool_input)
                     events.append({
                         **base,
-                        "hook_event_name": "PreToolUse",
+                        "kind": "tool_call",
+                        "phase": "start",
+                        "status": "ok",
                         "tool_name": tool_name,
                         "tool_input": tool_input,
                         "model": model,
                         "usage": block_usage,
-                        "_dedup_key": f"{uuid}:pre:{tool_id or i}" if uuid else None,
+                        "dedup_key": f"{uuid}:pre:{tool_id or i}" if uuid else None,
                     })
         else:
             text = str(content or "").strip()
             if text:
                 events.append({
                     **base,
-                    "hook_event_name": "afterAgentResponse",
-                    "_synthetic_category": "response",
-                    "response": text,
+                    "kind": "response",
+                    "text": text,
                     "model": model,
                     "usage": usage,
-                    "_dedup_key": f"{uuid}:resp" if uuid else None,
+                    "dedup_key": f"{uuid}:resp" if uuid else None,
                 })
 
     return events
+
+
+def _claude_line_to_events(
+    obj: dict,
+    session_id: str,
+    *,
+    lineno: int = 0,
+    mtime: float | None = None,
+    state: dict | None = None,
+    path: str = "",
+) -> list[dict]:
+    """Map a Claude transcript line to current collector hook payloads."""
+    return _ingest_events_to_hook_payloads(
+        _claude_line_to_ingest_events(
+            obj, session_id, lineno=lineno, mtime=mtime, state=state, path=path
+        )
+    )
 
 
 def _cursor_import_ts(mtime: float | None, lineno: int, block_idx: int = 0) -> str | None:
@@ -2618,7 +2634,69 @@ def _cursor_import_ts(mtime: float | None, lineno: int, block_idx: int = 0) -> s
     return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def _cursor_line_to_events(
+def _ingest_event_to_hook_payload(event: dict) -> dict:
+    """Translate a canonical import event onto the current collector payload.
+
+    The collector still accepts Claude-Code-style hook payloads. Keeping this
+    bridge at the edge lets source adapters move to product-level ingest events
+    without forcing a storage/API migration in the same change.
+    """
+    out = {
+        "session_id": event.get("session_id"),
+        "timestamp": event.get("timestamp"),
+    }
+    if event.get("origin") == "import":
+        out["_import"] = True
+    if event.get("cwd"):
+        out["cwd"] = event.get("cwd")
+    if event.get("dedup_key"):
+        out["_dedup_key"] = event.get("dedup_key")
+    if event.get("model"):
+        out["model"] = event.get("model")
+    if event.get("usage") is not None:
+        out["usage"] = event.get("usage")
+    if event.get("interrupted"):
+        out["interrupted"] = True
+
+    kind = event.get("kind")
+    if kind == "prompt":
+        out["hook_event_name"] = "UserPromptSubmit"
+        out["prompt"] = event.get("text") or ""
+    elif kind == "response":
+        out["hook_event_name"] = "afterAgentResponse"
+        out["_synthetic_category"] = "response"
+        out["response"] = event.get("text") or ""
+    elif kind == "thought":
+        out["hook_event_name"] = "afterAgentThought"
+        out["_synthetic_category"] = "thought"
+        out["thought"] = event.get("text") or ""
+    elif kind == "tool_call":
+        phase = event.get("phase") or "instant"
+        if phase == "start":
+            out["hook_event_name"] = "PreToolUse"
+        elif event.get("status") == "error":
+            out["hook_event_name"] = "PostToolUseFailure"
+        else:
+            out["hook_event_name"] = "PostToolUse"
+        out["tool_name"] = event.get("tool_name") or ""
+        out["tool_input"] = event.get("tool_input") or {}
+        if "tool_response" in event:
+            out["tool_response"] = event.get("tool_response")
+    elif kind == "attachment":
+        out["_attach_to_prompt"] = True
+        out["text"] = event.get("text") or ""
+        out["attachments"] = event.get("attachments") or []
+    else:
+        out.update(event.get("payload") if isinstance(event.get("payload"), dict) else {})
+
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _ingest_events_to_hook_payloads(events: list[dict]) -> list[dict]:
+    return [_ingest_event_to_hook_payload(ev) for ev in events]
+
+
+def _cursor_line_to_ingest_events(
     obj: dict,
     session_id: str,
     *,
@@ -2627,12 +2705,11 @@ def _cursor_line_to_events(
     state: dict | None = None,
     path: str = "",
 ) -> list[dict]:
-    """Map a Cursor transcript line to hook-shaped payloads.
+    """Map a Cursor transcript line to canonical ingest events.
 
     Cursor transcripts differ from Claude's: no per-line timestamp or uuid, and
     no ``tool_result`` blocks (only the assistant's ``tool_use`` inputs). So we
-    emit each tool call as a single standalone PostToolUse event (the end phase
-    renders as an instant timeline item and counts in shell/web history) rather
+    emit each tool call as a single standalone instant tool_call event rather
     than a Pre/Post span that would otherwise dangle as "ongoing". Dedup keys
     are derived from the stable (path, line, block) position.
     """
@@ -2645,8 +2722,8 @@ def _cursor_line_to_events(
 
     def _base(block_idx: int = 0) -> dict:
         return {
+            "origin": "import",
             "session_id": session_id,
-            "_import": True,
             "timestamp": _cursor_import_ts(mtime, lineno, block_idx),
         }
 
@@ -2655,16 +2732,16 @@ def _cursor_line_to_events(
         if text and not _is_interruption(text):
             events.append({
                 **_base(),
-                "hook_event_name": "UserPromptSubmit",
-                "prompt": text,
-                "_dedup_key": f"{path}:{lineno}:prompt",
+                "kind": "prompt",
+                "text": text,
+                "dedup_key": f"{path}:{lineno}:prompt",
             })
         if isinstance(content, list):
             atts = _message_attachments(content)
             if atts and text:
                 events.append({
                     **_base(),
-                    "_attach_to_prompt": True,
+                    "kind": "attachment",
                     "text": text,
                     "attachments": atts,
                 })
@@ -2680,20 +2757,18 @@ def _cursor_line_to_events(
                 if text:
                     events.append({
                         **_base(i),
-                        "hook_event_name": "afterAgentResponse",
-                        "_synthetic_category": "response",
-                        "response": str(text),
-                        "_dedup_key": f"{path}:{lineno}:resp:{i}",
+                        "kind": "response",
+                        "text": str(text),
+                        "dedup_key": f"{path}:{lineno}:resp:{i}",
                     })
             elif btype == "thinking":
                 think = block.get("thinking")
                 if think:
                     events.append({
                         **_base(i),
-                        "hook_event_name": "afterAgentThought",
-                        "_synthetic_category": "thought",
-                        "thought": str(think),
-                        "_dedup_key": f"{path}:{lineno}:think:{i}",
+                        "kind": "thought",
+                        "text": str(think),
+                        "dedup_key": f"{path}:{lineno}:think:{i}",
                     })
             elif btype == "tool_use":
                 name = block.get("name") or ""
@@ -2703,14 +2778,33 @@ def _cursor_line_to_events(
                 tool_input = inp if isinstance(inp, (dict, str)) else {}
                 events.append({
                     **_base(i),
-                    "hook_event_name": "PostToolUse",
+                    "kind": "tool_call",
+                    "phase": "instant",
+                    "status": "ok",
                     "tool_name": name,
                     "tool_input": tool_input,
-                    "_dedup_key": f"{path}:{lineno}:tool:{i}",
+                    "dedup_key": f"{path}:{lineno}:tool:{i}",
                 })
         return events
 
     return events
+
+
+def _cursor_line_to_events(
+    obj: dict,
+    session_id: str,
+    *,
+    lineno: int = 0,
+    mtime: float | None = None,
+    state: dict | None = None,
+    path: str = "",
+) -> list[dict]:
+    """Map a Cursor transcript line to current collector hook payloads."""
+    return _ingest_events_to_hook_payloads(
+        _cursor_line_to_ingest_events(
+            obj, session_id, lineno=lineno, mtime=mtime, state=state, path=path
+        )
+    )
 
 
 def _codex_tool_args(raw_args: object) -> dict:

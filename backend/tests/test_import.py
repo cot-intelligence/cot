@@ -56,6 +56,53 @@ def _categories(agent, parser, lines, *, mtime=None):
 
 # --- Cursor -----------------------------------------------------------------
 
+def test_cursor_adapter_emits_canonical_ingest_events():
+    lines = [
+        {"role": "user", "message": {"content": [{"type": "text", "text": "<user_query>\nhi\n</user_query>"}]}},
+        {"role": "assistant", "message": {"content": [
+            {"type": "thinking", "thinking": "planning"},
+            {"type": "text", "text": "working"},
+            {"type": "tool_use", "name": "StrReplace", "input": {"path": "/a.py"}},
+        ]}},
+    ]
+    state: dict = {}
+    events = []
+    for lineno, obj in enumerate(lines):
+        events.extend(
+            bridge._cursor_line_to_ingest_events(
+                obj, "SID", lineno=lineno, mtime=_MTIME, state=state, path="/t.jsonl"
+            )
+        )
+
+    assert [ev["kind"] for ev in events] == ["prompt", "thought", "response", "tool_call"], events
+    assert events[0]["text"] == "hi"
+    assert events[0]["origin"] == "import"
+    assert events[0]["dedup_key"] == "/t.jsonl:0:prompt"
+    tool = events[-1]
+    assert tool["phase"] == "instant"
+    assert tool["tool_name"] == "StrReplace"
+    assert tool["tool_input"] == {"path": "/a.py"}
+    # The canonical seam should not expose the collector's hook-shaped transport fields.
+    assert all("hook_event_name" not in ev for ev in events), events
+    assert all("_dedup_key" not in ev and "_synthetic_category" not in ev for ev in events), events
+
+
+def test_cursor_canonical_events_adapt_to_existing_hook_payloads():
+    line = {"role": "assistant", "message": {"content": [
+        {"type": "text", "text": "done"},
+        {"type": "tool_use", "name": "Shell", "input": {"command": "ls"}},
+    ]}}
+    hooks = bridge._cursor_line_to_events(line, "SID", lineno=2, mtime=_MTIME, path="/t.jsonl")
+    assert [(ev.get("hook_event_name"), ev.get("_synthetic_category")) for ev in hooks] == [
+        ("afterAgentResponse", "response"),
+        ("PostToolUse", None),
+    ], hooks
+    assert hooks[0]["_import"] is True
+    assert hooks[0]["_dedup_key"] == "/t.jsonl:2:resp:0"
+    assert hooks[1]["tool_name"] == "Shell"
+    assert hooks[1]["_dedup_key"] == "/t.jsonl:2:tool:1"
+
+
 def test_cursor_tool_calls_categorize_correctly():
     lines = [
         {"role": "user", "message": {"content": [{"type": "text", "text": "<user_query>\nhi\n</user_query>"}]}},
@@ -113,6 +160,38 @@ def test_cursor_dedup_keys_are_stable_across_reparse():
 
 
 # --- Claude -----------------------------------------------------------------
+
+def test_claude_adapter_emits_canonical_tool_call_and_result():
+    lines = [
+        {"type": "assistant", "uuid": "u1", "timestamp": "2026-06-01T00:00:00Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "thinking", "thinking": "checking"},
+             {"type": "text", "text": "I will list files"},
+             {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}},
+         ]}},
+        {"type": "user", "uuid": "u2", "timestamp": "2026-06-01T00:00:01Z",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "t1", "content": "file1", "is_error": False},
+         ]}},
+    ]
+    state: dict = {}
+    events = []
+    for lineno, obj in enumerate(lines):
+        events.extend(
+            bridge._claude_line_to_ingest_events(
+                obj, "SID", lineno=lineno, state=state, path="/claude.jsonl"
+            )
+        )
+
+    assert [ev["kind"] for ev in events] == ["thought", "response", "tool_call", "tool_call"], events
+    pre = events[2]
+    post = events[3]
+    assert pre["phase"] == "start" and pre["tool_name"] == "Bash", pre
+    assert post["phase"] == "end" and post["tool_response"] == "file1", post
+    assert post["tool_input"] == {"command": "ls"}, post
+    assert all("hook_event_name" not in ev for ev in events), events
+    assert all("_dedup_key" not in ev and "_synthetic_category" not in ev for ev in events), events
+
 
 def test_claude_tool_result_paired_to_call():
     """tool_use (assistant) + tool_result (next user msg) become Pre/Post with
