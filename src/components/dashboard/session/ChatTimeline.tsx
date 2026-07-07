@@ -1,7 +1,8 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import { getEventDetail, type TimelineItem } from '../../../lib/api';
+import type { TimelineItem } from '../../../lib/api';
 import { formatClock, formatDateTime, formatDuration, getCategoryMeta } from '../../../lib/categoryMeta';
 import {
+  PROVENANCE_META,
   conversationMessage,
   eventKey,
   eventSessionId,
@@ -11,6 +12,7 @@ import {
   type EditChunk,
   type SubagentRun,
 } from '../../../lib/sessionView';
+import { useFullEventDetail } from '../../../lib/useFullEventDetail';
 import { MarkdownContent } from '../../ui/MarkdownContent';
 import { AttachmentTags } from './AttachmentTags';
 
@@ -34,47 +36,6 @@ export interface ExpansionRequest {
 type Segment =
   | { type: 'event'; item: TimelineItem }
   | { type: 'subagent'; run: SubagentRun; item: TimelineItem; resultItem: TimelineItem; children: TimelineItem[] };
-
-function provenanceLabel(item: TimelineItem): string | null {
-  if (item.provenance === 'approval_review') return 'Review';
-  if (item.provenance === 'reviewed_session') return 'Reviewed session';
-  if (item.provenance === 'subagent') return 'Subagent';
-  return null;
-}
-
-function provenanceAccent(item: TimelineItem): string {
-  if (item.provenance === 'approval_review') return 'border-l-2 border-l-cobalt/25 ';
-  if (item.provenance === 'reviewed_session') return 'border-l-2 border-l-fg/15 ';
-  return '';
-}
-
-function provenancePillClass(item: TimelineItem): string {
-  if (item.provenance === 'approval_review') {
-    return 'bg-cobalt/10 text-cobalt';
-  }
-  return 'bg-fg/8 text-fg/45';
-}
-
-function useFullEventDetail(item: TimelineItem, sessionId: string) {
-  const [full, setFull] = useState<{ detail: string | null; attachments: TimelineItem['attachments'] } | null>(null);
-  const needsFull = Boolean(item.detail_truncated && full === null);
-  const lookupSessionId = item.detail_lookup?.session_id ?? sessionId;
-  const lookupEventId = item.detail_lookup?.event_id ?? item.id;
-
-  useEffect(() => {
-    if (!needsFull) return;
-    let cancelled = false;
-    getEventDetail(lookupSessionId, lookupEventId)
-      .then((res) => { if (!cancelled) setFull({ detail: res.detail, attachments: res.attachments }); })
-      .catch(() => { if (!cancelled) setFull({ detail: item.detail, attachments: item.attachments }); });
-    return () => { cancelled = true; };
-  }, [needsFull, lookupSessionId, lookupEventId, item.detail, item.attachments]);
-
-  return {
-    resolved: full ? { ...item, detail: full.detail, attachments: full.attachments ?? item.attachments } : item,
-    loading: Boolean(item.detail_truncated && !full),
-  };
-}
 
 /**
  * Inside a subagent group the run header already conveys provenance, so drop
@@ -106,20 +67,10 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
 
       const childIds = new Set<string>();
       const runChildren = new Map<number, TimelineItem[]>();
-      const runResultItems = new Map<number, TimelineItem>();
       for (const run of runs) {
         const children = eventsInRun(items, run);
         runChildren.set(run.item.id, children);
         for (const c of children) childIds.add(keyFor(c));
-
-        const resultItem = items.find(
-          (it) =>
-            it.category === 'subagent' &&
-            it.id !== run.item.id &&
-            it.target === run.item.target &&
-            it.phase === 'end',
-        );
-        if (resultItem) runResultItems.set(run.item.id, resultItem);
       }
 
       const result: Segment[] = [];
@@ -135,7 +86,7 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
               type: 'subagent',
               run,
               item,
-              resultItem: runResultItems.get(run.item.id) ?? item,
+              resultItem: run.item,
               children: runChildren.get(run.item.id) ?? [],
             });
           }
@@ -319,7 +270,7 @@ const SubagentGroup = forwardRef<HTMLDivElement, {
 
 function SubagentResultCard({ item, sessionId }: { item: TimelineItem; sessionId: string }) {
   const { resolved, loading } = useFullEventDetail(item, sessionId);
-  const d = parseDetail(resolved);
+  const d = parseDetail(resolved ?? item);
   const message = d.agentResponse?.trim();
 
   if (!message && loading) {
@@ -354,13 +305,13 @@ const ConversationCard = forwardRef<HTMLDivElement, { item: TimelineItem; sessio
   function ConversationCard({ item, sessionId, eventKey: itemEventKey }, ref) {
     const meta = getCategoryMeta(item.category);
     const isPrompt = item.category === 'prompt' || item.category === 'question';
-    const label = provenanceLabel(item);
+    const provenance = item.provenance ? PROVENANCE_META[item.provenance] : null;
 
     return (
       <div
         ref={ref}
         data-event-key={itemEventKey}
-        className={`scroll-mt-4 rounded-lg px-4 py-3 ${provenanceAccent(item)}${
+        className={`scroll-mt-4 rounded-lg px-4 py-3 ${provenance?.accent ?? ''}${
           isPrompt
             ? 'border border-fg/10 bg-surface'
             : 'bg-transparent'
@@ -372,9 +323,9 @@ const ConversationCard = forwardRef<HTMLDivElement, { item: TimelineItem; sessio
           <span className={`font-mono text-[0.58rem] font-bold uppercase tracking-widest ${meta.color}`}>
             {isPrompt ? 'User' : item.category === 'thought' ? 'Thinking' : 'Agent'}
           </span>
-          {label && (
-            <span className={`rounded px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest ${provenancePillClass(item)}`}>
-              {label}
+          {provenance && (
+            <span className={`rounded px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest ${provenance.pillClass}`}>
+              {provenance.label}
             </span>
           )}
           <span
@@ -428,7 +379,7 @@ const ActionCard = forwardRef<HTMLDivElement, {
     const meta = getCategoryMeta(item.category);
     const isError = item.status === 'error' || item.status === 'blocked';
     const showTarget = item.category !== 'question' && Boolean(item.target);
-    const label = provenanceLabel(item);
+    const provenance = item.provenance ? PROVENANCE_META[item.provenance] : null;
 
     useEffect(() => {
       setExpanded(expansionRequest.open);
@@ -438,7 +389,7 @@ const ActionCard = forwardRef<HTMLDivElement, {
       <div
         ref={ref}
         data-event-key={itemEventKey}
-        className={`group scroll-mt-4 rounded-lg border border-line/5 transition-colors hover:border-line/15 ${provenanceAccent(item)}`}
+        className={`group scroll-mt-4 rounded-lg border border-line/5 transition-colors hover:border-line/15 ${provenance?.accent ?? ''}`}
       >
         <button
           type="button"
@@ -449,9 +400,9 @@ const ActionCard = forwardRef<HTMLDivElement, {
           <span className={`shrink-0 font-mono text-[0.55rem] font-bold uppercase tracking-widest ${meta.color}`}>
             {meta.label}
           </span>
-          {label && (
-            <span className={`shrink-0 rounded px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest ${provenancePillClass(item)}`}>
-              {label}
+          {provenance && (
+            <span className={`shrink-0 rounded px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest ${provenance.pillClass}`}>
+              {provenance.label}
             </span>
           )}
           <span className="min-w-0 flex-1 truncate font-mono text-[0.78rem] font-bold text-fg/80">
@@ -512,16 +463,17 @@ const ActionCard = forwardRef<HTMLDivElement, {
 
 function CardBody({ item, sessionId }: { item: TimelineItem; sessionId: string }) {
   const { resolved, loading } = useFullEventDetail(item, sessionId);
+  const resolvedItem = resolved ?? item;
 
   if (item.category === 'question' && item.questions && item.questions.length > 0) {
     return <QuestionCards questions={item.questions} />;
   }
   if (item.category === 'plan') {
-    return <PlanBody item={resolved} />;
+    return <PlanBody item={resolvedItem} />;
   }
 
-  const d = parseDetail(resolved);
-  const message = conversationMessage(resolved, d);
+  const d = parseDetail(resolvedItem);
+  const message = conversationMessage(resolvedItem, d);
   if (message) return <MarkdownContent content={message} />;
 
   if (d.edits && d.edits.length) {

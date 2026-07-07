@@ -222,6 +222,49 @@ def test_session_detail_drops_orphan_subagent_stop_events():
         tmp.cleanup()
 
 
+def test_session_detail_events_use_merged_display_spans():
+    tmp = _fresh_db()
+    try:
+        sid = "99999999-9999-9999-9999-999999999999"
+        _session(sid)
+        start_id = _event(
+            sid,
+            seconds=1,
+            category="shell",
+            phase="start",
+            hook="PreToolUse",
+            tool="Bash",
+            title="Run shell",
+            target="npm test",
+            detail='{"input": {"command": "npm test"}}',
+        )
+        _event(
+            sid,
+            seconds=6,
+            category="shell",
+            phase="end",
+            hook="PostToolUse",
+            tool="Bash",
+            title="Run shell",
+            target="npm test",
+            detail='{"response": "ok"}',
+        )
+
+        detail = db.get_session_detail(sid)
+        assert detail is not None
+        shell_events = [e for e in detail["events"] if e["category"] == "shell"]
+        assert len(shell_events) == 1, shell_events
+        assert shell_events[0]["id"] == start_id
+        assert shell_events[0]["start_ts"] == "2026-06-01T00:00:01+00:00"
+        assert shell_events[0]["end_ts"] == "2026-06-01T00:00:06+00:00"
+        assert shell_events[0]["ongoing"] is False
+        assert shell_events[0]["duration_ms"] == 5000
+        assert "npm test" in shell_events[0]["detail"]
+        assert "ok" in shell_events[0]["detail"]
+    finally:
+        tmp.cleanup()
+
+
 def test_session_detail_annotates_inlined_child_questions():
     tmp = _fresh_db()
     try:

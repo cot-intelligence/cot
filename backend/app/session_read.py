@@ -21,12 +21,8 @@ DETAIL_PREVIEW_CHARS = 4000
 QUESTION_TOOLS = {"AskUserQuestion", "AskQuestion", "request_user_input"}
 QUESTION_END_HOOKS = {"PostToolUse", "postToolUse"}
 InlineKind = Literal["approval_review", "reviewed_session", "subagent"]
-INLINE_PROVENANCE_FLAGS: dict[InlineKind, str] = {
-    "approval_review": "inlined_approval_review",
-    "reviewed_session": "inlined_reviewed_session",
-    "subagent": "inlined_subagent",
-}
 SUBAGENT_STOP_HOOKS = {"SubagentStop", "subagentStop"}
+PRIVATE_ITEM_KEYS = {"_child_session_id", "_run_kind"}
 
 
 def _coerce_dict(val: Any) -> dict[str, Any]:
@@ -168,30 +164,23 @@ def _fetch_inlined_session_events(
     skip_history_dump: bool,
     inline_kind: InlineKind,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    rows = conn.execute(
+    raw_rows = conn.execute(
         "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
         (session_id,),
     ).fetchall()
-    clarifications, annotations = build_clarifications(rows)
+    clarifications, annotations = build_clarifications(raw_rows)
     for clarification in clarifications:
         clarification["question_session_id"] = session_id
         if clarification["answer_event_id"] is not None:
             clarification["answer_session_id"] = session_id
 
     out: list[dict[str, Any]] = []
-    for row in rows:
-        if skip_history_dump and row["category"] == "prompt" and _is_approval_history_dump(row["detail"]):
+    for row in db.timeline(session_id):
+        if skip_history_dump and row.get("category") == "prompt" and _is_approval_history_dump(row.get("detail")):
             continue
-        item: dict[str, Any] = {
-            **db._event_row(row),
-            "start_ts": db._format_ts(row["ts"]),
-            "end_ts": db._format_ts(row["ts"]),
-            "ongoing": False,
-            "event_session_id": session_id,
-            "owner_session_id": session_id,
-            "provenance": inline_kind,
-        }
-        item[INLINE_PROVENANCE_FLAGS[inline_kind]] = True
+        item: dict[str, Any] = dict(row)
+        item["owner_session_id"] = session_id
+        item["provenance"] = inline_kind
         _apply_event_annotations(item, annotations, session_id=session_id, trim_detail=False)
         out.append(item)
     return out, clarifications
@@ -241,7 +230,7 @@ def _trim_detail_inplace(item: dict[str, Any], session_id: str) -> None:
         item["detail"] = detail[:DETAIL_PREVIEW_CHARS]
         item["detail_truncated"] = True
         item["detail_lookup"] = {
-            "session_id": item.get("event_session_id") or session_id,
+            "session_id": item.get("owner_session_id") or session_id,
             "event_id": item["id"],
         }
 
@@ -277,14 +266,14 @@ def _synthesize_child_subagent_spans(
         return
     by_child: dict[str, list[dict[str, Any]]] = {}
     for ev in events:
-        sid = ev.get("event_session_id")
+        sid = ev.get("owner_session_id")
         if sid and sid != parent_session_id:
             by_child.setdefault(sid, []).append(ev)
 
     native_spans = [
         it
         for it in timeline_items
-        if it.get("category") == "subagent" and not it.get("subagent_child_session")
+        if it.get("category") == "subagent" and not it.get("_child_session_id")
     ]
     claimed: set[int] = set()
 
@@ -330,8 +319,12 @@ def _synthesize_child_subagent_spans(
         if adopt_idx is not None:
             claimed.add(adopt_idx)
             span = native_spans[adopt_idx]
-            span["subagent_child_session"] = child_id
-            span["subagent_run_kind"] = kind
+            span["_child_session_id"] = child_id
+            span["_run_kind"] = kind
+            for event in events:
+                if event.get("id") == span.get("id") and event.get("category") == "subagent":
+                    event["_child_session_id"] = child_id
+                    event["_run_kind"] = kind
             continue
 
         dur = int((db._duration_seconds(ts_first, ts_last) or 0) * 1000)
@@ -353,8 +346,9 @@ def _synthesize_child_subagent_spans(
             "start_ts": ts_first,
             "end_ts": ts_last,
             "ongoing": False,
-            "subagent_child_session": child_id,
-            "subagent_run_kind": kind,
+            "owner_session_id": parent_session_id,
+            "_child_session_id": child_id,
+            "_run_kind": kind,
         }
         synthetic_id -= 1
         events.append(dict(span))
@@ -371,16 +365,31 @@ def _subagent_label(item: dict[str, Any]) -> str:
     return "Subagent"
 
 
-def _timeline_runs(timeline_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _public_item(item: dict[str, Any]) -> dict[str, Any]:
+    out = dict(item)
+    for key in PRIVATE_ITEM_KEYS:
+        out.pop(key, None)
+    return out
+
+
+def _timeline_runs(
+    timeline_items: list[dict[str, Any]], events: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     runs: list[dict[str, Any]] = []
+    event_by_id = {
+        item["id"]: item
+        for item in events
+        if item.get("category") == "subagent" and isinstance(item.get("id"), int)
+    }
     for item in timeline_items:
         if item.get("category") != "subagent" or not (item.get("start_ts") or item.get("ts")):
             continue
+        run_item = event_by_id.get(item["id"], item)
         runs.append(
             {
                 "id": item["id"],
                 "kind": "review"
-                if item.get("subagent_run_kind") == "approval_review"
+                if item.get("_run_kind") == "approval_review"
                 else "subagent",
                 "label": _subagent_label(item),
                 "start": item.get("start_ts") or item.get("ts"),
@@ -388,8 +397,8 @@ def _timeline_runs(timeline_items: list[dict[str, Any]]) -> list[dict[str, Any]]
                 "status": item.get("status"),
                 "duration_ms": item.get("duration_ms"),
                 "ongoing": item.get("ongoing") if "ongoing" in item else item.get("end_ts") is None,
-                "child_session_id": item.get("subagent_child_session"),
-                "item": item,
+                "child_session_id": item.get("_child_session_id"),
+                "item": _public_item(run_item),
             }
         )
     runs.sort(key=lambda r: r["start"] or "")
@@ -430,8 +439,8 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
             clarification["question_session_id"] = session_id
             if clarification["answer_event_id"] is not None:
                 clarification["answer_session_id"] = session_id
-        events = db.events_list(session_id)
         timeline_items = db.timeline(session_id)
+        events = [dict(item) for item in timeline_items]
 
         for item in events:
             item["owner_session_id"] = session_id
@@ -440,12 +449,8 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
         clarifications.extend(linked_clarifications)
         clarifications.sort(key=lambda c: (c.get("question_ts") or "", c.get("question_event_id") or 0))
         for item in events:
-            if (
-                item.get("inlined_approval_review")
-                or item.get("inlined_reviewed_session")
-                or item.get("inlined_subagent")
-            ):
-                _trim_detail_inplace(item, item.get("event_session_id") or session_id)
+            if item.get("provenance"):
+                _trim_detail_inplace(item, item.get("owner_session_id") or session_id)
 
         _synthesize_child_subagent_spans(events, timeline_items, links, session_id)
         events = _drop_orphan_subagent_stops(events, timeline_items)
@@ -456,13 +461,13 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
 
         components = db.session_components(session_id)
 
-    runs = _timeline_runs(timeline_items)
+    runs = _timeline_runs(timeline_items, events)
     return {
         "summary": summary,
         "links": links,
         "components": components,
-        "events": events,
-        "timeline": timeline_items,
+        "events": [_public_item(item) for item in events],
+        "timeline": [_public_item(item) for item in timeline_items],
         "timeline_runs": runs,
         "clarifications": clarifications,
     }

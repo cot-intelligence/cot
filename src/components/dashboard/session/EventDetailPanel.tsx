@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
-import { getEventDetail, type TimelineItem } from '../../../lib/api';
+import type { TimelineItem } from '../../../lib/api';
 import { formatDateTime, formatDuration, getCategoryMeta } from '../../../lib/categoryMeta';
 import { formatModel } from '../../../lib/modelMeta';
 import { conversationMessage, parseDetail, type EditChunk } from '../../../lib/sessionView';
+import { useFullEventDetail } from '../../../lib/useFullEventDetail';
 import { Icon } from '../../ui/icons';
 import { MarkdownContent } from '../../ui/MarkdownContent';
 import { AttachmentTags } from './AttachmentTags';
@@ -316,31 +316,7 @@ function QaPill({ item }: { item: TimelineItem }) {
 }
 
 export function EventDetailPanel({ item, sessionId, onViewInAll, onJump }: EventDetailPanelProps) {
-  // Lazy-load the full body for events whose list entry was truncated. Cached
-  // by lookup key so inlined child-session rows cannot collide with parent ids.
-  const [fullById, setFullById] = useState<Record<string, { detail: string | null; attachments: TimelineItem['attachments'] }>>({});
-  const lookupSessionId = item?.detail_lookup?.session_id ?? sessionId;
-  const lookupEventId = item?.detail_lookup?.event_id ?? item?.id;
-  const lookupKey = lookupSessionId && lookupEventId != null ? `${lookupSessionId}:${lookupEventId}` : null;
-  const needsFull = Boolean(item?.detail_truncated && lookupKey && fullById[lookupKey] === undefined);
-
-  useEffect(() => {
-    if (!needsFull || !item || !lookupSessionId || lookupEventId == null || !lookupKey) return;
-    let cancelled = false;
-    getEventDetail(lookupSessionId, lookupEventId)
-      .then((res) => {
-        if (!cancelled) {
-          setFullById((prev) => ({ ...prev, [lookupKey]: { detail: res.detail, attachments: res.attachments } }));
-        }
-      })
-      .catch(() => {
-        // On failure, keep the preview rather than blocking the panel.
-        if (!cancelled) setFullById((prev) => ({ ...prev, [lookupKey]: { detail: item.detail, attachments: item.attachments } }));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [needsFull, item, lookupSessionId, lookupEventId, lookupKey]);
+  const { resolved, loading } = useFullEventDetail(item, sessionId);
 
   if (!item) {
     return (
@@ -349,12 +325,6 @@ export function EventDetailPanel({ item, sessionId, onViewInAll, onJump }: Event
       </div>
     );
   }
-
-  const loadedFull = lookupKey ? fullById[lookupKey] : undefined;
-  const resolved = item.detail_truncated && loadedFull
-    ? { ...item, detail: loadedFull.detail, attachments: loadedFull.attachments ?? item.attachments }
-    : item;
-  const loadingFull = Boolean(item.detail_truncated && lookupKey && fullById[lookupKey] === undefined);
 
   const meta = getCategoryMeta(item.category);
   const isError = item.status === 'error' || item.status === 'blocked';
@@ -416,17 +386,17 @@ export function EventDetailPanel({ item, sessionId, onViewInAll, onJump }: Event
         {showTarget && (
           <p className="break-all font-mono text-xs text-fg/60">{item.target}</p>
         )}
-        {resolved.attachments && resolved.attachments.length > 0 && (
+        {resolved?.attachments && resolved.attachments.length > 0 && (
           <AttachmentTags attachments={resolved.attachments} />
         )}
       </div>
       <QaBanner item={item} onJump={onJump} />
-      {loadingFull && (
+      {loading && (
         <p className="font-mono text-[0.62rem] uppercase tracking-widest text-fg/35">
           Loading full detail…
         </p>
       )}
-      <Body item={resolved} />
+      <Body item={resolved ?? item} />
     </div>
   );
 }

@@ -191,6 +191,33 @@ const SUBAGENT_CONTENT_CATEGORIES = new Set([
 ]);
 
 export type AgentLane = 'main' | 'subagent';
+type EventProvenance = NonNullable<TimelineItem['provenance']>;
+
+export const PROVENANCE_META: Record<EventProvenance, {
+  label: string;
+  sidebar: string;
+  accent: string;
+  pillClass: string;
+}> = {
+  approval_review: {
+    label: 'Review',
+    sidebar: 'review',
+    accent: 'border-l-2 border-l-cobalt/25 ',
+    pillClass: 'bg-cobalt/10 text-cobalt',
+  },
+  reviewed_session: {
+    label: 'Reviewed session',
+    sidebar: 'reviewed',
+    accent: 'border-l-2 border-l-fg/15 ',
+    pillClass: 'bg-fg/8 text-fg/45',
+  },
+  subagent: {
+    label: 'Subagent',
+    sidebar: 'subagent',
+    accent: '',
+    pillClass: 'bg-fg/8 text-fg/45',
+  },
+};
 
 /** A subagent's execution window plus display metadata. */
 export interface SubagentRun {
