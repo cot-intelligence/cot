@@ -257,7 +257,7 @@ export function parentTimelineItems(detail: SessionDetail): TimelineItem[] {
 /** Whether an action belongs to a backend-owned subagent/review run. */
 export function itemLane(item: TimelineItem): AgentLane {
   if (!ACTION_CATEGORIES.has(item.category)) return 'main';
-  return item.run_id == null ? 'main' : 'subagent';
+  return item.run_id == null && !item.run_ids?.length ? 'main' : 'subagent';
 }
 
 /** Session that owns an event row (parent session or an inlined review session). */
@@ -272,12 +272,16 @@ export function eventKey(item: TimelineItem, parentSessionId: string): string {
 
 /** Action events that belong to a single backend-owned run. */
 export function actionsInRun(items: TimelineItem[], run: SubagentRun): TimelineItem[] {
-  return items.filter((it) => ACTION_CATEGORIES.has(it.category) && it.run_id === run.item.id);
+  return items.filter((it) => ACTION_CATEGORIES.has(it.category) && eventBelongsToRun(it, run.item.id));
 }
 
 /** Events worth showing inside a subagent group. */
 export function eventsInRun(items: TimelineItem[], run: SubagentRun): TimelineItem[] {
-  return items.filter((it) => it.run_id === run.item.id && it.id !== run.item.id);
+  return items.filter((it) => eventBelongsToRun(it, run.item.id) && it.id !== run.item.id);
+}
+
+function eventBelongsToRun(item: TimelineItem, runId: number): boolean {
+  return item.run_id === runId || item.run_ids?.includes(runId) === true;
 }
 
 /** Whether any two runs overlap in time (i.e. ran in parallel). */

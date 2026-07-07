@@ -390,6 +390,80 @@ def test_session_detail_merges_subagent_stop_detail_into_run():
         tmp.cleanup()
 
 
+def test_session_detail_keeps_overlapping_native_run_membership():
+    tmp = _fresh_db()
+    try:
+        sid = "20202020-2020-2020-2020-202020202020"
+        _session(sid)
+        run_a = _event(
+            sid,
+            seconds=0,
+            category="subagent",
+            phase="start",
+            hook="PreToolUse",
+            tool="Agent",
+            title="Agent A",
+            target="toolu_a",
+        )
+        _event(
+            sid,
+            seconds=1,
+            category="subagent",
+            phase="end",
+            hook="PostToolUse",
+            tool="Agent",
+            title="Agent A",
+            target="toolu_a",
+        )
+        run_b = _event(
+            sid,
+            seconds=2,
+            category="subagent",
+            phase="start",
+            hook="PreToolUse",
+            tool="Agent",
+            title="Agent B",
+            target="toolu_b",
+        )
+        _event(
+            sid,
+            seconds=3,
+            category="subagent",
+            phase="end",
+            hook="PostToolUse",
+            tool="Agent",
+            title="Agent B",
+            target="toolu_b",
+        )
+        shared_id = _event(sid, seconds=5, category="shell", title="Shared action", target="pwd")
+        _event(
+            sid,
+            seconds=10,
+            category="subagent",
+            phase="end",
+            hook="SubagentStop",
+            title="Agent A",
+            target="Subagent A",
+        )
+        _event(
+            sid,
+            seconds=12,
+            category="subagent",
+            phase="end",
+            hook="SubagentStop",
+            title="Agent B",
+            target="Subagent B",
+        )
+
+        detail = db.get_session_detail(sid)
+        assert detail is not None
+        shared = next(e for e in detail["events"] if e["id"] == shared_id)
+        assert shared["run_id"] == run_a
+        assert shared["run_ids"] == [run_a, run_b]
+    finally:
+        tmp.cleanup()
+
+
 def test_session_detail_merges_cursor_keyed_subagent_stop():
     tmp = _fresh_db()
     try:
@@ -468,8 +542,8 @@ def test_session_detail_events_use_merged_display_spans():
         assert shell_events[0]["duration_ms"] == 5000
         assert "npm test" in shell_events[0]["detail"]
         assert "ok" in shell_events[0]["detail"]
-        assert "hook" not in shell_events[0]
-        assert "phase" not in shell_events[0]
+        assert shell_events[0]["hook"] == "PreToolUse"
+        assert shell_events[0]["phase"] == "start"
     finally:
         tmp.cleanup()
 

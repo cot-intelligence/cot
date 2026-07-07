@@ -99,6 +99,7 @@ export interface TimelineItem {
   subagent_run_kind?: 'subagent' | 'approval_review';
   /** Backend-owned run membership for rows displayed inside a subagent/review group. */
   run_id?: number;
+  run_ids?: number[];
   run_kind?: 'subagent' | 'review';
 }
 

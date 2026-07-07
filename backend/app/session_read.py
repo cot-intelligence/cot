@@ -23,7 +23,7 @@ QUESTION_END_HOOKS = {"PostToolUse", "postToolUse"}
 InlineKind = Literal["approval_review", "reviewed_session", "subagent"]
 SUBAGENT_STOP_HOOKS = {"SubagentStop", "subagentStop"}
 INTERNAL_ITEM_KEYS = {"_child_session_id", "_run_kind"}
-PRIVATE_ITEM_KEYS = INTERNAL_ITEM_KEYS | {"hook", "phase"}
+PRIVATE_ITEM_KEYS = INTERNAL_ITEM_KEYS
 RUN_CONTENT_CATEGORIES = {
     "shell",
     "file_read",
@@ -614,14 +614,21 @@ def _in_window(ts: str, start: str, end: str | None) -> bool:
 
 
 def _assign_run_membership(events: list[dict[str, Any]], runs: list[dict[str, Any]]) -> None:
+    def _claim(item: dict[str, Any], run: dict[str, Any]) -> None:
+        run_ids = item.setdefault("run_ids", [])
+        if run["id"] not in run_ids:
+            run_ids.append(run["id"])
+        if item.get("run_id") is None:
+            item["run_id"] = run["id"]
+            item["run_kind"] = run["kind"]
+
     for run in runs:
-        run_id = run["id"]
         child_session_id = run.get("child_session_id")
         if child_session_id:
             members = [
                 item
                 for item in events
-                if item.get("owner_session_id") == child_session_id and item.get("id") != run_id
+                if item.get("owner_session_id") == child_session_id and item.get("id") != run["id"]
             ]
         else:
             members = [
@@ -631,8 +638,7 @@ def _assign_run_membership(events: list[dict[str, Any]], runs: list[dict[str, An
                 and _in_window(_event_time(item), run["start"], run["end"])
             ]
         for item in members:
-            item["run_id"] = run_id
-            item["run_kind"] = run["kind"]
+            _claim(item, run)
 
 
 def _sort_items(items: list[dict[str, Any]]) -> None:
