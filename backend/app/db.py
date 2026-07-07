@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import __version__
 from .normalize import categorize, normalize
 from .pricing import cost_for, normalize_model
 
@@ -139,7 +140,9 @@ CREATE TABLE IF NOT EXISTS events (
     attachments TEXT,
     dedup_key   TEXT,
     origin      TEXT,
+    raw_ingest_id INTEGER,
     created_at  TEXT NOT NULL,
+    FOREIGN KEY (raw_ingest_id) REFERENCES raw_ingest_events(id) ON DELETE SET NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
@@ -148,6 +151,29 @@ CREATE INDEX IF NOT EXISTS idx_events_session_category ON events(session_id, cat
 CREATE INDEX IF NOT EXISTS idx_events_session_model ON events(session_id, model);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_sessions_archived_source ON sessions(archived, source);
+
+CREATE TABLE IF NOT EXISTS raw_ingest_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source      TEXT NOT NULL,
+    origin      TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    session_id_guess TEXT,
+    raw_kind    TEXT,
+    raw_payload TEXT,
+    raw_payload_truncated INTEGER NOT NULL DEFAULT 0,
+    raw_hash    TEXT NOT NULL,
+    parser_version TEXT,
+    agent_version TEXT,
+    status      TEXT NOT NULL,
+    event_id    INTEGER,
+    projection_error TEXT,
+    created_at  TEXT NOT NULL,
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_ingest_source_received ON raw_ingest_events(source, received_at);
+CREATE INDEX IF NOT EXISTS idx_raw_ingest_status ON raw_ingest_events(status);
+CREATE INDEX IF NOT EXISTS idx_raw_ingest_event ON raw_ingest_events(event_id);
 
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -205,8 +231,8 @@ _EVENT_INSERT_SQL = (
     "INSERT INTO events (session_id, source, hook, tool, phase, ts, payload,"
     " category, title, detail, target, status, duration_ms, model,"
     " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
-    " dedup_key, origin, created_at)"
-    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    " dedup_key, origin, raw_ingest_id, created_at)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 
@@ -222,6 +248,7 @@ def _event_params(
     dedup_key: str,
     ts: str | None = None,
     origin: str = "hook",
+    raw_ingest_id: int | None = None,
 ) -> tuple[Any, ...]:
     return (
         norm["session_id"],
@@ -244,6 +271,7 @@ def _event_params(
         norm.get("cache_write_tokens"),
         dedup_key,
         origin,
+        raw_ingest_id,
         _now(),
     )
 
@@ -321,8 +349,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("attachments", "TEXT"),
         ("dedup_key", "TEXT"),
         ("origin", "TEXT"),
+        ("raw_ingest_id", "INTEGER"),
     ):
         _add_column_if_missing(conn, "events", name, col_def, event_cols)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_raw_ingest ON events(raw_ingest_id)"
+    )
 
     session_cols = _table_columns(conn, "sessions")
     for name, col_def in (
@@ -1260,6 +1292,7 @@ def _question_response_obj(detail: Any) -> dict[str, Any] | None:
 
 
 _MIGRATIONS_VERSION = "8"
+_RAW_PAYLOAD_MAX_BYTES = 64 * 1024
 
 
 def init_db() -> None:
@@ -1485,7 +1518,196 @@ def get_install_id() -> str:
     return new_id
 
 
-def record_event(norm: dict[str, Any], raw: dict[str, Any]) -> tuple[str, int]:
+def _raw_hash(raw_text: str) -> str:
+    return hashlib.sha1(raw_text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _raw_payload_text(raw: Any) -> tuple[str, int]:
+    if isinstance(raw, str):
+        text = raw
+    else:
+        text = json.dumps(raw, ensure_ascii=False, default=str)
+    data = text.encode("utf-8", errors="replace")
+    if len(data) <= _RAW_PAYLOAD_MAX_BYTES:
+        return text, 0
+    clipped = data[:_RAW_PAYLOAD_MAX_BYTES].decode("utf-8", errors="ignore")
+    return clipped, 1
+
+
+def _session_id_guess(source: str, raw: Any) -> str | None:
+    if not isinstance(raw, dict):
+        return None
+    if source == "cursor":
+        value = raw.get("conversation_id") or raw.get("session_id") or raw.get("generation_id")
+    else:
+        value = raw.get("session_id")
+    return str(value) if value not in (None, "") else None
+
+
+def _raw_kind(raw: Any) -> str | None:
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get("hook_event_name") or raw.get("hook") or raw.get("event") or raw.get("raw_kind")
+    return str(value) if value not in (None, "") else None
+
+
+def _agent_version(raw: Any) -> str | None:
+    if not isinstance(raw, dict):
+        return None
+    value = (
+        raw.get("agent_version")
+        or raw.get("cursor_version")
+        or raw.get("claude_version")
+        or raw.get("codex_version")
+        or raw.get("cli_version")
+    )
+    return str(value) if value not in (None, "") else None
+
+
+def _raw_received_at(raw: Any) -> str:
+    if isinstance(raw, dict):
+        value = raw.get("timestamp") or raw.get("ts") or raw.get("created_at")
+        if value not in (None, ""):
+            return str(value)
+    return _now()
+
+
+def append_raw_ingest(
+    source: str,
+    raw: Any,
+    *,
+    origin: str = "hook",
+    status: str = "pending",
+    projection_error: str | None = None,
+) -> int:
+    payload, truncated = _raw_payload_text(raw)
+    now = _now()
+    received_at = _raw_received_at(raw)
+    with _write_lock, _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO raw_ingest_events (source, origin, received_at, session_id_guess,"
+            " raw_kind, raw_payload, raw_payload_truncated, raw_hash, parser_version,"
+            " agent_version, status, projection_error, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                source,
+                origin,
+                received_at,
+                _session_id_guess(source, raw),
+                _raw_kind(raw),
+                payload,
+                truncated,
+                _raw_hash(payload),
+                __version__,
+                _agent_version(raw),
+                status,
+                projection_error,
+                now,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def mark_raw_ingest(
+    raw_ingest_id: int,
+    status: str,
+    *,
+    event_id: int | None = None,
+    projection_error: str | None = None,
+) -> None:
+    with _write_lock, _connect() as conn:
+        conn.execute(
+            "UPDATE raw_ingest_events SET status = ?, event_id = ?, projection_error = ?"
+            " WHERE id = ?",
+            (status, event_id, projection_error, raw_ingest_id),
+        )
+
+
+def raw_ingest_events(limit: int = 100) -> list[dict[str, Any]]:
+    limit = max(1, min(limit, 500))
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM raw_ingest_events ORDER BY id ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def record_malformed_ingest(
+    source: str,
+    raw_text: str,
+    *,
+    origin: str = "hook",
+    error: str | None = None,
+) -> dict[str, Any]:
+    raw_id = append_raw_ingest(
+        source,
+        raw_text,
+        origin=origin,
+        status="malformed",
+        projection_error=error,
+    )
+    return {
+        "ok": True,
+        "raw_ingest_id": raw_id,
+        "raw_status": "malformed",
+        "session_id": None,
+        "event_id": None,
+    }
+
+
+def record_ingest(source: str, raw: dict[str, Any]) -> dict[str, Any]:
+    raw_id = append_raw_ingest(source, raw, origin="import" if raw.get("_import") else "hook")
+    try:
+        norm = normalize(source, raw)
+        if should_ignore_event(norm):
+            mark_raw_ingest(raw_id, "ignored")
+            return {
+                "ok": True,
+                "ignored": True,
+                "raw_ingest_id": raw_id,
+                "raw_status": "ignored",
+                "session_id": norm["session_id"],
+                "event_id": None,
+                "hook": norm["hook"],
+                "category": norm.get("category"),
+            }
+        session_id, event_id, inserted = record_event(
+            norm, raw, raw_ingest_id=raw_id, return_status=True
+        )
+    except Exception as exc:
+        mark_raw_ingest(raw_id, "failed", projection_error=str(exc))
+        return {
+            "ok": True,
+            "raw_ingest_id": raw_id,
+            "raw_status": "failed",
+            "session_id": _session_id_guess(source, raw),
+            "event_id": None,
+            "error": str(exc),
+        }
+
+    raw_status = "projected" if inserted else "duplicate"
+    mark_raw_ingest(raw_id, raw_status, event_id=event_id)
+    return {
+        "ok": True,
+        "raw_ingest_id": raw_id,
+        "raw_status": raw_status,
+        "session_id": session_id,
+        "event_id": event_id,
+        "hook": norm["hook"],
+        "category": norm.get("category"),
+        "ignored": False,
+        "duplicate": not inserted,
+    }
+
+
+def record_event(
+    norm: dict[str, Any],
+    raw: dict[str, Any],
+    *,
+    raw_ingest_id: int | None = None,
+    return_status: bool = False,
+) -> tuple[str, int] | tuple[str, int, bool]:
     sid = norm["session_id"]
     ts = norm["ts"]
     origin = "import" if raw.get("_import") else "hook"
@@ -1508,7 +1730,14 @@ def record_event(norm: dict[str, Any], raw: dict[str, Any]) -> tuple[str, int]:
                 (sid, dk, cutoff),
             ).fetchone()
         if dup is not None:
-            return sid, int(dup["id"])
+            event_id = int(dup["id"])
+            if raw_ingest_id is not None:
+                conn.execute(
+                    "UPDATE raw_ingest_events SET status = 'duplicate', event_id = ?"
+                    " WHERE id = ?",
+                    (event_id, raw_ingest_id),
+                )
+            return (sid, event_id, False) if return_status else (sid, event_id)
 
         row = conn.execute("SELECT id FROM sessions WHERE id = ?", (sid,)).fetchone()
         if row is None or norm["hook"] in _SESSION_START_HOOKS:
@@ -1546,7 +1775,7 @@ def record_event(norm: dict[str, Any], raw: dict[str, Any]) -> tuple[str, int]:
             )
 
         cur = conn.execute(
-            _EVENT_INSERT_SQL, _event_params(norm, raw, dk, ts, origin)
+            _EVENT_INSERT_SQL, _event_params(norm, raw, dk, ts, origin, raw_ingest_id)
         )
 
         if (
@@ -1579,7 +1808,8 @@ def record_event(norm: dict[str, Any], raw: dict[str, Any]) -> tuple[str, int]:
                         (bounds["mn"], sid),
                     )
 
-        return sid, int(cur.lastrowid)
+        event_id = int(cur.lastrowid)
+        return (sid, event_id, True) if return_status else (sid, event_id)
 
 
 def _duration_seconds(first: Any, last: Any) -> float | None:
@@ -3467,6 +3697,96 @@ def reset_imported() -> dict[str, Any]:
     }
     record_audit_event("import.reset", target="import", detail=result)
     return result
+
+
+def _week_start(value: Any) -> str:
+    dt = _parse_ts(value) or datetime.now(timezone.utc)
+    return (dt.date() - timedelta(days=dt.weekday())).isoformat()
+
+
+def drift_report() -> dict[str, Any]:
+    """Weekly source-level ingest drift metrics.
+
+    Projected events provide the current unknown-rate signal. Raw ledger rows
+    add health counts for input that was ignored, malformed, duplicated, or
+    failed before it became a timeline event.
+    """
+    with _connect() as conn:
+        event_rows = conn.execute(
+            "SELECT source, ts, category, hook, tool FROM events"
+        ).fetchall()
+        raw_rows = conn.execute(
+            "SELECT source, received_at, status FROM raw_ingest_events"
+        ).fetchall()
+
+    buckets: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def bucket(source: str | None, period: str) -> dict[str, Any]:
+        key = (source or "unknown", period)
+        if key not in buckets:
+            buckets[key] = {
+                "source": key[0],
+                "period_start": period,
+                "total_events": 0,
+                "other_events": 0,
+                "_unknown_hooks": {},
+                "_unknown_tools": {},
+                "raw_status_counts": {},
+            }
+        return buckets[key]
+
+    for row in event_rows:
+        b = bucket(row["source"], _week_start(row["ts"]))
+        b["total_events"] += 1
+        if row["category"] == "other":
+            b["other_events"] += 1
+            hook = row["hook"] or "unknown"
+            tool = row["tool"] or "unknown"
+            b["_unknown_hooks"][hook] = b["_unknown_hooks"].get(hook, 0) + 1
+            b["_unknown_tools"][tool] = b["_unknown_tools"].get(tool, 0) + 1
+
+    for row in raw_rows:
+        b = bucket(row["source"], _week_start(row["received_at"]))
+        status = row["status"] or "unknown"
+        counts = b["raw_status_counts"]
+        counts[status] = counts.get(status, 0) + 1
+
+    weeks: list[dict[str, Any]] = []
+    for b in buckets.values():
+        total = int(b["total_events"] or 0)
+        other = int(b["other_events"] or 0)
+
+        def top(counter: dict[str, int], key: str) -> list[dict[str, Any]]:
+            return [
+                {key: name, "events": count}
+                for name, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:5]
+            ]
+
+        weeks.append(
+            {
+                "source": b["source"],
+                "period_start": b["period_start"],
+                "total_events": total,
+                "other_events": other,
+                "other_rate": round(other / total, 4) if total else 0.0,
+                "top_unknown_hooks": top(b["_unknown_hooks"], "hook"),
+                "top_unknown_tools": top(b["_unknown_tools"], "tool"),
+                "raw_status_counts": dict(sorted(b["raw_status_counts"].items())),
+            }
+        )
+
+    prior_rates = {
+        (row["source"], row["period_start"]): row["other_rate"]
+        for row in weeks
+    }
+    for row in weeks:
+        prior = (
+            datetime.fromisoformat(row["period_start"]).date() - timedelta(days=7)
+        ).isoformat()
+        row["previous_other_rate"] = prior_rates.get((row["source"], prior))
+
+    weeks.sort(key=lambda row: (row["period_start"], row["source"]), reverse=True)
+    return {"generated_at": _now(), "weeks": weeks}
 
 
 def import_quality() -> dict[str, Any]:
