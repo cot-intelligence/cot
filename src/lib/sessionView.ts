@@ -247,8 +247,15 @@ export function sessionRuns(detail: SessionDetail): SubagentRun[] {
   return detail.timeline_runs.map(fromReadModelRun);
 }
 
+export function parentTimelineItems(detail: SessionDetail): TimelineItem[] {
+  return (
+    detail.timeline ??
+    detail.events.filter((item) => eventSessionId(item, detail.summary.id) === detail.summary.id)
+  );
+}
+
 /** Whether an action belongs to a backend-owned subagent/review run. */
-export function itemLane(item: TimelineItem, _runs: SubagentRun[]): AgentLane {
+export function itemLane(item: TimelineItem): AgentLane {
   if (!ACTION_CATEGORIES.has(item.category)) return 'main';
   return item.run_id == null ? 'main' : 'subagent';
 }
@@ -319,8 +326,9 @@ export interface MetricCard {
 }
 
 export function metricCardsFor(detail: SessionDetail): MetricCard[] {
-  const { summary, components, events } = detail;
-  const count = (cat: string) => events.filter((t) => t.category === cat).length;
+  const { summary, components } = detail;
+  const timeline = parentTimelineItems(detail);
+  const count = (cat: string) => timeline.filter((t) => t.category === cat).length;
   const cards: MetricCard[] = [
     { key: 'events', label: 'Events', value: summary.event_count, icon: 'event' },
     { key: 'tools', label: 'Tool calls', value: summary.tool_count, icon: 'layers' },

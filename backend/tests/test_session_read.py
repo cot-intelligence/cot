@@ -235,6 +235,45 @@ def test_session_detail_drops_orphan_subagent_stop_events():
         tmp.cleanup()
 
 
+def test_session_detail_merges_cursor_keyed_subagent_stop():
+    tmp = _fresh_db()
+    try:
+        sid = "12121212-1212-1212-1212-121212121212"
+        _session(sid)
+        start_id = _event(
+            sid,
+            seconds=0,
+            category="subagent",
+            phase="start",
+            source="cursor",
+            hook="subagentStart",
+            title="Cursor sub",
+            target="sub_123",
+        )
+        stop_id = _event(
+            sid,
+            seconds=30,
+            category="subagent",
+            phase="end",
+            source="cursor",
+            hook="subagentStop",
+            title="Cursor sub",
+            target="sub_123",
+        )
+
+        detail = db.get_session_detail(sid)
+        assert detail is not None
+        subagent_events = [e for e in detail["events"] if e["category"] == "subagent"]
+        assert [e["id"] for e in subagent_events] == [start_id]
+        assert stop_id not in [e["id"] for e in detail["events"]]
+        assert subagent_events[0]["duration_ms"] >= 29_000
+        assert subagent_events[0]["ongoing"] is False
+        assert len(detail["timeline_runs"]) == 1
+        assert detail["timeline_runs"][0]["id"] == start_id
+    finally:
+        tmp.cleanup()
+
+
 def test_session_detail_events_use_merged_display_spans():
     tmp = _fresh_db()
     try:
@@ -367,7 +406,8 @@ def test_session_detail_inlines_approval_review_as_review_run():
 
         detail = db.get_session_detail(parent)
         assert detail is not None
-        assert "timeline" not in detail
+        assert "timeline" in detail
+        assert all(e.get("owner_session_id") == parent for e in detail["timeline"])
         review_events = [e for e in detail["events"] if e.get("owner_session_id") == review]
         assert [e["id"] for e in review_events] == [response_id], review_events
         assert all(e["id"] != history_id for e in detail["events"])

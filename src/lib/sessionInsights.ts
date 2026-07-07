@@ -1,7 +1,7 @@
 import type { SessionDetail } from './api';
 import type { IconName } from '../components/ui/icons';
 import { formatDuration } from './categoryMeta';
-import { splitPath } from './sessionView';
+import { parentTimelineItems, splitPath } from './sessionView';
 
 export interface Insight {
   icon: IconName;
@@ -28,7 +28,8 @@ export interface SessionInsights {
 }
 
 export function buildInsights(detail: SessionDetail): SessionInsights {
-  const { summary, components, events } = detail;
+  const { summary, components } = detail;
+  const events = parentTimelineItems(detail);
   const insights: Insight[] = [];
 
   const dur = formatDuration(null, summary.duration_seconds);

@@ -49,7 +49,10 @@ export interface SessionSummary {
 
 export interface TimelineItem {
   id: number;
+  /** Deprecated compatibility fields from stored hook rows. */
+  hook?: string | null;
   tool: string | null;
+  phase?: string | null;
   ts: string;
   source: AgentId;
   category: EventCategory | string;
@@ -174,6 +177,8 @@ export interface SessionDetail {
   links: SessionLinks;
   components: Components;
   events: TimelineItem[];
+  /** Deprecated compatibility field; prefer `events` plus `timeline_runs`. */
+  timeline?: TimelineItem[];
   /** Display-ready subagent/review windows assembled by the session read module. */
   timeline_runs: TimelineRun[];
   clarifications: Clarification[];

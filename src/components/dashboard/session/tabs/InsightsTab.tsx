@@ -4,6 +4,7 @@ import { formatDuration, getCategoryMeta, toTimestampString } from '../../../../
 import { compact } from '../../../../lib/format';
 import { formatModel } from '../../../../lib/modelMeta';
 import { buildInsights } from '../../../../lib/sessionInsights';
+import { parentTimelineItems } from '../../../../lib/sessionView';
 import { CHART_COLORS, type Datum } from '../../chartConstants';
 import { AreaTrend, DonutChart, HBars } from '../../chartTheme';
 
@@ -126,7 +127,7 @@ export function InsightsTab({ detail }: InsightsTabProps) {
     };
   }, [detail.summary.id]);
   const c = s.category_counts ?? {};
-  const events = detail.events;
+  const events = parentTimelineItems(detail);
   const cat = (k: string) => c[k] ?? 0;
 
   const computed = useMemo(() => {

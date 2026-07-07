@@ -22,7 +22,7 @@ QUESTION_TOOLS = {"AskUserQuestion", "AskQuestion", "request_user_input"}
 QUESTION_END_HOOKS = {"PostToolUse", "postToolUse"}
 InlineKind = Literal["approval_review", "reviewed_session", "subagent"]
 SUBAGENT_STOP_HOOKS = {"SubagentStop", "subagentStop"}
-PRIVATE_ITEM_KEYS = {"_child_session_id", "_run_kind", "hook", "phase"}
+PRIVATE_ITEM_KEYS = {"_child_session_id", "_run_kind"}
 RUN_CONTENT_CATEGORIES = {
     "shell",
     "file_read",
@@ -166,6 +166,13 @@ def build_clarifications(
     return clarifications, annotations
 
 
+def _stamp_clarification_session(clarifications: list[dict[str, Any]], session_id: str) -> None:
+    for clarification in clarifications:
+        clarification["question_session_id"] = session_id
+        if clarification["answer_event_id"] is not None:
+            clarification["answer_session_id"] = session_id
+
+
 def _is_approval_history_dump(detail: str | None) -> bool:
     return str(detail or "").lstrip().startswith(db._APPROVAL_REVIEW_PREFIX)
 
@@ -300,10 +307,7 @@ def _fetch_inlined_session_events(
         (session_id,),
     ).fetchall()
     clarifications, annotations = build_clarifications(raw_rows)
-    for clarification in clarifications:
-        clarification["question_session_id"] = session_id
-        if clarification["answer_event_id"] is not None:
-            clarification["answer_session_id"] = session_id
+    _stamp_clarification_session(clarifications, session_id)
 
     out: list[dict[str, Any]] = []
     for row in build_timeline_items(session_id):
@@ -598,10 +602,7 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
         ).fetchall()
         links = db._session_links(conn, session_id)
         clarifications, annotations = build_clarifications(ev_rows)
-        for clarification in clarifications:
-            clarification["question_session_id"] = session_id
-            if clarification["answer_event_id"] is not None:
-                clarification["answer_session_id"] = session_id
+        _stamp_clarification_session(clarifications, session_id)
         timeline_items = build_timeline_items(session_id)
         events = [dict(item) for item in timeline_items]
 
@@ -631,6 +632,9 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
         "links": links,
         "components": components,
         "events": [_public_item(item) for item in events],
+        # Deprecated compatibility field: the dashboard renders `events` plus
+        # `timeline_runs`, but older callers still expect a parent-only list.
+        "timeline": [_public_item(item) for item in timeline_items],
         "timeline_runs": runs,
         "clarifications": clarifications,
     }
