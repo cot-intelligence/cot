@@ -129,11 +129,21 @@ def test_detail_preview_lookup_points_at_owning_session_for_parent_and_child_eve
         assert parent_event["detail_truncated"] is True
         assert parent_event["detail_lookup"] == {"session_id": parent, "event_id": parent_id}
         assert len(parent_event["detail"]) == 4000
+        full = db.get_event_detail(
+            parent_event["detail_lookup"]["session_id"],
+            parent_event["detail_lookup"]["event_id"],
+        )
+        assert full is not None and full["detail"] == "p" * 4100
 
         assert child_event["id"] == child_id
         assert child_event["provenance"] == "subagent"
         assert child_event["detail_truncated"] is True
         assert child_event["detail_lookup"] == {"session_id": child, "event_id": child_id}
+        child_full = db.get_event_detail(
+            child_event["detail_lookup"]["session_id"],
+            child_event["detail_lookup"]["event_id"],
+        )
+        assert child_full is not None and child_full["detail"] == "c" * 4100
     finally:
         tmp.cleanup()
 
@@ -261,6 +271,8 @@ def test_session_detail_events_use_merged_display_spans():
         assert shell_events[0]["duration_ms"] == 5000
         assert "npm test" in shell_events[0]["detail"]
         assert "ok" in shell_events[0]["detail"]
+        assert "hook" not in shell_events[0]
+        assert "phase" not in shell_events[0]
     finally:
         tmp.cleanup()
 
@@ -328,5 +340,37 @@ def test_session_detail_annotates_inlined_child_questions():
             and c["answer_event_id"] == aid
             for c in detail["clarifications"]
         ), detail["clarifications"]
+    finally:
+        tmp.cleanup()
+
+
+def test_session_detail_inlines_approval_review_as_review_run():
+    tmp = _fresh_db()
+    try:
+        parent = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        review = "ffffffff-1111-2222-3333-444444444444"
+        _session(parent, source="codex")
+        _session(review, source="codex")
+        _event(parent, seconds=0, category="prompt", detail="original task")
+        _event(parent, seconds=1, category="response", detail="done")
+        history = (
+            f"{db._APPROVAL_REVIEW_PREFIX}\n\n"
+            f"Reviewed Codex session id: {parent}\n\n"
+            "Check the previous session."
+        )
+        history_id = _event(review, seconds=2, category="prompt", detail=history)
+        response_id = _event(review, seconds=3, category="response", detail="Looks clean")
+
+        detail = db.get_session_detail(parent)
+        assert detail is not None
+        review_events = [e for e in detail["events"] if e.get("owner_session_id") == review]
+        assert [e["id"] for e in review_events] == [response_id], review_events
+        assert all(e["id"] != history_id for e in detail["events"])
+        assert review_events[0]["provenance"] == "approval_review"
+        runs = detail["timeline_runs"]
+        assert len(runs) == 1, runs
+        assert runs[0]["kind"] == "review"
+        assert runs[0]["child_session_id"] == review
+        assert runs[0]["label"] == "Approval review"
     finally:
         tmp.cleanup()

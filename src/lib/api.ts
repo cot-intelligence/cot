@@ -49,9 +49,7 @@ export interface SessionSummary {
 
 export interface TimelineItem {
   id: number;
-  hook: string;
   tool: string | null;
-  phase: string;
   ts: string;
   source: AgentId;
   category: EventCategory | string;
@@ -173,7 +171,6 @@ export interface SessionDetail {
   links: SessionLinks;
   components: Components;
   events: TimelineItem[];
-  timeline: TimelineItem[];
   /** Display-ready subagent/review windows assembled by the session read module. */
   timeline_runs: TimelineRun[];
   clarifications: Clarification[];

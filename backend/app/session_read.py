@@ -22,7 +22,7 @@ QUESTION_TOOLS = {"AskUserQuestion", "AskQuestion", "request_user_input"}
 QUESTION_END_HOOKS = {"PostToolUse", "postToolUse"}
 InlineKind = Literal["approval_review", "reviewed_session", "subagent"]
 SUBAGENT_STOP_HOOKS = {"SubagentStop", "subagentStop"}
-PRIVATE_ITEM_KEYS = {"_child_session_id", "_run_kind"}
+PRIVATE_ITEM_KEYS = {"_child_session_id", "_run_kind", "hook", "phase"}
 
 
 def _coerce_dict(val: Any) -> dict[str, Any]:
@@ -157,6 +157,124 @@ def _is_approval_history_dump(detail: str | None) -> bool:
     return str(detail or "").lstrip().startswith(db._APPROVAL_REVIEW_PREFIX)
 
 
+EMPTY_DETAIL_VALUES = (None, "", {}, [])
+
+
+def _merge_detail(start_detail: Any, end_detail: Any) -> Any:
+    def _load(raw: Any) -> Any:
+        if not isinstance(raw, str):
+            return raw
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return raw
+
+    start = _load(start_detail)
+    end = _load(end_detail)
+    if not isinstance(start, dict) or not isinstance(end, dict):
+        return end_detail or start_detail
+
+    merged = dict(start)
+    for key, val in end.items():
+        if (
+            key in ("input", "arguments", "tool_input")
+            and isinstance(val, dict)
+            and isinstance(merged.get(key), dict)
+        ):
+            combined = dict(val)
+            combined.update({k: v for k, v in merged[key].items() if v not in EMPTY_DETAIL_VALUES})
+            merged[key] = combined
+        elif val not in EMPTY_DETAIL_VALUES:
+            merged[key] = val
+    return json.dumps(merged, indent=2, ensure_ascii=False, default=str)
+
+
+def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
+    """Build display timeline items, merging start/end hook pairs into spans."""
+    with db._connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
+            (session_id,),
+        ).fetchall()
+        events = [db._event_row(r) for r in rows]
+
+    spans: dict[str, dict[str, Any]] = {}
+    items: list[dict[str, Any]] = []
+    open_subagent_keys: list[str] = []
+    pending_subagent_stops: list[dict[str, Any]] = []
+
+    def _is_subagent_stop(event: dict[str, Any]) -> bool:
+        return (event.get("hook") or "") in SUBAGENT_STOP_HOOKS
+
+    def _extend(span: dict[str, Any], end_ts: str, status: Any) -> None:
+        if (end_ts or "") > (span.get("end_ts") or ""):
+            span["end_ts"] = end_ts
+            span["ongoing"] = False
+            span["duration_ms"] = int((db._duration_seconds(span["start_ts"], end_ts) or 0) * 1000)
+            span["status"] = status or span.get("status")
+
+    for event in events:
+        category = event.get("category") or "other"
+        target = event.get("target") or ""
+        phase = event.get("phase") or "instant"
+        key = f"{category}::{target}"
+
+        if phase == "superseded":
+            continue
+
+        if phase == "start":
+            spans[key] = {**event, "start_ts": event["ts"], "end_ts": None, "ongoing": True}
+            if category == "subagent":
+                open_subagent_keys.append(key)
+            continue
+
+        if phase == "end" and key in spans:
+            start = spans.pop(key)
+            if category == "subagent" and key in open_subagent_keys:
+                open_subagent_keys.remove(key)
+            duration = event.get("duration_ms") or start.get("duration_ms")
+            if duration is None:
+                duration = int((db._duration_seconds(start["start_ts"], event["ts"]) or 0) * 1000)
+            merged = {
+                **start,
+                "end_ts": event["ts"],
+                "ongoing": False,
+                "duration_ms": duration,
+                "detail": _merge_detail(start.get("detail"), event.get("detail")),
+                "status": event.get("status") or start.get("status"),
+            }
+            items.append(merged)
+            if category == "subagent" and not _is_subagent_stop(event):
+                pending_subagent_stops.append(merged)
+            continue
+
+        if category == "subagent" and phase == "end":
+            if open_subagent_keys:
+                start = spans.pop(open_subagent_keys.pop(0))
+                duration = int((db._duration_seconds(start["start_ts"], event["ts"]) or 0) * 1000)
+                items.append({
+                    **start,
+                    "end_ts": event["ts"],
+                    "ongoing": False,
+                    "duration_ms": duration,
+                    "status": event.get("status") or start.get("status"),
+                })
+                continue
+            if pending_subagent_stops:
+                _extend(pending_subagent_stops.pop(0), event["ts"], event.get("status"))
+                continue
+            if _is_subagent_stop(event):
+                continue
+
+        items.append({**event, "start_ts": event["ts"], "end_ts": event["ts"], "ongoing": False})
+
+    for pending in spans.values():
+        items.append({**pending, "end_ts": None})
+
+    items.sort(key=lambda item: item.get("start_ts") or item.get("ts") or "")
+    return items
+
+
 def _fetch_inlined_session_events(
     conn: sqlite3.Connection,
     session_id: str,
@@ -175,7 +293,7 @@ def _fetch_inlined_session_events(
             clarification["answer_session_id"] = session_id
 
     out: list[dict[str, Any]] = []
-    for row in db.timeline(session_id):
+    for row in build_timeline_items(session_id):
         if skip_history_dump and row.get("category") == "prompt" and _is_approval_history_dump(row.get("detail")):
             continue
         item: dict[str, Any] = dict(row)
@@ -439,7 +557,7 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
             clarification["question_session_id"] = session_id
             if clarification["answer_event_id"] is not None:
                 clarification["answer_session_id"] = session_id
-        timeline_items = db.timeline(session_id)
+        timeline_items = build_timeline_items(session_id)
         events = [dict(item) for item in timeline_items]
 
         for item in events:

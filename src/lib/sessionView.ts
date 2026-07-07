@@ -350,8 +350,8 @@ export interface MetricCard {
 }
 
 export function metricCardsFor(detail: SessionDetail): MetricCard[] {
-  const { summary, components, timeline } = detail;
-  const count = (cat: string) => timeline.filter((t) => t.category === cat).length;
+  const { summary, components, events } = detail;
+  const count = (cat: string) => events.filter((t) => t.category === cat).length;
   const cards: MetricCard[] = [
     { key: 'events', label: 'Events', value: summary.event_count, icon: 'event' },
     { key: 'tools', label: 'Tool calls', value: summary.tool_count, icon: 'layers' },
