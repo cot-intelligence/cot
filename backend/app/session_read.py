@@ -210,6 +210,20 @@ def _merge_detail(start_detail: Any, end_detail: Any) -> Any:
     return json.dumps(merged, indent=2, ensure_ascii=False, default=str)
 
 
+def _merge_attachments(start_attachments: Any, end_attachments: Any) -> Any:
+    if not start_attachments:
+        return end_attachments
+    if not end_attachments:
+        return start_attachments
+    if not isinstance(start_attachments, list) or not isinstance(end_attachments, list):
+        return end_attachments or start_attachments
+    merged = list(start_attachments)
+    for attachment in end_attachments:
+        if attachment not in merged:
+            merged.append(attachment)
+    return merged
+
+
 def _has_useful_detail(detail: Any) -> bool:
     if detail in EMPTY_DETAIL_VALUES:
         return False
@@ -235,12 +249,15 @@ def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
     def _is_subagent_stop(event: dict[str, Any]) -> bool:
         return (event.get("hook") or "") in SUBAGENT_STOP_HOOKS
 
-    def _extend(span: dict[str, Any], end_ts: str, status: Any) -> None:
+    def _extend(span: dict[str, Any], end_event: dict[str, Any]) -> None:
+        end_ts = end_event["ts"]
         if (end_ts or "") > (span.get("end_ts") or ""):
             span["end_ts"] = end_ts
             span["ongoing"] = False
             span["duration_ms"] = int((db._duration_seconds(span["start_ts"], end_ts) or 0) * 1000)
-            span["status"] = status or span.get("status")
+            span["detail"] = _merge_detail(span.get("detail"), end_event.get("detail"))
+            span["attachments"] = _merge_attachments(span.get("attachments"), end_event.get("attachments"))
+            span["status"] = end_event.get("status") or span.get("status")
 
     for event in events:
         category = event.get("category") or "other"
@@ -270,6 +287,7 @@ def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
                 "ongoing": False,
                 "duration_ms": duration,
                 "detail": _merge_detail(start.get("detail"), event.get("detail")),
+                "attachments": _merge_attachments(start.get("attachments"), event.get("attachments")),
                 "status": event.get("status") or start.get("status"),
             }
             items.append(merged)
@@ -286,11 +304,13 @@ def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
                     "end_ts": event["ts"],
                     "ongoing": False,
                     "duration_ms": duration,
+                    "detail": _merge_detail(start.get("detail"), event.get("detail")),
+                    "attachments": _merge_attachments(start.get("attachments"), event.get("attachments")),
                     "status": event.get("status") or start.get("status"),
                 })
                 continue
             if pending_subagent_stops:
-                _extend(pending_subagent_stops.pop(0), event["ts"], event.get("status"))
+                _extend(pending_subagent_stops.pop(0), event)
                 continue
             if _is_subagent_stop(event) and not _has_useful_detail(event.get("detail")):
                 continue
@@ -474,7 +494,10 @@ def _synthesize_child_subagent_spans(
                     event["_run_kind"] = kind
             continue
 
-        dur = int((db._duration_seconds(ts_first, ts_last) or 0) * 1000)
+        status = link.get("status") or "completed"
+        ongoing = status == "active"
+        end_ts = None if ongoing else ts_last
+        dur = None if ongoing else int((db._duration_seconds(ts_first, ts_last) or 0) * 1000)
         span = {
             "id": synthetic_id,
             "hook": None,
@@ -486,13 +509,13 @@ def _synthesize_child_subagent_spans(
             "title": label,
             "detail": None,
             "target": f"child::{child_id}",
-            "status": "success",
+            "status": status,
             "duration_ms": dur,
             "model": None,
             "attachments": None,
             "start_ts": ts_first,
-            "end_ts": ts_last,
-            "ongoing": False,
+            "end_ts": end_ts,
+            "ongoing": ongoing,
             "owner_session_id": parent_session_id,
             "_child_session_id": child_id,
             "_run_kind": kind,

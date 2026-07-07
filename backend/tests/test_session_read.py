@@ -145,6 +145,50 @@ def test_session_detail_orders_synthetic_spans_with_events():
         tmp.cleanup()
 
 
+def test_session_detail_synthetic_run_uses_link_status():
+    tmp = _fresh_db()
+    try:
+        parent = "18181818-1818-1818-1818-181818181818"
+        child = "19191919-1919-1919-1919-191919191919"
+        _session(parent)
+        _session(child)
+        _event(parent, seconds=0, category="prompt", detail="delegate")
+        now = db._now()
+        with db._connect() as conn:
+            conn.execute(
+                "INSERT INTO events (session_id, source, hook, tool, phase, ts, category,"
+                " title, detail, target, dedup_key, origin, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    child,
+                    "cursor",
+                    "x",
+                    None,
+                    "instant",
+                    now,
+                    "prompt",
+                    None,
+                    "still working",
+                    None,
+                    f"{child}:active",
+                    "hook",
+                    now,
+                ),
+            )
+
+        assert db.set_subagent_links([{"child": child, "parent": parent, "label": "child"}]) == 1
+
+        detail = db.get_session_detail(parent)
+        assert detail is not None
+        run = detail["timeline_runs"][0]
+        assert run["status"] == "active"
+        assert run["ongoing"] is True
+        assert run["end"] is None
+        assert run["duration_ms"] is None
+    finally:
+        tmp.cleanup()
+
+
 def test_detail_preview_lookup_points_at_owning_session_for_parent_and_child_events():
     tmp = _fresh_db()
     try:
@@ -291,6 +335,57 @@ def test_session_detail_keeps_orphan_subagent_stop_with_detail():
         assert [e["id"] for e in subagent_events] == [stop_id]
         assert subagent_events[0]["detail"] == "Subagent completed with notes."
         assert len(detail["timeline_runs"]) == 1
+    finally:
+        tmp.cleanup()
+
+
+def test_session_detail_merges_subagent_stop_detail_into_run():
+    tmp = _fresh_db()
+    try:
+        sid = "17171717-1717-1717-1717-171717171717"
+        _session(sid)
+        start_id = _event(
+            sid,
+            seconds=0,
+            category="subagent",
+            phase="start",
+            hook="PreToolUse",
+            tool="Agent",
+            title="Explore",
+            target="toolu_1",
+            detail='{"input": {"description": "Explore"}}',
+        )
+        _event(
+            sid,
+            seconds=1,
+            category="subagent",
+            phase="end",
+            hook="PostToolUse",
+            tool="Agent",
+            title="Explore",
+            target="toolu_1",
+        )
+        _event(
+            sid,
+            seconds=20,
+            category="subagent",
+            phase="end",
+            hook="SubagentStop",
+            title="Explore",
+            target="Subagent",
+            detail='{"response": "final notes"}',
+        )
+
+        detail = db.get_session_detail(sid)
+        assert detail is not None
+        run = detail["timeline_runs"][0]
+        assert run["id"] == start_id
+        assert run["duration_ms"] == 20000
+        assert "Explore" in run["item"]["detail"]
+        assert "final notes" in run["item"]["detail"]
+        full_detail = db.get_event_detail(sid, start_id)
+        assert full_detail is not None
+        assert "final notes" in full_detail["detail"]
     finally:
         tmp.cleanup()
 
