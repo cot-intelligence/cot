@@ -2978,18 +2978,9 @@ def get_session_detail(session_id: str) -> dict[str, Any] | None:
 def get_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:
     """Full detail + attachments for a single event (lazy-loaded by the UI when
     a truncated event is selected)."""
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT detail, attachments FROM events WHERE session_id=? AND id=?",
-            (session_id, event_id),
-        ).fetchone()
-    if row is None:
-        return None
-    return {
-        "id": event_id,
-        "detail": row["detail"],
-        "attachments": json.loads(row["attachments"]) if row["attachments"] else None,
-    }
+    from .session_read import build_event_detail
+
+    return build_event_detail(session_id, event_id)
 
 
 def get_session(session_id: str) -> dict[str, Any] | None:

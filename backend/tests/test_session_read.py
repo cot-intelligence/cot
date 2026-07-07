@@ -235,6 +235,32 @@ def test_session_detail_drops_orphan_subagent_stop_events():
         tmp.cleanup()
 
 
+def test_session_detail_keeps_orphan_subagent_stop_with_detail():
+    tmp = _fresh_db()
+    try:
+        sid = "13131313-1313-1313-1313-131313131313"
+        _session(sid)
+        stop_id = _event(
+            sid,
+            seconds=5,
+            category="subagent",
+            phase="end",
+            hook="SubagentStop",
+            title="Subagent",
+            target="Subagent",
+            detail="Subagent completed with notes.",
+        )
+
+        detail = db.get_session_detail(sid)
+        assert detail is not None
+        subagent_events = [e for e in detail["events"] if e["category"] == "subagent"]
+        assert [e["id"] for e in subagent_events] == [stop_id]
+        assert subagent_events[0]["detail"] == "Subagent completed with notes."
+        assert len(detail["timeline_runs"]) == 1
+    finally:
+        tmp.cleanup()
+
+
 def test_session_detail_merges_cursor_keyed_subagent_stop():
     tmp = _fresh_db()
     try:
@@ -315,6 +341,51 @@ def test_session_detail_events_use_merged_display_spans():
         assert "ok" in shell_events[0]["detail"]
         assert "hook" not in shell_events[0]
         assert "phase" not in shell_events[0]
+    finally:
+        tmp.cleanup()
+
+
+def test_session_detail_full_lookup_uses_merged_span_detail():
+    tmp = _fresh_db()
+    try:
+        sid = "14141414-1414-1414-1414-141414141414"
+        _session(sid)
+        start_id = _event(
+            sid,
+            seconds=1,
+            category="shell",
+            phase="start",
+            hook="PreToolUse",
+            tool="Bash",
+            title="Run shell",
+            target="npm test",
+            detail=json.dumps({"input": {"command": "npm test", "padding": "x" * 4100}}),
+        )
+        _event(
+            sid,
+            seconds=6,
+            category="shell",
+            phase="end",
+            hook="PostToolUse",
+            tool="Bash",
+            title="Run shell",
+            target="npm test",
+            detail=json.dumps({"response": "ok"}),
+        )
+
+        detail = db.get_session_detail(sid)
+        assert detail is not None
+        shell_event = next(e for e in detail["events"] if e["category"] == "shell")
+        assert shell_event["id"] == start_id
+        assert shell_event["detail_truncated"] is True
+        assert shell_event["detail_lookup"] == {"session_id": sid, "event_id": start_id}
+        full_detail = db.get_event_detail(
+            shell_event["detail_lookup"]["session_id"],
+            shell_event["detail_lookup"]["event_id"],
+        )
+        assert full_detail is not None
+        assert "npm test" in full_detail["detail"]
+        assert "ok" in full_detail["detail"]
     finally:
         tmp.cleanup()
 

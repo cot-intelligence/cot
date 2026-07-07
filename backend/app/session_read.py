@@ -22,7 +22,8 @@ QUESTION_TOOLS = {"AskUserQuestion", "AskQuestion", "request_user_input"}
 QUESTION_END_HOOKS = {"PostToolUse", "postToolUse"}
 InlineKind = Literal["approval_review", "reviewed_session", "subagent"]
 SUBAGENT_STOP_HOOKS = {"SubagentStop", "subagentStop"}
-PRIVATE_ITEM_KEYS = {"_child_session_id", "_run_kind"}
+INTERNAL_ITEM_KEYS = {"_child_session_id", "_run_kind"}
+PRIVATE_ITEM_KEYS = INTERNAL_ITEM_KEYS | {"hook", "phase"}
 RUN_CONTENT_CATEGORIES = {
     "shell",
     "file_read",
@@ -209,6 +210,14 @@ def _merge_detail(start_detail: Any, end_detail: Any) -> Any:
     return json.dumps(merged, indent=2, ensure_ascii=False, default=str)
 
 
+def _has_useful_detail(detail: Any) -> bool:
+    if detail in EMPTY_DETAIL_VALUES:
+        return False
+    if isinstance(detail, str):
+        return bool(detail.strip())
+    return True
+
+
 def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
     """Build display timeline items, merging start/end hook pairs into spans."""
     with db._connect() as conn:
@@ -283,7 +292,7 @@ def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
             if pending_subagent_stops:
                 _extend(pending_subagent_stops.pop(0), event["ts"], event.get("status"))
                 continue
-            if _is_subagent_stop(event):
+            if _is_subagent_stop(event) and not _has_useful_detail(event.get("detail")):
                 continue
 
         items.append({**event, "start_ts": event["ts"], "end_ts": event["ts"], "ongoing": False})
@@ -386,6 +395,7 @@ def _drop_orphan_subagent_stops(
             and item.get("phase") == "end"
             and item.get("hook") in SUBAGENT_STOP_HOOKS
             and item.get("ts") not in completed_subagent_ends
+            and not _has_useful_detail(item.get("detail"))
         )
     ]
 
@@ -445,12 +455,14 @@ def _synthesize_child_subagent_spans(
 
         adopt_idx: int | None = None
         if kind == "subagent":
-            cands = [i for i in range(len(native_spans)) if i not in claimed]
-            le = [i for i in cands if _start_of(native_spans[i]) <= ts_first]
-            if le:
-                adopt_idx = max(le, key=lambda i: _start_of(native_spans[i]))
-            elif cands:
-                adopt_idx = min(cands, key=lambda i: _start_of(native_spans[i]))
+            unclaimed_span_indexes = [i for i in range(len(native_spans)) if i not in claimed]
+            spans_starting_before_child = [
+                i for i in unclaimed_span_indexes if _start_of(native_spans[i]) <= ts_first
+            ]
+            if spans_starting_before_child:
+                adopt_idx = max(spans_starting_before_child, key=lambda i: _start_of(native_spans[i]))
+            elif unclaimed_span_indexes:
+                adopt_idx = min(unclaimed_span_indexes, key=lambda i: _start_of(native_spans[i]))
         if adopt_idx is not None:
             claimed.add(adopt_idx)
             span = native_spans[adopt_idx]
@@ -503,6 +515,13 @@ def _subagent_label(item: dict[str, Any]) -> str:
 def _public_item(item: dict[str, Any]) -> dict[str, Any]:
     out = dict(item)
     for key in PRIVATE_ITEM_KEYS:
+        out.pop(key, None)
+    return out
+
+
+def _legacy_item(item: dict[str, Any]) -> dict[str, Any]:
+    out = dict(item)
+    for key in INTERNAL_ITEM_KEYS:
         out.pop(key, None)
     return out
 
@@ -634,7 +653,31 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
         "events": [_public_item(item) for item in events],
         # Deprecated compatibility field: the dashboard renders `events` plus
         # `timeline_runs`, but older callers still expect a parent-only list.
-        "timeline": [_public_item(item) for item in timeline_items],
+        "timeline": [_legacy_item(item) for item in timeline_items],
         "timeline_runs": runs,
         "clarifications": clarifications,
+    }
+
+
+def build_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:
+    """Return full display detail for a row, including merged start/end spans."""
+    for item in build_timeline_items(session_id):
+        if item.get("id") == event_id:
+            return {
+                "id": event_id,
+                "detail": item.get("detail"),
+                "attachments": item.get("attachments"),
+            }
+
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT detail, attachments FROM events WHERE session_id=? AND id=?",
+            (session_id, event_id),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": event_id,
+        "detail": row["detail"],
+        "attachments": json.loads(row["attachments"]) if row["attachments"] else None,
     }
