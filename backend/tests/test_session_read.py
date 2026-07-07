@@ -106,6 +106,9 @@ def test_session_detail_exposes_backend_owned_timeline_runs_for_inlined_child():
         assert runs[0]["label"] == "Explore files"
         assert runs[0]["child_session_id"] == child
         assert runs[0]["item"]["owner_session_id"] == parent
+        child_events = [e for e in detail["events"] if e.get("owner_session_id") == child]
+        assert {e["category"] for e in child_events} == {"prompt", "shell"}
+        assert all(e["run_id"] == runs[0]["id"] for e in child_events), child_events
     finally:
         tmp.cleanup()
 
@@ -359,18 +362,30 @@ def test_session_detail_inlines_approval_review_as_review_run():
             "Check the previous session."
         )
         history_id = _event(review, seconds=2, category="prompt", detail=history)
-        response_id = _event(review, seconds=3, category="response", detail="Looks clean")
+        response_detail = "Looks clean. " + ("x" * 4100)
+        response_id = _event(review, seconds=3, category="response", detail=response_detail)
 
         detail = db.get_session_detail(parent)
         assert detail is not None
+        assert "timeline" not in detail
         review_events = [e for e in detail["events"] if e.get("owner_session_id") == review]
         assert [e["id"] for e in review_events] == [response_id], review_events
         assert all(e["id"] != history_id for e in detail["events"])
         assert review_events[0]["provenance"] == "approval_review"
+        assert review_events[0]["run_kind"] == "review"
+        assert review_events[0]["detail_truncated"] is True
+        assert review_events[0]["detail_lookup"] == {"session_id": review, "event_id": response_id}
+        full_detail = db.get_event_detail(
+            review_events[0]["detail_lookup"]["session_id"],
+            review_events[0]["detail_lookup"]["event_id"],
+        )
+        assert full_detail is not None
+        assert full_detail["detail"] == response_detail
         runs = detail["timeline_runs"]
         assert len(runs) == 1, runs
         assert runs[0]["kind"] == "review"
         assert runs[0]["child_session_id"] == review
         assert runs[0]["label"] == "Approval review"
+        assert review_events[0]["run_id"] == runs[0]["id"]
     finally:
         tmp.cleanup()

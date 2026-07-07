@@ -779,11 +779,9 @@ def test_subagent_link_embeds_child_under_parent():
 
             # The native subagentStart/Stop span is *adopted* (stamped with the
             # child session), not duplicated by a second synthetic bar.
-            spans = [t for t in detail["timeline"] if t.get("category") == "subagent"]
             runs = [r for r in detail["timeline_runs"] if r["kind"] == "subagent"]
-            assert len(spans) == 1, spans
             assert len(runs) == 1 and runs[0]["child_session_id"] == child, runs
-            assert spans[0]["id"] > 0, spans[0]  # the real native span, not synthetic
+            assert runs[0]["item"]["id"] > 0, runs[0]  # the real native span, not synthetic
 
             cdetail = db.get_session_detail(child)
             assert any(
@@ -838,11 +836,9 @@ def test_synthetic_subagent_span_groups_child_events():
             ) == 1
 
             detail = db.get_session_detail(parent)
-            spans = [t for t in detail["timeline"] if t.get("category") == "subagent"]
             runs = [r for r in detail["timeline_runs"] if r["kind"] == "subagent"]
-            assert len(spans) == 1, spans
-            span = spans[0]
             assert len(runs) == 1 and runs[0]["child_session_id"] == child, runs
+            span = runs[0]["item"]
             # Label prefers the child's first instruction (richer than the
             # stored fallback label).
             assert span["title"] == "explore everything", span
@@ -851,9 +847,7 @@ def test_synthetic_subagent_span_groups_child_events():
             # Every child event (prompt included) is inlined and falls in the run.
             inlined = [e for e in detail["events"] if e.get("owner_session_id") == child]
             assert {e["category"] for e in inlined} == {"prompt", "shell"}, inlined
-            assert all(span["start_ts"] <= e["start_ts"] <= span["end_ts"] for e in inlined), (
-                span, inlined,
-            )
+            assert all(e["run_id"] == span["id"] for e in inlined), (span, inlined)
         finally:
             restore()
 

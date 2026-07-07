@@ -23,6 +23,19 @@ QUESTION_END_HOOKS = {"PostToolUse", "postToolUse"}
 InlineKind = Literal["approval_review", "reviewed_session", "subagent"]
 SUBAGENT_STOP_HOOKS = {"SubagentStop", "subagentStop"}
 PRIVATE_ITEM_KEYS = {"_child_session_id", "_run_kind", "hook", "phase"}
+RUN_CONTENT_CATEGORIES = {
+    "shell",
+    "file_read",
+    "file_edit",
+    "mcp",
+    "web",
+    "context_read",
+    "memory",
+    "response",
+    "thought",
+    "plan",
+    "question",
+}
 
 
 def _coerce_dict(val: Any) -> dict[str, Any]:
@@ -523,6 +536,38 @@ def _timeline_runs(
     return runs
 
 
+def _event_time(item: dict[str, Any]) -> str:
+    return item.get("start_ts") or item.get("ts") or ""
+
+
+def _in_window(ts: str, start: str, end: str | None) -> bool:
+    if ts < start:
+        return False
+    return True if end is None else ts <= end
+
+
+def _assign_run_membership(events: list[dict[str, Any]], runs: list[dict[str, Any]]) -> None:
+    for run in runs:
+        run_id = run["id"]
+        child_session_id = run.get("child_session_id")
+        if child_session_id:
+            members = [
+                item
+                for item in events
+                if item.get("owner_session_id") == child_session_id and item.get("id") != run_id
+            ]
+        else:
+            members = [
+                item
+                for item in events
+                if item.get("category") in RUN_CONTENT_CATEGORIES
+                and _in_window(_event_time(item), run["start"], run["end"])
+            ]
+        for item in members:
+            item["run_id"] = run_id
+            item["run_kind"] = run["kind"]
+
+
 def _apply_event_annotations(
     item: dict[str, Any],
     annotations: dict[int, dict[str, Any]],
@@ -580,12 +625,12 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
         components = db.session_components(session_id)
 
     runs = _timeline_runs(timeline_items, events)
+    _assign_run_membership(events, runs)
     return {
         "summary": summary,
         "links": links,
         "components": components,
         "events": [_public_item(item) for item in events],
-        "timeline": [_public_item(item) for item in timeline_items],
         "timeline_runs": runs,
         "clarifications": clarifications,
     }

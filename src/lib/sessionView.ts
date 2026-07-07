@@ -182,14 +182,6 @@ const ACTION_CATEGORIES = new Set([
   'memory',
 ]);
 
-const SUBAGENT_CONTENT_CATEGORIES = new Set([
-  ...ACTION_CATEGORIES,
-  'response',
-  'thought',
-  'plan',
-  'question',
-]);
-
 export type AgentLane = 'main' | 'subagent';
 type EventProvenance = NonNullable<TimelineItem['provenance']>;
 
@@ -233,11 +225,7 @@ export interface SubagentRun {
   ongoing: boolean;
   /** What the run represents: a launched subagent or an inlined review. */
   kind: 'subagent' | 'review';
-  /**
-   * For synthetic spans (Cursor subagents, Codex reviews) the child session
-   * whose inlined events this run groups. Native Claude spans leave this unset
-   * and fall back to time-window membership.
-   */
+  /** Linked child/review session represented by this run, when known. */
   childSessionId?: string;
 }
 
@@ -255,20 +243,14 @@ function fromReadModelRun(run: TimelineRun): SubagentRun {
   };
 }
 
-function inWindow(ts: string, start: string, end: string | null): boolean {
-  if (ts < start) return false;
-  return end == null ? true : ts <= end;
-}
-
 export function sessionRuns(detail: SessionDetail): SubagentRun[] {
   return detail.timeline_runs.map(fromReadModelRun);
 }
 
-/** Whether an action falls within any subagent run window. */
-export function itemLane(item: TimelineItem, runs: SubagentRun[]): AgentLane {
+/** Whether an action belongs to a backend-owned subagent/review run. */
+export function itemLane(item: TimelineItem, _runs: SubagentRun[]): AgentLane {
   if (!ACTION_CATEGORIES.has(item.category)) return 'main';
-  const ts = eventTimestamp(item);
-  return runs.some((r) => inWindow(ts, r.start, r.end)) ? 'subagent' : 'main';
+  return item.run_id == null ? 'main' : 'subagent';
 }
 
 /** Session that owns an event row (parent session or an inlined review session). */
@@ -281,27 +263,14 @@ export function eventKey(item: TimelineItem, parentSessionId: string): string {
   return `${eventSessionId(item, parentSessionId)}:${item.id}`;
 }
 
-/** Action events whose timestamp falls inside a single run's window. */
+/** Action events that belong to a single backend-owned run. */
 export function actionsInRun(items: TimelineItem[], run: SubagentRun): TimelineItem[] {
-  return items.filter(
-    (it) => ACTION_CATEGORIES.has(it.category) && inWindow(eventTimestamp(it), run.start, run.end),
-  );
+  return items.filter((it) => ACTION_CATEGORIES.has(it.category) && it.run_id === run.item.id);
 }
 
 /** Events worth showing inside a subagent group. */
 export function eventsInRun(items: TimelineItem[], run: SubagentRun): TimelineItem[] {
-  // Synthetic spans (Cursor subagents, Codex reviews) own a whole child
-  // session: group by that session id so every event nests — including the
-  // child's own prompt and lifecycle rows that the category filter would drop.
-  if (run.childSessionId) {
-    return items.filter(
-      (it) => it.owner_session_id === run.childSessionId && it.id !== run.item.id,
-    );
-  }
-  // Native Claude spans: members are whatever falls inside the time window.
-  return items.filter(
-    (it) => SUBAGENT_CONTENT_CATEGORIES.has(it.category) && inWindow(eventTimestamp(it), run.start, run.end),
-  );
+  return items.filter((it) => it.run_id === run.item.id && it.id !== run.item.id);
 }
 
 /** Whether any two runs overlap in time (i.e. ran in parallel). */

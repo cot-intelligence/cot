@@ -87,6 +87,9 @@ export interface TimelineItem {
   owner_session_id?: string;
   /** Display provenance for rows inlined from linked sessions. */
   provenance?: 'approval_review' | 'reviewed_session' | 'subagent';
+  /** Backend-owned run membership for rows displayed inside a subagent/review group. */
+  run_id?: number;
+  run_kind?: 'subagent' | 'review';
 }
 
 export interface QuestionPart {
