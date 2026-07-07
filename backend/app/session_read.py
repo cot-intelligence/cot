@@ -240,7 +240,7 @@ def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
         ).fetchall()
         events = [db._event_row(r) for r in rows]
 
-    spans: dict[str, dict[str, Any]] = {}
+    spans: dict[str, list[dict[str, Any]]] = {}
     items: list[dict[str, Any]] = []
     open_subagent_keys: list[str] = []
     pending_subagent_stops: list[dict[str, Any]] = []
@@ -268,13 +268,17 @@ def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
             continue
 
         if phase == "start":
-            spans[key] = {**event, "start_ts": event["ts"], "end_ts": None, "ongoing": True}
+            spans.setdefault(key, []).append(
+                {**event, "start_ts": event["ts"], "end_ts": None, "ongoing": True}
+            )
             if category == "subagent":
                 open_subagent_keys.append(key)
             continue
 
-        if phase == "end" and key in spans:
-            start = spans.pop(key)
+        if phase == "end" and spans.get(key):
+            start = spans[key].pop(0)
+            if not spans[key]:
+                spans.pop(key, None)
             if category == "subagent" and key in open_subagent_keys:
                 open_subagent_keys.remove(key)
             duration = event.get("duration_ms") or start.get("duration_ms")
@@ -296,7 +300,12 @@ def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
 
         if category == "subagent" and phase == "end":
             if open_subagent_keys:
-                start = spans.pop(open_subagent_keys.pop(0))
+                open_key = open_subagent_keys.pop(0)
+                if not spans.get(open_key):
+                    continue
+                start = spans[open_key].pop(0)
+                if not spans[open_key]:
+                    spans.pop(open_key, None)
                 duration = int((db._duration_seconds(start["start_ts"], event["ts"]) or 0) * 1000)
                 items.append({
                     **start,
@@ -316,8 +325,9 @@ def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
 
         items.append({**event, "start_ts": event["ts"], "end_ts": event["ts"], "ongoing": False})
 
-    for pending in spans.values():
-        items.append({**pending, "end_ts": None})
+    for pending_group in spans.values():
+        for pending in pending_group:
+            items.append({**pending, "end_ts": None})
 
     items.sort(key=lambda item: item.get("start_ts") or item.get("ts") or "")
     return items

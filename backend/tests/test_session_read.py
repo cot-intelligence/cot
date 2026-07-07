@@ -20,12 +20,12 @@ def _fresh_db() -> tempfile.TemporaryDirectory[str]:
     return tmp
 
 
-def _session(sid: str, *, source: str = "cursor") -> None:
+def _session(sid: str, *, source: str = "cursor", status: str = "completed") -> None:
     with db._connect() as conn:
         conn.execute(
             "INSERT INTO sessions (id, source, started_at, status, created_at)"
             " VALUES (?,?,?,?,?)",
-            (sid, source, "2026-06-01T00:00:00Z", "completed", "2026-06-01T00:00:00Z"),
+            (sid, source, "2026-06-01T00:00:00Z", status, "2026-06-01T00:00:00Z"),
         )
 
 
@@ -41,13 +41,14 @@ def _event(
     title: str | None = None,
     detail: str | None = None,
     target: str | None = None,
+    status: str | None = None,
 ) -> int:
     ts = f"2026-06-01T00:00:{seconds:02d}Z"
     with db._connect() as conn:
         cur = conn.execute(
             "INSERT INTO events (session_id, source, hook, tool, phase, ts, category,"
-            " title, detail, target, dedup_key, origin, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " title, detail, target, status, dedup_key, origin, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 sid,
                 source,
@@ -59,6 +60,7 @@ def _event(
                 title,
                 detail,
                 target,
+                status,
                 f"{sid}:{seconds}:{category}:{phase}:{target}",
                 "hook",
                 ts,
@@ -151,7 +153,7 @@ def test_session_detail_synthetic_run_uses_link_status():
         parent = "18181818-1818-1818-1818-181818181818"
         child = "19191919-1919-1919-1919-191919191919"
         _session(parent)
-        _session(child)
+        _session(child, status="active")
         _event(parent, seconds=0, category="prompt", detail="delegate")
         now = db._now()
         with db._connect() as conn:
@@ -185,6 +187,28 @@ def test_session_detail_synthetic_run_uses_link_status():
         assert run["ongoing"] is True
         assert run["end"] is None
         assert run["duration_ms"] is None
+    finally:
+        tmp.cleanup()
+
+
+def test_session_detail_synthetic_run_uses_terminal_child_status():
+    tmp = _fresh_db()
+    try:
+        parent = "21212121-2121-2121-2121-212121212121"
+        child = "22222222-2222-2222-2222-222222222222"
+        _session(parent)
+        _session(child, status="active")
+        _event(parent, seconds=0, category="prompt", detail="delegate")
+        _event(child, seconds=1, category="shell", target="pytest", status="error")
+
+        assert db.set_subagent_links([{"child": child, "parent": parent, "label": "child"}]) == 1
+
+        detail = db.get_session_detail(parent)
+        assert detail is not None
+        run = detail["timeline_runs"][0]
+        assert run["status"] == "error"
+        assert run["ongoing"] is False
+        assert run["end"] is not None
     finally:
         tmp.cleanup()
 
@@ -544,6 +568,67 @@ def test_session_detail_events_use_merged_display_spans():
         assert "ok" in shell_events[0]["detail"]
         assert shell_events[0]["hook"] == "PreToolUse"
         assert shell_events[0]["phase"] == "start"
+    finally:
+        tmp.cleanup()
+
+
+def test_session_detail_keeps_overlapping_same_target_spans():
+    tmp = _fresh_db()
+    try:
+        sid = "23232323-2323-2323-2323-232323232323"
+        _session(sid)
+        first_id = _event(
+            sid,
+            seconds=1,
+            category="shell",
+            phase="start",
+            hook="PreToolUse",
+            tool="Bash",
+            title="Run shell",
+            target="npm test",
+            detail='{"input": {"run": "first"}}',
+        )
+        second_id = _event(
+            sid,
+            seconds=2,
+            category="shell",
+            phase="start",
+            hook="PreToolUse",
+            tool="Bash",
+            title="Run shell",
+            target="npm test",
+            detail='{"input": {"run": "second"}}',
+        )
+        _event(
+            sid,
+            seconds=3,
+            category="shell",
+            phase="end",
+            hook="PostToolUse",
+            tool="Bash",
+            title="Run shell",
+            target="npm test",
+            detail='{"response": "first done"}',
+        )
+        _event(
+            sid,
+            seconds=4,
+            category="shell",
+            phase="end",
+            hook="PostToolUse",
+            tool="Bash",
+            title="Run shell",
+            target="npm test",
+            detail='{"response": "second done"}',
+        )
+
+        detail = db.get_session_detail(sid)
+        assert detail is not None
+        shell_events = [e for e in detail["events"] if e["category"] == "shell"]
+        assert [e["id"] for e in shell_events] == [first_id, second_id]
+        assert [e["duration_ms"] for e in shell_events] == [2000, 2000]
+        assert "first done" in shell_events[0]["detail"]
+        assert "second done" in shell_events[1]["detail"]
     finally:
         tmp.cleanup()
 
