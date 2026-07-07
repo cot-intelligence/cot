@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import type { SessionDetail } from '../../../lib/api';
-import { subagentRuns } from '../../../lib/sessionView';
+import { sessionRuns } from '../../../lib/sessionView';
 import { InsightsTab } from './tabs/InsightsTab';
 import { TimelineTab } from './tabs/TimelineTab';
 
@@ -17,7 +17,7 @@ const TABS = [
 ];
 
 export function SessionTabs({ detail, activeTab, onTabChange, focusEventId }: SessionTabsProps) {
-  const runs = useMemo(() => subagentRuns(detail.timeline), [detail.timeline]);
+  const runs = useMemo(() => sessionRuns(detail), [detail]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

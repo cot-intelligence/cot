@@ -1,4 +1,4 @@
-import type { SessionDetail, TimelineItem } from './api';
+import type { SessionDetail, TimelineItem, TimelineRun } from './api';
 import type { IconName } from '../components/ui/icons';
 import { toTimestampString } from './categoryMeta';
 
@@ -214,6 +214,20 @@ export interface SubagentRun {
   childSessionId?: string;
 }
 
+function fromReadModelRun(run: TimelineRun): SubagentRun {
+  return {
+    item: run.item,
+    label: run.label,
+    start: toTimestampString(run.start),
+    end: run.end == null ? null : toTimestampString(run.end),
+    status: run.status ?? null,
+    durationMs: run.duration_ms ?? null,
+    ongoing: run.ongoing,
+    kind: run.kind,
+    childSessionId: run.child_session_id,
+  };
+}
+
 function inWindow(ts: string, start: string, end: string | null): boolean {
   if (ts < start) return false;
   return end == null ? true : ts <= end;
@@ -239,6 +253,13 @@ export function subagentRuns(timeline: TimelineItem[]): SubagentRun[] {
       childSessionId: it.subagent_child_session,
     }))
     .sort((a, b) => a.start.localeCompare(b.start));
+}
+
+export function sessionRuns(detail: SessionDetail): SubagentRun[] {
+  if (detail.timeline_runs) {
+    return detail.timeline_runs.map(fromReadModelRun);
+  }
+  return subagentRuns(detail.timeline);
 }
 
 /** Human label for a subagent span — title holds type/description; target is the stable id. */

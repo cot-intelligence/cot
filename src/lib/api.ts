@@ -68,6 +68,11 @@ export interface TimelineItem {
   payload?: string | null;
   /** True when `detail` is a preview; fetch the full body via getEventDetail. */
   detail_truncated?: boolean;
+  /** Self-describing lookup for loading the full body when this row is a preview. */
+  detail_lookup?: {
+    session_id: string;
+    event_id: number;
+  };
   /** Set on structured prompt events where the agent asked the user. */
   is_question?: boolean;
   /** Whether a following answer event completed this prompt. */
@@ -154,12 +159,27 @@ export interface SessionLinks {
   children: SessionLink[];
 }
 
+export interface TimelineRun {
+  id: number;
+  kind: 'subagent' | 'review';
+  label: string;
+  start: string;
+  end: string | null;
+  status: string | null;
+  duration_ms: number | null;
+  ongoing: boolean;
+  child_session_id?: string;
+  item: TimelineItem;
+}
+
 export interface SessionDetail {
   summary: SessionSummary;
   links: SessionLinks;
   components: Components;
   events: TimelineItem[];
   timeline: TimelineItem[];
+  /** Display-ready subagent/review windows assembled by the session read module. */
+  timeline_runs?: TimelineRun[];
   clarifications: Clarification[];
 }
 

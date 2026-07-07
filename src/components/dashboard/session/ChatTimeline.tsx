@@ -281,15 +281,17 @@ const SubagentGroup = forwardRef<HTMLDivElement, {
 function SubagentResultCard({ item, sessionId }: { item: TimelineItem; sessionId: string }) {
   const [full, setFull] = useState<{ detail: string | null; attachments: TimelineItem['attachments'] } | null>(null);
   const needsFull = Boolean(item.detail_truncated && full === null);
+  const lookupSessionId = item.detail_lookup?.session_id ?? sessionId;
+  const lookupEventId = item.detail_lookup?.event_id ?? item.id;
 
   useEffect(() => {
     if (!needsFull) return;
     let cancelled = false;
-    getEventDetail(sessionId, item.id)
+    getEventDetail(lookupSessionId, lookupEventId)
       .then((res) => { if (!cancelled) setFull({ detail: res.detail, attachments: res.attachments }); })
       .catch(() => { if (!cancelled) setFull({ detail: item.detail, attachments: item.attachments }); });
     return () => { cancelled = true; };
-  }, [needsFull, sessionId, item.id, item.detail, item.attachments]);
+  }, [needsFull, lookupSessionId, lookupEventId, item.detail, item.attachments]);
 
   const resolved = full ? { ...item, detail: full.detail, attachments: full.attachments ?? item.attachments } : item;
   const d = parseDetail(resolved);
@@ -498,15 +500,17 @@ const ActionCard = forwardRef<HTMLDivElement, {
 function CardBody({ item, sessionId }: { item: TimelineItem; sessionId: string }) {
   const [full, setFull] = useState<{ detail: string | null; attachments: TimelineItem['attachments'] } | null>(null);
   const needsFull = Boolean(item.detail_truncated && full === null);
+  const lookupSessionId = item.detail_lookup?.session_id ?? sessionId;
+  const lookupEventId = item.detail_lookup?.event_id ?? item.id;
 
   useEffect(() => {
     if (!needsFull) return;
     let cancelled = false;
-    getEventDetail(sessionId, item.id)
+    getEventDetail(lookupSessionId, lookupEventId)
       .then((res) => { if (!cancelled) setFull({ detail: res.detail, attachments: res.attachments }); })
       .catch(() => { if (!cancelled) setFull({ detail: item.detail, attachments: item.attachments }); });
     return () => { cancelled = true; };
-  }, [needsFull, sessionId, item.id, item.detail, item.attachments]);
+  }, [needsFull, lookupSessionId, lookupEventId, item.detail, item.attachments]);
 
   const resolved = full ? { ...item, detail: full.detail, attachments: full.attachments ?? item.attachments } : item;
   const loading = Boolean(item.detail_truncated && !full);

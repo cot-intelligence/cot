@@ -317,28 +317,30 @@ function QaPill({ item }: { item: TimelineItem }) {
 
 export function EventDetailPanel({ item, sessionId, onViewInAll, onJump }: EventDetailPanelProps) {
   // Lazy-load the full body for events whose list entry was truncated. Cached
-  // per event id so reselecting is instant; small/untruncated events skip the
-  // fetch entirely and render immediately.
-  const [fullById, setFullById] = useState<Record<number, { detail: string | null; attachments: TimelineItem['attachments'] }>>({});
-  const needsFull = Boolean(item?.detail_truncated && sessionId && fullById[item.id] === undefined);
+  // by lookup key so inlined child-session rows cannot collide with parent ids.
+  const [fullById, setFullById] = useState<Record<string, { detail: string | null; attachments: TimelineItem['attachments'] }>>({});
+  const lookupSessionId = item?.detail_lookup?.session_id ?? sessionId;
+  const lookupEventId = item?.detail_lookup?.event_id ?? item?.id;
+  const lookupKey = lookupSessionId && lookupEventId != null ? `${lookupSessionId}:${lookupEventId}` : null;
+  const needsFull = Boolean(item?.detail_truncated && lookupKey && fullById[lookupKey] === undefined);
 
   useEffect(() => {
-    if (!needsFull || !item || !sessionId) return;
+    if (!needsFull || !item || !lookupSessionId || lookupEventId == null || !lookupKey) return;
     let cancelled = false;
-    getEventDetail(sessionId, item.id)
+    getEventDetail(lookupSessionId, lookupEventId)
       .then((res) => {
         if (!cancelled) {
-          setFullById((prev) => ({ ...prev, [item.id]: { detail: res.detail, attachments: res.attachments } }));
+          setFullById((prev) => ({ ...prev, [lookupKey]: { detail: res.detail, attachments: res.attachments } }));
         }
       })
       .catch(() => {
         // On failure, keep the preview rather than blocking the panel.
-        if (!cancelled) setFullById((prev) => ({ ...prev, [item.id]: { detail: item.detail, attachments: item.attachments } }));
+        if (!cancelled) setFullById((prev) => ({ ...prev, [lookupKey]: { detail: item.detail, attachments: item.attachments } }));
       });
     return () => {
       cancelled = true;
     };
-  }, [needsFull, item, sessionId]);
+  }, [needsFull, item, lookupSessionId, lookupEventId, lookupKey]);
 
   if (!item) {
     return (
@@ -348,10 +350,11 @@ export function EventDetailPanel({ item, sessionId, onViewInAll, onJump }: Event
     );
   }
 
-  const resolved = item.detail_truncated && fullById[item.id]
-    ? { ...item, detail: fullById[item.id].detail, attachments: fullById[item.id].attachments ?? item.attachments }
+  const loadedFull = lookupKey ? fullById[lookupKey] : undefined;
+  const resolved = item.detail_truncated && loadedFull
+    ? { ...item, detail: loadedFull.detail, attachments: loadedFull.attachments ?? item.attachments }
     : item;
-  const loadingFull = Boolean(item.detail_truncated && fullById[item.id] === undefined);
+  const loadingFull = Boolean(item.detail_truncated && lookupKey && fullById[lookupKey] === undefined);
 
   const meta = getCategoryMeta(item.category);
   const isError = item.status === 'error' || item.status === 'blocked';
