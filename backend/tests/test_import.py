@@ -56,6 +56,53 @@ def _categories(agent, parser, lines, *, mtime=None):
 
 # --- Cursor -----------------------------------------------------------------
 
+def test_cursor_adapter_emits_canonical_ingest_events():
+    lines = [
+        {"role": "user", "message": {"content": [{"type": "text", "text": "<user_query>\nhi\n</user_query>"}]}},
+        {"role": "assistant", "message": {"content": [
+            {"type": "thinking", "thinking": "planning"},
+            {"type": "text", "text": "working"},
+            {"type": "tool_use", "name": "StrReplace", "input": {"path": "/a.py"}},
+        ]}},
+    ]
+    state: dict = {}
+    events = []
+    for lineno, obj in enumerate(lines):
+        events.extend(
+            bridge._cursor_line_to_ingest_events(
+                obj, "SID", lineno=lineno, mtime=_MTIME, state=state, path="/t.jsonl"
+            )
+        )
+
+    assert [ev["kind"] for ev in events] == ["prompt", "thought", "response", "tool_call"], events
+    assert events[0]["text"] == "hi"
+    assert events[0]["origin"] == "import"
+    assert events[0]["dedup_key"] == "/t.jsonl:0:prompt"
+    tool = events[-1]
+    assert tool["phase"] == "instant"
+    assert tool["tool_name"] == "StrReplace"
+    assert tool["tool_input"] == {"path": "/a.py"}
+    # The canonical seam should not expose the collector's hook-shaped transport fields.
+    assert all("hook_event_name" not in ev for ev in events), events
+    assert all("_dedup_key" not in ev and "_synthetic_category" not in ev for ev in events), events
+
+
+def test_cursor_canonical_events_adapt_to_existing_hook_payloads():
+    line = {"role": "assistant", "message": {"content": [
+        {"type": "text", "text": "done"},
+        {"type": "tool_use", "name": "Shell", "input": {"command": "ls"}},
+    ]}}
+    hooks = bridge._cursor_line_to_events(line, "SID", lineno=2, mtime=_MTIME, path="/t.jsonl")
+    assert [(ev.get("hook_event_name"), ev.get("_synthetic_category")) for ev in hooks] == [
+        ("afterAgentResponse", "response"),
+        ("PostToolUse", None),
+    ], hooks
+    assert hooks[0]["_import"] is True
+    assert hooks[0]["_dedup_key"] == "/t.jsonl:2:resp:0"
+    assert hooks[1]["tool_name"] == "Shell"
+    assert hooks[1]["_dedup_key"] == "/t.jsonl:2:tool:1"
+
+
 def test_cursor_tool_calls_categorize_correctly():
     lines = [
         {"role": "user", "message": {"content": [{"type": "text", "text": "<user_query>\nhi\n</user_query>"}]}},
@@ -114,6 +161,38 @@ def test_cursor_dedup_keys_are_stable_across_reparse():
 
 # --- Claude -----------------------------------------------------------------
 
+def test_claude_adapter_emits_canonical_tool_call_and_result():
+    lines = [
+        {"type": "assistant", "uuid": "u1", "timestamp": "2026-06-01T00:00:00Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "thinking", "thinking": "checking"},
+             {"type": "text", "text": "I will list files"},
+             {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}},
+         ]}},
+        {"type": "user", "uuid": "u2", "timestamp": "2026-06-01T00:00:01Z",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "t1", "content": "file1", "is_error": False},
+         ]}},
+    ]
+    state: dict = {}
+    events = []
+    for lineno, obj in enumerate(lines):
+        events.extend(
+            bridge._claude_line_to_ingest_events(
+                obj, "SID", lineno=lineno, state=state, path="/claude.jsonl"
+            )
+        )
+
+    assert [ev["kind"] for ev in events] == ["thought", "response", "tool_call", "tool_call"], events
+    pre = events[2]
+    post = events[3]
+    assert pre["phase"] == "start" and pre["tool_name"] == "Bash", pre
+    assert post["phase"] == "end" and post["tool_response"] == "file1", post
+    assert post["tool_input"] == {"command": "ls"}, post
+    assert all("hook_event_name" not in ev for ev in events), events
+    assert all("_dedup_key" not in ev and "_synthetic_category" not in ev for ev in events), events
+
+
 def test_claude_tool_result_paired_to_call():
     """tool_use (assistant) + tool_result (next user msg) become Pre/Post with
     the result body and matching tool name."""
@@ -152,6 +231,50 @@ def test_claude_tool_result_error_status():
 
 
 # --- Codex ------------------------------------------------------------------
+
+def test_codex_adapter_emits_canonical_tool_call_and_result():
+    state: dict = {}
+    call = {"type": "response_item", "id": "l1", "timestamp": "2026-04-01T00:00:00Z",
+            "payload": {"type": "function_call", "name": "exec_command",
+                        "arguments": "{\"cmd\": \"pwd\"}", "call_id": "c1"}}
+    output = {"type": "response_item", "id": "l2", "timestamp": "2026-04-01T00:00:01Z",
+              "payload": {"type": "function_call_output", "call_id": "c1",
+                          "output": "/home", "status": "completed"}}
+
+    events = []
+    events.extend(bridge._codex_line_to_ingest_events(call, "SID", state=state))
+    events.extend(bridge._codex_line_to_ingest_events(output, "SID", state=state))
+
+    assert [ev["kind"] for ev in events] == ["tool_call", "tool_call"], events
+    assert events[0]["phase"] == "start"
+    assert events[0]["tool_name"] == "Bash"
+    assert events[0]["tool_input"] == {"command": "pwd"}
+    assert events[1]["phase"] == "end"
+    assert events[1]["tool_response"] == "/home"
+    assert all("hook_event_name" not in ev and "_dedup_key" not in ev for ev in events), events
+
+
+def test_codex_canonical_pending_response_folds_token_usage():
+    state: dict = {}
+    lines = [
+        {"type": "response_item", "id": "m1", "timestamp": "2026-04-01T00:00:00Z",
+         "payload": {"type": "message", "role": "assistant", "phase": "final_answer",
+                     "content": [{"type": "output_text", "text": "done"}]}},
+        {"type": "event_msg", "timestamp": "2026-04-01T00:00:01Z",
+         "payload": {"type": "token_count", "info": {"last_token_usage": {
+             "input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 20}}}},
+    ]
+    assert bridge._codex_line_to_ingest_events(lines[0], "SID", state=state) == []
+    assert bridge._codex_line_to_ingest_events(lines[1], "SID", state=state) == []
+    flushed = bridge._codex_flush_pending_ingest_events(state)
+    assert len(flushed) == 1, flushed
+    event = flushed[0]
+    assert event["kind"] == "response", event
+    assert event["text"] == "done", event
+    assert event["usage"]["input_tokens"] == 100, event
+    assert event["usage"]["cached_input_tokens"] == 40, event
+    assert "hook_event_name" not in event and "_synthetic_category" not in event, event
+
 
 def test_codex_function_call_and_output_pair():
     lines = [
@@ -503,6 +626,68 @@ def _with_env(key, value):
             os.environ[key] = prior
 
     return restore
+
+
+def test_tiny_import_smoke_records_all_sources_without_golden_session():
+    """Tiny wiring smoke: parser -> normalize -> storage, no broad snapshot."""
+    with _tempfile.TemporaryDirectory() as tmp:
+        restore = _with_env("COT_DB_PATH", str(_Path(tmp) / "cot.db"))
+        try:
+            from app import db
+            db.init_db()
+
+            cases = [
+                ("cursor", "smoke-cursor", bridge._cursor_line_to_events, [
+                    {"role": "user", "message": {"content": [{"type": "text", "text": "<user_query>\nhi\n</user_query>"}]}},
+                    {"role": "assistant", "message": {"content": [
+                        {"type": "tool_use", "name": "Shell", "input": {"command": "ls"}},
+                    ]}},
+                ], _MTIME),
+                ("claude", "smoke-claude", bridge._claude_line_to_events, [
+                    {"type": "assistant", "uuid": "smoke-c1", "timestamp": "2026-06-01T00:00:00Z",
+                     "message": {"role": "assistant", "content": [
+                         {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "pwd"}},
+                     ]}},
+                    {"type": "user", "uuid": "smoke-c2", "timestamp": "2026-06-01T00:00:01Z",
+                     "message": {"role": "user", "content": [
+                         {"type": "tool_result", "tool_use_id": "t1", "content": "/repo", "is_error": False},
+                     ]}},
+                ], None),
+                ("codex", "smoke-codex", bridge._codex_line_to_events, [
+                    {"type": "response_item", "id": "smoke-z1", "timestamp": "2026-04-01T00:00:00Z",
+                     "payload": {"type": "function_call", "name": "exec_command",
+                                 "arguments": "{\"cmd\": \"pwd\"}", "call_id": "cz1"}},
+                    {"type": "response_item", "id": "smoke-z2", "timestamp": "2026-04-01T00:00:01Z",
+                     "payload": {"type": "function_call_output", "call_id": "cz1",
+                                 "output": "/repo", "status": "completed"}},
+                ], None),
+            ]
+
+            def ingest_once():
+                for agent, sid, parser, lines, mtime in cases:
+                    state: dict = {}
+                    for lineno, obj in enumerate(lines):
+                        for ev in parser(obj, sid, lineno=lineno, mtime=mtime, state=state, path=f"/{sid}.jsonl"):
+                            db.record_event(normalize(agent, ev), ev)
+                    for ev in bridge._codex_flush_pending(state):
+                        db.record_event(normalize(agent, ev), ev)
+
+            ingest_once()
+            ingest_once()
+
+            with db._connect() as conn:
+                rows = conn.execute(
+                    "SELECT source, category, COUNT(*) n FROM events"
+                    " WHERE session_id LIKE 'smoke-%'"
+                    " GROUP BY source, category ORDER BY source, category"
+                ).fetchall()
+            got = {(r["source"], r["category"]): r["n"] for r in rows}
+            assert got[("cursor", "prompt")] == 1, got
+            assert got[("cursor", "shell")] == 1, got
+            assert got[("claude", "shell")] == 2, got
+            assert got[("codex", "shell")] == 2, got
+        finally:
+            restore()
 
 
 def test_discover_subagent_links_from_cursor_nesting():

@@ -7,6 +7,18 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from .tool_classification import (
+    ToolInvocation,
+    canonical_tool as _canonical_tool,
+    classify_cursor_hook,
+    classify_tool,
+    coerce_tool_input as _coerce_tool_input,
+    cursor_tool as _cursor_tool,
+    is_tool_hook as _is_tool_hook,
+    subagent_key as _subagent_key,
+    subagent_label as _subagent_label,
+)
+
 Source = str  # 'claude' | 'cursor' | 'codex'
 
 _START_HOOKS = {
@@ -34,20 +46,6 @@ _END_HOOKS = {
     "sessionEnd",
 }
 
-_CONTEXT_PATTERNS = (
-    re.compile(r"(^|/)CLAUDE\.md$", re.I),
-    re.compile(r"(^|/)AGENTS\.md$", re.I),
-    re.compile(r"(^|/)SKILL\.md$", re.I),
-    re.compile(r"(^|/)\.cursor/rules/", re.I),
-    re.compile(r"(^|/)\.claude/", re.I),
-    re.compile(r"(^|/)skills?/", re.I),
-)
-
-_MEMORY_PATTERNS = (
-    re.compile(r"(^|/)CLAUDE\.md$", re.I),
-    re.compile(r"memory", re.I),
-)
-
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -61,41 +59,11 @@ def _phase(hook: str) -> str:
     return "instant"
 
 
-def _matches(path: str | None, patterns: tuple[re.Pattern[str], ...]) -> bool:
-    if not path:
-        return False
-    return any(p.search(path.replace("\\", "/")) for p in patterns)
-
-
 def _short(text: str | None, limit: int = 80) -> str:
     if not text:
         return ""
     text = str(text).strip().replace("\n", " ")
     return text if len(text) <= limit else text[: limit - 1] + "…"
-
-
-def _subagent_key(body: dict[str, Any]) -> str | None:
-    """Stable per-run id from hook payloads (Cursor subagent_id, tool_call_id, etc.)."""
-    for field in ("subagent_id", "tool_call_id", "tool_use_id"):
-        val = body.get(field)
-        if isinstance(val, str) and val.strip():
-            # Cursor ids sometimes carry a second line (fc_…); the call_ prefix is enough.
-            return val.strip().split("\n")[0].strip()
-    return None
-
-
-def _subagent_label(body: dict[str, Any], tool_input: dict[str, Any] | None = None) -> str:
-    ti = tool_input if isinstance(tool_input, dict) else {}
-    if not ti:
-        raw = body.get("tool_input")
-        ti = raw if isinstance(raw, dict) else {}
-    desc = body.get("description") or ti.get("description") or body.get("task") or ti.get("prompt")
-    stype = body.get("subagent_type") or body.get("agent_type") or ti.get("subagent_type")
-    if desc:
-        desc = _short(str(desc), 80)
-    if stype and desc:
-        return f"{stype} · {desc}"
-    return stype or desc or "Subagent"
 
 
 _ENV_CONTEXT_RE = re.compile(r"<environment_context>.*?</environment_context>", re.S)
@@ -130,206 +98,8 @@ def _json_detail(obj: Any) -> str:
     return json.dumps(obj, indent=2, ensure_ascii=False, default=str)
 
 
-def _extract_path(body: dict[str, Any]) -> str | None:
-    for key in ("file_path", "path", "target"):
-        val = body.get(key)
-        if isinstance(val, str) and val:
-            return val
-    tool_input = body.get("tool_input")
-    if isinstance(tool_input, dict):
-        for key in ("file_path", "path", "notebook_path"):
-            val = tool_input.get(key)
-            if isinstance(val, str) and val:
-                return val
-    edits = body.get("edits")
-    if isinstance(edits, list) and edits:
-        first = edits[0]
-        if isinstance(first, dict) and first.get("file_path"):
-            return str(first["file_path"])
-    return None
-
-
-_PATCH_FILE_RE = re.compile(r"\*\*\*\s+(?:Update|Add|Delete) File:\s*(.+)")
-
-
-def _extract_patch_path(patch: Any) -> str | None:
-    """Pull the target path out of a Codex ``apply_patch`` command body."""
-    if not isinstance(patch, str):
-        return None
-    match = _PATCH_FILE_RE.search(patch)
-    return match.group(1).strip() if match else None
-
-
-def _parse_mcp(tool_name: str | None) -> tuple[str | None, str | None]:
-    if not tool_name or not tool_name.startswith("mcp__"):
-        return None, None
-    parts = tool_name.split("__", 2)
-    if len(parts) >= 3:
-        return parts[1], parts[2]
-    return tool_name, None
-
-
-_BROWSER_NETWORK_TOOLS = frozenset({"browser_navigate"})
-
-
-def _tool_basename(tool_name: str | None) -> str:
-    if not tool_name:
-        return ""
-    if tool_name.startswith("MCP:"):
-        return tool_name[4:]
-    if tool_name.startswith("mcp__"):
-        _, _, mcp_tool = _parse_mcp(tool_name)
-        return mcp_tool or tool_name
-    if "/" in tool_name:
-        return tool_name.rsplit("/", 1)[-1]
-    return tool_name
-
-
-def _is_browser_network_tool(tool_name: str | None) -> bool:
-    return _tool_basename(tool_name) in _BROWSER_NETWORK_TOOLS
-
-
-def _coerce_tool_input(val: Any) -> dict[str, Any]:
-    if isinstance(val, dict):
-        return val
-    if isinstance(val, str) and val.strip():
-        try:
-            parsed = json.loads(val)
-            return parsed if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError:
-            return {}
-    return {}
-
-
-def _extract_network_url(body: dict[str, Any]) -> str | None:
-    tool_input = _coerce_tool_input(body.get("tool_input"))
-    url = tool_input.get("url")
-    if isinstance(url, str) and url.strip():
-        return url.strip()
-    result = body.get("result_json")
-    if isinstance(result, str):
-        match = re.search(r"Page URL:\s*(\S+)", result)
-        if match:
-            return match.group(1).rstrip("/")
-    return None
-
-
-def _extract_web_target(tool_input: dict[str, Any]) -> str:
-    for key in ("url", "query", "search_term"):
-        val = tool_input.get(key)
-        if isinstance(val, str) and val.strip():
-            return val.strip()
-    for key in ("queries", "search_terms"):
-        vals = tool_input.get(key)
-        if isinstance(vals, list):
-            first = next((v.strip() for v in vals if isinstance(v, str) and v.strip()), "")
-            if first:
-                return first
-    return ""
-
-
-def _question_target(tool_input: dict[str, Any], title: str) -> str:
-    questions = tool_input.get("questions")
-    qlist = questions if isinstance(questions, list) else []
-    qids = [
-        str(q.get("id") or q.get("prompt") or q.get("question") or "")
-        for q in qlist
-        if isinstance(q, dict)
-    ]
-    key = "|".join(q for q in qids if q) or title
-    return _short(key, 160)
-
-
-def _web_call(
-    *,
-    title: str,
-    target: str,
-    detail: Any,
-    status: str = "ok",
-    duration_ms: int | None = None,
-) -> dict[str, Any]:
-    return {
-        "category": "web",
-        "title": title,
-        "target": target,
-        "detail": detail if isinstance(detail, str) else _json_detail(detail),
-        "status": status,
-        "duration_ms": duration_ms,
-    }
-
-
-def _cursor_tool(hook: str, body: dict[str, Any]) -> str | None:
-    if hook in ("preToolUse", "postToolUse", "postToolUseFailure"):
-        return body.get("tool_name")
-    mapping = {
-        "beforeShellExecution": "shell",
-        "afterShellExecution": "shell",
-        "afterFileEdit": "edit",
-        "beforeReadFile": "read",
-        "beforeMCPExecution": "mcp",
-        "afterMCPExecution": "mcp",
-    }
-    if hook in mapping:
-        return mapping[hook]
-    return body.get("tool_name")
-
-
 def _is_failure(hook: str) -> bool:
     return hook in ("PostToolUseFailure", "postToolUseFailure")
-
-
-# Structured search tools that map to ``shell`` alongside Bash/Shell. Cursor
-# uses Grep / Codebase / Search; Claude uses Glob / Grep.
-_SEARCH_TOOLS = frozenset(
-    {"Glob", "Grep", "Search", "Codebase", "GrepSearch", "FileSearch", "ListDir"}
-)
-
-# Cursor (and some Codex) tool names that mean the same thing as a Claude tool.
-# Mapping them to the canonical name lets one ``_tool_event`` dispatch serve
-# every agent, so imported Cursor history lands in the right bucket instead of
-# falling through to ``other``.
-_TOOL_ALIASES = {
-    "ReadFile": "Read",
-    "StrReplace": "Edit",
-    "SearchReplace": "Edit",
-    "ApplyPatch": "apply_patch",
-    "SemanticSearch": "Search",
-    "ListDir": "Search",
-    "rg": "Bash",
-}
-
-# Every casing of the pre/post tool-use hooks across agents. A payload carrying
-# one of these plus a ``tool_name`` is a tool call regardless of source.
-_TOOL_HOOKS = frozenset(
-    {
-        "PreToolUse",
-        "PostToolUse",
-        "PostToolUseFailure",
-        "preToolUse",
-        "postToolUse",
-        "postToolUseFailure",
-    }
-)
-
-
-def _canonical_tool(name: str | None) -> str:
-    return _TOOL_ALIASES.get(name or "", name or "")
-
-
-# Agent-internal / workflow tools that have no real-world side effect (todo
-# lists, mode switches, lint reads, plan-step bookkeeping). Mapping them to a
-# dedicated ``meta`` bucket keeps ``other`` meaningful (a true "uncategorized"
-# signal) instead of a catch-all. Keyed by canonical tool name -> display title.
-_META_TOOLS: dict[str, str] = {
-    "TodoWrite": "Update todos",
-    "AwaitShell": "Await shell",
-    "SwitchMode": "Switch mode",
-    "ReadLints": "Read lints",
-    "UpdateCurrentStep": "Update step",
-    "updateCurrentStep": "Update step",
-    "ToolSearch": "Tool search",
-    "update_plan": "Update plan",
-}
 
 
 def _tool_event(
@@ -340,230 +110,17 @@ def _tool_event(
     body: dict[str, Any],
     duration_ms: int | None,
 ) -> dict[str, Any] | None:
-    """Categorize one tool call. Shared by Claude, Codex, and Cursor so the same
-    tool always lands in the same bucket regardless of which agent emitted it.
-    Returns ``None`` for tool names we don't have a dedicated bucket for."""
-    if not isinstance(tool_input, dict):
-        tool_input = {}
-    status = "error" if _is_failure(hook) else "ok"
-    path = _extract_path(body)
-
-    # The agent explicitly asking the user something — Claude's AskUserQuestion,
-    # Cursor's AskQuestion, or Codex's request_user_input. These are the only
-    # "questions" we tag: structured prompts shown to the user, never heuristics
-    # over assistant prose.
-    if tool_name in ("AskUserQuestion", "AskQuestion", "request_user_input"):
-        questions = tool_input.get("questions")
-        qlist = questions if isinstance(questions, list) else []
-        first = next(
-            (
-                str(q.get("question") or q.get("prompt"))
-                for q in qlist
-                if isinstance(q, dict) and (q.get("question") or q.get("prompt"))
-            ),
-            "",
-        )
-        title = first or "Question for the user"
-        if len(qlist) > 1:
-            title = f"{title} (+{len(qlist) - 1} more)"
-        return {
-            "category": "question",
-            "title": _short(title, 120),
-            "target": _question_target(tool_input, title),
-            "detail": _json_detail({"input": tool_input, "response": tool_response}),
-            "status": status,
-            "duration_ms": duration_ms,
-        }
-
-    # Codex routes file edits through apply_patch; the patch body carries the
-    # target path rather than a discrete file_path field. Cursor's ApplyPatch
-    # (aliased here) sends the patch as a raw string tool_input, which
-    # _coerce_tool_input drops — fall back to the raw body in that case.
-    if tool_name == "apply_patch":
-        patch = tool_input.get("command")
-        if not patch:
-            raw_ti = body.get("tool_input")
-            if isinstance(raw_ti, str):
-                patch = raw_ti
-        path = _extract_patch_path(patch) or path
-        cat = "memory" if _matches(path, _MEMORY_PATTERNS) else "file_edit"
-        return {
-            "category": cat,
-            "title": "Edit file",
-            "target": path,
-            "detail": _json_detail({"input": tool_input, "response": tool_response}),
-            "status": status,
-            "duration_ms": duration_ms,
-        }
-    if tool_name in ("Task", "Agent", "Subagent"):
-        key = _subagent_key(body)
-        label = _subagent_label(body, tool_input)
-        return {
-            "category": "subagent",
-            "title": label,
-            "target": key or label,
-            "detail": _json_detail({"input": tool_input, "response": tool_response}),
-            "status": "ok",
-            "duration_ms": duration_ms,
-        }
-    if tool_name in ("Bash", "Shell"):
-        cmd = tool_input.get("command", "")
-        return {
-            "category": "shell",
-            "title": "Shell command",
-            "target": _short(cmd, 120),
-            "detail": _json_detail({"command": cmd, "response": tool_response}),
-            "status": status,
-            "duration_ms": duration_ms,
-        }
-    # Cursor's generic MCP invoker carries the server/tool in the input rather
-    # than encoded in the tool name (unlike Claude/Codex ``mcp__server__tool``).
-    if tool_name in ("CallMcpTool", "call_mcp_tool"):
-        server = tool_input.get("server") or ""
-        mcp_tool = tool_input.get("toolName") or tool_input.get("tool") or ""
-        if _is_browser_network_tool(mcp_tool):
-            args = _coerce_tool_input(tool_input.get("arguments"))
-            url = args.get("url") or _extract_network_url(body)
-            if url:
-                return _web_call(
-                    title="External network",
-                    target=str(url),
-                    detail={"input": tool_input, "response": tool_response},
-                    status=status,
-                    duration_ms=duration_ms,
-                )
-        if server and mcp_tool:
-            target = f"{server}/{mcp_tool}"
-        else:
-            target = mcp_tool or server or tool_name
-        return {
-            "category": "memory" if server == "memory" else "mcp",
-            "title": f"MCP {server or mcp_tool or 'call'}",
-            "target": target,
-            "detail": _json_detail({"input": tool_input, "response": tool_response}),
-            "status": status,
-            "duration_ms": duration_ms,
-        }
-    # Cursor plan-mode plan, recorded as a CreatePlan tool call in the
-    # transcript. Mirror the structured ``plan`` event the live bridge emits.
-    if tool_name == "CreatePlan":
-        todos = tool_input.get("todos")
-        return {
-            "category": "plan",
-            "title": _short(str(tool_input.get("name") or "Plan"), 120),
-            "target": None,
-            "detail": _json_detail(
-                {
-                    "overview": tool_input.get("overview") or "",
-                    "plan": tool_input.get("plan") or "",
-                    "todos": todos if isinstance(todos, list) else [],
-                }
-            ),
-            "status": status,
-            "duration_ms": duration_ms,
-        }
-    if tool_name in ("Read", "NotebookRead"):
-        cat = "context_read" if _matches(path, _CONTEXT_PATTERNS) else "file_read"
-        content = tool_response if isinstance(tool_response, str) else _json_detail(tool_response)
-        return {
-            "category": cat,
-            "title": "Read file",
-            "target": path,
-            "detail": content or _json_detail({"input": tool_input, "response": tool_response}),
-            "status": status,
-            "duration_ms": duration_ms,
-        }
-    if tool_name in ("Write", "Edit", "MultiEdit", "NotebookEdit", "Delete"):
-        cat = "memory" if _matches(path, _MEMORY_PATTERNS) else "file_edit"
-        return {
-            "category": cat,
-            "title": "Delete file" if tool_name == "Delete" else "Edit file",
-            "target": path,
-            "detail": _json_detail({"input": tool_input, "response": tool_response}),
-            "status": status,
-            "duration_ms": duration_ms,
-        }
-    if tool_name in _SEARCH_TOOLS:
-        pattern = (
-            tool_input.get("pattern")
-            or tool_input.get("glob_pattern")
-            or tool_input.get("query")
-            or tool_input.get("glob")
-            or tool_input.get("path")
-            or tool_input.get("file_path")
-            or ""
-        )
-        return {
-            "category": "shell",
-            "title": tool_name,
-            "target": _short(str(pattern)),
-            "detail": _json_detail({"input": tool_input, "response": tool_response}),
-            "status": status,
-            "duration_ms": duration_ms,
-        }
-    if tool_name in ("WebFetch", "WebSearch"):
-        target = _extract_web_target(tool_input)
-        return _web_call(
-            title=tool_name,
-            target=target,
-            detail={"input": tool_input, "response": tool_response},
-            status=status,
+    return classify_tool(
+        ToolInvocation(
+            name=tool_name,
+            input=tool_input,
+            response=tool_response,
+            status="error" if _is_failure(hook) else "ok",
             duration_ms=duration_ms,
+            body=body,
+            raw_input=body.get("tool_input"),
         )
-    if tool_name.startswith("mcp__") or tool_name.startswith("MCP:"):
-        # Cursor names MCP tools "MCP:<tool>" with no server; Claude/Codex use
-        # "mcp__<server>__<tool>".
-        if tool_name.startswith("MCP:"):
-            server, mcp_tool = None, tool_name[4:]
-        else:
-            server, mcp_tool = _parse_mcp(tool_name)
-        if _is_browser_network_tool(mcp_tool):
-            url = _extract_network_url(body) or tool_input.get("url")
-            if url:
-                return _web_call(
-                    title="External network",
-                    target=str(url),
-                    detail={"input": tool_input, "response": tool_response},
-                    status=status,
-                    duration_ms=duration_ms,
-                )
-        label = server or mcp_tool or tool_name
-        if server and mcp_tool:
-            target = f"{server}/{mcp_tool}"
-        else:
-            target = mcp_tool or server or tool_name
-        return {
-            "category": "memory" if server == "memory" else "mcp",
-            "title": f"MCP {label}",
-            "target": target,
-            "detail": _json_detail({"input": tool_input, "response": tool_response}),
-            "status": status,
-            "duration_ms": duration_ms,
-        }
-    # Claude's Skill tool pulls a skill/context doc into the conversation.
-    if tool_name == "Skill":
-        skill = tool_input.get("name") or tool_input.get("skill") or tool_input.get("command")
-        return {
-            "category": "context_read",
-            "title": "Skill",
-            "target": _short(str(skill)) if skill else None,
-            "detail": _json_detail({"input": tool_input, "response": tool_response}),
-            "status": status,
-            "duration_ms": duration_ms,
-        }
-    # Data-driven fallback for agent-internal/workflow tools, so they land in
-    # the ``meta`` bucket rather than the catch-all ``other``.
-    meta_title = _META_TOOLS.get(tool_name)
-    if meta_title:
-        return {
-            "category": "meta",
-            "title": meta_title,
-            "target": None,
-            "detail": _json_detail({"input": tool_input, "response": tool_response}),
-            "status": status,
-            "duration_ms": duration_ms,
-        }
-    return None
+    )
 
 
 def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None) -> dict[str, Any]:
@@ -700,66 +257,16 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
     # A tool-use hook (any casing, any source) with a tool name is a tool call.
     # Imported Cursor history rides Claude-style capitalized hooks, so gating
     # this on source previously dropped every Cursor tool call into ``other``.
-    if tool_name and hook in _TOOL_HOOKS:
+    if tool_name and _is_tool_hook(hook):
         res = _tool_event(hook, tool_name, tool_input, tool_response, body, duration_ms)
         if res is not None:
             return res
 
     # --- Cursor hook-based ---
     if source == "cursor":
-        if hook in ("beforeShellExecution", "afterShellExecution"):
-            cmd = body.get("command") or ""
-            return {
-                "category": "shell",
-                "title": "Shell command",
-                "target": _short(cmd, 120),
-                "detail": _json_detail(body),
-                "status": "ok",
-                "duration_ms": duration_ms,
-            }
-        if hook in ("beforeMCPExecution", "afterMCPExecution"):
-            server = body.get("server") or body.get("mcp_server") or ""
-            mcp_tool = body.get("tool_name") or body.get("tool") or ""
-            if _is_browser_network_tool(mcp_tool):
-                url = _extract_network_url(body) or (body.get("arguments") or {}).get("url")
-                if url:
-                    return _web_call(
-                        title="External network",
-                        target=str(url),
-                        detail=body,
-                        status="ok",
-                        duration_ms=duration_ms,
-                    )
-            return {
-                "category": "mcp",
-                "title": f"MCP {server or 'call'}",
-                "target": f"{server}/{mcp_tool}".strip("/") if server else mcp_tool,
-                "detail": _json_detail(body),
-                "status": "ok",
-                "duration_ms": duration_ms,
-            }
-        if hook == "beforeReadFile":
-            path = body.get("file_path") or body.get("path") or ""
-            cat = "context_read" if _matches(path, _CONTEXT_PATTERNS) else "file_read"
-            return {
-                "category": cat,
-                "title": "Read file",
-                "target": path,
-                "detail": _json_detail(body),
-                "status": "ok",
-                "duration_ms": duration_ms,
-            }
-        if hook == "afterFileEdit":
-            path = _extract_path(body) or ""
-            cat = "memory" if _matches(path, _MEMORY_PATTERNS) else "file_edit"
-            return {
-                "category": cat,
-                "title": "Edit file",
-                "target": path,
-                "detail": _json_detail(body),
-                "status": "ok",
-                "duration_ms": duration_ms,
-            }
+        res = classify_cursor_hook(hook, body, duration_ms)
+        if res is not None:
+            return res
         if hook in ("preToolUse", "postToolUse", "postToolUseFailure"):
             tn = _canonical_tool(body.get("tool_name") or tool or "")
             if tn:
