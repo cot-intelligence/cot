@@ -32,7 +32,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import __version__, db, insights
-from .normalize import normalize
 
 app = FastAPI(title="cot collector", version=__version__)
 
@@ -604,11 +603,26 @@ async def _json_body(request: Request) -> dict[str, Any]:
     return body
 
 
+async def _ingest_body(request: Request) -> tuple[dict[str, Any] | None, str | None]:
+    raw = await request.body()
+    try:
+        body = json.loads(raw.decode("utf-8") if raw else "{}")
+    except Exception as exc:
+        text = raw.decode("utf-8", errors="replace")
+        return None, str(exc) or f"Malformed JSON: {text[:80]}"
+    if not isinstance(body, dict):
+        return None, "Hook payload must be a JSON object"
+    return body, None
+
+
 @app.post("/v1/ingest/{source}")
 async def ingest(source: str, request: Request) -> dict[str, Any]:
     if source not in ("claude", "cursor", "codex"):
         raise HTTPException(status_code=404, detail=f"Unknown source: {source}")
-    body = await _json_body(request)
+    body, malformed_error = await _ingest_body(request)
+    if body is None:
+        raw_text = (await request.body()).decode("utf-8", errors="replace")
+        return db.record_malformed_ingest(source, raw_text, origin="hook", error=malformed_error)
 
     # Attachment metadata folds onto the matching prompt event, not a new row.
     if body.get("_attach_to_prompt"):
@@ -620,24 +634,7 @@ async def ingest(source: str, request: Request) -> dict[str, Any]:
         )
         return {"ok": True, "attached": attached}
 
-    norm = normalize(source, body)
-    if db.should_ignore_event(norm):
-        return {
-            "ok": True,
-            "ignored": True,
-            "session_id": norm["session_id"],
-            "event_id": None,
-            "hook": norm["hook"],
-            "category": norm.get("category"),
-        }
-    session_id, event_id = db.record_event(norm, body)
-    return {
-        "ok": True,
-        "session_id": session_id,
-        "event_id": event_id,
-        "hook": norm["hook"],
-        "category": norm.get("category"),
-    }
+    return db.record_ingest(source, body)
 
 
 @app.get("/v1/stats")
@@ -705,6 +702,11 @@ def get_import_report() -> dict[str, Any]:
     token/model coverage). Surfaces parsing regressions and what each agent
     actually logs."""
     return db.import_quality()
+
+
+@app.get("/v1/drift/report")
+def get_drift_report() -> dict[str, Any]:
+    return db.drift_report()
 
 
 @app.post("/v1/sessions/complete-imported")
