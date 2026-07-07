@@ -23,7 +23,6 @@ QUESTION_END_HOOKS = {"PostToolUse", "postToolUse"}
 InlineKind = Literal["approval_review", "reviewed_session", "subagent"]
 SUBAGENT_STOP_HOOKS = {"SubagentStop", "subagentStop"}
 INTERNAL_ITEM_KEYS = {"_child_session_id", "_run_kind"}
-PRIVATE_ITEM_KEYS = INTERNAL_ITEM_KEYS
 RUN_CONTENT_CATEGORIES = {
     "shell",
     "file_read",
@@ -538,14 +537,6 @@ def _subagent_label(item: dict[str, Any]) -> str:
 def _public_item(item: dict[str, Any]) -> dict[str, Any]:
     out = dict(item)
     _add_compat_aliases(out)
-    for key in PRIVATE_ITEM_KEYS:
-        out.pop(key, None)
-    return out
-
-
-def _legacy_item(item: dict[str, Any]) -> dict[str, Any]:
-    out = dict(item)
-    _add_compat_aliases(out)
     for key in INTERNAL_ITEM_KEYS:
         out.pop(key, None)
     return out
@@ -709,7 +700,7 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
         "events": [_public_item(item) for item in events],
         # Deprecated compatibility field: the dashboard renders `events` plus
         # `timeline_runs`, but older callers still expect a parent-only list.
-        "timeline": [_legacy_item(item) for item in timeline_items],
+        "timeline": [_public_item(item) for item in timeline_items],
         "timeline_runs": runs,
         "clarifications": clarifications,
     }

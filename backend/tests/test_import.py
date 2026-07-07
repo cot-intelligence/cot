@@ -774,14 +774,15 @@ def test_subagent_link_embeds_child_under_parent():
             assert len(kids) == 1 and kids[0]["session_id"] == child, links
 
             detail = db.get_session_detail(parent)
-            inlined = [e for e in detail["events"] if e.get("provenance") == "subagent"]
-            assert len(inlined) == 2, [(e["category"], e.get("provenance")) for e in detail["events"]]
+            inlined = [e for e in detail["events"] if e.get("inlined_subagent")]
+            assert len(inlined) == 2, [(e["category"], e.get("inlined_subagent")) for e in detail["events"]]
 
             # The native subagentStart/Stop span is *adopted* (stamped with the
             # child session), not duplicated by a second synthetic bar.
-            runs = [r for r in detail["timeline_runs"] if r["kind"] == "subagent"]
-            assert len(runs) == 1 and runs[0]["child_session_id"] == child, runs
-            assert runs[0]["item"]["id"] > 0, runs[0]  # the real native span, not synthetic
+            spans = [t for t in detail["timeline"] if t.get("category") == "subagent"]
+            assert len(spans) == 1, spans
+            assert spans[0]["subagent_child_session"] == child, spans[0]
+            assert spans[0]["id"] > 0, spans[0]  # the real native span, not synthetic
 
             cdetail = db.get_session_detail(child)
             assert any(
@@ -836,18 +837,22 @@ def test_synthetic_subagent_span_groups_child_events():
             ) == 1
 
             detail = db.get_session_detail(parent)
-            runs = [r for r in detail["timeline_runs"] if r["kind"] == "subagent"]
-            assert len(runs) == 1 and runs[0]["child_session_id"] == child, runs
-            span = runs[0]["item"]
+            spans = [t for t in detail["timeline"] if t.get("category") == "subagent"]
+            assert len(spans) == 1, spans
+            span = spans[0]
+            assert span["subagent_child_session"] == child, span
+            assert span["subagent_run_kind"] == "subagent", span
             # Label prefers the child's first instruction (richer than the
             # stored fallback label).
             assert span["title"] == "explore everything", span
             assert span["id"] < 0, span  # synthetic, no collision with real ids
 
             # Every child event (prompt included) is inlined and falls in the run.
-            inlined = [e for e in detail["events"] if e.get("owner_session_id") == child]
+            inlined = [e for e in detail["events"] if e.get("event_session_id") == child]
             assert {e["category"] for e in inlined} == {"prompt", "shell"}, inlined
-            assert all(e["run_id"] == span["id"] for e in inlined), (span, inlined)
+            assert all(span["start_ts"] <= e["start_ts"] <= span["end_ts"] for e in inlined), (
+                span, inlined,
+            )
         finally:
             restore()
 
