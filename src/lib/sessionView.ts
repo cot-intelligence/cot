@@ -233,42 +233,8 @@ function inWindow(ts: string, start: string, end: string | null): boolean {
   return end == null ? true : ts <= end;
 }
 
-/**
- * Subagent runs in a session, built from the merged timeline's `subagent`
- * spans. Pass the merged `detail.timeline` (not `detail.events`, which is
- * unmerged and would double-count Pre/Post).
- */
-export function subagentRuns(timeline: TimelineItem[]): SubagentRun[] {
-  return timeline
-    .filter((it) => it.category === 'subagent' && (it.start_ts || it.ts))
-    .map((it): SubagentRun => ({
-      item: it,
-      label: subagentLabel(it),
-      start: toTimestampString(it.start_ts || it.ts),
-      end: it.end_ts == null ? null : toTimestampString(it.end_ts),
-      status: it.status ?? null,
-      durationMs: it.duration_ms ?? null,
-      ongoing: it.ongoing ?? it.end_ts == null,
-      kind: it.subagent_run_kind === 'approval_review' ? 'review' : 'subagent',
-      childSessionId: it.subagent_child_session,
-    }))
-    .sort((a, b) => a.start.localeCompare(b.start));
-}
-
 export function sessionRuns(detail: SessionDetail): SubagentRun[] {
-  if (detail.timeline_runs) {
-    return detail.timeline_runs.map(fromReadModelRun);
-  }
-  return subagentRuns(detail.timeline);
-}
-
-/** Human label for a subagent span — title holds type/description; target is the stable id. */
-function subagentLabel(it: TimelineItem): string {
-  const title = it.title?.trim();
-  if (title && title !== 'Subagent') return title;
-  const target = it.target?.trim();
-  if (target && !target.startsWith('call_') && !target.startsWith('toolu_')) return target;
-  return 'Subagent';
+  return detail.timeline_runs.map(fromReadModelRun);
 }
 
 /** Whether an action falls within any subagent run window. */
@@ -280,7 +246,7 @@ export function itemLane(item: TimelineItem, runs: SubagentRun[]): AgentLane {
 
 /** Session that owns an event row (parent session or an inlined review session). */
 export function eventSessionId(item: TimelineItem, parentSessionId: string): string {
-  return item.event_session_id ?? parentSessionId;
+  return item.owner_session_id ?? parentSessionId;
 }
 
 /** Stable key for selection/scrolling when parent and review sessions share event ids. */
@@ -302,7 +268,7 @@ export function eventsInRun(items: TimelineItem[], run: SubagentRun): TimelineIt
   // child's own prompt and lifecycle rows that the category filter would drop.
   if (run.childSessionId) {
     return items.filter(
-      (it) => it.event_session_id === run.childSessionId && it.id !== run.item.id,
+      (it) => it.owner_session_id === run.childSessionId && it.id !== run.item.id,
     );
   }
   // Native Claude spans: members are whatever falls inside the time window.

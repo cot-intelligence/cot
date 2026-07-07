@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any
+from typing import Any, Literal
 
 from . import db
 
@@ -20,6 +20,13 @@ DETAIL_PREVIEW_CHARS = 4000
 # We never guess from assistant prose alone.
 QUESTION_TOOLS = {"AskUserQuestion", "AskQuestion", "request_user_input"}
 QUESTION_END_HOOKS = {"PostToolUse", "postToolUse"}
+InlineKind = Literal["approval_review", "reviewed_session", "subagent"]
+INLINE_PROVENANCE_FLAGS: dict[InlineKind, str] = {
+    "approval_review": "inlined_approval_review",
+    "reviewed_session": "inlined_reviewed_session",
+    "subagent": "inlined_subagent",
+}
+SUBAGENT_STOP_HOOKS = {"SubagentStop", "subagentStop"}
 
 
 def _coerce_dict(val: Any) -> dict[str, Any]:
@@ -159,12 +166,18 @@ def _fetch_inlined_session_events(
     session_id: str,
     *,
     skip_history_dump: bool,
-    inline_kind: str,
-) -> list[dict[str, Any]]:
+    inline_kind: InlineKind,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rows = conn.execute(
         "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
         (session_id,),
     ).fetchall()
+    clarifications, annotations = build_clarifications(rows)
+    for clarification in clarifications:
+        clarification["question_session_id"] = session_id
+        if clarification["answer_event_id"] is not None:
+            clarification["answer_session_id"] = session_id
+
     out: list[dict[str, Any]] = []
     for row in rows:
         if skip_history_dump and row["category"] == "prompt" and _is_approval_history_dump(row["detail"]):
@@ -175,53 +188,51 @@ def _fetch_inlined_session_events(
             "end_ts": db._format_ts(row["ts"]),
             "ongoing": False,
             "event_session_id": session_id,
+            "owner_session_id": session_id,
+            "provenance": inline_kind,
         }
-        if inline_kind == "approval_review":
-            item["inlined_approval_review"] = True
-        elif inline_kind == "reviewed_session":
-            item["inlined_reviewed_session"] = True
-        elif inline_kind == "subagent":
-            item["inlined_subagent"] = True
+        item[INLINE_PROVENANCE_FLAGS[inline_kind]] = True
+        _apply_event_annotations(item, annotations, session_id=session_id, trim_detail=False)
         out.append(item)
-    return out
+    return out, clarifications
 
 
 def _merge_linked_session_events(
     conn: sqlite3.Connection,
     events: list[dict[str, Any]],
     links: dict[str, list[dict[str, Any]]],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     children = links.get("children") or []
     parents = links.get("parents") or []
     if not children and not parents:
-        return events
+        return events, []
     merged = list(events)
+    linked_clarifications: list[dict[str, Any]] = []
     for link in children:
         if link.get("type") == "subagent":
-            merged.extend(
-                _fetch_inlined_session_events(
-                    conn, link["session_id"], skip_history_dump=False, inline_kind="subagent"
-                )
+            inlined, clarifications = _fetch_inlined_session_events(
+                conn, link["session_id"], skip_history_dump=False, inline_kind="subagent"
             )
         else:
-            merged.extend(
-                _fetch_inlined_session_events(
-                    conn,
-                    link["session_id"],
-                    skip_history_dump=True,
-                    inline_kind="approval_review",
-                )
+            inlined, clarifications = _fetch_inlined_session_events(
+                conn,
+                link["session_id"],
+                skip_history_dump=True,
+                inline_kind="approval_review",
             )
+        merged.extend(inlined)
+        linked_clarifications.extend(clarifications)
     for link in parents:
         if link.get("type") == "subagent":
             continue
-        merged.extend(
-            _fetch_inlined_session_events(
-                conn, link["session_id"], skip_history_dump=False, inline_kind="reviewed_session"
-            )
+        inlined, clarifications = _fetch_inlined_session_events(
+            conn, link["session_id"], skip_history_dump=False, inline_kind="reviewed_session"
         )
+        merged.extend(inlined)
+        linked_clarifications.extend(clarifications)
     merged.sort(key=lambda e: (e.get("ts") or "", e.get("id") or 0))
-    return merged
+    linked_clarifications.sort(key=lambda c: (c.get("question_ts") or "", c.get("question_event_id") or 0))
+    return merged, linked_clarifications
 
 
 def _trim_detail_inplace(item: dict[str, Any], session_id: str) -> None:
@@ -233,6 +244,26 @@ def _trim_detail_inplace(item: dict[str, Any], session_id: str) -> None:
             "session_id": item.get("event_session_id") or session_id,
             "event_id": item["id"],
         }
+
+
+def _drop_orphan_subagent_stops(
+    events: list[dict[str, Any]], timeline_items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    completed_subagent_ends = {
+        item.get("end_ts")
+        for item in timeline_items
+        if item.get("category") == "subagent" and item.get("end_ts")
+    }
+    return [
+        item
+        for item in events
+        if not (
+            item.get("category") == "subagent"
+            and item.get("phase") == "end"
+            and item.get("hook") in SUBAGENT_STOP_HOOKS
+            and item.get("ts") not in completed_subagent_ends
+        )
+    ]
 
 
 def _synthesize_child_subagent_spans(
@@ -395,12 +426,19 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
         ).fetchall()
         links = db._session_links(conn, session_id)
         clarifications, annotations = build_clarifications(ev_rows)
+        for clarification in clarifications:
+            clarification["question_session_id"] = session_id
+            if clarification["answer_event_id"] is not None:
+                clarification["answer_session_id"] = session_id
         events = db.events_list(session_id)
-        tl = db.timeline(session_id)
+        timeline_items = db.timeline(session_id)
 
         for item in events:
+            item["owner_session_id"] = session_id
             _apply_event_annotations(item, annotations, session_id=session_id, trim_detail=True)
-        events = _merge_linked_session_events(conn, events, links)
+        events, linked_clarifications = _merge_linked_session_events(conn, events, links)
+        clarifications.extend(linked_clarifications)
+        clarifications.sort(key=lambda c: (c.get("question_ts") or "", c.get("question_event_id") or 0))
         for item in events:
             if (
                 item.get("inlined_approval_review")
@@ -409,20 +447,22 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
             ):
                 _trim_detail_inplace(item, item.get("event_session_id") or session_id)
 
-        _synthesize_child_subagent_spans(events, tl, links, session_id)
-        for item in tl:
+        _synthesize_child_subagent_spans(events, timeline_items, links, session_id)
+        events = _drop_orphan_subagent_stops(events, timeline_items)
+        for item in timeline_items:
+            item["owner_session_id"] = session_id
             _apply_event_annotations(item, annotations, session_id=session_id, trim_detail=False)
             item["detail"] = None
 
         components = db.session_components(session_id)
 
-    runs = _timeline_runs(tl)
+    runs = _timeline_runs(timeline_items)
     return {
         "summary": summary,
         "links": links,
         "components": components,
         "events": events,
-        "timeline": tl,
+        "timeline": timeline_items,
         "timeline_runs": runs,
         "clarifications": clarifications,
     }

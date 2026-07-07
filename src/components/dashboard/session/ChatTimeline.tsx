@@ -35,20 +35,59 @@ type Segment =
   | { type: 'event'; item: TimelineItem }
   | { type: 'subagent'; run: SubagentRun; item: TimelineItem; resultItem: TimelineItem; children: TimelineItem[] };
 
+function provenanceLabel(item: TimelineItem): string | null {
+  if (item.provenance === 'approval_review') return 'Review';
+  if (item.provenance === 'reviewed_session') return 'Reviewed session';
+  if (item.provenance === 'subagent') return 'Subagent';
+  return null;
+}
+
+function provenanceAccent(item: TimelineItem): string {
+  if (item.provenance === 'approval_review') return 'border-l-2 border-l-cobalt/25 ';
+  if (item.provenance === 'reviewed_session') return 'border-l-2 border-l-fg/15 ';
+  return '';
+}
+
+function provenancePillClass(item: TimelineItem): string {
+  if (item.provenance === 'approval_review') {
+    return 'bg-cobalt/10 text-cobalt';
+  }
+  return 'bg-fg/8 text-fg/45';
+}
+
+function useFullEventDetail(item: TimelineItem, sessionId: string) {
+  const [full, setFull] = useState<{ detail: string | null; attachments: TimelineItem['attachments'] } | null>(null);
+  const needsFull = Boolean(item.detail_truncated && full === null);
+  const lookupSessionId = item.detail_lookup?.session_id ?? sessionId;
+  const lookupEventId = item.detail_lookup?.event_id ?? item.id;
+
+  useEffect(() => {
+    if (!needsFull) return;
+    let cancelled = false;
+    getEventDetail(lookupSessionId, lookupEventId)
+      .then((res) => { if (!cancelled) setFull({ detail: res.detail, attachments: res.attachments }); })
+      .catch(() => { if (!cancelled) setFull({ detail: item.detail, attachments: item.attachments }); });
+    return () => { cancelled = true; };
+  }, [needsFull, lookupSessionId, lookupEventId, item.detail, item.attachments]);
+
+  return {
+    resolved: full ? { ...item, detail: full.detail, attachments: full.attachments ?? item.attachments } : item,
+    loading: Boolean(item.detail_truncated && !full),
+  };
+}
+
 /**
  * Inside a subagent group the run header already conveys provenance, so drop
  * the per-event "Review"/"subagent" badge + accent — giving every provider the
  * same clean nested look Claude has natively.
  */
 function nestedChild(item: TimelineItem): TimelineItem {
-  if (!item.inlined_approval_review && !item.inlined_subagent && !item.inlined_reviewed_session) {
+  if (!item.provenance) {
     return item;
   }
   return {
     ...item,
-    inlined_approval_review: false,
-    inlined_subagent: false,
-    inlined_reviewed_session: false,
+    provenance: undefined,
   };
 }
 
@@ -279,25 +318,11 @@ const SubagentGroup = forwardRef<HTMLDivElement, {
 );
 
 function SubagentResultCard({ item, sessionId }: { item: TimelineItem; sessionId: string }) {
-  const [full, setFull] = useState<{ detail: string | null; attachments: TimelineItem['attachments'] } | null>(null);
-  const needsFull = Boolean(item.detail_truncated && full === null);
-  const lookupSessionId = item.detail_lookup?.session_id ?? sessionId;
-  const lookupEventId = item.detail_lookup?.event_id ?? item.id;
-
-  useEffect(() => {
-    if (!needsFull) return;
-    let cancelled = false;
-    getEventDetail(lookupSessionId, lookupEventId)
-      .then((res) => { if (!cancelled) setFull({ detail: res.detail, attachments: res.attachments }); })
-      .catch(() => { if (!cancelled) setFull({ detail: item.detail, attachments: item.attachments }); });
-    return () => { cancelled = true; };
-  }, [needsFull, lookupSessionId, lookupEventId, item.detail, item.attachments]);
-
-  const resolved = full ? { ...item, detail: full.detail, attachments: full.attachments ?? item.attachments } : item;
+  const { resolved, loading } = useFullEventDetail(item, sessionId);
   const d = parseDetail(resolved);
   const message = d.agentResponse?.trim();
 
-  if (!message && needsFull) {
+  if (!message && loading) {
     return (
       <p className="rounded-md bg-panel px-3 py-2 font-mono text-[0.62rem] uppercase tracking-widest text-fg/35">
         Loading subagent response...
@@ -329,14 +354,13 @@ const ConversationCard = forwardRef<HTMLDivElement, { item: TimelineItem; sessio
   function ConversationCard({ item, sessionId, eventKey: itemEventKey }, ref) {
     const meta = getCategoryMeta(item.category);
     const isPrompt = item.category === 'prompt' || item.category === 'question';
+    const label = provenanceLabel(item);
 
     return (
       <div
         ref={ref}
         data-event-key={itemEventKey}
-        className={`scroll-mt-4 rounded-lg px-4 py-3 ${
-          item.inlined_approval_review ? 'border-l-2 border-cobalt/25 ' : ''
-        }${item.inlined_reviewed_session ? 'border-l-2 border-fg/15 ' : ''}${
+        className={`scroll-mt-4 rounded-lg px-4 py-3 ${provenanceAccent(item)}${
           isPrompt
             ? 'border border-fg/10 bg-surface'
             : 'bg-transparent'
@@ -348,14 +372,9 @@ const ConversationCard = forwardRef<HTMLDivElement, { item: TimelineItem; sessio
           <span className={`font-mono text-[0.58rem] font-bold uppercase tracking-widest ${meta.color}`}>
             {isPrompt ? 'User' : item.category === 'thought' ? 'Thinking' : 'Agent'}
           </span>
-          {item.inlined_approval_review && (
-            <span className="rounded bg-cobalt/10 px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest text-cobalt">
-              Review
-            </span>
-          )}
-          {item.inlined_reviewed_session && (
-            <span className="rounded bg-fg/8 px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest text-fg/45">
-              Reviewed session
+          {label && (
+            <span className={`rounded px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest ${provenancePillClass(item)}`}>
+              {label}
             </span>
           )}
           <span
@@ -409,6 +428,7 @@ const ActionCard = forwardRef<HTMLDivElement, {
     const meta = getCategoryMeta(item.category);
     const isError = item.status === 'error' || item.status === 'blocked';
     const showTarget = item.category !== 'question' && Boolean(item.target);
+    const label = provenanceLabel(item);
 
     useEffect(() => {
       setExpanded(expansionRequest.open);
@@ -418,9 +438,7 @@ const ActionCard = forwardRef<HTMLDivElement, {
       <div
         ref={ref}
         data-event-key={itemEventKey}
-        className={`group scroll-mt-4 rounded-lg border border-line/5 transition-colors hover:border-line/15 ${
-          item.inlined_approval_review ? 'border-l-2 border-l-cobalt/25' : ''
-        }${item.inlined_reviewed_session ? ' border-l-2 border-l-fg/15' : ''}`}
+        className={`group scroll-mt-4 rounded-lg border border-line/5 transition-colors hover:border-line/15 ${provenanceAccent(item)}`}
       >
         <button
           type="button"
@@ -431,14 +449,9 @@ const ActionCard = forwardRef<HTMLDivElement, {
           <span className={`shrink-0 font-mono text-[0.55rem] font-bold uppercase tracking-widest ${meta.color}`}>
             {meta.label}
           </span>
-          {item.inlined_approval_review && (
-            <span className="shrink-0 rounded bg-cobalt/10 px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest text-cobalt">
-              Review
-            </span>
-          )}
-          {item.inlined_reviewed_session && (
-            <span className="shrink-0 rounded bg-fg/8 px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest text-fg/45">
-              Reviewed session
+          {label && (
+            <span className={`shrink-0 rounded px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest ${provenancePillClass(item)}`}>
+              {label}
             </span>
           )}
           <span className="min-w-0 flex-1 truncate font-mono text-[0.78rem] font-bold text-fg/80">
@@ -498,22 +511,7 @@ const ActionCard = forwardRef<HTMLDivElement, {
 /* ------------------------------------------------------------------ */
 
 function CardBody({ item, sessionId }: { item: TimelineItem; sessionId: string }) {
-  const [full, setFull] = useState<{ detail: string | null; attachments: TimelineItem['attachments'] } | null>(null);
-  const needsFull = Boolean(item.detail_truncated && full === null);
-  const lookupSessionId = item.detail_lookup?.session_id ?? sessionId;
-  const lookupEventId = item.detail_lookup?.event_id ?? item.id;
-
-  useEffect(() => {
-    if (!needsFull) return;
-    let cancelled = false;
-    getEventDetail(lookupSessionId, lookupEventId)
-      .then((res) => { if (!cancelled) setFull({ detail: res.detail, attachments: res.attachments }); })
-      .catch(() => { if (!cancelled) setFull({ detail: item.detail, attachments: item.attachments }); });
-    return () => { cancelled = true; };
-  }, [needsFull, lookupSessionId, lookupEventId, item.detail, item.attachments]);
-
-  const resolved = full ? { ...item, detail: full.detail, attachments: full.attachments ?? item.attachments } : item;
-  const loading = Boolean(item.detail_truncated && !full);
+  const { resolved, loading } = useFullEventDetail(item, sessionId);
 
   if (item.category === 'question' && item.questions && item.questions.length > 0) {
     return <QuestionCards questions={item.questions} />;

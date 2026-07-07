@@ -286,6 +286,13 @@ function SidebarList({
   sessionId: string;
   onSelect: (item: TimelineItem) => void;
 }) {
+  const provenanceLabel = (item: TimelineItem) => {
+    if (item.provenance === 'approval_review') return ' · review';
+    if (item.provenance === 'reviewed_session') return ' · reviewed';
+    if (item.provenance === 'subagent') return ' · subagent';
+    return '';
+  };
+
   return (
     <ul className="divide-y divide-line/10">
       {items.map((item) => {
@@ -309,9 +316,7 @@ function SidebarList({
                 <span className="flex items-center justify-between gap-1">
                   <span className={`truncate font-mono text-[0.5rem] font-bold uppercase tracking-widest ${meta.color}`}>
                     {meta.label}
-                    {item.inlined_approval_review ? ' · review' : ''}
-                    {item.inlined_reviewed_session ? ' · reviewed' : ''}
-                    {item.inlined_subagent ? ' · subagent' : ''}
+                    {provenanceLabel(item)}
                   </span>
                   <span className="shrink-0 font-mono text-[0.48rem] tabular-nums text-fg/25" title={formatDateTime(item.start_ts || item.ts)}>
                     {formatClock(item.start_ts || item.ts)}

@@ -85,16 +85,10 @@ export interface TimelineItem {
   questions?: QuestionPart[];
   /** Cursor composer mode when not the default "agent" (e.g. "plan"). */
   composer_mode?: string;
-  /** When set, this event was inlined from a linked session (review or subagent). */
-  event_session_id?: string;
-  inlined_approval_review?: boolean;
-  inlined_reviewed_session?: boolean;
-  /** Inlined from a subagent session that this (parent) session launched. */
-  inlined_subagent?: boolean;
-  /** On a synthetic subagent span: the child session whose events it groups. */
-  subagent_child_session?: string;
-  /** On a synthetic subagent span: whether it groups a subagent or a review. */
-  subagent_run_kind?: 'subagent' | 'approval_review';
+  /** Session that owns this display row; parent session unless the row was inlined. */
+  owner_session_id?: string;
+  /** Display provenance for rows inlined from linked sessions. */
+  provenance?: 'approval_review' | 'reviewed_session' | 'subagent';
 }
 
 export interface QuestionPart {
@@ -107,9 +101,11 @@ export interface QuestionPart {
 
 export interface Clarification {
   question_event_id: number;
+  question_session_id?: string;
   question_ts: string;
   question_excerpt: string;
   answer_event_id: number | null;
+  answer_session_id?: string;
   answer_ts: string | null;
   answer_excerpt: string | null;
   answered: boolean;
@@ -179,7 +175,7 @@ export interface SessionDetail {
   events: TimelineItem[];
   timeline: TimelineItem[];
   /** Display-ready subagent/review windows assembled by the session read module. */
-  timeline_runs?: TimelineRun[];
+  timeline_runs: TimelineRun[];
   clarifications: Clarification[];
 }
 

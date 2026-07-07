@@ -105,7 +105,7 @@ def test_session_detail_exposes_backend_owned_timeline_runs_for_inlined_child():
         assert runs[0]["kind"] == "subagent"
         assert runs[0]["label"] == "Explore files"
         assert runs[0]["child_session_id"] == child
-        assert runs[0]["item"]["subagent_child_session"] == child
+        assert runs[0]["item"]["owner_session_id"] == parent
     finally:
         tmp.cleanup()
 
@@ -124,13 +124,14 @@ def test_detail_preview_lookup_points_at_owning_session_for_parent_and_child_eve
         detail = db.get_session_detail(parent)
         assert detail is not None
         parent_event = next(e for e in detail["events"] if e["id"] == parent_id)
-        child_event = next(e for e in detail["events"] if e.get("event_session_id") == child)
+        child_event = next(e for e in detail["events"] if e.get("owner_session_id") == child)
 
         assert parent_event["detail_truncated"] is True
         assert parent_event["detail_lookup"] == {"session_id": parent, "event_id": parent_id}
         assert len(parent_event["detail"]) == 4000
 
         assert child_event["id"] == child_id
+        assert child_event["provenance"] == "subagent"
         assert child_event["detail_truncated"] is True
         assert child_event["detail_lookup"] == {"session_id": child, "event_id": child_id}
     finally:
@@ -194,5 +195,95 @@ def test_session_detail_pairs_structured_question_and_answer_annotations():
         assert question_event["questions"][0]["answer"] is None
         assert answer_event["answers_event_id"] == qid
         assert answer_event["questions"][0]["answer"] == "current"
+    finally:
+        tmp.cleanup()
+
+
+def test_session_detail_drops_orphan_subagent_stop_events():
+    tmp = _fresh_db()
+    try:
+        sid = "66666666-6666-6666-6666-666666666666"
+        _session(sid)
+        stop_id = _event(
+            sid,
+            seconds=5,
+            category="subagent",
+            phase="end",
+            hook="SubagentStop",
+            title="Subagent",
+            target="Subagent",
+        )
+
+        detail = db.get_session_detail(sid)
+        assert detail is not None
+        assert all(e["id"] != stop_id for e in detail["events"]), detail["events"]
+        assert detail["timeline_runs"] == []
+    finally:
+        tmp.cleanup()
+
+
+def test_session_detail_annotates_inlined_child_questions():
+    tmp = _fresh_db()
+    try:
+        parent = "77777777-7777-7777-7777-777777777777"
+        child = "88888888-8888-8888-8888-888888888888"
+        question = {
+            "input": {
+                "questions": [
+                    {
+                        "id": "mode",
+                        "header": "Mode",
+                        "question": "Review or edit?",
+                        "options": [{"label": "review"}, {"label": "edit"}],
+                    }
+                ]
+            }
+        }
+        answer = {
+            **question,
+            "response": {"answers": {"mode": {"answers": ["review"]}}},
+        }
+        _session(parent)
+        _session(child)
+        _event(parent, seconds=0, category="prompt", detail="delegate")
+        qid = _event(
+            child,
+            seconds=1,
+            category="question",
+            hook="request_user_input",
+            tool="request_user_input",
+            detail=json.dumps(question),
+        )
+        aid = _event(
+            child,
+            seconds=2,
+            category="question",
+            hook="postToolUse",
+            tool="request_user_input",
+            detail=json.dumps(answer),
+        )
+        assert db.set_subagent_links([{"child": child, "parent": parent, "label": "child"}]) == 1
+
+        detail = db.get_session_detail(parent)
+        assert detail is not None
+        child_question = next(
+            e for e in detail["events"] if e.get("owner_session_id") == child and e["id"] == qid
+        )
+        child_answer = next(
+            e for e in detail["events"] if e.get("owner_session_id") == child and e["id"] == aid
+        )
+        assert child_question["provenance"] == "subagent"
+        assert child_question["is_question"] is True
+        assert child_question["answered"] is True
+        assert child_question["answer_event_id"] == aid
+        assert child_answer["answers_event_id"] == qid
+        assert child_answer["questions"][0]["answer"] == "review"
+        assert any(
+            c["question_session_id"] == child
+            and c["question_event_id"] == qid
+            and c["answer_session_id"] == child
+            and c["answer_event_id"] == aid
+            for c in detail["clarifications"]
+        ), detail["clarifications"]
     finally:
         tmp.cleanup()
