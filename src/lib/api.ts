@@ -90,6 +90,13 @@ export interface TimelineItem {
   owner_session_id?: string;
   /** Display provenance for rows inlined from linked sessions. */
   provenance?: 'approval_review' | 'reviewed_session' | 'subagent';
+  /** Deprecated aliases for older session-detail callers. */
+  event_session_id?: string;
+  inlined_approval_review?: boolean;
+  inlined_reviewed_session?: boolean;
+  inlined_subagent?: boolean;
+  subagent_child_session?: string;
+  subagent_run_kind?: 'subagent' | 'approval_review';
   /** Backend-owned run membership for rows displayed inside a subagent/review group. */
   run_id?: number;
   run_kind?: 'subagent' | 'review';

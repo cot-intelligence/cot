@@ -514,6 +514,7 @@ def _subagent_label(item: dict[str, Any]) -> str:
 
 def _public_item(item: dict[str, Any]) -> dict[str, Any]:
     out = dict(item)
+    _add_compat_aliases(out)
     for key in PRIVATE_ITEM_KEYS:
         out.pop(key, None)
     return out
@@ -521,9 +522,29 @@ def _public_item(item: dict[str, Any]) -> dict[str, Any]:
 
 def _legacy_item(item: dict[str, Any]) -> dict[str, Any]:
     out = dict(item)
+    _add_compat_aliases(out)
     for key in INTERNAL_ITEM_KEYS:
         out.pop(key, None)
     return out
+
+
+def _add_compat_aliases(item: dict[str, Any]) -> None:
+    owner_session_id = item.get("owner_session_id")
+    if owner_session_id and item.get("provenance"):
+        item["event_session_id"] = owner_session_id
+
+    provenance = item.get("provenance")
+    if provenance == "approval_review":
+        item["inlined_approval_review"] = True
+    elif provenance == "reviewed_session":
+        item["inlined_reviewed_session"] = True
+    elif provenance == "subagent":
+        item["inlined_subagent"] = True
+
+    if item.get("_child_session_id"):
+        item["subagent_child_session"] = item["_child_session_id"]
+    if item.get("_run_kind"):
+        item["subagent_run_kind"] = item["_run_kind"]
 
 
 def _timeline_runs(
@@ -591,6 +612,10 @@ def _assign_run_membership(events: list[dict[str, Any]], runs: list[dict[str, An
             item["run_kind"] = run["kind"]
 
 
+def _sort_items(items: list[dict[str, Any]]) -> None:
+    items.sort(key=lambda item: (item.get("start_ts") or item.get("ts") or "", item.get("id") or 0))
+
+
 def _apply_event_annotations(
     item: dict[str, Any],
     annotations: dict[int, dict[str, Any]],
@@ -637,6 +662,8 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
 
         _synthesize_child_subagent_spans(events, timeline_items, links, session_id)
         events = _drop_orphan_subagent_stops(events, timeline_items)
+        _sort_items(events)
+        _sort_items(timeline_items)
         for item in timeline_items:
             item["owner_session_id"] = session_id
             _apply_event_annotations(item, annotations, session_id=session_id, trim_detail=False)

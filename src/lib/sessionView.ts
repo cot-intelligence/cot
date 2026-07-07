@@ -262,7 +262,7 @@ export function itemLane(item: TimelineItem): AgentLane {
 
 /** Session that owns an event row (parent session or an inlined review session). */
 export function eventSessionId(item: TimelineItem, parentSessionId: string): string {
-  return item.owner_session_id ?? parentSessionId;
+  return item.owner_session_id ?? item.event_session_id ?? parentSessionId;
 }
 
 /** Stable key for selection/scrolling when parent and review sessions share event ids. */

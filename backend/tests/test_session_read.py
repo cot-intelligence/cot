@@ -106,9 +106,41 @@ def test_session_detail_exposes_backend_owned_timeline_runs_for_inlined_child():
         assert runs[0]["label"] == "Explore files"
         assert runs[0]["child_session_id"] == child
         assert runs[0]["item"]["owner_session_id"] == parent
+        assert runs[0]["item"]["subagent_child_session"] == child
+        assert runs[0]["item"]["subagent_run_kind"] == "subagent"
         child_events = [e for e in detail["events"] if e.get("owner_session_id") == child]
         assert {e["category"] for e in child_events} == {"prompt", "shell"}
         assert all(e["run_id"] == runs[0]["id"] for e in child_events), child_events
+        assert all(e["event_session_id"] == child for e in child_events), child_events
+        assert all(e["inlined_subagent"] is True for e in child_events), child_events
+    finally:
+        tmp.cleanup()
+
+
+def test_session_detail_orders_synthetic_spans_with_events():
+    tmp = _fresh_db()
+    try:
+        parent = "15151515-1515-1515-1515-151515151515"
+        child = "16161616-1616-1616-1616-161616161616"
+        _session(parent)
+        _session(child)
+        _event(parent, seconds=0, category="prompt", detail="delegate")
+        _event(child, seconds=1, category="prompt", detail="child work")
+        _event(parent, seconds=4, category="response", detail="done")
+
+        assert db.set_subagent_links([{"child": child, "parent": parent, "label": "child"}]) == 1
+
+        detail = db.get_session_detail(parent)
+        assert detail is not None
+        assert [e["category"] for e in detail["events"]] == [
+            "prompt",
+            "prompt",
+            "subagent",
+            "response",
+        ]
+        assert detail["events"][1]["owner_session_id"] == child
+        assert detail["events"][2]["subagent_child_session"] == child
+        assert detail["events"][2]["subagent_run_kind"] == "subagent"
     finally:
         tmp.cleanup()
 
@@ -140,6 +172,8 @@ def test_detail_preview_lookup_points_at_owning_session_for_parent_and_child_eve
 
         assert child_event["id"] == child_id
         assert child_event["provenance"] == "subagent"
+        assert child_event["event_session_id"] == child
+        assert child_event["inlined_subagent"] is True
         assert child_event["detail_truncated"] is True
         assert child_event["detail_lookup"] == {"session_id": child, "event_id": child_id}
         child_full = db.get_event_detail(
@@ -483,6 +517,8 @@ def test_session_detail_inlines_approval_review_as_review_run():
         assert [e["id"] for e in review_events] == [response_id], review_events
         assert all(e["id"] != history_id for e in detail["events"])
         assert review_events[0]["provenance"] == "approval_review"
+        assert review_events[0]["event_session_id"] == review
+        assert review_events[0]["inlined_approval_review"] is True
         assert review_events[0]["run_kind"] == "review"
         assert review_events[0]["detail_truncated"] is True
         assert review_events[0]["detail_lookup"] == {"session_id": review, "event_id": response_id}
