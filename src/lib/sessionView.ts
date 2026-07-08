@@ -171,6 +171,10 @@ export function sortEventsByTime(items: TimelineItem[], order: TimeSort): Timeli
  * Categories that represent concrete agent *actions* (as opposed to
  * conversation or lifecycle markers). Only these are attributed to a
  * main-vs-subagent lane by run-window membership.
+ *
+ * Backend session_read.RUN_CONTENT_CATEGORIES is the broader grouping
+ * counterpart for server-owned run membership; review both when changing
+ * action categories.
  */
 const ACTION_CATEGORIES = new Set([
   'shell',
@@ -182,8 +186,6 @@ const ACTION_CATEGORIES = new Set([
   'memory',
 ]);
 
-// Backend session_read.RUN_CONTENT_CATEGORIES is the authoritative grouping
-// counterpart for nested run membership.
 export type AgentLane = 'main' | 'subagent';
 type EventProvenance = NonNullable<TimelineItem['provenance']>;
 

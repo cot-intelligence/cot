@@ -57,8 +57,6 @@ export function useFullEventDetail(item: TimelineItem | null, sessionId: string)
 
   return {
     resolved,
-    loading: Boolean(
-      item?.detail_truncated && lookupKey && fullByKey[lookupKey] === undefined && failedKey !== lookupKey,
-    ),
+    loading: needsFull,
   };
 }

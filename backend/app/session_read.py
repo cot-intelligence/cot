@@ -24,6 +24,8 @@ InlineKind = Literal["approval_review", "reviewed_session", "subagent"]
 SUBAGENT_STOP_HOOKS = {"SubagentStop", "subagentStop"}
 INTERNAL_ITEM_KEYS = {"_child_session_id", "_run_kind"}
 RUN_CONTENT_CATEGORIES = {
+    # Frontend sessionView.ACTION_CATEGORIES is the narrower display-lane
+    # counterpart; review both when changing run-membership categories.
     "shell",
     "file_read",
     "file_edit",
@@ -235,7 +237,7 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
     spans: dict[str, list[dict[str, Any]]] = {}
     items: list[dict[str, Any]] = []
     open_subagent_keys: list[str] = []
-    pending_subagent_stops: list[dict[str, Any]] = []
+    pending_subagent_spans: list[dict[str, Any]] = []
 
     def _is_subagent_stop(event: dict[str, Any]) -> bool:
         return (event.get("hook") or "") in SUBAGENT_STOP_HOOKS
@@ -287,12 +289,14 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
             }
             items.append(merged)
             if category == "subagent" and not _is_subagent_stop(event):
-                pending_subagent_stops.append(merged)
+                pending_subagent_spans.append(merged)
             continue
 
         if category == "subagent" and phase == "end":
             if open_subagent_keys:
                 open_key = open_subagent_keys.pop(0)
+                # open_subagent_keys is maintained alongside spans; this only
+                # guards inconsistent legacy rows or future bookkeeping bugs.
                 if not spans.get(open_key):
                     continue
                 start = spans[open_key].pop(0)
@@ -309,8 +313,8 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
                     "status": event.get("status") or start.get("status"),
                 })
                 continue
-            if pending_subagent_stops:
-                _extend(pending_subagent_stops.pop(0), event)
+            if pending_subagent_spans:
+                _extend(pending_subagent_spans.pop(0), event)
                 continue
             if _is_subagent_stop(event) and not _has_useful_detail(event.get("detail")):
                 continue
@@ -724,7 +728,9 @@ def build_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:
             else:
                 rows = conn.execute(
                     "SELECT * FROM events"
-                    " WHERE session_id=? AND COALESCE(category, 'other')=? AND COALESCE(target, '')=?"
+                    " WHERE session_id=?"
+                    " AND COALESCE(NULLIF(category, ''), 'other')=?"
+                    " AND COALESCE(target, '')=?"
                     " AND phase IN ('start', 'end')"
                     " ORDER BY ts ASC, id ASC",
                     (session_id, category, event.get("target") or ""),

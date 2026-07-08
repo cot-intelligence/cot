@@ -13,11 +13,25 @@ sys.path.insert(0, _BACKEND)
 from app import db  # noqa: E402
 
 
-def _fresh_db() -> tempfile.TemporaryDirectory[str]:
-    tmp = tempfile.TemporaryDirectory()
-    os.environ["COT_DB_PATH"] = os.path.join(tmp.name, "cot.db")
-    db.init_db()
-    return tmp
+class _FreshDb:
+    def __init__(self) -> None:
+        self._prior = os.environ.get("COT_DB_PATH")
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["COT_DB_PATH"] = os.path.join(self._tmp.name, "cot.db")
+        db.init_db()
+
+    def cleanup(self) -> None:
+        try:
+            self._tmp.cleanup()
+        finally:
+            if self._prior is None:
+                os.environ.pop("COT_DB_PATH", None)
+            else:
+                os.environ["COT_DB_PATH"] = self._prior
+
+
+def _fresh_db() -> _FreshDb:
+    return _FreshDb()
 
 
 def test_connect_closes_after_context_exit():
@@ -716,58 +730,62 @@ def test_session_detail_full_lookup_uses_merged_span_detail():
         tmp.cleanup()
 
 
-def test_event_detail_lookup_merges_null_category_spans():
+def test_event_detail_lookup_merges_missing_category_spans():
     tmp = _fresh_db()
     try:
-        sid = "26262626-2626-2626-2626-262626262626"
-        _session(sid)
-        with db._connect() as conn:
-            cur = conn.execute(
-                "INSERT INTO events (session_id, source, hook, tool, phase, ts, category,"
-                " title, detail, target, dedup_key, origin, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    sid,
-                    "cursor",
-                    "PreToolUse",
-                    "Unknown",
-                    "start",
-                    "2026-06-01T00:00:01Z",
-                    None,
-                    "Unknown",
-                    json.dumps({"input": {"value": "start"}}),
-                    "same-target",
-                    f"{sid}:null-category:start",
-                    "hook",
-                    "2026-06-01T00:00:01Z",
-                ),
-            )
-            start_id = int(cur.lastrowid)
-            conn.execute(
-                "INSERT INTO events (session_id, source, hook, tool, phase, ts, category,"
-                " title, detail, target, dedup_key, origin, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    sid,
-                    "cursor",
-                    "PostToolUse",
-                    "Unknown",
-                    "end",
-                    "2026-06-01T00:00:02Z",
-                    None,
-                    "Unknown",
-                    json.dumps({"response": "end"}),
-                    "same-target",
-                    f"{sid}:null-category:end",
-                    "hook",
-                    "2026-06-01T00:00:02Z",
-                ),
-            )
+        cases = [
+            ("26262626-2626-2626-2626-262626262626", None, "null"),
+            ("27272727-2727-2727-2727-272727272727", "", "empty"),
+        ]
+        for sid, category, label in cases:
+            _session(sid)
+            with db._connect() as conn:
+                cur = conn.execute(
+                    "INSERT INTO events (session_id, source, hook, tool, phase, ts, category,"
+                    " title, detail, target, dedup_key, origin, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        sid,
+                        "cursor",
+                        "PreToolUse",
+                        "Unknown",
+                        "start",
+                        "2026-06-01T00:00:01Z",
+                        category,
+                        "Unknown",
+                        json.dumps({"input": {"value": "start"}}),
+                        "same-target",
+                        f"{sid}:{label}-category:start",
+                        "hook",
+                        "2026-06-01T00:00:01Z",
+                    ),
+                )
+                start_id = int(cur.lastrowid)
+                conn.execute(
+                    "INSERT INTO events (session_id, source, hook, tool, phase, ts, category,"
+                    " title, detail, target, dedup_key, origin, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        sid,
+                        "cursor",
+                        "PostToolUse",
+                        "Unknown",
+                        "end",
+                        "2026-06-01T00:00:02Z",
+                        category,
+                        "Unknown",
+                        json.dumps({"response": "end"}),
+                        "same-target",
+                        f"{sid}:{label}-category:end",
+                        "hook",
+                        "2026-06-01T00:00:02Z",
+                    ),
+                )
 
-        full_detail = db.get_event_detail(sid, start_id)
-        assert full_detail is not None
-        assert "start" in full_detail["detail"]
-        assert "end" in full_detail["detail"]
+            full_detail = db.get_event_detail(sid, start_id)
+            assert full_detail is not None
+            assert "start" in full_detail["detail"]
+            assert "end" in full_detail["detail"]
     finally:
         tmp.cleanup()
 

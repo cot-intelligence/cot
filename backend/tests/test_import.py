@@ -697,6 +697,7 @@ def test_discover_subagent_links_from_cursor_nesting():
     # home-confinement passes even when the real home is read-only.
     with _tempfile.TemporaryDirectory() as tmp:
         restore_home = _with_env("HOME", tmp)
+        restore_userprofile = _with_env("USERPROFILE", tmp)
         d = _Path(tmp) / ".cursor" / "projects" / "proj" / "agent-transcripts" / parent / "subagents"
         d.mkdir(parents=True)
         (d / f"{child}.jsonl").write_text(
@@ -709,6 +710,7 @@ def test_discover_subagent_links_from_cursor_nesting():
             links = bridge._discover_subagent_links("cursor")
         finally:
             restore()
+            restore_userprofile()
             restore_home()
     assert len(links) == 1, links
     assert links[0]["child"] == child and links[0]["parent"] == parent, links
@@ -723,6 +725,7 @@ def test_discover_subagent_links_skips_claude_folded():
     parent = "33333333-3333-3333-3333-333333333333"
     with _tempfile.TemporaryDirectory() as tmp:
         restore_home = _with_env("HOME", tmp)
+        restore_userprofile = _with_env("USERPROFILE", tmp)
         d = _Path(tmp) / ".claude" / "projects" / "-proj" / parent / "subagents"
         d.mkdir(parents=True)
         (d / "agent-deadbeef0.jsonl").write_text(
@@ -732,6 +735,7 @@ def test_discover_subagent_links_skips_claude_folded():
             links = bridge._discover_subagent_links("claude")
         finally:
             restore()
+            restore_userprofile()
             restore_home()
     assert links == [], links
 
