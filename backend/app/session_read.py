@@ -709,7 +709,7 @@ def build_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:
         event = db._event_row(row)
 
         if event.get("phase") == "start":
-            category = event.get("category")
+            category = event.get("category") or "other"
             if category == "subagent":
                 rows = conn.execute(
                     "SELECT * FROM events WHERE session_id=? AND category='subagent'"
@@ -719,7 +719,7 @@ def build_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:
             else:
                 rows = conn.execute(
                     "SELECT * FROM events"
-                    " WHERE session_id=? AND category=? AND COALESCE(target, '')=?"
+                    " WHERE session_id=? AND COALESCE(category, 'other')=? AND COALESCE(target, '')=?"
                     " AND phase IN ('start', 'end')"
                     " ORDER BY ts ASC, id ASC",
                     (session_id, category, event.get("target") or ""),

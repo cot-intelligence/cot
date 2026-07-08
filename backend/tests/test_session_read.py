@@ -214,6 +214,28 @@ def test_session_detail_synthetic_run_uses_terminal_child_status():
         tmp.cleanup()
 
 
+def test_session_detail_synthetic_run_clears_recovered_child_status():
+    tmp = _fresh_db()
+    try:
+        parent = "24242424-2424-2424-2424-242424242424"
+        child = "25252525-2525-2525-2525-252525252525"
+        _session(parent)
+        _session(child, status="active")
+        _event(parent, seconds=0, category="prompt", detail="delegate")
+        _event(child, seconds=1, category="shell", target="pytest", status="error")
+        _event(child, seconds=2, category="shell", target="pytest", status="ok")
+
+        assert db.set_subagent_links([{"child": child, "parent": parent, "label": "child"}]) == 1
+
+        detail = db.get_session_detail(parent)
+        assert detail is not None
+        run = detail["timeline_runs"][0]
+        assert run["status"] == "completed"
+        assert run["ongoing"] is False
+    finally:
+        tmp.cleanup()
+
+
 def test_detail_preview_lookup_points_at_owning_session_for_parent_and_child_events():
     tmp = _fresh_db()
     try:
@@ -675,6 +697,62 @@ def test_session_detail_full_lookup_uses_merged_span_detail():
         assert full_detail is not None
         assert "npm test" in full_detail["detail"]
         assert "ok" in full_detail["detail"]
+    finally:
+        tmp.cleanup()
+
+
+def test_event_detail_lookup_merges_null_category_spans():
+    tmp = _fresh_db()
+    try:
+        sid = "26262626-2626-2626-2626-262626262626"
+        _session(sid)
+        with db._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO events (session_id, source, hook, tool, phase, ts, category,"
+                " title, detail, target, dedup_key, origin, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    sid,
+                    "cursor",
+                    "PreToolUse",
+                    "Unknown",
+                    "start",
+                    "2026-06-01T00:00:01Z",
+                    None,
+                    "Unknown",
+                    json.dumps({"input": {"value": "start"}}),
+                    "same-target",
+                    f"{sid}:null-category:start",
+                    "hook",
+                    "2026-06-01T00:00:01Z",
+                ),
+            )
+            start_id = int(cur.lastrowid)
+            conn.execute(
+                "INSERT INTO events (session_id, source, hook, tool, phase, ts, category,"
+                " title, detail, target, dedup_key, origin, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    sid,
+                    "cursor",
+                    "PostToolUse",
+                    "Unknown",
+                    "end",
+                    "2026-06-01T00:00:02Z",
+                    None,
+                    "Unknown",
+                    json.dumps({"response": "end"}),
+                    "same-target",
+                    f"{sid}:null-category:end",
+                    "hook",
+                    "2026-06-01T00:00:02Z",
+                ),
+            )
+
+        full_detail = db.get_event_detail(sid, start_id)
+        assert full_detail is not None
+        assert "start" in full_detail["detail"]
+        assert "end" in full_detail["detail"]
     finally:
         tmp.cleanup()
 
