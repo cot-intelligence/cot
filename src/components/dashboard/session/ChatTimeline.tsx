@@ -311,7 +311,7 @@ const ConversationCard = forwardRef<HTMLDivElement, { item: TimelineItem; sessio
       <div
         ref={ref}
         data-event-key={itemEventKey}
-        className={`scroll-mt-4 rounded-lg px-4 py-3 ${provenance?.accent ?? ''}${
+        className={`scroll-mt-4 rounded-lg px-4 py-3 ${provenance?.accent ?? ''} ${
           isPrompt
             ? 'border border-fg/10 bg-surface'
             : 'bg-transparent'

@@ -182,6 +182,8 @@ const ACTION_CATEGORIES = new Set([
   'memory',
 ]);
 
+// Backend session_read.RUN_CONTENT_CATEGORIES is the authoritative grouping
+// counterpart for nested run membership.
 export type AgentLane = 'main' | 'subagent';
 type EventProvenance = NonNullable<TimelineItem['provenance']>;
 
@@ -194,13 +196,13 @@ export const PROVENANCE_META: Record<EventProvenance, {
   approval_review: {
     label: 'Review',
     sidebar: 'review',
-    accent: 'border-l-2 border-l-cobalt/25 ',
+    accent: 'border-l-2 border-l-cobalt/25',
     pillClass: 'bg-cobalt/10 text-cobalt',
   },
   reviewed_session: {
     label: 'Reviewed session',
     sidebar: 'reviewed',
-    accent: 'border-l-2 border-l-fg/15 ',
+    accent: 'border-l-2 border-l-fg/15',
     pillClass: 'bg-fg/8 text-fg/45',
   },
   subagent: {

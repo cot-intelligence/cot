@@ -14,13 +14,18 @@ function lookupFor(item: TimelineItem, fallbackSessionId: string) {
 
 export function useFullEventDetail(item: TimelineItem | null, sessionId: string) {
   const [fullByKey, setFullByKey] = useState<Record<string, FullDetail>>({});
+  const [failedKey, setFailedKey] = useState<string | null>(null);
   const lookup = item ? lookupFor(item, sessionId) : null;
   const lookupSessionId = lookup?.sessionId;
   const lookupEventId = lookup?.eventId;
   const lookupKey = lookup?.key;
   const needsFull = Boolean(
-    item?.detail_truncated && lookupKey && fullByKey[lookupKey] === undefined,
+    item?.detail_truncated && lookupKey && fullByKey[lookupKey] === undefined && failedKey !== lookupKey,
   );
+
+  useEffect(() => {
+    setFailedKey(null);
+  }, [lookupKey]);
 
   useEffect(() => {
     if (!needsFull || !item || !lookupSessionId || lookupEventId == null || !lookupKey) return;
@@ -32,14 +37,12 @@ export function useFullEventDetail(item: TimelineItem | null, sessionId: string)
             ...prev,
             [lookupKey]: { detail: res.detail, attachments: res.attachments },
           }));
+          setFailedKey(null);
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setFullByKey((prev) => ({
-            ...prev,
-            [lookupKey]: { detail: item.detail, attachments: item.attachments },
-          }));
+          setFailedKey(lookupKey);
         }
       });
     return () => {
@@ -54,6 +57,8 @@ export function useFullEventDetail(item: TimelineItem | null, sessionId: string)
 
   return {
     resolved,
-    loading: Boolean(item?.detail_truncated && lookupKey && fullByKey[lookupKey] === undefined),
+    loading: Boolean(
+      item?.detail_truncated && lookupKey && fullByKey[lookupKey] === undefined && failedKey !== lookupKey,
+    ),
   };
 }

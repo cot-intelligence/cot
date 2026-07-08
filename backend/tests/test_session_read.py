@@ -153,7 +153,7 @@ def test_session_detail_synthetic_run_uses_link_status():
         parent = "18181818-1818-1818-1818-181818181818"
         child = "19191919-1919-1919-1919-191919191919"
         _session(parent)
-        _session(child, status="active")
+        _session(child)
         _event(parent, seconds=0, category="prompt", detail="delegate")
         now = db._now()
         with db._connect() as conn:
@@ -200,6 +200,7 @@ def test_session_detail_synthetic_run_uses_terminal_child_status():
         _session(child, status="active")
         _event(parent, seconds=0, category="prompt", detail="delegate")
         _event(child, seconds=1, category="shell", target="pytest", status="error")
+        _event(child, seconds=2, category="prompt", detail="later status-less event")
 
         assert db.set_subagent_links([{"child": child, "parent": parent, "label": "child"}]) == 1
 

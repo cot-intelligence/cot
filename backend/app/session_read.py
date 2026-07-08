@@ -231,15 +231,7 @@ def _has_useful_detail(detail: Any) -> bool:
     return True
 
 
-def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
-    """Build display timeline items, merging start/end hook pairs into spans."""
-    with db._connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
-            (session_id,),
-        ).fetchall()
-        events = [db._event_row(r) for r in rows]
-
+def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     spans: dict[str, list[dict[str, Any]]] = {}
     items: list[dict[str, Any]] = []
     open_subagent_keys: list[str] = []
@@ -333,6 +325,17 @@ def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
     return items
 
 
+def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
+    """Build display timeline items, merging start/end hook pairs into spans."""
+    with db._connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
+            (session_id,),
+        ).fetchall()
+        events = [db._event_row(r) for r in rows]
+    return _build_timeline_items_from_events(events)
+
+
 def _fetch_inlined_session_events(
     conn: sqlite3.Connection,
     session_id: str,
@@ -406,27 +409,6 @@ def _trim_detail_inplace(item: dict[str, Any], session_id: str) -> None:
             "session_id": item.get("owner_session_id") or session_id,
             "event_id": item["id"],
         }
-
-
-def _drop_orphan_subagent_stops(
-    events: list[dict[str, Any]], timeline_items: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    completed_subagent_ends = {
-        item.get("end_ts")
-        for item in timeline_items
-        if item.get("category") == "subagent" and item.get("end_ts")
-    }
-    return [
-        item
-        for item in events
-        if not (
-            item.get("category") == "subagent"
-            and item.get("phase") == "end"
-            and item.get("hook") in SUBAGENT_STOP_HOOKS
-            and item.get("ts") not in completed_subagent_ends
-            and not _has_useful_detail(item.get("detail"))
-        )
-    ]
 
 
 def _synthesize_child_subagent_spans(
@@ -691,7 +673,6 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
                 _trim_detail_inplace(item, item.get("owner_session_id") or session_id)
 
         _synthesize_child_subagent_spans(events, timeline_items, links, session_id)
-        events = _drop_orphan_subagent_stops(events, timeline_items)
         _sort_items(events)
         _sort_items(timeline_items)
         for item in timeline_items:
@@ -718,23 +699,42 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
 
 def build_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:
     """Return full display detail for a row, including merged start/end spans."""
-    for item in build_timeline_items(session_id):
-        if item.get("id") == event_id:
-            return {
-                "id": event_id,
-                "detail": item.get("detail"),
-                "attachments": item.get("attachments"),
-            }
-
     with db._connect() as conn:
         row = conn.execute(
-            "SELECT detail, attachments FROM events WHERE session_id=? AND id=?",
+            "SELECT * FROM events WHERE session_id=? AND id=?",
             (session_id, event_id),
         ).fetchone()
-    if row is None:
-        return None
-    return {
-        "id": event_id,
-        "detail": row["detail"],
-        "attachments": json.loads(row["attachments"]) if row["attachments"] else None,
-    }
+        if row is None:
+            return None
+        event = db._event_row(row)
+
+        if event.get("phase") == "start":
+            category = event.get("category")
+            if category == "subagent":
+                rows = conn.execute(
+                    "SELECT * FROM events WHERE session_id=? AND category='subagent'"
+                    " ORDER BY ts ASC, id ASC",
+                    (session_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM events"
+                    " WHERE session_id=? AND category=? AND COALESCE(target, '')=?"
+                    " AND phase IN ('start', 'end')"
+                    " ORDER BY ts ASC, id ASC",
+                    (session_id, category, event.get("target") or ""),
+                ).fetchall()
+            timeline_items = _build_timeline_items_from_events([db._event_row(r) for r in rows])
+            for item in timeline_items:
+                if item.get("id") == event_id:
+                    return {
+                        "id": event_id,
+                        "detail": item.get("detail"),
+                        "attachments": item.get("attachments"),
+                    }
+
+        return {
+            "id": event_id,
+            "detail": row["detail"],
+            "attachments": json.loads(row["attachments"]) if row["attachments"] else None,
+        }

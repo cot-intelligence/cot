@@ -1873,8 +1873,9 @@ def _session_link_item(
         " FROM events WHERE session_id = ?",
         (session_id,),
     ).fetchone()
-    last_event = conn.execute(
+    terminal_event = conn.execute(
         "SELECT status FROM events WHERE session_id = ?"
+        " AND status IN ('error', 'blocked', 'interrupted')"
         " ORDER BY ts DESC, id DESC LIMIT 1",
         (session_id,),
     ).fetchone()
@@ -1883,10 +1884,10 @@ def _session_link_item(
     title = _first_prompt(conn, row["id"]) or label
     recent_status = _live_status(agg["last_ts"])
     stored_status = row["status"] or "completed"
-    last_event_status = last_event["status"] if last_event else None
-    if last_event_status in ("error", "blocked", "interrupted"):
-        status = last_event_status
-    elif stored_status and stored_status != "active":
+    terminal_status = terminal_event["status"] if terminal_event else None
+    if terminal_status:
+        status = terminal_status
+    elif row["ended_at"] and stored_status != "active":
         status = stored_status
     else:
         status = recent_status
