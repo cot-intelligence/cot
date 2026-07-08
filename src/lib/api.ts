@@ -49,9 +49,10 @@ export interface SessionSummary {
 
 export interface TimelineItem {
   id: number;
-  hook: string;
+  /** Deprecated compatibility fields from stored hook rows. */
+  hook?: string | null;
   tool: string | null;
-  phase: string;
+  phase?: string | null;
   ts: string;
   source: AgentId;
   category: EventCategory | string;
@@ -68,6 +69,11 @@ export interface TimelineItem {
   payload?: string | null;
   /** True when `detail` is a preview; fetch the full body via getEventDetail. */
   detail_truncated?: boolean;
+  /** Self-describing lookup for loading the full body when this row is a preview. */
+  detail_lookup?: {
+    session_id: string;
+    event_id: number;
+  };
   /** Set on structured prompt events where the agent asked the user. */
   is_question?: boolean;
   /** Whether a following answer event completed this prompt. */
@@ -80,16 +86,21 @@ export interface TimelineItem {
   questions?: QuestionPart[];
   /** Cursor composer mode when not the default "agent" (e.g. "plan"). */
   composer_mode?: string;
-  /** When set, this event was inlined from a linked session (review or subagent). */
+  /** Session that owns this display row; parent session unless the row was inlined. */
+  owner_session_id?: string;
+  /** Display provenance for rows inlined from linked sessions. */
+  provenance?: 'approval_review' | 'reviewed_session' | 'subagent';
+  /** Deprecated aliases for older session-detail callers. */
   event_session_id?: string;
   inlined_approval_review?: boolean;
   inlined_reviewed_session?: boolean;
-  /** Inlined from a subagent session that this (parent) session launched. */
   inlined_subagent?: boolean;
-  /** On a synthetic subagent span: the child session whose events it groups. */
   subagent_child_session?: string;
-  /** On a synthetic subagent span: whether it groups a subagent or a review. */
   subagent_run_kind?: 'subagent' | 'approval_review';
+  /** Backend-owned run membership for rows displayed inside a subagent/review group. */
+  run_id?: number;
+  run_ids?: number[];
+  run_kind?: 'subagent' | 'review';
 }
 
 export interface QuestionPart {
@@ -102,9 +113,11 @@ export interface QuestionPart {
 
 export interface Clarification {
   question_event_id: number;
+  question_session_id?: string;
   question_ts: string;
   question_excerpt: string;
   answer_event_id: number | null;
+  answer_session_id?: string;
   answer_ts: string | null;
   answer_excerpt: string | null;
   answered: boolean;
@@ -154,12 +167,28 @@ export interface SessionLinks {
   children: SessionLink[];
 }
 
+export interface TimelineRun {
+  id: number;
+  kind: 'subagent' | 'review';
+  label: string;
+  start: string;
+  end: string | null;
+  status: string | null;
+  duration_ms: number | null;
+  ongoing: boolean;
+  child_session_id?: string;
+  item: TimelineItem;
+}
+
 export interface SessionDetail {
   summary: SessionSummary;
   links: SessionLinks;
   components: Components;
   events: TimelineItem[];
-  timeline: TimelineItem[];
+  /** Deprecated compatibility field; prefer `events` plus `timeline_runs`. */
+  timeline?: TimelineItem[];
+  /** Display-ready subagent/review windows assembled by the session read module. */
+  timeline_runs: TimelineRun[];
   clarifications: Clarification[];
 }
 

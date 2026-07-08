@@ -693,8 +693,11 @@ def test_tiny_import_smoke_records_all_sources_without_golden_session():
 def test_discover_subagent_links_from_cursor_nesting():
     parent = "11111111-1111-1111-1111-111111111111"
     child = "22222222-2222-2222-2222-222222222222"
-    # Under $HOME so the bridge's _safe_transcript_root home-confinement passes.
-    with _tempfile.TemporaryDirectory(dir=str(_Path.home())) as tmp:
+    # Under a test-owned $HOME so the bridge's _safe_transcript_root
+    # home-confinement passes even when the real home is read-only.
+    with _tempfile.TemporaryDirectory() as tmp:
+        restore_home = _with_env("HOME", tmp)
+        restore_userprofile = _with_env("USERPROFILE", tmp)
         d = _Path(tmp) / ".cursor" / "projects" / "proj" / "agent-transcripts" / parent / "subagents"
         d.mkdir(parents=True)
         (d / f"{child}.jsonl").write_text(
@@ -707,6 +710,8 @@ def test_discover_subagent_links_from_cursor_nesting():
             links = bridge._discover_subagent_links("cursor")
         finally:
             restore()
+            restore_userprofile()
+            restore_home()
     assert len(links) == 1, links
     assert links[0]["child"] == child and links[0]["parent"] == parent, links
     # Label is wrapper-stripped to the user's words.
@@ -718,7 +723,9 @@ def test_discover_subagent_links_skips_claude_folded():
     # into the parent) and names the file agent-<hex> — a non-UUID stem. So it
     # must yield no separate child link.
     parent = "33333333-3333-3333-3333-333333333333"
-    with _tempfile.TemporaryDirectory(dir=str(_Path.home())) as tmp:
+    with _tempfile.TemporaryDirectory() as tmp:
+        restore_home = _with_env("HOME", tmp)
+        restore_userprofile = _with_env("USERPROFILE", tmp)
         d = _Path(tmp) / ".claude" / "projects" / "-proj" / parent / "subagents"
         d.mkdir(parents=True)
         (d / "agent-deadbeef0.jsonl").write_text(
@@ -728,6 +735,8 @@ def test_discover_subagent_links_skips_claude_folded():
             links = bridge._discover_subagent_links("claude")
         finally:
             restore()
+            restore_userprofile()
+            restore_home()
     assert links == [], links
 
 

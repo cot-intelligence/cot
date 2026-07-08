@@ -10,7 +10,7 @@ interface EventListProps {
   selectedKey: string | null;
   sessionId: string;
   onSelect: (item: TimelineItem) => void;
-  /** Subagent run windows; used to tag rows that ran during a subagent. */
+  /** Present when the session has run metadata; rows carry backend-owned membership. */
   runs?: SubagentRun[];
   /**
    * Scroll the selected row into view whenever this key changes — e.g. the
@@ -33,7 +33,7 @@ export function EventList({ items, selectedKey, sessionId, onSelect, runs, scrol
         const meta = getCategoryMeta(item.category);
         const key = eventKey(item, sessionId);
         const active = key === selectedKey;
-        const isSubagent = runs ? itemLane(item, runs) === 'subagent' : false;
+        const isSubagent = runs ? itemLane(item) === 'subagent' : false;
         const showTarget = item.category !== 'question' && Boolean(item.target);
         return (
           // content-visibility lets the browser skip rendering off-screen rows

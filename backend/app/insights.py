@@ -55,7 +55,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from . import db
+from . import db, session_read
 from .pricing import cost_for, normalize_model
 
 PILLARS = ("usability", "cost", "security")
@@ -311,13 +311,13 @@ def _permission_friction(ctx: RuleContext) -> list[dict[str, Any]]:
 @rule(id="usability.stalled_clarifications", pillar="usability", tier=1)
 def _stalled_clarifications(ctx: RuleContext) -> list[dict[str, Any]]:
     # AskUserQuestion-style tools; Claude-only signal today (noted, acceptable).
-    q_tools = ",".join("?" for _ in db._QUESTION_TOOLS)
+    q_tools = ",".join("?" for _ in session_read.QUESTION_TOOLS)
     scope, params = _scope(ctx, f" AND e.tool IN ({q_tools})")
     rows = ctx.conn.execute(
         "SELECT e.id, e.session_id, e.ts, e.detail, e.tool, e.hook"
         + scope
         + " ORDER BY e.session_id, e.ts, e.id",
-        params + list(db._QUESTION_TOOLS),
+        params + list(session_read.QUESTION_TOOLS),
     ).fetchall()
     by_session: dict[str, list[Any]] = {}
     for r in rows:
@@ -329,7 +329,7 @@ def _stalled_clarifications(ctx: RuleContext) -> list[dict[str, Any]]:
         ).fetchone()["t"]
         if db._live_status(last) == "active":
             continue  # user may still answer a running session
-        clars, _ = db._build_clarifications(ev_rows)
+        clars, _ = session_read.build_clarifications(ev_rows)
         open_qs = [q for q in clars if not q["answered"]]
         if not open_qs:
             continue

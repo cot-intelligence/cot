@@ -12,6 +12,8 @@ import re
 import sqlite3
 import string
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -294,23 +296,28 @@ def _tokens_from_parts(i: Any, o: Any, cr: Any, cw: Any) -> dict[str, int]:
     }
 
 
-def _connect() -> sqlite3.Connection:
+@contextmanager
+def _connect() -> Iterator[sqlite3.Connection]:
     path = db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # DELETE journal mode: WAL breaks on Docker bind mounts (macOS virtiofs disk I/O).
     conn = sqlite3.connect(path, check_same_thread=False, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000;")
-    journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
-    if str(journal_mode).lower() != "delete":
-        conn.execute("PRAGMA journal_mode=DELETE;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    # Keep sort/temp B-trees in RAM. The container runs read-only with a tiny
-    # (~16MB) /tmp tmpfs, so spilling a large session's ORDER BY to a temp file
-    # raised SQLITE_FULL ("database or disk is full"). Memory temp store avoids
-    # the tmpfs entirely; query working sets here are well within RAM.
-    conn.execute("PRAGMA temp_store=MEMORY;")
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000;")
+        journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+        if str(journal_mode).lower() != "delete":
+            conn.execute("PRAGMA journal_mode=DELETE;")
+        conn.execute("PRAGMA foreign_keys=ON;")
+        # Keep sort/temp B-trees in RAM. The container runs read-only with a tiny
+        # (~16MB) /tmp tmpfs, so spilling a large session's ORDER BY to a temp file
+        # raised SQLITE_FULL ("database or disk is full"). Memory temp store avoids
+        # the tmpfs entirely; query working sets here are well within RAM.
+        conn.execute("PRAGMA temp_store=MEMORY;")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -1873,14 +1880,29 @@ def _session_link_item(
         " FROM events WHERE session_id = ?",
         (session_id,),
     ).fetchone()
+    status_event = conn.execute(
+        "SELECT status FROM events WHERE session_id = ?"
+        " AND status IS NOT NULL AND status != ''"
+        " ORDER BY ts DESC, id DESC LIMIT 1",
+        (session_id,),
+    ).fetchone()
     # Subagent sessions rarely have a user prompt; fall back to the label the
     # importer derived from the parent's Task launch.
     title = _first_prompt(conn, row["id"]) or label
+    recent_status = _live_status(agg["last_ts"])
+    stored_status = row["status"] or "completed"
+    last_status = status_event["status"] if status_event else None
+    if last_status in ("error", "blocked", "interrupted"):
+        status = last_status
+    elif row["ended_at"] and stored_status != "active":
+        status = stored_status
+    else:
+        status = recent_status
     return {
         "type": link_type,
         "session_id": row["id"],
         "source": row["source"],
-        "status": _live_status(agg["last_ts"]),
+        "status": status,
         "started_at": _format_ts(row["started_at"]) or str(row["started_at"] or ""),
         "last_activity": _format_ts(agg["last_ts"]),
         "event_count": agg["events"] or 0,
@@ -1952,91 +1974,6 @@ def _session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[
             seen.add(child_id)
 
     return {"parents": parents, "children": children}
-
-
-def _is_approval_history_dump(detail: str | None) -> bool:
-    return str(detail or "").lstrip().startswith(_APPROVAL_REVIEW_PREFIX)
-
-
-def _fetch_inlined_session_events(
-    conn: sqlite3.Connection,
-    session_id: str,
-    *,
-    skip_history_dump: bool,
-    inline_kind: str,
-) -> list[dict[str, Any]]:
-    rows = conn.execute(
-        "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
-        (session_id,),
-    ).fetchall()
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        if skip_history_dump and row["category"] == "prompt" and _is_approval_history_dump(row["detail"]):
-            continue
-        item: dict[str, Any] = {
-            **_event_row(row),
-            "start_ts": _format_ts(row["ts"]),
-            "end_ts": _format_ts(row["ts"]),
-            "ongoing": False,
-            "event_session_id": session_id,
-        }
-        if inline_kind == "approval_review":
-            item["inlined_approval_review"] = True
-        elif inline_kind == "reviewed_session":
-            item["inlined_reviewed_session"] = True
-        elif inline_kind == "subagent":
-            item["inlined_subagent"] = True
-        out.append(item)
-    return out
-
-
-def _merge_linked_session_events(
-    conn: sqlite3.Connection,
-    events: list[dict[str, Any]],
-    links: dict[str, list[dict[str, Any]]],
-) -> list[dict[str, Any]]:
-    """Flatten linked child sessions into one timeline, by link kind.
-
-    - ``approval_review`` child: inline its events (skipping the history dump).
-    - ``subagent`` child: inline its events so they nest under the parent's
-      subagent run window (this is what gives Cursor parity with Claude, whose
-      subagent lines already fold into the parent).
-    - ``approval_review`` parent: inline the reviewed work session's events.
-
-    A ``subagent`` *parent* is intentionally not inlined: when viewing the child
-    subagent session we only show a back-link, never the parent's whole
-    timeline."""
-    children = links.get("children") or []
-    parents = links.get("parents") or []
-    if not children and not parents:
-        return events
-    merged = list(events)
-    for link in children:
-        if link.get("type") == "subagent":
-            merged.extend(
-                _fetch_inlined_session_events(
-                    conn, link["session_id"],
-                    skip_history_dump=False, inline_kind="subagent",
-                )
-            )
-        else:
-            merged.extend(
-                _fetch_inlined_session_events(
-                    conn, link["session_id"],
-                    skip_history_dump=True, inline_kind="approval_review",
-                )
-            )
-    for link in parents:
-        if link.get("type") == "subagent":
-            continue
-        merged.extend(
-            _fetch_inlined_session_events(
-                conn, link["session_id"],
-                skip_history_dump=False, inline_kind="reviewed_session",
-            )
-        )
-    merged.sort(key=lambda e: (e.get("ts") or "", e.get("id") or 0))
-    return merged
 
 
 def _session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
@@ -2717,13 +2654,15 @@ def enrich_sessions(
             ]
 
         if "clarifications" in want:
+            from .session_read import build_clarifications
+
             with _connect() as conn:
                 ev_rows = conn.execute(
                     "SELECT id, category, detail, ts, hook, tool FROM events"
                     " WHERE session_id=? ORDER BY ts ASC, id ASC",
                     (sid,),
                 ).fetchall()
-            clars, _ = _build_clarifications(ev_rows)
+            clars, _ = build_clarifications(ev_rows)
             s["clarifications"] = clars
     return summaries
 
@@ -2975,136 +2914,10 @@ def attach_to_prompt(
         return True
 
 
-_EMPTY = (None, "", {}, [])
-
-
-def _merge_detail(start_detail: Any, end_detail: Any) -> Any:
-    """Combine a start event's detail (rich input, e.g. diff) with the end
-    event's detail (result/response), so edits keep both before/after and result."""
-    def _load(raw: Any) -> Any:
-        if not isinstance(raw, str):
-            return raw
-        try:
-            return json.loads(raw)
-        except (ValueError, TypeError):
-            return raw
-
-    s = _load(start_detail)
-    e = _load(end_detail)
-    if not isinstance(s, dict) or not isinstance(e, dict):
-        return end_detail or start_detail
-
-    merged = dict(s)
-    for key, val in e.items():
-        if (
-            key in ("input", "arguments", "tool_input")
-            and isinstance(val, dict)
-            and isinstance(merged.get(key), dict)
-        ):
-            combined = dict(val)
-            combined.update({k: v for k, v in merged[key].items() if v not in _EMPTY})
-            merged[key] = combined
-        elif val not in _EMPTY:
-            merged[key] = val
-    return json.dumps(merged, indent=2, ensure_ascii=False, default=str)
-
-
 def timeline(session_id: str) -> list[dict[str, Any]]:
-    """Build timeline items, merging start/end pairs into spans."""
-    with _connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
-            (session_id,),
-        ).fetchall()
-        events = [_event_row(r) for r in rows]
+    from .session_read import build_timeline_items
 
-    spans: dict[str, dict[str, Any]] = {}
-    items: list[dict[str, Any]] = []
-    # Claude subagents open with a PreToolUse(Agent) start keyed by tool_use_id
-    # and later fire a SubagentStop whose payload carries no tool_use_id, so it
-    # can't key-match. For background agents the PostToolUse(Agent) "launched"
-    # ack closes the span almost instantly, leaving a near-zero window plus an
-    # orphan SubagentStop. Track open subagent spans and finalized launches so
-    # the trailing SubagentStop attaches to its run (FIFO — no shared id).
-    open_subagent_keys: list[str] = []
-    pending_subagent_stops: list[dict[str, Any]] = []
-
-    def _is_subagent_stop(e: dict[str, Any]) -> bool:
-        return (e.get("hook") or "") in ("SubagentStop", "subagentStop")
-
-    def _extend(span: dict[str, Any], end_ts: str, status: Any) -> None:
-        if (end_ts or "") > (span.get("end_ts") or ""):
-            span["end_ts"] = end_ts
-            span["ongoing"] = False
-            span["duration_ms"] = int((_duration_seconds(span["start_ts"], end_ts) or 0) * 1000)
-            span["status"] = status or span.get("status")
-
-    for ev in events:
-        cat = ev.get("category") or "other"
-        target = ev.get("target") or ""
-        phase = ev.get("phase") or "instant"
-        key = f"{cat}::{target}"
-
-        if phase == "superseded":
-            continue
-
-        if phase == "start":
-            spans[key] = {**ev, "start_ts": ev["ts"], "end_ts": None, "ongoing": True}
-            if cat == "subagent":
-                open_subagent_keys.append(key)
-            continue
-
-        if phase == "end" and key in spans:
-            start = spans.pop(key)
-            if cat == "subagent" and key in open_subagent_keys:
-                open_subagent_keys.remove(key)
-            dur = ev.get("duration_ms") or start.get("duration_ms")
-            if dur is None:
-                dur = int((_duration_seconds(start["start_ts"], ev["ts"]) or 0) * 1000)
-            merged = {
-                **start,
-                "end_ts": ev["ts"],
-                "ongoing": False,
-                "duration_ms": dur,
-                "detail": _merge_detail(start.get("detail"), ev.get("detail")),
-                "status": ev.get("status") or start.get("status"),
-            }
-            items.append(merged)
-            # A PostToolUse(Agent) end may just be the launch ack; keep the span
-            # so a later SubagentStop can extend it to real completion. The stop
-            # itself (Cursor keys match) is the true end and needs no extending.
-            if cat == "subagent" and not _is_subagent_stop(ev):
-                pending_subagent_stops.append(merged)
-            continue
-
-        # Orphan subagent end (Claude SubagentStop): attach to its launch.
-        if cat == "subagent" and phase == "end":
-            if open_subagent_keys:
-                start = spans.pop(open_subagent_keys.pop(0))
-                dur = int((_duration_seconds(start["start_ts"], ev["ts"]) or 0) * 1000)
-                items.append({
-                    **start,
-                    "end_ts": ev["ts"],
-                    "ongoing": False,
-                    "duration_ms": dur,
-                    "status": ev.get("status") or start.get("status"),
-                })
-                continue
-            if pending_subagent_stops:
-                _extend(pending_subagent_stops.pop(0), ev["ts"], ev.get("status"))
-                continue
-            if _is_subagent_stop(ev):
-                # A SubagentStop with no captured launch: no window, no content,
-                # generic label. Drop it instead of rendering an empty group.
-                continue
-
-        items.append({**ev, "start_ts": ev["ts"], "end_ts": ev["ts"], "ongoing": False})
-
-    for pending in spans.values():
-        items.append({**pending, "end_ts": None})
-
-    items.sort(key=lambda x: x.get("start_ts") or x.get("ts") or "")
-    return items
+    return build_timeline_items(session_id)
 
 
 def events_list(session_id: str) -> list[dict[str, Any]]:
@@ -3178,366 +2991,18 @@ def session_components(session_id: str) -> dict[str, Any]:
     }
 
 
-# Only structured questions count: the agent explicitly asking the user via
-# Claude's AskUserQuestion, Cursor's AskQuestion, or Codex's request_user_input.
-# We never guess from assistant prose alone.
-_QUESTION_TOOLS = {"AskUserQuestion", "AskQuestion", "request_user_input"}
-_QUESTION_END_HOOKS = {"PostToolUse", "postToolUse"}
-
-
-def _coerce_dict(val: Any) -> dict[str, Any]:
-    if isinstance(val, dict):
-        return val
-    if isinstance(val, str) and val.strip():
-        try:
-            parsed = json.loads(val)
-            return parsed if isinstance(parsed, dict) else {}
-        except (ValueError, TypeError):
-            return {}
-    return {}
-
-
-def _parse_questions(detail: Any) -> list[dict[str, Any]]:
-    """Break a structured-question event (AskUserQuestion / AskQuestion /
-    request_user_input)
-    into its individual sub-questions, each paired with the user's chosen answer
-    when it's recoverable.
-
-    A single tool call can pose several questions at once; this returns one entry
-    per question: ``{header, question, options, answer, skipped}``. Codex and
-    recovered Cursor prompts carry answers keyed by each question's ``id``;
-    Claude doesn't put the selection in the hook, so ``answer`` is ``None`` there.
-    """
-    obj = _coerce_dict(detail)
-    if not obj:
-        return []
-    src = obj.get("input") if isinstance(obj.get("input"), dict) else obj
-    qs = src.get("questions") if isinstance(src.get("questions"), list) else []
-    # Codex/Cursor response: {"answers": {<question id>: {"answers": [<label>, ...]}}}.
-    # Claude response: {"answers": {<question text>: "<answer text>"}}.
-    resp = _coerce_dict(obj.get("response") or obj.get("output"))
-    answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
-    skipped_raw = resp.get("skipped") or resp.get("skipped_questions") or []
-    skipped = {str(v) for v in skipped_raw if v} if isinstance(skipped_raw, list) else set()
-
-    out: list[dict[str, Any]] = []
-    for q in qs:
-        if not isinstance(q, dict) or not (q.get("question") or q.get("prompt")):
-            continue
-        ans: str | None = None
-        picked = answers.get(q.get("id")) if q.get("id") else None
-        if picked is None:
-            picked = answers.get(q.get("question")) or answers.get(q.get("prompt"))
-        if isinstance(picked, dict) and isinstance(picked.get("answers"), list):
-            ans = ", ".join(str(a) for a in picked["answers"] if a)
-        elif isinstance(picked, list):
-            ans = ", ".join(str(a) for a in picked if a)
-        elif isinstance(picked, str):
-            ans = picked
-        options = [
-            str(o.get("label"))
-            for o in (q.get("options") or [])
-            if isinstance(o, dict) and o.get("label")
-        ]
-        qid = str(q.get("id") or "")
-        out.append(
-            {
-                "header": q.get("header"),
-                "question": str(q.get("question") or q.get("prompt")),
-                "options": options,
-                "answer": ans or None,
-                "skipped": bool(qid and qid in skipped and not ans),
-            }
-        )
-    return out
-
-
-def _question_text(detail: Any) -> str:
-    """Pull the human-readable question(s) out of a structured-question detail."""
-    return " · ".join(q["question"] for q in _parse_questions(detail))
-
-
-def _excerpt(text: str | None, limit: int = 200) -> str:
-    if not text:
-        return ""
-    collapsed = " ".join(str(text).split())
-    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
-
-
-def _build_clarifications(
-    ev_rows: list[sqlite3.Row],
-) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
-    """Flag the agent's explicit questions to the user (AskUserQuestion) and how
-    they were answered.
-
-    The PreToolUse fires when the question is posed; the PostToolUse fires once
-    the user has answered through the structured prompt UI, so a completed pair
-    = answered. A later plain chat prompt is not treated as the answer; if the
-    structured prompt was never shown or was unavailable, it remains unanswered.
-    Annotations are keyed by the question's start event id — the same id the
-    merged timeline span carries — so the badge lands on the right item.
-    """
-    questions: list[dict[str, Any]] = []
-    pending: dict[str, Any] | None = None
-
-    def _new(row: sqlite3.Row, answered: bool) -> dict[str, Any]:
-        return {
-            "start_id": row["id"],
-            "ts": row["ts"],
-            "detail": row["detail"],
-            "answered": answered,
-            "answer_id": None,
-            "answer_ts": None,
-            "answer_detail": None,
-        }
-
-    for r in ev_rows:
-        if r["tool"] in _QUESTION_TOOLS:
-            if r["hook"] in _QUESTION_END_HOOKS:
-                # Answer was returned inline to the agent by the tool end event.
-                if pending is not None:
-                    pending["answered"] = True
-                    pending["answer_id"] = r["id"]
-                    pending["answer_ts"] = r["ts"]
-                    pending["answer_detail"] = r["detail"]
-                else:
-                    pending = _new(r, answered=True)
-                questions.append(pending)
-                pending = None
-            else:
-                if pending is not None:
-                    questions.append(pending)
-                pending = _new(r, answered=False)
-    if pending is not None:
-        questions.append(pending)
-
-    clarifications: list[dict[str, Any]] = []
-    annotations: dict[int, dict[str, Any]] = {}
-    for q in questions:
-        annotations[q["start_id"]] = {
-            "is_question": True,
-            "answered": q["answered"],
-            "answer_event_id": q["answer_id"],
-        }
-        if q["answer_id"] is not None:
-            annotations[q["answer_id"]] = {"answers_event_id": q["start_id"]}
-        clarifications.append(
-            {
-                "question_event_id": q["start_id"],
-                "question_ts": q["ts"],
-                "question_excerpt": _excerpt(_question_text(q["detail"])),
-                "answer_event_id": q["answer_id"],
-                "answer_ts": q["answer_ts"],
-                "answer_excerpt": _excerpt(q["answer_detail"]) if q["answer_detail"] else None,
-                "answered": q["answered"],
-            }
-        )
-    return clarifications, annotations
-
-
-def _synthesize_child_subagent_spans(
-    events: list[dict[str, Any]],
-    timeline_items: list[dict[str, Any]],
-    links: dict[str, list[dict[str, Any]]],
-    parent_session_id: str,
-) -> None:
-    """Give every inlined child session exactly one ``subagent`` run group so
-    all providers render the same collapsible view.
-
-    Claude folds subagent work into the parent natively and emits real
-    ``subagent`` start/stop spans. Cursor subagents and Codex approval-reviews
-    live in *separate* child sessions whose events we inline (see
-    ``_merge_linked_session_events``). There are two cases:
-
-    - The parent already has a native span for the run (Cursor captured the
-      ``subagentStop`` hook). We **adopt** that span — stamping it with the
-      child session id — rather than fabricating a duplicate bar.
-    - No native span exists (older/interrupted Cursor runs, all Codex reviews).
-      We **fabricate** one bracketing the child's events.
-
-    Either way the span carries ``subagent_child_session`` (so the frontend
-    groups by origin session, not a fuzzy time window) and ``subagent_run_kind``
-    (so the header reads "Subagent" vs "Review")."""
-    children = links.get("children") or []
-    if not children:
-        return
-    # Bucket the already-inlined events by the child session they came from.
-    by_child: dict[str, list[dict[str, Any]]] = {}
-    for ev in events:
-        sid = ev.get("event_session_id")
-        if sid and sid != parent_session_id:
-            by_child.setdefault(sid, []).append(ev)
-
-    # Native subagent spans already in the timeline (from subagentStart/Stop).
-    # Adopt one per child instead of duplicating it.
-    native_spans = [
-        it
-        for it in timeline_items
-        if it.get("category") == "subagent" and not it.get("subagent_child_session")
-    ]
-    claimed: set[int] = set()
-
-    def _start_of(span: dict[str, Any]) -> str:
-        return span.get("start_ts") or span.get("ts") or ""
-
-    synthetic_id = -1
-    for link in children:
-        child_id = link.get("session_id")
-        if not child_id:
-            continue
-        child_events = by_child.get(child_id)
-        if not child_events:
-            continue
-        kind = "subagent" if link.get("type") == "subagent" else "approval_review"
-        starts = [
-            e.get("start_ts") or e.get("ts")
-            for e in child_events
-            if (e.get("start_ts") or e.get("ts"))
-        ]
-        ends = [
-            e.get("end_ts") or e.get("ts") or e.get("start_ts")
-            for e in child_events
-            if (e.get("end_ts") or e.get("ts") or e.get("start_ts"))
-        ]
-        if not starts:
-            continue
-        ts_first = min(starts)
-        ts_last = max(ends) if ends else ts_first
-        if kind == "approval_review":
-            label = "Approval review"
-        else:
-            label = (link.get("title") or link.get("label") or "Subagent").strip() or "Subagent"
-
-        # Adopt the native span launched for this run: the latest unclaimed span
-        # starting at/before the child (the launch point), else the earliest
-        # remaining one. Codex reviews never have a native span.
-        adopt_idx: int | None = None
-        if kind == "subagent":
-            cands = [i for i in range(len(native_spans)) if i not in claimed]
-            le = [i for i in cands if _start_of(native_spans[i]) <= ts_first]
-            if le:
-                adopt_idx = max(le, key=lambda i: _start_of(native_spans[i]))
-            elif cands:
-                adopt_idx = min(cands, key=lambda i: _start_of(native_spans[i]))
-        if adopt_idx is not None:
-            claimed.add(adopt_idx)
-            span = native_spans[adopt_idx]
-            span["subagent_child_session"] = child_id
-            span["subagent_run_kind"] = kind
-            # Keep the native window/duration; grouping is by child id, not time.
-            continue
-
-        # No native span — fabricate one bracketing the child's events.
-        dur = int((_duration_seconds(ts_first, ts_last) or 0) * 1000)
-        span = {
-            "id": synthetic_id,
-            "hook": None,
-            "tool": None,
-            "phase": "start",
-            "ts": ts_first,
-            "source": link.get("source"),
-            "category": "subagent",
-            "title": label,
-            "detail": None,
-            "target": f"child::{child_id}",
-            "status": "success",
-            "duration_ms": dur,
-            "model": None,
-            "attachments": None,
-            "start_ts": ts_first,
-            "end_ts": ts_last,
-            "ongoing": False,
-            "subagent_child_session": child_id,
-            "subagent_run_kind": kind,
-        }
-        synthetic_id -= 1
-        events.append(dict(span))
-        timeline_items.append(dict(span))
-
-
 def get_session_detail(session_id: str) -> dict[str, Any] | None:
-    with _connect() as conn:
-        row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
-        if row is None:
-            return None
-        summary = _session_summary(conn, row)
-        ev_rows = conn.execute(
-            "SELECT id, category, detail, ts, hook, tool FROM events"
-            " WHERE session_id=? ORDER BY ts ASC, id ASC",
-            (session_id,),
-        ).fetchall()
-        links = _session_links(conn, session_id)
-        clarifications, annotations = _build_clarifications(ev_rows)
-        events = events_list(session_id)
-        tl = timeline(session_id)
-        for item in events:
-            extra = annotations.get(item["id"])
-            if extra:
-                item.update(extra)
-            if item.get("category") == "question":
-                item["questions"] = _parse_questions(item.get("detail"))
-            _trim_detail_inplace(item)
-        events = _merge_linked_session_events(conn, events, links)
-        for item in events:
-            if (
-                item.get("inlined_approval_review")
-                or item.get("inlined_reviewed_session")
-                or item.get("inlined_subagent")
-            ):
-                _trim_detail_inplace(item)
-        # Cursor subagents and Codex reviews live in separate child sessions with
-        # no native subagent span in the parent. Fabricate one span per child so
-        # every provider renders the same collapsible run group (Claude already
-        # emits real spans and folds its subagent work in natively).
-        _synthesize_child_subagent_spans(events, tl, links, session_id)
-        for item in tl:
-            extra = annotations.get(item["id"])
-            if extra:
-                item.update(extra)
-            if item.get("category") == "question":
-                item["questions"] = _parse_questions(item.get("detail"))
-            # The merged timeline is consumed only to derive subagent run windows;
-            # its detail bodies are never rendered, so drop them entirely.
-            item["detail"] = None
+    from .session_read import build_session_detail
 
-    return {
-        "summary": summary,
-        "links": links,
-        "components": session_components(session_id),
-        "events": events,
-        "timeline": tl,
-        "clarifications": clarifications,
-    }
-
-
-_DETAIL_PREVIEW_CHARS = 4000
-
-
-def _trim_detail_inplace(item: dict[str, Any]) -> None:
-    """Shrink an oversized detail body to a preview, flagging that the full
-    text must be fetched on demand. Small bodies (the common conversation
-    case) are left intact so they render instantly without a follow-up call."""
-    detail = item.get("detail")
-    if isinstance(detail, str) and len(detail) > _DETAIL_PREVIEW_CHARS:
-        item["detail"] = detail[:_DETAIL_PREVIEW_CHARS]
-        item["detail_truncated"] = True
+    return build_session_detail(session_id)
 
 
 def get_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:
     """Full detail + attachments for a single event (lazy-loaded by the UI when
     a truncated event is selected)."""
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT detail, attachments FROM events WHERE session_id=? AND id=?",
-            (session_id, event_id),
-        ).fetchone()
-    if row is None:
-        return None
-    return {
-        "id": event_id,
-        "detail": row["detail"],
-        "attachments": json.loads(row["attachments"]) if row["attachments"] else None,
-    }
+    from .session_read import build_event_detail
+
+    return build_event_detail(session_id, event_id)
 
 
 def get_session(session_id: str) -> dict[str, Any] | None:
