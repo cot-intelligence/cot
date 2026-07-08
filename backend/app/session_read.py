@@ -625,7 +625,12 @@ def _assign_run_membership(events: list[dict[str, Any]], runs: list[dict[str, An
 
 
 def _sort_items(items: list[dict[str, Any]]) -> None:
-    items.sort(key=lambda item: (item.get("start_ts") or item.get("ts") or "", item.get("id") or 0))
+    def _key(item: dict[str, Any]) -> tuple[str, int, int]:
+        item_id = item.get("id") or 0
+        synthetic_span = item_id < 0 and item.get("category") == "subagent"
+        return (item.get("start_ts") or item.get("ts") or "", 1 if synthetic_span else 0, item_id)
+
+    items.sort(key=_key)
 
 
 def _apply_event_annotations(

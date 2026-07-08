@@ -869,3 +869,24 @@ def test_session_detail_inlines_approval_review_as_review_run():
         assert review_events[0]["run_id"] == runs[0]["id"]
     finally:
         tmp.cleanup()
+
+
+def _run_all() -> int:
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    failed = 0
+    for test in tests:
+        try:
+            test()
+            print(f"PASS {test.__name__}")
+        except AssertionError as exc:
+            failed += 1
+            print(f"FAIL {test.__name__}: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            print(f"ERROR {test.__name__}: {exc!r}")
+    print(f"\n{len(tests) - failed}/{len(tests)} passed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_run_all())
