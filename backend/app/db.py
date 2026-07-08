@@ -12,6 +12,8 @@ import re
 import sqlite3
 import string
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -294,23 +296,28 @@ def _tokens_from_parts(i: Any, o: Any, cr: Any, cw: Any) -> dict[str, int]:
     }
 
 
-def _connect() -> sqlite3.Connection:
+@contextmanager
+def _connect() -> Iterator[sqlite3.Connection]:
     path = db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # DELETE journal mode: WAL breaks on Docker bind mounts (macOS virtiofs disk I/O).
     conn = sqlite3.connect(path, check_same_thread=False, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000;")
-    journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
-    if str(journal_mode).lower() != "delete":
-        conn.execute("PRAGMA journal_mode=DELETE;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    # Keep sort/temp B-trees in RAM. The container runs read-only with a tiny
-    # (~16MB) /tmp tmpfs, so spilling a large session's ORDER BY to a temp file
-    # raised SQLITE_FULL ("database or disk is full"). Memory temp store avoids
-    # the tmpfs entirely; query working sets here are well within RAM.
-    conn.execute("PRAGMA temp_store=MEMORY;")
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000;")
+        journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+        if str(journal_mode).lower() != "delete":
+            conn.execute("PRAGMA journal_mode=DELETE;")
+        conn.execute("PRAGMA foreign_keys=ON;")
+        # Keep sort/temp B-trees in RAM. The container runs read-only with a tiny
+        # (~16MB) /tmp tmpfs, so spilling a large session's ORDER BY to a temp file
+        # raised SQLITE_FULL ("database or disk is full"). Memory temp store avoids
+        # the tmpfs entirely; query working sets here are well within RAM.
+        conn.execute("PRAGMA temp_store=MEMORY;")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:

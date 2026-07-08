@@ -20,6 +20,21 @@ def _fresh_db() -> tempfile.TemporaryDirectory[str]:
     return tmp
 
 
+def test_connect_closes_after_context_exit():
+    tmp = _fresh_db()
+    try:
+        with db._connect() as conn:
+            conn.execute("SELECT 1").fetchone()
+        try:
+            conn.execute("SELECT 1").fetchone()
+        except Exception as exc:  # noqa: BLE001
+            assert exc.__class__.__name__ == "ProgrammingError"
+        else:
+            raise AssertionError("db._connect() left the SQLite handle open")
+    finally:
+        tmp.cleanup()
+
+
 def _session(sid: str, *, source: str = "cursor", status: str = "completed") -> None:
     with db._connect() as conn:
         conn.execute(
