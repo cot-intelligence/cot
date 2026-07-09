@@ -84,7 +84,8 @@
     },
     "prose": "This is still open; I do not have enough information to choose.",
     "expected": {
-      "skipped": ["batch"]
+      "skipped": ["batch"],
+      "answer_source": "assistant_summary"
     }
   },
   {

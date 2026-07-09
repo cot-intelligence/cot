@@ -324,9 +324,41 @@ def test_bridge_push_and_collector_backfill_match_for_skipped_question():
     )
 
     collector_artifact = db._scan_cursor_question_artifacts(transcript)[0]
-    assert collector_artifact["response"] == {"skipped": ["deploy_path"]}
+    assert collector_artifact["response"] == {
+        "skipped": ["deploy_path"],
+        "answer_source": "assistant_summary",
+    }
     assert _stored_response(event_id) == collector_artifact["response"]
     tmp.cleanup()
+
+
+def test_skipped_recovery_can_be_replaced_by_later_answer_and_reset():
+    sid = _fresh()
+    event_id = _post_question_event(sid)
+    skipped_payload = {
+        "session_id": sid,
+        "title": "Deploy strategy",
+        "qids": ["deploy_path"],
+        "response_text": "This is still open; I do not have enough information to choose.",
+    }
+    answered_payload = {
+        "session_id": sid,
+        "title": "Deploy strategy",
+        "qids": ["deploy_path"],
+        "response_text": "Selected Rebuild prod image + restart (Recommended).",
+    }
+
+    assert _set_answer(skipped_payload)["updated"] == 1
+    assert _stored_response(event_id) == {
+        "skipped": ["deploy_path"],
+        "answer_source": "assistant_summary",
+    }
+    assert _set_answer(answered_payload)["updated"] == 1
+    assert _stored_response(event_id)["answers"]["deploy_path"]["answers"] == [
+        "Rebuild prod image + restart (Recommended)"
+    ]
+    assert db.clear_recovered_answers() == 1
+    assert _stored_response(event_id) == {}
 
 
 def test_reposting_same_recovery_is_idempotent():

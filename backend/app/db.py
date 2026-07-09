@@ -2884,8 +2884,7 @@ def set_question_answer(
             )
             if not _has_recovered_question_response(next_response):
                 continue
-            if next_response.get("answers"):
-                next_response.setdefault("answer_source", ANSWER_SOURCE_ASSISTANT_SUMMARY)
+            next_response.setdefault("answer_source", ANSWER_SOURCE_ASSISTANT_SUMMARY)
             existing = obj.get("response")
             if existing and not (
                 isinstance(existing, dict)

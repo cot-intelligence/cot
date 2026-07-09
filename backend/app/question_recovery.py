@@ -201,7 +201,8 @@ def recover_cursor_question_response(tool_input: dict[str, Any], response_text: 
     response_payload: dict[str, Any] = {}
     if answers:
         response_payload["answers"] = answers
-        response_payload["answer_source"] = ANSWER_SOURCE_ASSISTANT_SUMMARY
     if skipped:
         response_payload["skipped"] = skipped
+    if response_payload:
+        response_payload["answer_source"] = ANSWER_SOURCE_ASSISTANT_SUMMARY
     return response_payload
