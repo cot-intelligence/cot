@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+ANSWER_SOURCE_ASSISTANT_SUMMARY = "assistant_summary"
+
 
 def _norm_choice(text: object) -> str:
     return " ".join(str(text or "").lower().replace("_", " ").split())
@@ -199,7 +201,7 @@ def recover_cursor_question_response(tool_input: dict[str, Any], response_text: 
     response_payload: dict[str, Any] = {}
     if answers:
         response_payload["answers"] = answers
-        response_payload["answer_source"] = "assistant_summary"
+        response_payload["answer_source"] = ANSWER_SOURCE_ASSISTANT_SUMMARY
     if skipped:
         response_payload["skipped"] = skipped
     return response_payload

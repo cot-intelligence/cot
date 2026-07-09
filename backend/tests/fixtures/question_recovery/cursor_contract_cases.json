@@ -66,5 +66,61 @@
     },
     "prose": "I need one more clarification before choosing.",
     "expected": {}
+  },
+  {
+    "name": "skipped_marker",
+    "input": {
+      "title": "Follow-up batches",
+      "questions": [
+        {
+          "id": "batch",
+          "question": "Which follow-up batch should stay open?",
+          "options": [
+            {"id": "ship_now", "label": "Ship now"},
+            {"id": "ask_later", "label": "Ask later"}
+          ]
+        }
+      ]
+    },
+    "prose": "This is still open; I do not have enough information to choose.",
+    "expected": {
+      "skipped": ["batch"]
+    }
+  },
+  {
+    "name": "multi_question",
+    "input": {
+      "title": "Two clarifications",
+      "questions": [
+        {
+          "id": "deploy",
+          "question": "How should I deploy?",
+          "options": [
+            {"id": "restart_only", "label": "Restart service only"},
+            {"id": "rebuild_prod", "label": "Rebuild prod image + restart (Recommended)"}
+          ]
+        },
+        {
+          "id": "notify",
+          "question": "Should I notify after deploying?",
+          "options": [
+            {"id": "silent", "label": "No notification"},
+            {"id": "send_summary", "label": "Send summary to the team"}
+          ]
+        }
+      ]
+    },
+    "prose": "I chose Rebuild prod image + restart (Recommended) and Send summary to the team.",
+    "expected": {
+      "answers": {
+        "deploy": {
+          "answers": ["Rebuild prod image + restart (Recommended)"]
+        },
+        "notify": {
+          "answers": ["Send summary to the team"]
+        }
+      },
+      "answer_source": "assistant_summary"
+    }
   }
 ]

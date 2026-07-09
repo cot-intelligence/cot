@@ -3235,7 +3235,7 @@ def _recover_questions() -> int:
     """Host-side AskQuestion answer recovery, pushed to the collector.
 
     Works for both live and imported Cursor sessions: the transcript filename
-    stem is the session id used in storage. Posts only non-empty answers.
+    stem is the session id used in storage. Posts only non-empty follow-up prose.
     Clears previously recovered (heuristic) answers first so a re-run replaces
     stale guesses rather than leaving them stuck."""
     try:

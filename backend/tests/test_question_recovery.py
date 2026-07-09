@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from unittest import SkipTest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -83,40 +84,46 @@ class _Request:
         return self._payload
 
 
-def _answer(payload: dict) -> dict:
+def _answer_endpoint(payload: dict) -> dict:
     try:
         from app import main
     except ModuleNotFoundError as exc:
         if exc.name != "fastapi":
             raise
-        return {
-            "ok": True,
-            "updated": db.set_question_answer(
-                str(payload.get("session_id") or ""),
-                payload.get("title"),
-                payload.get("qids") if isinstance(payload.get("qids"), list) else [],
-                payload.get("response") if isinstance(payload.get("response"), dict) else {},
-                payload.get("response_text") if isinstance(payload.get("response_text"), str) else None,
-            ),
-        }
+        raise SkipTest(
+            "FastAPI is not installed; install backend requirements to run endpoint tests"
+        ) from exc
     return asyncio.run(main.set_question_answer(_Request(payload)))  # type: ignore[arg-type]
 
 
+def _set_answer(payload: dict) -> dict:
+    return {
+        "ok": True,
+        "updated": db.set_question_answer(
+            str(payload.get("session_id") or ""),
+            payload.get("title"),
+            payload.get("qids") if isinstance(payload.get("qids"), list) else [],
+            payload.get("response") if isinstance(payload.get("response"), dict) else {},
+            payload.get("response_text") if isinstance(payload.get("response_text"), str) else None,
+        ),
+    }
+
+
 def test_fixture_contract_cases_recover_expected_answers():
-    fixture_path = Path(_HERE) / "fixtures" / "question_recovery" / "cursor_sanitized_cases.json"
+    fixture_path = Path(_HERE) / "fixtures" / "question_recovery" / "cursor_contract_cases.json"
     cases = json.loads(fixture_path.read_text())
     assert cases
     for case in cases:
         assert (
             recover_cursor_question_response(case["input"], case["prose"]) == case["expected"]
-        ), case["name"]
+        ), f"{fixture_path}::{case['name']} (refresh: replace with captured Cursor contract case)"
 
 
 def test_answer_endpoint_accepts_prose_and_session_detail_shows_recovered_answer():
     sid = _fresh()
     _post_question_event(sid)
 
-    result = _answer(
+    result = _answer_endpoint(
         {
             "session_id": sid,
             "title": "Deploy strategy",
@@ -141,7 +148,7 @@ def test_answer_endpoint_still_accepts_legacy_prederived_response():
     }
 
     assert (
-        _answer(
+        _set_answer(
             {
                 "session_id": sid,
                 "title": "Deploy strategy",
@@ -163,7 +170,7 @@ def test_collector_derivation_wins_when_prose_and_legacy_response_are_both_prese
         "answer_source": "assistant_summary",
     }
 
-    result = _answer(
+    result = _set_answer(
         {
             "session_id": sid,
             "title": "Deploy strategy",
@@ -194,7 +201,7 @@ def test_recovery_can_replace_heuristic_answers_but_not_real_answers():
         timestamp="2026-07-08T12:00:01Z",
     )
 
-    result = _answer(
+    result = _set_answer(
         {
             "session_id": sid,
             "title": "Deploy strategy",
@@ -217,7 +224,7 @@ def test_ambiguous_prose_does_not_apply_legacy_response_when_prose_is_present():
     sid = _fresh()
     event_id = _post_question_event(sid)
 
-    result = _answer(
+    result = _set_answer(
         {
             "session_id": sid,
             "title": "Deploy strategy",
@@ -234,8 +241,7 @@ def test_ambiguous_prose_does_not_apply_legacy_response_when_prose_is_present():
     assert _stored_response(event_id) == {}
 
 
-def test_bridge_push_and_collector_backfill_derive_same_answer_from_transcript():
-    bridge = _load_bridge()
+def _write_question_transcript(tool_input: dict, response_text: str) -> tempfile.TemporaryDirectory:
     tmp = tempfile.TemporaryDirectory()
     transcript = Path(tmp.name) / "session-1.jsonl"
     transcript.write_text(
@@ -246,7 +252,7 @@ def test_bridge_push_and_collector_backfill_derive_same_answer_from_transcript()
                         "role": "assistant",
                         "message": {
                             "content": [
-                                {"type": "tool_use", "name": "AskQuestion", "input": _question_input()}
+                                {"type": "tool_use", "name": "AskQuestion", "input": tool_input}
                             ]
                         },
                     }
@@ -258,7 +264,7 @@ def test_bridge_push_and_collector_backfill_derive_same_answer_from_transcript()
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": "Selected Rebuild prod image + restart (Recommended).",
+                                    "text": response_text,
                                 }
                             ]
                         },
@@ -267,6 +273,16 @@ def test_bridge_push_and_collector_backfill_derive_same_answer_from_transcript()
             ]
         )
     )
+    return tmp
+
+
+def test_bridge_push_and_collector_backfill_derive_same_answer_from_transcript():
+    bridge = _load_bridge()
+    tmp = _write_question_transcript(
+        _question_input(),
+        "Selected Rebuild prod image + restart (Recommended).",
+    )
+    transcript = Path(tmp.name) / "session-1.jsonl"
 
     sid = _fresh()
     event_id = _post_question_event(sid)
@@ -286,6 +302,50 @@ def test_bridge_push_and_collector_backfill_derive_same_answer_from_transcript()
     tmp.cleanup()
 
 
+def test_bridge_push_and_collector_backfill_match_for_skipped_question():
+    bridge = _load_bridge()
+    tmp = _write_question_transcript(
+        _question_input(),
+        "This is still open; I do not have enough information to choose.",
+    )
+    transcript = Path(tmp.name) / "session-1.jsonl"
+
+    sid = _fresh()
+    event_id = _post_question_event(sid)
+    bridge_item = bridge._scan_questions_full(transcript)[0]
+    assert (
+        db.set_question_answer(
+            sid,
+            bridge_item["input"].get("title"),
+            bridge._question_qids(bridge_item["input"]),
+            response_text=bridge_item["response_text"],
+        )
+        == 1
+    )
+
+    collector_artifact = db._scan_cursor_question_artifacts(transcript)[0]
+    assert collector_artifact["response"] == {"skipped": ["deploy_path"]}
+    assert _stored_response(event_id) == collector_artifact["response"]
+    tmp.cleanup()
+
+
+def test_reposting_same_recovery_is_idempotent():
+    sid = _fresh()
+    event_id = _post_question_event(sid)
+    payload = {
+        "session_id": sid,
+        "title": "Deploy strategy",
+        "qids": ["deploy_path"],
+        "response_text": "Selected Rebuild prod image + restart (Recommended).",
+    }
+
+    assert _set_answer(payload)["updated"] == 1
+    assert _set_answer(payload)["updated"] == 0
+    assert _stored_response(event_id)["answers"]["deploy_path"]["answers"] == [
+        "Rebuild prod image + restart (Recommended)"
+    ]
+
+
 def _load_bridge():
     path = os.path.join(_REPO, "bridge", "cot")
     loader = importlib.machinery.SourceFileLoader("cot_bridge_question_recovery_under_test", path)
@@ -297,37 +357,11 @@ def _load_bridge():
 
 def test_bridge_scans_raw_question_prose_without_owning_recovery_heuristic():
     bridge = _load_bridge()
-    tmp = tempfile.TemporaryDirectory()
-    transcript = Path(tmp.name) / "session-1.jsonl"
-    transcript.write_text(
-        "\n".join(
-            [
-                json.dumps(
-                    {
-                        "role": "assistant",
-                        "message": {
-                            "content": [
-                                {"type": "tool_use", "name": "AskQuestion", "input": _question_input()}
-                            ]
-                        },
-                    }
-                ),
-                json.dumps(
-                    {
-                        "role": "assistant",
-                        "message": {
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": "Selected Rebuild prod image + restart (Recommended).",
-                                }
-                            ]
-                        },
-                    }
-                ),
-            ]
-        )
+    tmp = _write_question_transcript(
+        _question_input(),
+        "Selected Rebuild prod image + restart (Recommended).",
     )
+    transcript = Path(tmp.name) / "session-1.jsonl"
 
     assert not hasattr(bridge, "_cursor_question_response")
     assert bridge._scan_questions_full(transcript) == [
@@ -349,6 +383,8 @@ if __name__ == "__main__":
             except AssertionError as exc:
                 failures += 1
                 print(f"FAIL {name}: {exc}")
+            except SkipTest as exc:
+                print(f"SKIP {name}: {exc}")
             except Exception as exc:  # noqa: BLE001
                 failures += 1
                 print(f"ERROR {name}: {exc}")

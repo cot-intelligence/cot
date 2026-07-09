@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import __version__
 from .normalize import categorize, normalize
 from .pricing import cost_for, normalize_model
-from .question_recovery import recover_cursor_question_response
+from .question_recovery import ANSWER_SOURCE_ASSISTANT_SUMMARY, recover_cursor_question_response
 
 _write_lock = threading.Lock()
 
@@ -2859,7 +2859,7 @@ def set_question_answer(
     """
     has_prose = isinstance(response_text, str) and bool(response_text.strip())
     legacy_response = response if isinstance(response, dict) else {}
-    if not session_id or (not has_prose and not legacy_response.get("answers")):
+    if not session_id or (not has_prose and not _has_recovered_question_response(legacy_response)):
         return 0
     wanted = (str(title or ""), tuple(str(q) for q in qids))
     updated = 0
@@ -2882,12 +2882,14 @@ def set_question_answer(
                 if has_prose
                 else dict(legacy_response)
             )
-            if not next_response.get("answers"):
+            if not _has_recovered_question_response(next_response):
                 continue
-            next_response.setdefault("answer_source", "assistant_summary")
+            if next_response.get("answers"):
+                next_response.setdefault("answer_source", ANSWER_SOURCE_ASSISTANT_SUMMARY)
             existing = obj.get("response")
             if existing and not (
-                isinstance(existing, dict) and existing.get("answer_source") == "assistant_summary"
+                isinstance(existing, dict)
+                and existing.get("answer_source") == ANSWER_SOURCE_ASSISTANT_SUMMARY
             ):
                 continue
             if existing == next_response:
@@ -2899,6 +2901,10 @@ def set_question_answer(
             )
             updated += 1
     return updated
+
+
+def _has_recovered_question_response(response: dict[str, Any]) -> bool:
+    return bool(response.get("answers") or response.get("skipped"))
 
 
 def clear_recovered_answers() -> int:
@@ -2919,7 +2925,7 @@ def clear_recovered_answers() -> int:
             if obj is None:
                 continue
             resp = obj.get("response")
-            if isinstance(resp, dict) and resp.get("answer_source") == "assistant_summary":
+            if isinstance(resp, dict) and resp.get("answer_source") == ANSWER_SOURCE_ASSISTANT_SUMMARY:
                 obj["response"] = {}
                 conn.execute(
                     "UPDATE events SET detail = ? WHERE id = ?",
