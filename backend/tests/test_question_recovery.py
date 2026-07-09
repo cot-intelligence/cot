@@ -22,6 +22,145 @@ from app import db  # noqa: E402
 from app.question_recovery import recover_cursor_question_response  # noqa: E402
 
 _case = 0
+_HEURISTIC_CASES = [
+    {
+        "name": "explicit_label",
+        "input": {
+            "title": "Deploy strategy",
+            "questions": [
+                {
+                    "id": "deploy_path",
+                    "question": "How should I deploy?",
+                    "options": [
+                        {"id": "restart_only", "label": "Restart service only"},
+                        {
+                            "id": "rebuild_prod",
+                            "label": "Rebuild prod image + restart (Recommended)",
+                        },
+                    ],
+                }
+            ],
+        },
+        "prose": (
+            "Got it, I chose Rebuild prod image + restart (Recommended). "
+            "I will rebuild the image and restart the service now."
+        ),
+        "expected": {
+            "answers": {
+                "deploy_path": {
+                    "answers": ["Rebuild prod image + restart (Recommended)"],
+                }
+            },
+            "answer_source": "assistant_summary",
+        },
+    },
+    {
+        "name": "paraphrased_title",
+        "input": {
+            "title": "Recovery scope",
+            "questions": [
+                {
+                    "id": "scope",
+                    "question": "Which recovery pass should I run?",
+                    "options": [
+                        {"id": "full_recover", "label": "Full transcript recovery: scan every session"},
+                        {"id": "single_owner", "label": "Single owner refactor: collector derives answers"},
+                    ],
+                }
+            ],
+        },
+        "prose": (
+            "I'll go with the single owner refactor so the collector derives answers "
+            "from the raw follow-up text."
+        ),
+        "expected": {
+            "answers": {
+                "scope": {
+                    "answers": ["Single owner refactor: collector derives answers"],
+                }
+            },
+            "answer_source": "assistant_summary",
+        },
+    },
+    {
+        "name": "ambiguous",
+        "input": {
+            "title": "Ambiguous choice",
+            "questions": [
+                {
+                    "id": "choice",
+                    "question": "Which option did the user pick?",
+                    "options": [
+                        {"id": "alpha_path", "label": "Alpha path"},
+                        {"id": "beta_path", "label": "Beta path"},
+                    ],
+                }
+            ],
+        },
+        "prose": "I need one more clarification before choosing.",
+        "expected": {},
+    },
+    {
+        "name": "skipped_marker",
+        "input": {
+            "title": "Follow-up batches",
+            "questions": [
+                {
+                    "id": "batch",
+                    "question": "Which follow-up batch should stay open?",
+                    "options": [
+                        {"id": "ship_now", "label": "Ship now"},
+                        {"id": "ask_later", "label": "Ask later"},
+                    ],
+                }
+            ],
+        },
+        "prose": "This is still open; I do not have enough information to choose.",
+        "expected": {
+            "skipped": ["batch"],
+            "answer_source": "assistant_summary",
+        },
+    },
+    {
+        "name": "multi_question",
+        "input": {
+            "title": "Two clarifications",
+            "questions": [
+                {
+                    "id": "deploy",
+                    "question": "How should I deploy?",
+                    "options": [
+                        {"id": "restart_only", "label": "Restart service only"},
+                        {
+                            "id": "rebuild_prod",
+                            "label": "Rebuild prod image + restart (Recommended)",
+                        },
+                    ],
+                },
+                {
+                    "id": "notify",
+                    "question": "Should I notify after deploying?",
+                    "options": [
+                        {"id": "silent", "label": "No notification"},
+                        {"id": "send_summary", "label": "Send summary to the team"},
+                    ],
+                },
+            ],
+        },
+        "prose": "I chose Rebuild prod image + restart (Recommended) and Send summary to the team.",
+        "expected": {
+            "answers": {
+                "deploy": {
+                    "answers": ["Rebuild prod image + restart (Recommended)"],
+                },
+                "notify": {
+                    "answers": ["Send summary to the team"],
+                },
+            },
+            "answer_source": "assistant_summary",
+        },
+    },
+]
 
 
 def _fresh() -> str:
@@ -109,14 +248,11 @@ def _set_answer(payload: dict) -> dict:
     }
 
 
-def test_fixture_contract_cases_recover_expected_answers():
-    fixture_path = Path(_HERE) / "fixtures" / "question_recovery" / "cursor_contract_cases.json"
-    cases = json.loads(fixture_path.read_text())
-    assert cases
-    for case in cases:
+def test_heuristic_examples_recover_expected_answers():
+    for case in _HEURISTIC_CASES:
         assert (
             recover_cursor_question_response(case["input"], case["prose"]) == case["expected"]
-        ), f"{fixture_path}::{case['name']} (refresh: replace with captured Cursor contract case)"
+        ), case["name"]
 
 
 def test_answer_endpoint_accepts_prose_and_session_detail_shows_recovered_answer():
