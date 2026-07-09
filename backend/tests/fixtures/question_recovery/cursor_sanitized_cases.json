@@ -1,0 +1,70 @@
+[
+  {
+    "name": "explicit_label",
+    "input": {
+      "title": "Deploy strategy",
+      "questions": [
+        {
+          "id": "deploy_path",
+          "question": "How should I deploy?",
+          "options": [
+            {"id": "restart_only", "label": "Restart service only"},
+            {"id": "rebuild_prod", "label": "Rebuild prod image + restart (Recommended)"}
+          ]
+        }
+      ]
+    },
+    "prose": "Got it, I chose Rebuild prod image + restart (Recommended). I will rebuild the image and restart the service now.",
+    "expected": {
+      "answers": {
+        "deploy_path": {
+          "answers": ["Rebuild prod image + restart (Recommended)"]
+        }
+      },
+      "answer_source": "assistant_summary"
+    }
+  },
+  {
+    "name": "paraphrased_title",
+    "input": {
+      "title": "Recovery scope",
+      "questions": [
+        {
+          "id": "scope",
+          "question": "Which recovery pass should I run?",
+          "options": [
+            {"id": "full_recover", "label": "Full transcript recovery: scan every session"},
+            {"id": "single_owner", "label": "Single owner refactor: collector derives answers"}
+          ]
+        }
+      ]
+    },
+    "prose": "I'll go with the single owner refactor so the collector derives answers from the raw follow-up text.",
+    "expected": {
+      "answers": {
+        "scope": {
+          "answers": ["Single owner refactor: collector derives answers"]
+        }
+      },
+      "answer_source": "assistant_summary"
+    }
+  },
+  {
+    "name": "ambiguous",
+    "input": {
+      "title": "Ambiguous choice",
+      "questions": [
+        {
+          "id": "choice",
+          "question": "Which option did the user pick?",
+          "options": [
+            {"id": "alpha_path", "label": "Alpha path"},
+            {"id": "beta_path", "label": "Beta path"}
+          ]
+        }
+      ]
+    },
+    "prose": "I need one more clarification before choosing.",
+    "expected": {}
+  }
+]

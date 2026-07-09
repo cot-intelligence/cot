@@ -463,7 +463,7 @@ def test_codex_emits_session_start_with_posture():
 
 # --- AskQuestion answer recovery -------------------------------------------
 
-from app.db import _cursor_question_response  # noqa: E402
+from app.question_recovery import recover_cursor_question_response  # noqa: E402
 
 _ROLLOUT_Q = {"questions": [{"id": "rollout", "prompt": "How should I run the rollout?", "options": [
     {"id": "rebuild_prod", "label": "Rebuild prod image + restart (Recommended): docker build the fixed cot image, then `cot reimport`."},
@@ -473,18 +473,18 @@ _ROLLOUT_Q = {"questions": [{"id": "rollout", "prompt": "How should I run the ro
 
 
 def test_question_recovers_paraphrased_selection():
-    resp = _cursor_question_response(_ROLLOUT_Q, "Rebuilding the prod image with the fixes. This builds the dashboard + backend into a fresh image.")
+    resp = recover_cursor_question_response(_ROLLOUT_Q, "Rebuilding the prod image with the fixes. This builds the dashboard + backend into a fresh image.")
     picked = resp.get("answers", {}).get("rollout", {}).get("answers", [])
     assert picked and picked[0].startswith("Rebuild prod image"), resp
 
 
 def test_question_ambiguous_text_records_nothing():
-    resp = _cursor_question_response(_ROLLOUT_Q, "Okay, let me proceed with the next steps now.")
+    resp = recover_cursor_question_response(_ROLLOUT_Q, "Okay, let me proceed with the next steps now.")
     assert resp == {}, resp
 
 
 def test_question_matches_other_option_by_its_own_title():
-    resp = _cursor_question_response(_ROLLOUT_Q, "Bringing up the dev compose stack via just dev up.")
+    resp = recover_cursor_question_response(_ROLLOUT_Q, "Bringing up the dev compose stack via just dev up.")
     picked = resp.get("answers", {}).get("rollout", {}).get("answers", [])
     assert picked and picked[0].startswith("Dev compose"), resp
 
@@ -504,7 +504,7 @@ def test_question_recovers_choice_stated_after_acknowledgment():
         "I'm settling on \"security-architect\" as the consistent naming across directories, "
         "the plugin configuration, and the marketplace listing."
     )
-    resp = _cursor_question_response(_NAMING_Q, follow)
+    resp = recover_cursor_question_response(_NAMING_Q, follow)
     picked = resp.get("answers", {}).get("naming", {}).get("answers", [])
     assert picked and picked[0].startswith("security-architect"), resp
 
