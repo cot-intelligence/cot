@@ -733,202 +733,8 @@ def _emit_claude_responses(body: dict, source: str) -> None:
     _emit_synthetic_messages(source, body, scanned)
 
 
-def _norm_choice(text: object) -> str:
-    return " ".join(str(text or "").lower().replace("_", " ").split())
-
-
-def _contains_positive(haystack: str, needle: str) -> bool:
-    if not needle:
-        return False
-    start = haystack.find(needle)
-    if start < 0:
-        return False
-    before = haystack[max(0, start - 24) : start].split()
-    return not any(tok in {"no", "not", "without"} for tok in before[-3:])
-
-
-def _choice_matches(label: str, option_id: str, response_text: str) -> bool:
-    haystack = _norm_choice(response_text)
-    candidates = [label, label.split(" (", 1)[0]]
-    if " for now" in label:
-        candidates.append(label.split(" for now", 1)[0])
-    if " — " in label:
-        candidates.append(label.split(" — ", 1)[0])
-    if any(len(_norm_choice(c)) >= 4 and _contains_positive(haystack, _norm_choice(c)) for c in candidates):
-        return True
-    oid = _norm_choice(option_id.replace("_", " "))
-    # Short ids are often common words ("accept", "keep") that match prose by
-    # coincidence; require a reasonably long id to avoid false positives.
-    if len(oid) >= 8 and _contains_positive(haystack, oid):
-        return True
-    return False
-
-
-# Match window: the agent states its choice up front; the deliberation tail
-# re-mentions every option and only adds ambiguity. Kept in sync with db.py.
-_ANSWER_REGION_CHARS = 700
-
-
-def _answer_region(text: str) -> str:
-    region = str(text or "").strip()
-    markers = (
-        "\n---",
-        "\n## Full picture",
-        "\n## Suggested",
-        "\n**Suggested roadmap",
-        "\n**Still unanswered",
-        "\n**Two optional follow-ups",
-    )
-    for marker in markers:
-        idx = region.find(marker)
-        if idx >= 0:
-            region = region[:idx]
-    return region[:_ANSWER_REGION_CHARS]
-
-
-# Kept in sync with backend/app/db.py: recover a paraphrased AskQuestion
-# selection from the agent's follow-up prose when strict label matching misses.
-_TITLE_STOPWORDS = frozenset(
-    {
-        "the", "a", "an", "and", "or", "then", "with", "your", "you", "for",
-        "now", "via", "use", "using", "run", "not", "but", "its", "this",
-        "that", "into", "etc", "all", "any", "per", "are", "was", "will",
-    }
-)
-
-
-def _option_title(label: str) -> str:
-    t = str(label or "")
-    for sep in (":", " — ", " - ", " ("):
-        if sep in t:
-            t = t.split(sep, 1)[0]
-    return t.strip()
-
-
-def _word_tokens(text: str) -> list[str]:
-    return [w for w in re.split(r"[^a-z0-9]+", str(text or "").lower()) if w]
-
-
-def _title_tokens(title: str) -> list[str]:
-    return [w for w in _word_tokens(title) if len(w) >= 3 and w not in _TITLE_STOPWORDS]
-
-
-def _token_present(tok: str, resp_tokens: list[str]) -> bool:
-    for rt in resp_tokens:
-        if len(rt) < 3:
-            continue
-        if rt.startswith(tok) or tok.startswith(rt):
-            return True
-    return False
-
-
-_TITLE_MATCH_MIN_RATIO = 0.6
-
-
-def _unique_title_match(options: list, match_text: str, min_margin: float = 0.2) -> str | None:
-    """Commit to the top option only when it clears the ratio bar AND beats the
-    runner-up by ``min_margin`` — so a short generic label can't edge out the
-    real answer, and near-ties abstain. Kept in sync with db.py."""
-    resp_tokens = _word_tokens(match_text)
-    if not resp_tokens:
-        return None
-    scored: list = []
-    for opt in options:
-        if not isinstance(opt, dict):
-            continue
-        label = str(opt.get("label") or "").strip()
-        oid = str(opt.get("id") or "").strip()
-        tt = _title_tokens(_option_title(label))
-        if len(tt) < 2:
-            scored.append((0.0, 0, label or oid))
-            continue
-        present = sum(1 for t in tt if _token_present(t, resp_tokens))
-        scored.append((present / len(tt), present, label or oid))
-    if not scored:
-        return None
-    scored.sort(key=lambda x: (-x[0], -x[1]))
-    best_ratio, best_present, best_label = scored[0]
-    second_ratio = scored[1][0] if len(scored) > 1 else 0.0
-    if (
-        best_present >= 2
-        and best_ratio >= _TITLE_MATCH_MIN_RATIO
-        and best_ratio - second_ratio >= min_margin
-    ):
-        return best_label
-    return None
-
-
-_DECISION_ANCHORS = re.compile(
-    r"\b(?:went with|going with|go with|i'?ll go with|let'?s go with|you chose|"
-    r"i chose|we chose|chose|settling on|settle on|decided (?:on|to)|decided|"
-    r"picked|selected|opting for|opted for)\b"
-    r"|^\s*(?:got it|ok|okay|sounds good|perfect|great)\b[\s,:\u2014-]",
-    re.I | re.M,
-)
-_DECISION_SPAN_CHARS = 200
-
-
-def _decision_region(text: str) -> str:
-    s = str(text or "")
-    spans = [s[m.start() : m.start() + _DECISION_SPAN_CHARS] for m in _DECISION_ANCHORS.finditer(s)]
-    return " ".join(spans)
-
-
-def _match_question(options: list, region: str, min_margin: float = 0.2) -> list:
-    labels: list = []
-    for opt in options:
-        if not isinstance(opt, dict):
-            continue
-        label = str(opt.get("label") or "").strip()
-        oid = str(opt.get("id") or "").strip()
-        if _choice_matches(label, oid, region):
-            labels.append(label or oid)
-    if not labels:
-        single = _unique_title_match(options, region, min_margin)
-        if single:
-            labels = [single]
-    return labels
-
-
-def _cursor_question_response(tool_input: dict, response_text: str) -> dict:
-    """Best-effort recovery for Cursor AskQuestion selections.
-
-    Cursor records the question prompt as an ``AskQuestion`` transcript tool_use,
-    but does not persist a separate tool_result in the JSONL. The next assistant
-    response usually summarizes selected options and says which batches were
-    skipped/open. We only match explicit option labels/ids in that summary; no
-    free-form guessing.
-    """
-    questions = tool_input.get("questions") if isinstance(tool_input.get("questions"), list) else []
-    answer_region = _answer_region(response_text)
-    decision_region = _decision_region(response_text)
-    haystack = _norm_choice(response_text)
-    mentions_skip = any(word in haystack for word in ("skipped", "unanswered", "still open"))
-    answers: dict[str, dict[str, list[str]]] = {}
-    skipped: list[str] = []
-
-    for q in questions:
-        if not isinstance(q, dict):
-            continue
-        qid = str(q.get("id") or "")
-        if not qid:
-            continue
-        options = q.get("options") if isinstance(q.get("options"), list) else []
-        labels = _match_question(options, decision_region, 0.15) if decision_region else []
-        if not labels:
-            labels = _match_question(options, answer_region, 0.25)
-        if labels:
-            answers[qid] = {"answers": labels}
-        elif mentions_skip:
-            skipped.append(qid)
-
-    out: dict = {}
-    if answers:
-        out["answers"] = answers
-        out["answer_source"] = "assistant_summary"
-    if skipped:
-        out["skipped"] = skipped
-    return out
+def _collapse_response_text(text: object) -> str:
+    return " ".join(str(text or "").lower().split())
 
 
 def _scan_cursor_artifacts(transcript_path: str, session_id: str, response_text: str = "") -> dict:
@@ -995,7 +801,7 @@ def _scan_cursor_artifacts(transcript_path: str, session_id: str, response_text:
                 questions.append(
                     {
                         "input": inp,
-                        "response": _cursor_question_response(inp, response_text),
+                        "response_text": response_text,
                     }
                 )
     out["plans"] = plans
@@ -1036,7 +842,7 @@ def _emit_cursor_artifacts(body: dict, source: str) -> bool:
             },
         )
     for q in questions:
-        for hook_name, response in (("preToolUse", {}), ("postToolUse", q["response"])):
+        for hook_name in ("preToolUse", "postToolUse"):
             _post(
                 f"{COT_ENDPOINT}/v1/ingest/{source}",
                 {
@@ -1045,11 +851,16 @@ def _emit_cursor_artifacts(body: dict, source: str) -> bool:
                     "hook_event_name": hook_name,
                     "tool_name": "AskQuestion",
                     "tool_input": q["input"],
-                    "tool_response": response,
+                    "tool_response": {},
                     "composer_mode": body.get("composer_mode"),
                     "model": body.get("model"),
                     "timestamp": body.get("timestamp"),
                 },
+            )
+        if str(q.get("response_text") or "").strip():
+            _post(
+                f"{COT_ENDPOINT}/v1/questions/answer",
+                _question_answer_payload(session_id, q["input"], q["response_text"]),
             )
     # Emit every assistant text block from the transcript delta. Cursor's
     # afterAgentResponse hook carries only the turn-final text, so this is the
@@ -1060,13 +871,13 @@ def _emit_cursor_artifacts(body: dict, source: str) -> bool:
     responses = scanned.get("responses", [])
     deduped: list[str] = []
     for r in responses:
-        if not deduped or _norm_choice(deduped[-1]) != _norm_choice(r):
+        if not deduped or _collapse_response_text(deduped[-1]) != _collapse_response_text(r):
             deduped.append(r)
     body_text = str(body.get("text") or body.get("response") or "").strip()
     emit_list = list(deduped)
     # Safety net: if the hook's final text wasn't in the delta yet, include it
     # (deduped against the last transcript block).
-    if body_text and (not emit_list or _norm_choice(emit_list[-1]) != _norm_choice(body_text)):
+    if body_text and (not emit_list or _collapse_response_text(emit_list[-1]) != _collapse_response_text(body_text)):
         emit_list.append(body_text)
     for i, text in enumerate(emit_list):
         _post(
@@ -3411,11 +3222,20 @@ def _question_qids(tool_input: dict) -> list[str]:
     ]
 
 
+def _question_answer_payload(session_id: str, tool_input: dict, response_text: str) -> dict:
+    return {
+        "session_id": session_id,
+        "title": tool_input.get("title"),
+        "qids": _question_qids(tool_input),
+        "response_text": response_text,
+    }
+
+
 def _recover_questions() -> int:
     """Host-side AskQuestion answer recovery, pushed to the collector.
 
     Works for both live and imported Cursor sessions: the transcript filename
-    stem is the session id used in storage. Posts only non-empty answers.
+    stem is the session id used in storage. Posts only non-empty follow-up prose.
     Clears previously recovered (heuristic) answers first so a re-run replaces
     stale guesses rather than leaving them stuck."""
     try:
@@ -3427,15 +3247,10 @@ def _recover_questions() -> int:
         sid = path.stem
         for item in _scan_questions_full(path):
             inp = item["input"]
-            resp = _cursor_question_response(inp, item["response_text"])
-            if not resp.get("answers"):
+            response_text = item["response_text"]
+            if not str(response_text or "").strip():
                 continue
-            payload = {
-                "session_id": sid,
-                "title": inp.get("title"),
-                "qids": _question_qids(inp),
-                "response": resp,
-            }
+            payload = _question_answer_payload(sid, inp, response_text)
             try:
                 req = urllib.request.Request(
                     f"{COT_ENDPOINT}/v1/questions/answer",

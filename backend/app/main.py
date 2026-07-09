@@ -730,17 +730,18 @@ def reset_recovered_answers() -> dict[str, Any]:
 
 @app.post("/v1/questions/answer")
 async def set_question_answer(request: Request) -> dict[str, Any]:
-    """Merge a host-recovered AskQuestion answer onto stored question events.
+    """Merge a recovered AskQuestion answer onto stored question events.
 
-    Cursor never persists the selection, so the bridge recovers it from the
-    agent's follow-up prose (it can read the transcripts; the container can't)
-    and posts it here keyed by the question's signature."""
+    Cursor never persists the selection, so the bridge sends the raw agent
+    follow-up prose (it can read the transcripts; the container usually can't)
+    keyed by the question's signature. The collector owns derivation."""
     body = await _json_body(request)
     updated = db.set_question_answer(
         str(body.get("session_id") or ""),
         body.get("title"),
         body.get("qids") if isinstance(body.get("qids"), list) else [],
         body.get("response") if isinstance(body.get("response"), dict) else {},
+        body.get("response_text") if isinstance(body.get("response_text"), str) else None,
     )
     return {"ok": True, "updated": updated}
 
