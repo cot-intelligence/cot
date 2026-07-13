@@ -1,6 +1,10 @@
 default:
     @just --list
 
+check:
+    ruff check backend
+    python3 -m pytest -q backend/tests
+
 status:
     #!/usr/bin/env sh
     set -eu

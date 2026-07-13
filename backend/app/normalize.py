@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
 from typing import Any
 
+from . import timeutil
 from .tool_classification import (
     ToolInvocation,
     canonical_tool as _canonical_tool,
@@ -20,6 +20,7 @@ from .tool_classification import (
 )
 
 Source = str  # 'claude' | 'cursor' | 'codex'
+APPROVAL_REVIEW_PREFIX = "The following is the Codex agent history"
 
 _START_HOOKS = {
     "PreToolUse",
@@ -45,10 +46,6 @@ _END_HOOKS = {
     "stop",
     "sessionEnd",
 }
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _phase(hook: str) -> str:
@@ -405,7 +402,7 @@ def normalize(source: Source, body: dict[str, Any] | None) -> dict[str, Any]:
         "cwd": cwd,
         "tool": tool,
         "phase": _phase(hook),
-        "ts": body.get("timestamp") or _now(),
+        "ts": body.get("timestamp") or timeutil.now(),
         # Model behind this event when known. Cursor sends it on every hook;
         # for Claude it rides along on synthetic response events (from the
         # transcript) — plain tool hooks don't carry it. Cursor's "default"

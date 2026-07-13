@@ -1,0 +1,4 @@
+target-version = "py312"
+
+[lint]
+select = ["SLF001"]

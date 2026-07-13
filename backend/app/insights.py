@@ -55,7 +55,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from . import db, session_read
+from . import db, session_read, store, timeutil
 from .pricing import cost_for, normalize_model
 
 PILLARS = ("usability", "cost", "security")
@@ -87,6 +87,7 @@ CONSTANTS: dict[str, dict[str, Any]] = {
 }
 
 _EVIDENCE_CAP = 8
+_EVENT_SCOPE_SQL = " FROM events e JOIN sessions s ON s.id = e.session_id WHERE s.archived = 0"
 
 # Human label for each rule type, used to collapse many findings of the same
 # rule into one group in the UI. Keyed by rule id.
@@ -181,7 +182,7 @@ def _ev(row: Any, label: str, value: str | None = None) -> dict[str, Any]:
 
 def _scope(ctx: RuleContext, extra: str = "") -> tuple[str, list[Any]]:
     """Shared FROM/WHERE for event queries honoring window + session mode."""
-    sql = " FROM events e JOIN sessions s ON s.id = e.session_id WHERE s.archived = 0"
+    sql = _EVENT_SCOPE_SQL
     params: list[Any] = []
     if ctx.cutoff:
         sql += " AND e.ts >= ?"
@@ -327,7 +328,7 @@ def _stalled_clarifications(ctx: RuleContext) -> list[dict[str, Any]]:
         last = ctx.conn.execute(
             "SELECT MAX(ts) t FROM events WHERE session_id = ?", (session_id,)
         ).fetchone()["t"]
-        if db._live_status(last) == "active":
+        if timeutil.live_status(last) == "active":
             continue  # user may still answer a running session
         clars, _ = session_read.build_clarifications(ev_rows)
         open_qs = [q for q in clars if not q["answered"]]
@@ -644,8 +645,8 @@ def _trend_anomaly(ctx: RuleContext) -> list[dict[str, Any]]:
             "SELECT e.model m, COALESCE(SUM(e.input_tokens),0) i,"
             " COALESCE(SUM(e.output_tokens),0) o, COALESCE(SUM(e.cache_read_tokens),0) cr,"
             " COALESCE(SUM(e.cache_write_tokens),0) cw"
-            " FROM events e JOIN sessions s ON s.id = e.session_id"
-            " WHERE s.archived = 0 AND e.ts >= ? AND e.ts < ?"
+            + _EVENT_SCOPE_SQL
+            + " AND e.ts >= ? AND e.ts < ?"
             " AND e.model IS NOT NULL AND e.model != '' GROUP BY e.model",
             (lo, hi),
         ).fetchall()
@@ -879,7 +880,7 @@ def _read_then_exfil(ctx: RuleContext) -> list[dict[str, Any]]:
     window = timedelta(seconds=c["window_seconds"])
     pending: dict[str, list[tuple[datetime, str, Any]]] = {}  # session → sensitive reads
     for r in rows:
-        ts = db._parse_ts(r["ts"])
+        ts = timeutil.parse_ts(r["ts"])
         if ts is None:
             continue
         sid = r["session_id"]
@@ -1046,7 +1047,7 @@ def _dedup(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _reconcile(conn: Any, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Persist current findings and merge lifecycle state (aggregate mode only)."""
     findings = _dedup(findings)
-    now = db._now()
+    now = timeutil.now()
     grace = timedelta(days=CONSTANTS["lifecycle"]["resolve_grace_days"])
     stored = {
         r["fingerprint"]: r for r in conn.execute("SELECT * FROM insight_findings").fetchall()
@@ -1083,7 +1084,7 @@ def _reconcile(conn: Any, findings: list[dict[str, Any]]) -> list[dict[str, Any]
         if fp in current:
             continue
         if r["status"] == "active":
-            last = db._parse_ts(r["last_seen"])
+            last = timeutil.parse_ts(r["last_seen"])
             if last is not None and datetime.now(timezone.utc) - last >= grace:
                 conn.execute(
                     "UPDATE insight_findings SET status = 'resolved', resolved_at = ?"
@@ -1094,7 +1095,6 @@ def _reconcile(conn: Any, findings: list[dict[str, Any]]) -> list[dict[str, Any]
                     "SELECT * FROM insight_findings WHERE fingerprint = ?", (fp,)
                 ).fetchone()
         out.append(_stored_to_finding(r))
-    conn.commit()
     return out
 
 
@@ -1104,7 +1104,10 @@ def compute_insights(days: int = 30, session_id: str | None = None) -> dict[str,
     Aggregate mode (no session_id) persists findings and reconciles their
     lifecycle; per-session mode is ephemeral.
     """
-    with db._connect() as conn:
+    # Per-session evaluation is ephemeral; aggregate evaluation reconciles
+    # persisted finding lifecycle state and therefore needs a write transaction.
+    store_access = store.read() if session_id is not None else store.write()
+    with store_access as conn:
         ctx = RuleContext(
             conn=conn,
             cutoff=None if session_id else _cutoff_iso(days),
@@ -1127,7 +1130,7 @@ def compute_insights(days: int = 30, session_id: str | None = None) -> dict[str,
     active = [f for f in findings if f["status"] == "active"]
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
     return {
-        "generated_at": db._now(),
+        "generated_at": timeutil.now(),
         "window_days": 0 if session_id else days,
         "insights": findings,
         "counts": {
@@ -1143,7 +1146,7 @@ def compute_insights(days: int = 30, session_id: str | None = None) -> dict[str,
 
 
 def session_exists(session_id: str) -> bool:
-    with db._connect() as conn:
+    with store.read() as conn:
         return (
             conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()
             is not None
@@ -1153,8 +1156,8 @@ def session_exists(session_id: str) -> bool:
 def set_finding_status(fingerprint: str, status: str) -> bool:
     """Manual lifecycle control: dismiss or restore. Returns False if unknown."""
     assert status in ("dismissed", "active")
-    now = db._now()
-    with db._write_lock, db._connect() as conn:
+    now = timeutil.now()
+    with store.write() as conn:
         cur = conn.execute(
             "UPDATE insight_findings SET status = ?, dismissed_at = ?"
             " WHERE fingerprint = ?",
