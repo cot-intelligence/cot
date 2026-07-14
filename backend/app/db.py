@@ -11,24 +11,18 @@ import json
 import re
 import sqlite3
 import string
-import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import __version__
-from .normalize import categorize, normalize
+from . import __version__, store, timeutil
+from .normalize import APPROVAL_REVIEW_PREFIX, categorize, normalize
 from .pricing import cost_for, normalize_model
 from .question_recovery import ANSWER_SOURCE_ASSISTANT_SUMMARY, recover_cursor_question_response
 
-_write_lock = threading.Lock()
-
 _SESSION_END_HOOKS = {"Stop", "stop", "SessionEnd", "sessionEnd"}
 _SESSION_START_HOOKS = {"SessionStart", "sessionStart"}
-_APPROVAL_REVIEW_PREFIX = "The following is the Codex agent history"
 _APPROVAL_REVIEW_RE = re.compile(r"\bReviewed Codex session id:\s*([0-9a-fA-F-]{36})\b")
 
 
@@ -47,7 +41,7 @@ def _clean_upload_wrapper_text(text: str | None) -> str:
 
 def _approval_review_origin_from_text(text: str | None) -> str | None:
     body = str(text or "").lstrip()
-    if not body.startswith(_APPROVAL_REVIEW_PREFIX):
+    if not body.startswith(APPROVAL_REVIEW_PREFIX):
         return None
     match = _APPROVAL_REVIEW_RE.search(body)
     return match.group(1).lower() if match else None
@@ -59,54 +53,6 @@ _CURSOR_GRANULAR_HOOKS = {
     "beforeReadFile",
     "afterFileEdit",
 }
-
-# A session is reported "active" only while it keeps emitting events. After this
-# much silence we treat it as completed, regardless of whether a Stop/SessionEnd
-# hook ever arrived. This makes "active" mean "running now" rather than the
-# stored flag, which is unreliable: Stop fires after every turn, and sessions
-# that never send an end hook would otherwise linger as active forever.
-_ACTIVE_WINDOW_SECONDS = 600
-
-
-def _parse_ts(value: Any) -> datetime | None:
-    """Parse an event timestamp into an aware datetime.
-
-    Timestamps are usually ISO strings, but legacy rows store a numeric epoch
-    (seconds or milliseconds) — ``body["timestamp"]`` from some agents is an
-    int, and SQLite keeps it as an integer storage class, so ``MAX(ts)`` comes
-    back as an ``int`` rather than text.
-    """
-    if value is None or value == "":
-        return None
-    if isinstance(value, (int, float)):
-        # Heuristic: values past ~year 2286 in seconds are really milliseconds.
-        seconds = value / 1000 if value > 1e11 else value
-        try:
-            return datetime.fromtimestamp(seconds, tz=timezone.utc)
-        except (ValueError, OSError, OverflowError):
-            return None
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
-
-
-def _format_ts(value: Any) -> str | None:
-    """Serialize a stored timestamp as an ISO string for API responses."""
-    dt = _parse_ts(value)
-    return dt.isoformat() if dt else None
-
-
-def _live_status(last_ts: Any) -> str:
-    """Effective status derived from recency of the last event."""
-    dt = _parse_ts(last_ts)
-    if dt is None:
-        return "completed"
-    age = (datetime.now(timezone.utc) - dt).total_seconds()
-    return "active" if age <= _ACTIVE_WINDOW_SECONDS else "completed"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -217,65 +163,46 @@ CREATE INDEX IF NOT EXISTS idx_audit_events_ts ON audit_events(ts);
 """
 
 
-def db_path() -> Path:
-    import os
-
-    env = os.environ.get("COT_DB_PATH")
-    if env:
-        return Path(env)
-    return Path.home() / ".cot" / "cot.db"
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-_EVENT_INSERT_SQL = (
-    "INSERT INTO events (session_id, source, hook, tool, phase, ts, payload,"
-    " category, title, detail, target, status, duration_ms, model,"
-    " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
-    " dedup_key, origin, raw_ingest_id, created_at)"
-    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-)
-
-
 def _dedup_key(raw: dict[str, Any]) -> str:
     return hashlib.sha1(
         json.dumps(raw, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
     ).hexdigest()
 
 
-def _event_params(
+def _insert_normalized_event(
+    conn: sqlite3.Connection,
     norm: dict[str, Any],
     raw: dict[str, Any],
     dedup_key: str,
+    *,
     ts: str | None = None,
     origin: str = "hook",
     raw_ingest_id: int | None = None,
-) -> tuple[Any, ...]:
-    return (
-        norm["session_id"],
-        norm["source"],
-        norm["hook"],
-        norm["tool"],
-        norm["phase"],
-        ts or norm["ts"],
-        json.dumps(raw, ensure_ascii=False, default=str),
-        norm.get("category"),
-        norm.get("title"),
-        norm.get("detail"),
-        norm.get("target"),
-        norm.get("status"),
-        norm.get("duration_ms"),
-        norm.get("model"),
-        norm.get("input_tokens"),
-        norm.get("output_tokens"),
-        norm.get("cache_read_tokens"),
-        norm.get("cache_write_tokens"),
-        dedup_key,
-        origin,
-        raw_ingest_id,
-        _now(),
+) -> int:
+    return store.insert_event(
+        conn,
+        session_id=norm["session_id"],
+        source=norm["source"],
+        hook=norm["hook"],
+        tool=norm["tool"],
+        phase=norm["phase"],
+        ts=ts or norm["ts"],
+        payload=raw,
+        category=norm.get("category"),
+        title=norm.get("title"),
+        detail=norm.get("detail"),
+        target=norm.get("target"),
+        status=norm.get("status"),
+        duration_ms=norm.get("duration_ms"),
+        model=norm.get("model"),
+        input_tokens=norm.get("input_tokens"),
+        output_tokens=norm.get("output_tokens"),
+        cache_read_tokens=norm.get("cache_read_tokens"),
+        cache_write_tokens=norm.get("cache_write_tokens"),
+        dedup_key=dedup_key,
+        origin=origin,
+        raw_ingest_id=raw_ingest_id,
+        created_at=timeutil.now(),
     )
 
 
@@ -295,30 +222,6 @@ def _tokens_from_parts(i: Any, o: Any, cr: Any, cw: Any) -> dict[str, int]:
         "cache_write": cw,
         "total": i + o + cr + cw,
     }
-
-
-@contextmanager
-def _connect() -> Iterator[sqlite3.Connection]:
-    path = db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # DELETE journal mode: WAL breaks on Docker bind mounts (macOS virtiofs disk I/O).
-    conn = sqlite3.connect(path, check_same_thread=False, timeout=30.0)
-    try:
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=5000;")
-        journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
-        if str(journal_mode).lower() != "delete":
-            conn.execute("PRAGMA journal_mode=DELETE;")
-        conn.execute("PRAGMA foreign_keys=ON;")
-        # Keep sort/temp B-trees in RAM. The container runs read-only with a tiny
-        # (~16MB) /tmp tmpfs, so spilling a large session's ORDER BY to a temp file
-        # raised SQLITE_FULL ("database or disk is full"). Memory temp store avoids
-        # the tmpfs entirely; query working sets here are well within RAM.
-        conn.execute("PRAGMA temp_store=MEMORY;")
-        with conn:
-            yield conn
-    finally:
-        conn.close()
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -395,7 +298,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             ")"
         )
 
-    now = _now()
+    now = timeutil.now()
     conn.execute(
         "UPDATE events SET ts = ? WHERE ts IS NULL OR ts = ''",
         (now,),
@@ -845,7 +748,7 @@ def _response_fingerprint(text: Any) -> str:
 
 
 def _timestamp_before(value: Any, milliseconds: int = 1) -> str:
-    dt = _parse_ts(value) or datetime.now(timezone.utc)
+    dt = timeutil.parse_ts(value) or datetime.now(timezone.utc)
     return (dt - timedelta(milliseconds=milliseconds)).isoformat()
 
 
@@ -942,7 +845,7 @@ def _insert_cursor_question_event(
     ).fetchone():
         return
     norm = normalize("cursor", raw)
-    conn.execute(_EVENT_INSERT_SQL, _event_params(norm, raw, dk))
+    _insert_normalized_event(conn, norm, raw, dk)
 
 
 def _insert_backfilled_cursor_question(
@@ -1083,8 +986,10 @@ _RAW_PAYLOAD_MAX_BYTES = 64 * 1024
 
 
 def init_db() -> None:
-    with _connect() as conn:
-        conn.executescript(SCHEMA)
+    with store.write() as conn:
+        for statement in SCHEMA.split(";"):
+            if statement.strip():
+                conn.execute(statement)
         _migrate(conn)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source)"
@@ -1127,14 +1032,14 @@ def init_db() -> None:
 
 def get_setting(key: str, default: str | None = None) -> str | None:
     """Read a key/value preference, returning ``default`` when unset."""
-    with _connect() as conn:
+    with store.read() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
     return row["value"] if row is not None else default
 
 
 def set_setting(key: str, value: str) -> None:
     """Upsert a key/value preference."""
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         conn.execute(
             "INSERT INTO settings (key, value) VALUES (?, ?)"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1159,8 +1064,8 @@ def record_audit_event(
     payload = None
     if detail is not None:
         payload = json.dumps(detail, ensure_ascii=False, default=str)
-    now = _now()
-    with _write_lock, _connect() as conn:
+    now = timeutil.now()
+    with store.write() as conn:
         cur = conn.execute(
             "INSERT INTO audit_events (action, actor, target, status, detail, ts, created_at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1171,7 +1076,7 @@ def record_audit_event(
 
 def audit_events(limit: int = 100) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 500))
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT * FROM audit_events ORDER BY ts DESC, id DESC LIMIT ?",
             (limit,),
@@ -1192,7 +1097,7 @@ def audit_events(limit: int = 100) -> list[dict[str, Any]]:
                 "target": r["target"],
                 "status": r["status"],
                 "detail": detail,
-                "ts": _format_ts(r["ts"]) or r["ts"],
+                "ts": timeutil.format_ts(r["ts"]) or r["ts"],
             }
         )
     return out
@@ -1243,13 +1148,13 @@ def _retention_candidates(conn: sqlite3.Connection, cutoff: str) -> tuple[list[s
 def retention_status() -> dict[str, Any]:
     policy = retention_policy()
     cutoff = _retention_cutoff(policy["days"])
-    with _connect() as conn:
+    with store.read() as conn:
         sessions, events = _retention_candidates(conn, cutoff)
         oldest = conn.execute("SELECT MIN(ts) AS ts FROM events").fetchone()["ts"]
     return {
         "policy": policy,
         "cutoff": cutoff,
-        "oldest_event": _format_ts(oldest),
+        "oldest_event": timeutil.format_ts(oldest),
         "eligible_sessions": len(sessions) if policy["enabled"] else 0,
         "eligible_events": events if policy["enabled"] else 0,
         "preview_sessions": len(sessions),
@@ -1260,7 +1165,7 @@ def retention_status() -> dict[str, Any]:
 def cleanup_retention(*, dry_run: bool = True) -> dict[str, Any]:
     policy = retention_policy()
     cutoff = _retention_cutoff(policy["days"])
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         sessions, events = _retention_candidates(conn, cutoff)
         deleted_sessions = deleted_events = 0
         if policy["enabled"] and not dry_run and sessions:
@@ -1356,7 +1261,7 @@ def _raw_received_at(raw: Any) -> str:
         value = raw.get("timestamp") or raw.get("ts") or raw.get("created_at")
         if value not in (None, ""):
             return str(value)
-    return _now()
+    return timeutil.now()
 
 
 def append_raw_ingest(
@@ -1368,9 +1273,9 @@ def append_raw_ingest(
     projection_error: str | None = None,
 ) -> int:
     payload, truncated = _raw_payload_text(raw)
-    now = _now()
+    now = timeutil.now()
     received_at = _raw_received_at(raw)
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         cur = conn.execute(
             "INSERT INTO raw_ingest_events (source, origin, received_at, session_id_guess,"
             " raw_kind, raw_payload, raw_payload_truncated, raw_hash, parser_version,"
@@ -1402,7 +1307,7 @@ def mark_raw_ingest(
     event_id: int | None = None,
     projection_error: str | None = None,
 ) -> None:
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         conn.execute(
             "UPDATE raw_ingest_events SET status = ?, event_id = ?, projection_error = ?"
             " WHERE id = ?",
@@ -1412,7 +1317,7 @@ def mark_raw_ingest(
 
 def raw_ingest_events(limit: int = 100) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 500))
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT * FROM raw_ingest_events ORDER BY id ASC LIMIT ?",
             (limit,),
@@ -1501,7 +1406,7 @@ def record_event(
     explicit_dk = raw.get("_dedup_key")
     dk = str(explicit_dk) if explicit_dk else _dedup_key(raw)
 
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         if explicit_dk:
             # Import path: dedup on (session_id, dedup_key) with no time window.
             dup = conn.execute(
@@ -1532,7 +1437,7 @@ def record_event(
                 conn.execute(
                     "INSERT INTO sessions (id, source, cwd, started_at, status, created_at)"
                     " VALUES (?, ?, ?, ?, 'active', ?)",
-                    (sid, norm["source"], norm["cwd"], ts, _now()),
+                    (sid, norm["source"], norm["cwd"], ts, timeutil.now()),
                 )
             elif norm["hook"] in _SESSION_START_HOOKS:
                 conn.execute(
@@ -1561,8 +1466,14 @@ def record_event(
                 (ts, sid),
             )
 
-        cur = conn.execute(
-            _EVENT_INSERT_SQL, _event_params(norm, raw, dk, ts, origin, raw_ingest_id)
+        event_id = _insert_normalized_event(
+            conn,
+            norm,
+            raw,
+            dk,
+            ts=ts,
+            origin=origin,
+            raw_ingest_id=raw_ingest_id,
         )
 
         if (
@@ -1595,16 +1506,7 @@ def record_event(
                         (bounds["mn"], sid),
                     )
 
-        event_id = int(cur.lastrowid)
         return (sid, event_id, True) if return_status else (sid, event_id)
-
-
-def _duration_seconds(first: Any, last: Any) -> float | None:
-    first_dt = _parse_ts(first)
-    last_dt = _parse_ts(last)
-    if first_dt is None or last_dt is None:
-        return None
-    return round((last_dt - first_dt).total_seconds(), 2)
 
 
 def _summary_title(detail: Any) -> str | None:
@@ -1636,7 +1538,7 @@ def _approval_review_origin(conn: sqlite3.Connection, session_id: str) -> str | 
         "SELECT detail FROM events"
         " WHERE session_id=? AND category='prompt' AND detail LIKE ?"
         " ORDER BY id ASC",
-        (session_id, f"{_APPROVAL_REVIEW_PREFIX}%"),
+        (session_id, f"{APPROVAL_REVIEW_PREFIX}%"),
     ).fetchall()
     for row in rows:
         origin = _approval_review_origin_from_text(row["detail"])
@@ -1669,7 +1571,7 @@ def _session_link_item(
     # Subagent sessions rarely have a user prompt; fall back to the label the
     # importer derived from the parent's Task launch.
     title = _first_prompt(conn, row["id"]) or label
-    recent_status = _live_status(agg["last_ts"])
+    recent_status = timeutil.live_status(agg["last_ts"])
     stored_status = row["status"] or "completed"
     last_status = status_event["status"] if status_event else None
     if last_status in ("error", "blocked", "interrupted"):
@@ -1683,15 +1585,15 @@ def _session_link_item(
         "session_id": row["id"],
         "source": row["source"],
         "status": status,
-        "started_at": _format_ts(row["started_at"]) or str(row["started_at"] or ""),
-        "last_activity": _format_ts(agg["last_ts"]),
+        "started_at": timeutil.format_ts(row["started_at"]) or str(row["started_at"] or ""),
+        "last_activity": timeutil.format_ts(agg["last_ts"]),
         "event_count": agg["events"] or 0,
         "title": title,
         "label": label,
     }
 
 
-def _session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[dict[str, Any]]]:
+def session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[dict[str, Any]]]:
     """Parent/child links for a session, unified across providers.
 
     Two link kinds feed the same structure (and the same inline-merge path):
@@ -1725,7 +1627,7 @@ def _session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[
         " WHERE category='prompt' AND detail LIKE ?"
         " GROUP BY session_id, detail"
         " ORDER BY first_ts ASC",
-        (f"{_APPROVAL_REVIEW_PREFIX}%",),
+        (f"{APPROVAL_REVIEW_PREFIX}%",),
     ).fetchall()
     for row in rows:
         review_session_id = row["session_id"]
@@ -1756,7 +1658,7 @@ def _session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[
     return {"parents": parents, "children": children}
 
 
-def _session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     agg = conn.execute(
         "SELECT COUNT(*) AS events,"
         " SUM(CASE WHEN tool IS NOT NULL THEN 1 ELSE 0 END) AS tools,"
@@ -1802,13 +1704,13 @@ def _session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, An
         "cwd": row["cwd"],
         "models": models,
         "archived": bool(row["archived"]),
-        "status": _live_status(last_ts),
-        "started_at": _format_ts(row["started_at"]) or str(row["started_at"] or ""),
-        "ended_at": _format_ts(row["ended_at"]),
-        "last_activity": _format_ts(last_ts),
+        "status": timeutil.live_status(last_ts),
+        "started_at": timeutil.format_ts(row["started_at"]) or str(row["started_at"] or ""),
+        "ended_at": timeutil.format_ts(row["ended_at"]),
+        "last_activity": timeutil.format_ts(last_ts),
         "event_count": agg["events"] or 0,
         "tool_count": agg["tools"] or 0,
-        "duration_seconds": _duration_seconds(agg["first_ts"], last_ts),
+        "duration_seconds": timeutil.duration_seconds(agg["first_ts"], last_ts),
         "title": _first_prompt(conn, row["id"]),
         "category_counts": _category_counts(conn, row["id"]),
         "tokens": _tokens_dict(tok),
@@ -1867,13 +1769,13 @@ def _batched_session_summaries(
                 "cwd": row["cwd"],
                 "models": [mr["model"] for mr in model_rows],
                 "archived": bool(row["archived"]),
-                "status": _live_status(last_ts),
-                "started_at": _format_ts(row["started_at"]) or str(row["started_at"] or ""),
-                "ended_at": _format_ts(row["ended_at"]),
-                "last_activity": _format_ts(last_ts),
+                "status": timeutil.live_status(last_ts),
+                "started_at": timeutil.format_ts(row["started_at"]) or str(row["started_at"] or ""),
+                "ended_at": timeutil.format_ts(row["ended_at"]),
+                "last_activity": timeutil.format_ts(last_ts),
                 "event_count": row["event_count"] or 0,
                 "tool_count": row["tool_count"] or 0,
-                "duration_seconds": _duration_seconds(row["first_ts"], last_ts),
+                "duration_seconds": timeutil.duration_seconds(row["first_ts"], last_ts),
                 "title": _summary_title(row["prompt_detail"]),
                 "category_counts": category_counts.get(row["id"], {}),
                 "tokens": _tokens_from_parts(row["i"], row["o"], row["cr"], row["cw"]),
@@ -1918,7 +1820,7 @@ def _metrics_time_buckets(
     day_counts: dict[str, int] = {}
     hour_counts: dict[int, int] = {}
     for r in conn.execute("SELECT ts FROM events WHERE ts IS NOT NULL"):
-        dt = _parse_ts(r["ts"])
+        dt = timeutil.parse_ts(r["ts"])
         if dt is None:
             continue
         local = dt.astimezone(tz)
@@ -1934,7 +1836,7 @@ def _metrics_time_buckets(
 def metrics(tz: str | None = None) -> dict[str, Any]:
     """Cross-session aggregates for the metrics dashboard."""
     zone = _resolve_tz(tz)
-    with _connect() as conn:
+    with store.read() as conn:
         one = lambda sql, *p: conn.execute(sql, p).fetchone()  # noqa: E731
         rows = lambda sql, *p: conn.execute(sql, p).fetchall()  # noqa: E731
 
@@ -1944,7 +1846,7 @@ def metrics(tz: str | None = None) -> dict[str, Any]:
         projects = one("SELECT COUNT(DISTINCT cwd) n FROM sessions WHERE cwd IS NOT NULL")["n"]
 
         last_rows = rows("SELECT session_id, MAX(ts) lt FROM events GROUP BY session_id")
-        active = sum(1 for r in last_rows if _live_status(r["lt"]) == "active")
+        active = sum(1 for r in last_rows if timeutil.live_status(r["lt"]) == "active")
 
         durs = rows(
             "SELECT (julianday(MAX(ts))-julianday(MIN(ts)))*86400 d"
@@ -2034,7 +1936,7 @@ def metrics(tz: str | None = None) -> dict[str, Any]:
                 "cwd": r["cwd"],
                 "sessions": r["s"],
                 "events": r["e"],
-                "last_activity": _format_ts(r["lt"]),
+                "last_activity": timeutil.format_ts(r["lt"]),
             }
             for r in rows(
                 "SELECT s.cwd, COUNT(DISTINCT s.id) s, COUNT(ev.id) e, MAX(ev.ts) lt"
@@ -2159,7 +2061,7 @@ def metrics_history(category: str, limit: int = 200) -> list[dict[str, Any]]:
     each with enough info to deep-link to the originating event."""
     if category not in ("shell", "web"):
         return []
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT e.id, e.session_id, e.target, e.title, e.ts, e.source,"
             " e.duration_ms, e.status, s.cwd"
@@ -2175,7 +2077,7 @@ def metrics_history(category: str, limit: int = 200) -> list[dict[str, Any]]:
             "session_id": r["session_id"],
             "target": r["target"],
             "title": r["title"],
-            "ts": _format_ts(r["ts"]),
+            "ts": timeutil.format_ts(r["ts"]),
             "source": r["source"],
             "duration_ms": r["duration_ms"],
             "status": r["status"],
@@ -2191,7 +2093,7 @@ def connections() -> list[dict[str, Any]]:
     A source counts as connected if it produced an event within the active
     window (same recency rule as live sessions).
     """
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT source, COUNT(*) AS events, COUNT(DISTINCT session_id) AS sessions,"
             " MAX(ts) AS last_ts"
@@ -2202,15 +2104,15 @@ def connections() -> list[dict[str, Any]]:
             "source": r["source"],
             "sessions": r["sessions"],
             "events": r["events"],
-            "last_event": _format_ts(r["last_ts"]),
-            "connected": _live_status(r["last_ts"]) == "active",
+            "last_event": timeutil.format_ts(r["last_ts"]),
+            "connected": timeutil.live_status(r["last_ts"]) == "active",
         }
         for r in rows
     ]
 
 
 def set_archived(session_id: str, archived: bool) -> bool:
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         cur = conn.execute(
             "UPDATE sessions SET archived = ? WHERE id = ?",
             (1 if archived else 0, session_id),
@@ -2228,7 +2130,7 @@ def set_subagent_links(links: list[dict[str, Any]]) -> int:
     the child session exists and the parent differs from the child. Idempotent.
     Returns the number of links newly applied or updated."""
     applied = 0
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         for link in links or []:
             child = str(link.get("child") or "").strip()
             parent = str(link.get("parent") or "").strip()
@@ -2297,7 +2199,7 @@ def export_sessions(
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
 
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
             f" s.status, s.archived, s.created_at,"
@@ -2352,7 +2254,7 @@ def _export_event_row(row: sqlite3.Row) -> dict[str, Any]:
         "hook": row["hook"],
         "tool": row["tool"],
         "phase": row["phase"],
-        "ts": _format_ts(row["ts"]),
+        "ts": timeutil.format_ts(row["ts"]),
         "source": row["source"],
         "category": row["category"],
         "title": row["title"],
@@ -2379,7 +2281,7 @@ def _export_event_row(row: sqlite3.Row) -> dict[str, Any]:
 
 def _export_events(session_id: str) -> list[dict[str, Any]]:
     """Full event list for export with token counts and payloads."""
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
             (session_id,),
@@ -2436,7 +2338,7 @@ def enrich_sessions(
         if "clarifications" in want:
             from .session_read import build_clarifications
 
-            with _connect() as conn:
+            with store.read() as conn:
                 ev_rows = conn.execute(
                     "SELECT id, category, detail, ts, hook, tool FROM events"
                     " WHERE session_id=? ORDER BY ts ASC, id ASC",
@@ -2466,7 +2368,7 @@ def list_sessions(
         params.extend([f"%{q}%", f"%{q}%"])
     where = f"WHERE {' AND '.join(clauses)}"
     params.append(limit)
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
             f" s.status, s.archived, s.created_at,"
@@ -2496,7 +2398,7 @@ def list_sessions(
             params,
         ).fetchall()
         summaries = _batched_session_summaries(conn, rows)
-    # "active"/"completed" is recency-derived (see _live_status), so the status
+    # "active"/"completed" is recency-derived (see timeutil.live_status), so the status
     # filter is applied here rather than in SQL.
     if status:
         summaries = [s for s in summaries if s["status"] == status]
@@ -2562,7 +2464,7 @@ def search(query: str, limit: int = 40) -> list[dict[str, Any]]:
         )
         params.extend([like, like, like])
     params.append(limit)
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT e.id, e.session_id, e.category, e.title, e.target, e.detail,"
             " e.ts, e.source, e.model, s.cwd AS cwd"
@@ -2578,7 +2480,7 @@ def search(query: str, limit: int = 40) -> list[dict[str, Any]]:
             "category": r["category"],
             "title": r["title"],
             "target": r["target"],
-            "ts": _format_ts(r["ts"]),
+            "ts": timeutil.format_ts(r["ts"]),
             "source": r["source"],
             "model": r["model"],
             "cwd": r["cwd"],
@@ -2586,37 +2488,6 @@ def search(query: str, limit: int = 40) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
-
-
-def _event_row(row: sqlite3.Row) -> dict[str, Any]:
-    out: dict[str, Any] = {
-        "id": row["id"],
-        "hook": row["hook"],
-        "tool": row["tool"],
-        "phase": row["phase"],
-        "ts": _format_ts(row["ts"]),
-        "source": row["source"],
-        "category": row["category"],
-        "title": row["title"],
-        "detail": row["detail"],
-        "target": row["target"],
-        "status": row["status"],
-        "duration_ms": row["duration_ms"],
-        "model": row["model"],
-        "attachments": json.loads(row["attachments"]) if row["attachments"] else None,
-    }
-    # The raw payload blob is large (~half the session response) and unused by
-    # the dashboard — only composer_mode is needed, so extract it and drop the
-    # rest from the wire.
-    if row["payload"]:
-        try:
-            body = json.loads(row["payload"])
-        except (json.JSONDecodeError, TypeError):
-            body = {}
-        mode = body.get("composer_mode")
-        if isinstance(mode, str) and mode != "agent":
-            out["composer_mode"] = mode
-    return out
 
 
 def attach_to_prompt(
@@ -2628,7 +2499,7 @@ def attach_to_prompt(
     """Merge file/image metadata onto the matching prompt event."""
     if not attachments:
         return False
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         row = None
         if text:
             row = conn.execute(
@@ -2657,7 +2528,7 @@ def attach_to_prompt(
                 (session_id, timestamp),
             ).fetchone()
         if row is None and timestamp:
-            target_ts = _parse_ts(timestamp)
+            target_ts = timeutil.parse_ts(timestamp)
             if target_ts is not None:
                 candidates = conn.execute(
                     "SELECT id, ts, attachments FROM events"
@@ -2668,7 +2539,7 @@ def attach_to_prompt(
                 best: sqlite3.Row | None = None
                 best_delta = 999999.0
                 for candidate in candidates:
-                    candidate_ts = _parse_ts(candidate["ts"])
+                    candidate_ts = timeutil.parse_ts(candidate["ts"])
                     if candidate_ts is None:
                         continue
                     delta = abs((candidate_ts - target_ts).total_seconds())
@@ -2702,19 +2573,19 @@ def timeline(session_id: str) -> list[dict[str, Any]]:
 
 def events_list(session_id: str) -> list[dict[str, Any]]:
     """Every stored event, one row per hook fire (no start/end merging)."""
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
             (session_id,),
         ).fetchall()
     return [
-        {**_event_row(r), "start_ts": r["ts"], "end_ts": r["ts"], "ongoing": False}
+        {**store.event_row(r), "start_ts": r["ts"], "end_ts": r["ts"], "ongoing": False}
         for r in rows
     ]
 
 
 def session_components(session_id: str) -> dict[str, Any]:
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT category, target, title, phase FROM events WHERE session_id=?",
             (session_id,),
@@ -2792,7 +2663,7 @@ def get_session(session_id: str) -> dict[str, Any] | None:
 def session_origins() -> dict[str, str]:
     """Return the dominant origin per session: 'hook' if any hook events exist,
     else 'import'. Used by the bridge to skip already-hooked sessions."""
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT session_id,"
             " MAX(CASE WHEN origin = 'hook' OR origin IS NULL THEN 1 ELSE 0 END) AS has_hook"
@@ -2806,7 +2677,7 @@ def session_origins() -> dict[str, str]:
 
 def import_summary() -> dict[str, Any]:
     """Stats about transcript-imported data."""
-    with _connect() as conn:
+    with store.read() as conn:
         row = conn.execute(
             "SELECT COUNT(DISTINCT session_id) AS sessions,"
             " COALESCE(SUM(input_tokens), 0) AS input_tok,"
@@ -2863,7 +2734,7 @@ def set_question_answer(
         return 0
     wanted = (str(title or ""), tuple(str(q) for q in qids))
     updated = 0
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         rows = conn.execute(
             "SELECT id, detail FROM events WHERE session_id = ?"
             " AND tool IN ('AskUserQuestion', 'AskQuestion', 'request_user_input')"
@@ -2913,7 +2784,7 @@ def clear_recovered_answers() -> int:
     Real answers carried in the tool result (Claude/Codex) are never tagged
     this way, so they are left intact."""
     cleared = 0
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         rows = conn.execute(
             "SELECT id, detail FROM events"
             " WHERE tool IN ('AskUserQuestion', 'AskQuestion', 'request_user_input')"
@@ -2941,7 +2812,7 @@ def reset_imported() -> dict[str, Any]:
     reimport`` to clear out a previous import before re-ingesting transcripts
     with the current parsers.
     """
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         events = conn.execute(
             "SELECT COUNT(*) n FROM events WHERE origin = 'import'"
         ).fetchone()["n"]
@@ -2960,7 +2831,7 @@ def reset_imported() -> dict[str, Any]:
 
 
 def _week_start(value: Any) -> str:
-    dt = _parse_ts(value) or datetime.now(timezone.utc)
+    dt = timeutil.parse_ts(value) or datetime.now(timezone.utc)
     return (dt.date() - timedelta(days=dt.weekday())).isoformat()
 
 
@@ -2971,7 +2842,7 @@ def drift_report() -> dict[str, Any]:
     add health counts for input that was ignored, malformed, duplicated, or
     failed before it became a timeline event.
     """
-    with _connect() as conn:
+    with store.read() as conn:
         event_rows = conn.execute(
             "SELECT source, ts, category, hook, tool FROM events"
         ).fetchall()
@@ -3046,7 +2917,7 @@ def drift_report() -> dict[str, Any]:
         row["previous_other_rate"] = prior_rates.get((row["source"], prior))
 
     weeks.sort(key=lambda row: (row["period_start"], row["source"]), reverse=True)
-    return {"generated_at": _now(), "weeks": weeks}
+    return {"generated_at": timeutil.now(), "weeks": weeks}
 
 
 def import_quality() -> dict[str, Any]:
@@ -3057,7 +2928,7 @@ def import_quality() -> dict[str, Any]:
     through to ``other`` (and the percentage), and token/model coverage. The
     token coverage doubles as the per-agent capability table (e.g. Cursor logs
     no tokens, so its coverage is ~0 by data, not by bug)."""
-    with _connect() as conn:
+    with store.read() as conn:
         src_rows = conn.execute(
             "SELECT source,"
             " COUNT(*) events,"
@@ -3095,7 +2966,7 @@ def import_quality() -> dict[str, Any]:
         for r in src_rows
     ]
     return {
-        "generated_at": _now(),
+        "generated_at": timeutil.now(),
         "by_source": by_source,
         "by_category": [{"category": r["category"], "events": r["n"]} for r in cat_rows],
         "by_origin": {r["origin"] or "hook": r["n"] for r in origin_rows},
@@ -3109,7 +2980,7 @@ def complete_imported_sessions() -> dict[str, Any]:
     stay 'active' forever.  This closes them using the timestamp of
     their most recent event as ended_at.
     """
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         rows = conn.execute(
             "SELECT s.id, MAX(e.ts) AS last_ts"
             " FROM sessions s"
@@ -3130,7 +3001,7 @@ def complete_imported_sessions() -> dict[str, Any]:
 
 
 def stats() -> dict[str, Any]:
-    with _connect() as conn:
+    with store.read() as conn:
         by_source = {
             r["source"]: r["n"]
             for r in conn.execute(
@@ -3147,7 +3018,7 @@ def stats() -> dict[str, Any]:
             " (julianday(MAX(ts)) - julianday(MIN(ts))) * 86400 AS duration"
             " FROM events GROUP BY session_id"
         ).fetchall()
-        active = sum(1 for r in event_rows if _live_status(r["last_ts"]) == "active")
+        active = sum(1 for r in event_rows if timeutil.live_status(r["last_ts"]) == "active")
         by_status = {"active": active, "completed": max(sessions - active, 0)}
         events = sum(r["events"] or 0 for r in event_rows)
         tool_calls = sum(r["tools"] or 0 for r in event_rows)

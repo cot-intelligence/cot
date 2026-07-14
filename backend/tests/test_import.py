@@ -49,7 +49,7 @@ def _categories(agent, parser, lines, *, mtime=None):
             out.append((ev, normalize(agent, ev)))
     # Codex defers the last assistant message until flush; release it so tests
     # see it (a no-op for the other parsers).
-    for ev in bridge._codex_flush_pending(state):
+    for ev in bridge._codex_flush_pending(state):  # noqa: SLF001
         out.append((ev, normalize(agent, ev)))
     return out
 
@@ -69,7 +69,7 @@ def test_cursor_adapter_emits_canonical_ingest_events():
     events = []
     for lineno, obj in enumerate(lines):
         events.extend(
-            bridge._cursor_line_to_ingest_events(
+            bridge._cursor_line_to_ingest_events(  # noqa: SLF001
                 obj, "SID", lineno=lineno, mtime=_MTIME, state=state, path="/t.jsonl"
             )
         )
@@ -92,7 +92,7 @@ def test_cursor_canonical_events_adapt_to_existing_hook_payloads():
         {"type": "text", "text": "done"},
         {"type": "tool_use", "name": "Shell", "input": {"command": "ls"}},
     ]}}
-    hooks = bridge._cursor_line_to_events(line, "SID", lineno=2, mtime=_MTIME, path="/t.jsonl")
+    hooks = bridge._cursor_line_to_events(line, "SID", lineno=2, mtime=_MTIME, path="/t.jsonl")  # noqa: SLF001
     assert [(ev.get("hook_event_name"), ev.get("_synthetic_category")) for ev in hooks] == [
         ("afterAgentResponse", "response"),
         ("PostToolUse", None),
@@ -116,7 +116,7 @@ def test_cursor_tool_calls_categorize_correctly():
             {"type": "tool_use", "name": "Task", "input": {"subagent_type": "explore", "description": "d"}},
         ]}},
     ]
-    cats = [n["category"] for _, n in _categories("cursor", bridge._cursor_line_to_events, lines, mtime=_MTIME)]
+    cats = [n["category"] for _, n in _categories("cursor", bridge._cursor_line_to_events, lines, mtime=_MTIME)]  # noqa: SLF001
     assert "prompt" in cats
     assert "response" in cats
     for expected in ("file_read", "file_edit", "shell", "mcp", "web", "subagent"):
@@ -131,7 +131,7 @@ def test_cursor_tool_events_are_not_dangling_starts():
     lines = [{"role": "assistant", "message": {"content": [
         {"type": "tool_use", "name": "Read", "input": {"path": "/a"}},
     ]}}]
-    evs = _categories("cursor", bridge._cursor_line_to_events, lines, mtime=_MTIME)
+    evs = _categories("cursor", bridge._cursor_line_to_events, lines, mtime=_MTIME)  # noqa: SLF001
     assert evs and all(n["phase"] in ("end", "instant") for _, n in evs)
 
 
@@ -140,7 +140,7 @@ def test_cursor_timestamps_derive_from_mtime_and_preserve_order():
         {"role": "user", "message": {"content": [{"type": "text", "text": "<user_query>\none\n</user_query>"}]}},
         {"role": "assistant", "message": {"content": [{"type": "text", "text": "two"}]}},
     ]
-    evs = _categories("cursor", bridge._cursor_line_to_events, lines, mtime=_MTIME)
+    evs = _categories("cursor", bridge._cursor_line_to_events, lines, mtime=_MTIME)  # noqa: SLF001
     tss = [n["ts"] for _, n in evs]
     # Anchored on the mtime day, not import-time.
     assert all(t.startswith("2026-05-01") for t in tss), tss
@@ -152,8 +152,8 @@ def test_cursor_dedup_keys_are_stable_across_reparse():
     lines = [{"role": "assistant", "message": {"content": [
         {"type": "tool_use", "name": "Shell", "input": {"command": "ls"}},
     ]}}]
-    first = _categories("cursor", bridge._cursor_line_to_events, lines, mtime=_MTIME)
-    second = _categories("cursor", bridge._cursor_line_to_events, lines, mtime=_MTIME)
+    first = _categories("cursor", bridge._cursor_line_to_events, lines, mtime=_MTIME)  # noqa: SLF001
+    second = _categories("cursor", bridge._cursor_line_to_events, lines, mtime=_MTIME)  # noqa: SLF001
     keys1 = [ev.get("_dedup_key") for ev, _ in first]
     keys2 = [ev.get("_dedup_key") for ev, _ in second]
     assert keys1 == keys2 and all(keys1)
@@ -178,7 +178,7 @@ def test_claude_adapter_emits_canonical_tool_call_and_result():
     events = []
     for lineno, obj in enumerate(lines):
         events.extend(
-            bridge._claude_line_to_ingest_events(
+            bridge._claude_line_to_ingest_events(  # noqa: SLF001
                 obj, "SID", lineno=lineno, state=state, path="/claude.jsonl"
             )
         )
@@ -206,7 +206,7 @@ def test_claude_tool_result_paired_to_call():
              {"type": "tool_result", "tool_use_id": "t1", "content": "file1\nfile2", "is_error": False},
          ]}},
     ]
-    evs = _categories("claude", bridge._claude_line_to_events, lines)
+    evs = _categories("claude", bridge._claude_line_to_events, lines)  # noqa: SLF001
     hooks = [(ev.get("hook_event_name"), n["category"], n["phase"]) for ev, n in evs]
     assert ("PreToolUse", "shell", "start") in hooks, hooks
     # The result is emitted as an end-phase shell event carrying the output.
@@ -225,7 +225,7 @@ def test_claude_tool_result_error_status():
              {"type": "tool_result", "tool_use_id": "t1", "content": "err", "is_error": True},
          ]}},
     ]
-    evs = _categories("claude", bridge._claude_line_to_events, lines)
+    evs = _categories("claude", bridge._claude_line_to_events, lines)  # noqa: SLF001
     statuses = [n["status"] for ev, n in evs if ev.get("hook_event_name") == "PostToolUseFailure"]
     assert statuses == ["error"], [(ev.get("hook_event_name"), n["status"]) for ev, n in evs]
 
@@ -242,8 +242,8 @@ def test_codex_adapter_emits_canonical_tool_call_and_result():
                           "output": "/home", "status": "completed"}}
 
     events = []
-    events.extend(bridge._codex_line_to_ingest_events(call, "SID", state=state))
-    events.extend(bridge._codex_line_to_ingest_events(output, "SID", state=state))
+    events.extend(bridge._codex_line_to_ingest_events(call, "SID", state=state))  # noqa: SLF001
+    events.extend(bridge._codex_line_to_ingest_events(output, "SID", state=state))  # noqa: SLF001
 
     assert [ev["kind"] for ev in events] == ["tool_call", "tool_call"], events
     assert events[0]["phase"] == "start"
@@ -264,9 +264,9 @@ def test_codex_canonical_pending_response_folds_token_usage():
          "payload": {"type": "token_count", "info": {"last_token_usage": {
              "input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 20}}}},
     ]
-    assert bridge._codex_line_to_ingest_events(lines[0], "SID", state=state) == []
-    assert bridge._codex_line_to_ingest_events(lines[1], "SID", state=state) == []
-    flushed = bridge._codex_flush_pending_ingest_events(state)
+    assert bridge._codex_line_to_ingest_events(lines[0], "SID", state=state) == []  # noqa: SLF001
+    assert bridge._codex_line_to_ingest_events(lines[1], "SID", state=state) == []  # noqa: SLF001
+    flushed = bridge._codex_flush_pending_ingest_events(state)  # noqa: SLF001
     assert len(flushed) == 1, flushed
     event = flushed[0]
     assert event["kind"] == "response", event
@@ -285,7 +285,7 @@ def test_codex_function_call_and_output_pair():
          "payload": {"type": "function_call_output", "call_id": "c1",
                      "output": "/home", "status": "completed"}},
     ]
-    evs = _categories("codex", bridge._codex_line_to_events, lines)
+    evs = _categories("codex", bridge._codex_line_to_events, lines)  # noqa: SLF001
     triples = [(ev.get("hook_event_name"), n["category"], n["phase"]) for ev, n in evs]
     assert ("PreToolUse", "shell", "start") in triples, triples
     assert ("PostToolUse", "shell", "end") in triples, triples
@@ -297,7 +297,7 @@ def test_codex_apply_patch_is_file_edit():
          "payload": {"type": "custom_tool_call", "name": "apply_patch", "call_id": "c2",
                      "input": "*** Begin Patch\n*** Update File: /a/b.py\n+x\n*** End Patch"}},
     ]
-    evs = _categories("codex", bridge._codex_line_to_events, lines)
+    evs = _categories("codex", bridge._codex_line_to_events, lines)  # noqa: SLF001
     cats = [n["category"] for _, n in evs]
     assert "file_edit" in cats, cats
 
@@ -308,8 +308,8 @@ def test_codex_reasoning_with_text_becomes_thought():
     encrypted = [{"type": "response_item", "id": "l2", "timestamp": "2026-04-01T00:00:00Z",
                   "payload": {"type": "reasoning", "summary": [], "content": "None",
                               "encrypted_content": "gAAA..."}}]
-    evs_text = _categories("codex", bridge._codex_line_to_events, with_text)
-    evs_enc = _categories("codex", bridge._codex_line_to_events, encrypted)
+    evs_text = _categories("codex", bridge._codex_line_to_events, with_text)  # noqa: SLF001
+    evs_enc = _categories("codex", bridge._codex_line_to_events, encrypted)  # noqa: SLF001
     assert [n["category"] for _, n in evs_text] == ["thought"]
     # Encrypted/empty reasoning produces nothing rather than a blank thought.
     assert evs_enc == []
@@ -325,7 +325,7 @@ def test_codex_token_count_folds_onto_message():
              "input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 20,
              "reasoning_output_tokens": 5, "total_tokens": 125}}}},
     ]
-    evs = _categories("codex", bridge._codex_line_to_events, lines)
+    evs = _categories("codex", bridge._codex_line_to_events, lines)  # noqa: SLF001
     resp = [n for ev, n in evs if n["category"] == "response"]
     assert len(resp) == 1, evs
     assert resp[0]["input_tokens"] == 100, resp[0]
@@ -346,7 +346,7 @@ def test_codex_environment_context_becomes_system_event_not_prompt():
          "payload": {"type": "message", "role": "user",
                      "content": [{"type": "input_text", "text": env + "\n\nreal question"}]}},
     ]
-    evs = _categories("codex", bridge._codex_line_to_events, lines)
+    evs = _categories("codex", bridge._codex_line_to_events, lines)  # noqa: SLF001
     prompts = [n["detail"] for ev, n in evs if n["category"] == "prompt"]
     assert prompts == ["real question"], prompts
     envs = [(ev, n) for ev, n in evs if n["title"] == "Environment context"]
@@ -410,7 +410,7 @@ def test_codex_turn_aborted_marks_message_interrupted():
         {"type": "event_msg", "timestamp": "2026-04-01T00:00:01Z",
          "payload": {"type": "turn_aborted", "reason": "interrupted"}},
     ]
-    evs = _categories("codex", bridge._codex_line_to_events, lines)
+    evs = _categories("codex", bridge._codex_line_to_events, lines)  # noqa: SLF001
     resp = [n for ev, n in evs if n["category"] == "response"]
     assert len(resp) == 1 and resp[0]["status"] == "interrupted", evs
 
@@ -425,7 +425,7 @@ def test_codex_session_meta_and_turn_context_stamp_cwd_and_model():
          "payload": {"type": "message", "role": "assistant", "phase": "final_answer",
                      "content": [{"type": "output_text", "text": "hi"}]}},
     ]
-    evs = _categories("codex", bridge._codex_line_to_events, lines)
+    evs = _categories("codex", bridge._codex_line_to_events, lines)  # noqa: SLF001
     resp = [n for ev, n in evs if n["category"] == "response"]
     assert len(resp) == 1, evs
     assert resp[0]["cwd"] == "/work/repo", resp[0]
@@ -444,7 +444,7 @@ def test_codex_emits_session_start_with_posture():
          "payload": {"type": "message", "role": "assistant", "phase": "final_answer",
                      "content": [{"type": "output_text", "text": "hi"}]}},
     ]
-    evs = _categories("codex", bridge._codex_line_to_events, lines)
+    evs = _categories("codex", bridge._codex_line_to_events, lines)  # noqa: SLF001
     starts = [(ev, n) for ev, n in evs if n["category"] == "lifecycle"]
     assert len(starts) == 1, evs
     ev, n = starts[0]
@@ -454,7 +454,7 @@ def test_codex_emits_session_start_with_posture():
     assert cfg["sandbox_policy"]["network_access"] is False, cfg
     assert cfg["effort"] == "high" and cfg["cli_version"] == "0.140.0", cfg
     # Exactly one SessionStart even across multiple turn_context lines.
-    evs2 = _categories("codex", bridge._codex_line_to_events, lines + [
+    evs2 = _categories("codex", bridge._codex_line_to_events, lines + [  # noqa: SLF001
         {"type": "turn_context", "timestamp": "2026-04-01T00:00:03Z",
          "payload": {"model": "gpt-5.5", "approval_policy": "never"}},
     ])
@@ -548,7 +548,7 @@ def test_pricing_variants_normalize_to_same_rate():
 # --- Hook install merge ------------------------------------------------------
 
 def test_hook_command_uses_home():
-    assert bridge._hook_command("claude") == "$HOME/.cot/bin/cot hook claude"
+    assert bridge._hook_command("claude") == "$HOME/.cot/bin/cot hook claude"  # noqa: SLF001
 
 
 def test_merge_hooks_does_not_false_positive_on_gryph():
@@ -560,8 +560,8 @@ def test_merge_hooks_does_not_false_positive_on_gryph():
             }],
         }],
     }
-    template = bridge._hook_templates()["claude"]
-    merged = bridge._merge_hooks(existing, template, "claude")
+    template = bridge._hook_templates()["claude"]  # noqa: SLF001
+    merged = bridge._merge_hooks(existing, template, "claude")  # noqa: SLF001
     cmds = [
         h["command"]
         for entry in merged["SessionStart"]
@@ -580,8 +580,8 @@ def test_merge_hooks_normalizes_legacy_absolute_path():
             }],
         }],
     }
-    template = bridge._hook_templates()["claude"]
-    merged = bridge._merge_hooks(existing, template, "claude")
+    template = bridge._hook_templates()["claude"]  # noqa: SLF001
+    merged = bridge._merge_hooks(existing, template, "claude")  # noqa: SLF001
     cmd = merged["Stop"][0]["hooks"][0]["command"]
     assert cmd == "$HOME/.cot/bin/cot hook claude"
 
@@ -603,7 +603,7 @@ def test_remove_hooks_preserves_gryph():
             },
         ],
     }
-    cleaned = bridge._remove_hooks(existing, "claude")
+    cleaned = bridge._remove_hooks(existing, "claude")  # noqa: SLF001
     assert len(cleaned["SessionStart"]) == 1
     assert "gryph" in cleaned["SessionStart"][0]["hooks"][0]["command"]
 
@@ -633,17 +633,17 @@ def test_tiny_import_smoke_records_all_sources_without_golden_session():
     with _tempfile.TemporaryDirectory() as tmp:
         restore = _with_env("COT_DB_PATH", str(_Path(tmp) / "cot.db"))
         try:
-            from app import db
+            from app import db, store
             db.init_db()
 
             cases = [
-                ("cursor", "smoke-cursor", bridge._cursor_line_to_events, [
+                ("cursor", "smoke-cursor", bridge._cursor_line_to_events, [  # noqa: SLF001
                     {"role": "user", "message": {"content": [{"type": "text", "text": "<user_query>\nhi\n</user_query>"}]}},
                     {"role": "assistant", "message": {"content": [
                         {"type": "tool_use", "name": "Shell", "input": {"command": "ls"}},
                     ]}},
                 ], _MTIME),
-                ("claude", "smoke-claude", bridge._claude_line_to_events, [
+                ("claude", "smoke-claude", bridge._claude_line_to_events, [  # noqa: SLF001
                     {"type": "assistant", "uuid": "smoke-c1", "timestamp": "2026-06-01T00:00:00Z",
                      "message": {"role": "assistant", "content": [
                          {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "pwd"}},
@@ -653,7 +653,7 @@ def test_tiny_import_smoke_records_all_sources_without_golden_session():
                          {"type": "tool_result", "tool_use_id": "t1", "content": "/repo", "is_error": False},
                      ]}},
                 ], None),
-                ("codex", "smoke-codex", bridge._codex_line_to_events, [
+                ("codex", "smoke-codex", bridge._codex_line_to_events, [  # noqa: SLF001
                     {"type": "response_item", "id": "smoke-z1", "timestamp": "2026-04-01T00:00:00Z",
                      "payload": {"type": "function_call", "name": "exec_command",
                                  "arguments": "{\"cmd\": \"pwd\"}", "call_id": "cz1"}},
@@ -669,13 +669,13 @@ def test_tiny_import_smoke_records_all_sources_without_golden_session():
                     for lineno, obj in enumerate(lines):
                         for ev in parser(obj, sid, lineno=lineno, mtime=mtime, state=state, path=f"/{sid}.jsonl"):
                             db.record_event(normalize(agent, ev), ev)
-                    for ev in bridge._codex_flush_pending(state):
+                    for ev in bridge._codex_flush_pending(state):  # noqa: SLF001
                         db.record_event(normalize(agent, ev), ev)
 
             ingest_once()
             ingest_once()
 
-            with db._connect() as conn:
+            with store.read() as conn:
                 rows = conn.execute(
                     "SELECT source, category, COUNT(*) n FROM events"
                     " WHERE session_id LIKE 'smoke-%'"
@@ -707,7 +707,7 @@ def test_discover_subagent_links_from_cursor_nesting():
         )
         restore = _with_env("COT_CURSOR_HOME", str(_Path(tmp) / ".cursor"))
         try:
-            links = bridge._discover_subagent_links("cursor")
+            links = bridge._discover_subagent_links("cursor")  # noqa: SLF001
         finally:
             restore()
             restore_userprofile()
@@ -732,7 +732,7 @@ def test_discover_subagent_links_skips_claude_folded():
             _json.dumps({"role": "user", "message": "hi"}) + "\n", encoding="utf-8")
         restore = _with_env("COT_CLAUDE_HOME", str(_Path(tmp) / ".claude"))
         try:
-            links = bridge._discover_subagent_links("claude")
+            links = bridge._discover_subagent_links("claude")  # noqa: SLF001
         finally:
             restore()
             restore_userprofile()
@@ -746,21 +746,27 @@ def test_subagent_link_embeds_child_under_parent():
     with _tempfile.TemporaryDirectory() as tmp:
         restore = _with_env("COT_DB_PATH", str(_Path(tmp) / "cot.db"))
         try:
-            from app import db
+            from app import db, store
             db.init_db()
             base = "2026-04-01T00:00:0"
 
             def ev(sid, cat, phase, secs, *, target=None, hook="x", detail=None):
-                with db._connect() as conn:
-                    conn.execute(
-                        "INSERT INTO events (session_id, source, hook, tool, phase, ts,"
-                        " category, title, detail, target, dedup_key, origin, created_at)"
-                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (sid, "cursor", hook, None, phase, f"{base}{secs}Z", cat, None,
-                         detail, target, f"{sid}{phase}{secs}", "hook", f"{base}{secs}Z"),
+                with store.write() as conn:
+                    store.insert_event(
+                        conn,
+                        session_id=sid,
+                        source="cursor",
+                        hook=hook,
+                        phase=phase,
+                        ts=f"{base}{secs}Z",
+                        category=cat,
+                        detail=detail,
+                        target=target,
+                        dedup_key=f"{sid}{phase}{secs}",
+                        created_at=f"{base}{secs}Z",
                     )
 
-            with db._connect() as conn:
+            with store.write() as conn:
                 for sid in (parent, child):
                     conn.execute(
                         "INSERT INTO sessions (id, source, started_at, status, created_at)"
@@ -777,8 +783,8 @@ def test_subagent_link_embeds_child_under_parent():
             # Idempotent: re-applying the same link is a no-op.
             assert db.set_subagent_links([{"child": child, "parent": parent, "label": "explore"}]) == 0
 
-            with db._connect() as conn:
-                links = db._session_links(conn, parent)
+            with store.read() as conn:
+                links = db.session_links(conn, parent)
             kids = [c for c in links["children"] if c["type"] == "subagent"]
             assert len(kids) == 1 and kids[0]["session_id"] == child, links
 
@@ -813,21 +819,26 @@ def test_synthetic_subagent_span_groups_child_events():
     with _tempfile.TemporaryDirectory() as tmp:
         restore = _with_env("COT_DB_PATH", str(_Path(tmp) / "cot.db"))
         try:
-            from app import db
+            from app import db, store
             db.init_db()
             base = "2026-05-01T00:00:0"
 
             def ev(sid, cat, phase, secs, *, target=None, detail=None):
-                with db._connect() as conn:
-                    conn.execute(
-                        "INSERT INTO events (session_id, source, hook, tool, phase, ts,"
-                        " category, title, detail, target, dedup_key, origin, created_at)"
-                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (sid, "cursor", "x", None, phase, f"{base}{secs}Z", cat, None,
-                         detail, target, f"{sid}{phase}{secs}", "hook", f"{base}{secs}Z"),
+                with store.write() as conn:
+                    store.insert_event(
+                        conn,
+                        session_id=sid,
+                        source="cursor",
+                        phase=phase,
+                        ts=f"{base}{secs}Z",
+                        category=cat,
+                        detail=detail,
+                        target=target,
+                        dedup_key=f"{sid}{phase}{secs}",
+                        created_at=f"{base}{secs}Z",
                     )
 
-            with db._connect() as conn:
+            with store.write() as conn:
                 for sid in (parent, child):
                     conn.execute(
                         "INSERT INTO sessions (id, source, started_at, status, created_at)"

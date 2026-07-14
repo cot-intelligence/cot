@@ -11,7 +11,8 @@ import json
 import sqlite3
 from typing import Any, Literal
 
-from . import db
+from . import db, store, timeutil
+from .normalize import APPROVAL_REVIEW_PREFIX
 
 DETAIL_PREVIEW_CHARS = 4000
 
@@ -176,7 +177,7 @@ def _stamp_clarification_session(clarifications: list[dict[str, Any]], session_i
 
 
 def _is_approval_history_dump(detail: str | None) -> bool:
-    return str(detail or "").lstrip().startswith(db._APPROVAL_REVIEW_PREFIX)
+    return str(detail or "").lstrip().startswith(APPROVAL_REVIEW_PREFIX)
 
 
 EMPTY_DETAIL_VALUES = (None, "", {}, [])
@@ -247,7 +248,9 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
         if (end_ts or "") > (span.get("end_ts") or ""):
             span["end_ts"] = end_ts
             span["ongoing"] = False
-            span["duration_ms"] = int((db._duration_seconds(span["start_ts"], end_ts) or 0) * 1000)
+            span["duration_ms"] = int(
+                (timeutil.duration_seconds(span["start_ts"], end_ts) or 0) * 1000
+            )
             span["detail"] = _merge_detail(span.get("detail"), end_event.get("detail"))
             span["attachments"] = _merge_attachments(span.get("attachments"), end_event.get("attachments"))
             span["status"] = end_event.get("status") or span.get("status")
@@ -277,7 +280,9 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
                 open_subagent_keys.remove(key)
             duration = event.get("duration_ms") or start.get("duration_ms")
             if duration is None:
-                duration = int((db._duration_seconds(start["start_ts"], event["ts"]) or 0) * 1000)
+                duration = int(
+                    (timeutil.duration_seconds(start["start_ts"], event["ts"]) or 0) * 1000
+                )
             merged = {
                 **start,
                 "end_ts": event["ts"],
@@ -302,7 +307,9 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
                 start = spans[open_key].pop(0)
                 if not spans[open_key]:
                     spans.pop(open_key, None)
-                duration = int((db._duration_seconds(start["start_ts"], event["ts"]) or 0) * 1000)
+                duration = int(
+                    (timeutil.duration_seconds(start["start_ts"], event["ts"]) or 0) * 1000
+                )
                 items.append({
                     **start,
                     "end_ts": event["ts"],
@@ -331,12 +338,12 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
 
 def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
     """Build display timeline items, merging start/end hook pairs into spans."""
-    with db._connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
             (session_id,),
         ).fetchall()
-        events = [db._event_row(r) for r in rows]
+        events = [store.event_row(r) for r in rows]
     return _build_timeline_items_from_events(events)
 
 
@@ -492,7 +499,11 @@ def _synthesize_child_subagent_spans(
         status = link.get("status") or "completed"
         ongoing = status == "active"
         end_ts = None if ongoing else ts_last
-        dur = None if ongoing else int((db._duration_seconds(ts_first, ts_last) or 0) * 1000)
+        dur = (
+            None
+            if ongoing
+            else int((timeutil.duration_seconds(ts_first, ts_last) or 0) * 1000)
+        )
         span = {
             "id": synthetic_id,
             "hook": None,
@@ -655,17 +666,17 @@ def _apply_event_annotations(
 
 def build_session_detail(session_id: str) -> dict[str, Any] | None:
     """Return the display-ready session detail read model."""
-    with db._connect() as conn:
+    with store.read() as conn:
         row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if row is None:
             return None
-        summary = db._session_summary(conn, row)
+        summary = db.session_summary(conn, row)
         ev_rows = conn.execute(
             "SELECT id, category, detail, ts, hook, tool FROM events"
             " WHERE session_id=? ORDER BY ts ASC, id ASC",
             (session_id,),
         ).fetchall()
-        links = db._session_links(conn, session_id)
+        links = db.session_links(conn, session_id)
         clarifications, annotations = build_clarifications(ev_rows)
         _stamp_clarification_session(clarifications, session_id)
         timeline_items = build_timeline_items(session_id)
@@ -708,14 +719,14 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
 
 def build_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:
     """Return full display detail for a row, including merged start/end spans."""
-    with db._connect() as conn:
+    with store.read() as conn:
         row = conn.execute(
             "SELECT * FROM events WHERE session_id=? AND id=?",
             (session_id, event_id),
         ).fetchone()
         if row is None:
             return None
-        event = db._event_row(row)
+        event = store.event_row(row)
 
         if event.get("phase") == "start":
             category = event.get("category") or "other"
@@ -735,7 +746,9 @@ def build_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:
                     " ORDER BY ts ASC, id ASC",
                     (session_id, category, event.get("target") or ""),
                 ).fetchall()
-            timeline_items = _build_timeline_items_from_events([db._event_row(r) for r in rows])
+            timeline_items = _build_timeline_items_from_events(
+                [store.event_row(r) for r in rows]
+            )
             for item in timeline_items:
                 if item.get("id") == event_id:
                     return {

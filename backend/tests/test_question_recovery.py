@@ -5,20 +5,19 @@ import importlib.machinery
 import importlib.util
 import json
 import os
-import sys
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import SkipTest
+
+import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 _REPO = os.path.dirname(_BACKEND)
-_TMP = tempfile.mkdtemp(prefix="cot-question-recovery-test-")
 
-sys.path.insert(0, _BACKEND)
-os.environ["COT_DB_PATH"] = os.path.join(_TMP, "bootstrap.db")
-
-from app import db  # noqa: E402
+from app import db, store  # noqa: E402
 from app.question_recovery import recover_cursor_question_response  # noqa: E402
 
 _case = 0
@@ -163,12 +162,15 @@ _HEURISTIC_CASES = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _use_fresh_db(fresh_db):
+    return fresh_db
+
+
 def _fresh() -> str:
     global _case
     _case += 1
     sid = f"question-recovery-{_case}"
-    os.environ["COT_DB_PATH"] = os.path.join(_TMP, f"case{_case}.db")
-    db.init_db()
     return sid
 
 
@@ -209,7 +211,7 @@ def _post_question_event(
 
 
 def _stored_response(event_id: int) -> object:
-    with db._connect() as conn:
+    with store.read() as conn:
         row = conn.execute("SELECT detail FROM events WHERE id = ?", (event_id,)).fetchone()
     assert row is not None
     return json.loads(row["detail"])["response"]
@@ -379,7 +381,8 @@ def test_ambiguous_prose_does_not_apply_legacy_response_when_prose_is_present():
 
 def _write_question_transcript(tool_input: dict, response_text: str) -> tempfile.TemporaryDirectory:
     tmp = tempfile.TemporaryDirectory()
-    transcript = Path(tmp.name) / "session-1.jsonl"
+    transcript = Path(tmp.name) / ".cursor" / "session-1.jsonl"
+    transcript.parent.mkdir()
     transcript.write_text(
         "\n".join(
             [
@@ -412,60 +415,107 @@ def _write_question_transcript(tool_input: dict, response_text: str) -> tempfile
     return tmp
 
 
+@contextmanager
+def _temporary_home(path: str) -> Iterator[None]:
+    prior_home = os.environ.get("HOME")
+    os.environ["HOME"] = path
+    try:
+        yield
+    finally:
+        if prior_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = prior_home
+
+
+def _collector_backfill_response(
+    session_id: str,
+    transcript: Path,
+    response_text: str,
+) -> object:
+    db.record_ingest(
+        "cursor",
+        {
+            "hook_event_name": "afterAgentResponse",
+            "session_id": session_id,
+            "timestamp": "2026-07-08T12:00:01Z",
+            "response": response_text,
+            "transcript_path": str(transcript),
+        },
+    )
+    with store.write() as conn:
+        conn.execute(
+            "UPDATE settings SET value = 'force-question-backfill'"
+            " WHERE key = 'migrations_version'"
+        )
+    db.init_db()
+    with store.read() as conn:
+        row = conn.execute(
+            "SELECT detail FROM events WHERE session_id = ?"
+            " AND hook = 'postToolUse' AND tool = 'AskQuestion'"
+            " ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+    assert row is not None
+    return json.loads(row["detail"])["response"]
+
+
 def test_bridge_push_and_collector_backfill_derive_same_answer_from_transcript():
     bridge = _load_bridge()
+    response_text = "Selected Rebuild prod image + restart (Recommended)."
     tmp = _write_question_transcript(
         _question_input(),
-        "Selected Rebuild prod image + restart (Recommended).",
+        response_text,
     )
-    transcript = Path(tmp.name) / "session-1.jsonl"
-
-    sid = _fresh()
-    event_id = _post_question_event(sid)
-    bridge_item = bridge._scan_questions_full(transcript)[0]
-    assert (
-        db.set_question_answer(
-            sid,
-            bridge_item["input"].get("title"),
-            bridge._question_qids(bridge_item["input"]),
-            response_text=bridge_item["response_text"],
+    transcript = Path(tmp.name) / ".cursor" / "session-1.jsonl"
+    with tmp, _temporary_home(tmp.name):
+        sid = _fresh()
+        event_id = _post_question_event(sid)
+        bridge_item = bridge._scan_questions_full(transcript)[0]  # noqa: SLF001
+        assert (
+            db.set_question_answer(
+                sid,
+                bridge_item["input"].get("title"),
+                bridge._question_qids(bridge_item["input"]),  # noqa: SLF001
+                response_text=bridge_item["response_text"],
+            )
+            == 1
         )
-        == 1
-    )
-
-    collector_artifact = db._scan_cursor_question_artifacts(transcript)[0]
-    assert _stored_response(event_id) == collector_artifact["response"]
-    tmp.cleanup()
+        collector_response = _collector_backfill_response(
+            f"{sid}-collector", transcript, response_text
+        )
+        assert _stored_response(event_id) == collector_response
 
 
 def test_bridge_push_and_collector_backfill_match_for_skipped_question():
     bridge = _load_bridge()
+    response_text = "This is still open; I do not have enough information to choose."
     tmp = _write_question_transcript(
         _question_input(),
-        "This is still open; I do not have enough information to choose.",
+        response_text,
     )
-    transcript = Path(tmp.name) / "session-1.jsonl"
-
-    sid = _fresh()
-    event_id = _post_question_event(sid)
-    bridge_item = bridge._scan_questions_full(transcript)[0]
-    assert (
-        db.set_question_answer(
-            sid,
-            bridge_item["input"].get("title"),
-            bridge._question_qids(bridge_item["input"]),
-            response_text=bridge_item["response_text"],
+    transcript = Path(tmp.name) / ".cursor" / "session-1.jsonl"
+    with tmp, _temporary_home(tmp.name):
+        sid = _fresh()
+        event_id = _post_question_event(sid)
+        bridge_item = bridge._scan_questions_full(transcript)[0]  # noqa: SLF001
+        assert (
+            db.set_question_answer(
+                sid,
+                bridge_item["input"].get("title"),
+                bridge._question_qids(bridge_item["input"]),  # noqa: SLF001
+                response_text=bridge_item["response_text"],
+            )
+            == 1
         )
-        == 1
-    )
-
-    collector_artifact = db._scan_cursor_question_artifacts(transcript)[0]
-    assert collector_artifact["response"] == {
-        "skipped": ["deploy_path"],
-        "answer_source": "assistant_summary",
-    }
-    assert _stored_response(event_id) == collector_artifact["response"]
-    tmp.cleanup()
+        collector_response = _collector_backfill_response(
+            f"{sid}-collector", transcript, response_text
+        )
+        assert collector_response == {
+            "skipped": ["deploy_path"],
+            "answer_source": "assistant_summary",
+        }
+        assert _stored_response(event_id) == collector_response
 
 
 def test_skipped_recovery_can_be_replaced_by_later_answer_and_reset():
@@ -529,31 +579,13 @@ def test_bridge_scans_raw_question_prose_without_owning_recovery_heuristic():
         _question_input(),
         "Selected Rebuild prod image + restart (Recommended).",
     )
-    transcript = Path(tmp.name) / "session-1.jsonl"
+    transcript = Path(tmp.name) / ".cursor" / "session-1.jsonl"
 
     assert not hasattr(bridge, "_cursor_question_response")
-    assert bridge._scan_questions_full(transcript) == [
+    assert bridge._scan_questions_full(transcript) == [  # noqa: SLF001
         {
             "input": _question_input(),
             "response_text": "Selected Rebuild prod image + restart (Recommended).",
         }
     ]
     tmp.cleanup()
-
-
-if __name__ == "__main__":
-    failures = 0
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-                print(f"ok   {name}")
-            except AssertionError as exc:
-                failures += 1
-                print(f"FAIL {name}: {exc}")
-            except SkipTest as exc:
-                print(f"SKIP {name}: {exc}")
-            except Exception as exc:  # noqa: BLE001
-                failures += 1
-                print(f"ERROR {name}: {exc}")
-    sys.exit(1 if failures else 0)

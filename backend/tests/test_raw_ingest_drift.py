@@ -1,35 +1,21 @@
 """Raw ingest ledger and drift report contract tests.
 
-Runnable with pytest or directly: ``python3 backend/tests/test_raw_ingest_drift.py``.
+Run with pytest via ``just check``.
 """
 
 from __future__ import annotations
 
-import os
-import sys
-import tempfile
+import pytest
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_BACKEND = os.path.dirname(_HERE)
-_TMP = tempfile.mkdtemp(prefix="cot-raw-ingest-test-")
-
-sys.path.insert(0, _BACKEND)
-os.environ["COT_DB_PATH"] = os.path.join(_TMP, "bootstrap.db")
-
-from app import db  # noqa: E402
-
-_case = 0
+from app import db, store  # noqa: E402
 
 
-def _fresh() -> None:
-    global _case
-    _case += 1
-    os.environ["COT_DB_PATH"] = os.path.join(_TMP, f"case{_case}.db")
-    db.init_db()
+@pytest.fixture(autouse=True)
+def _use_fresh_db(fresh_db):
+    return fresh_db
 
 
 def test_record_ingest_persists_raw_before_projection_and_ignored_rows():
-    _fresh()
     projected = db.record_ingest(
         "claude",
         {
@@ -60,7 +46,7 @@ def test_record_ingest_persists_raw_before_projection_and_ignored_rows():
     assert rows[0]["event_id"] == projected["event_id"], rows
     assert rows[0]["session_id_guess"] == "ledger-s1", rows
 
-    with db._connect() as conn:
+    with store.read() as conn:
         events = conn.execute(
             "SELECT id, raw_ingest_id, category FROM events ORDER BY id"
         ).fetchall()
@@ -70,7 +56,6 @@ def test_record_ingest_persists_raw_before_projection_and_ignored_rows():
 
 
 def test_malformed_raw_input_is_evidence_not_a_timeline_event():
-    _fresh()
     result = db.record_malformed_ingest(
         "codex",
         "{not-json",
@@ -86,12 +71,11 @@ def test_malformed_raw_input_is_evidence_not_a_timeline_event():
     assert rows[0]["status"] == "malformed"
     assert "Expecting property name" in rows[0]["projection_error"]
 
-    with db._connect() as conn:
+    with store.read() as conn:
         assert conn.execute("SELECT COUNT(*) n FROM events").fetchone()["n"] == 0
 
 
 def test_drift_report_groups_weekly_unknown_rates_and_raw_status_counts():
-    _fresh()
     db.record_ingest(
         "claude",
         {
@@ -139,16 +123,3 @@ def test_drift_report_groups_weekly_unknown_rates_and_raw_status_counts():
     ][0]
     assert cursor["total_events"] == 0, cursor
     assert cursor["raw_status_counts"]["ignored"] == 1, cursor
-
-
-if __name__ == "__main__":
-    failures = 0
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-                print(f"ok   {name}")
-            except AssertionError as exc:
-                failures += 1
-                print(f"FAIL {name}: {exc}")
-    sys.exit(1 if failures else 0)

@@ -31,7 +31,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import __version__, db, insights
+from . import __version__, db, insights, store
 
 app = FastAPI(title="cot collector", version=__version__)
 
@@ -196,11 +196,11 @@ async def _startup() -> None:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "version": __version__, "db_path": str(db.db_path())}
+    return {"status": "ok", "version": __version__, "db_path": str(store.path())}
 
 
 def _hook_status_path() -> Path:
-    return db.db_path().parent / "hooks_status.json"
+    return store.path().parent / "hooks_status.json"
 
 
 def _read_hook_manifest() -> dict[str, Any]:
