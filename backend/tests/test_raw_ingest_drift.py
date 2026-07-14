@@ -55,6 +55,40 @@ def test_record_ingest_persists_raw_before_projection_and_ignored_rows():
     assert events[0]["category"] == "prompt"
 
 
+def test_namespaced_live_event_supersedes_import_and_retry_is_idempotent():
+    sid = "reconcile-s1"
+    imported = {
+        "session_id": sid,
+        "hook_event_name": "afterAgentResponse",
+        "response": "Imported approximation",
+        "_synthetic_category": "response",
+        "_import": True,
+        "_dedup_key": "/transcript.jsonl:0:resp:0",
+        "timestamp": "2026-07-14T12:00:00Z",
+    }
+    live = {
+        "session_id": sid,
+        "hook_event_name": "afterAgentResponse",
+        "response": "Hook truth",
+        "_synthetic_category": "response",
+        "_dedup_key": "live:cursor:0:resp:0",
+        "timestamp": "2026-07-14T12:00:01Z",
+    }
+
+    assert db.record_ingest("cursor", imported)["raw_status"] == "projected"
+    assert db.record_ingest("cursor", live)["raw_status"] == "projected"
+    assert db.record_ingest("cursor", live)["raw_status"] == "duplicate"
+
+    detail = db.get_session_detail(sid)
+    assert detail is not None
+    responses = [
+        event["detail"] for event in detail["events"]
+        if event["category"] == "response"
+    ]
+    assert responses == ["Hook truth"]
+    assert db.session_origins()[sid] == "hook"
+
+
 def test_malformed_raw_input_is_evidence_not_a_timeline_event():
     result = db.record_malformed_ingest(
         "codex",

@@ -214,6 +214,53 @@ def test_claude_tool_result_paired_to_call():
     assert post and "file1" in str(post[0].get("tool_response")), hooks
 
 
+def test_import_keeps_historical_dedup_scope_for_identifierless_records():
+    claude = bridge._claude_line_to_ingest_events({  # noqa: SLF001
+        "type": "assistant",
+        "message": {"role": "assistant", "content": "done"},
+    }, "SID", path="/claude.jsonl")
+    codex = bridge._codex_line_to_ingest_events({  # noqa: SLF001
+        "type": "response_item",
+        "payload": {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "hello"},
+        ]},
+    }, "SID", path="/codex.jsonl")
+    cursor = bridge._cursor_line_to_ingest_events({  # noqa: SLF001
+        "role": "user",
+        "message": {"content": [
+            {"type": "text", "text": "see this"},
+            {"type": "image", "source": {"media_type": "image/png"}},
+        ]},
+    }, "SID", path="/cursor.jsonl")
+
+    assert claude[0]["dedup_key"] is None
+    assert codex[0]["dedup_key"] is None
+    assert [event["dedup_key"] for event in cursor if event["kind"] == "attachment"] == [None]
+
+
+def test_claude_import_recovers_matching_standalone_file_attachment():
+    state: dict = {}
+    prompt = bridge._claude_line_to_ingest_events({  # noqa: SLF001
+        "type": "user",
+        "uuid": "prompt-1",
+        "message": {"role": "user", "content": "Review @report.pdf"},
+    }, "SID", state=state)
+    attachment = bridge._claude_line_to_ingest_events({  # noqa: SLF001
+        "type": "attachment",
+        "parentUuid": "prompt-1",
+        "attachment": {
+            "type": "file",
+            "filename": "report.pdf",
+            "content": {"file": {"filePath": "/tmp/report.pdf"}},
+        },
+    }, "SID", state=state)
+
+    assert prompt[0]["kind"] == "prompt"
+    assert attachment[0]["kind"] == "attachment"
+    assert attachment[0]["text"] == "Review @report.pdf"
+    assert attachment[0]["dedup_key"] is None
+
+
 def test_claude_tool_result_error_status():
     lines = [
         {"type": "assistant", "uuid": "u1", "timestamp": "2026-06-01T00:00:00Z",

@@ -37,8 +37,9 @@ DEFAULT_ENDPOINT = "http://127.0.0.1:31337"
 # reimport. (1 = original; 2 = dedicated cursor parser, tool results, mtime ts,
 # meta categorization; 3 = codex token usage, cwd/model, interruptions, and a
 # SessionStart carrying sandbox/approval posture; 4 = codex environment_context
-# lifted into its own system event instead of leaking as a prompt.)
-IMPORT_PARSER_VERSION = "4"
+# lifted into its own system event instead of leaking as a prompt; 5 = shared
+# live/import parsers, Cursor plans, interruption markers, and response collapse.)
+IMPORT_PARSER_VERSION = "5"
 
 # Skip transcript files larger than this. Guards against a runaway/hostile file
 # exhausting memory; real transcripts are far smaller.
@@ -443,6 +444,7 @@ def _is_interruption(text: str | None) -> bool:
     t = text.lower()
     return (
         "request interrupted by user" in t
+        or "user aborted" in t
         or "<turn_aborted>" in t
         or "interrupted the previous turn" in t
     )
@@ -467,482 +469,373 @@ def _merge_usage(acc: dict | None, usage: dict) -> dict:
     return out
 
 
-def _read_transcript_delta(transcript_path: str, session_id: str) -> str:
-    """Return newly appended transcript bytes since the last read for this session."""
-    path = Path(transcript_path)
-    if not path.exists():
-        return ""
-    offsets = _load_offsets()
-    key = f"{session_id}:{transcript_path}"
-    start = offsets.get(key, 0)
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    if start > len(text):
-        start = 0
-    new_text = text[start:]
-    offsets[key] = len(text)
-    _save_offsets(offsets)
-    return new_text
-
-
-def _scan_transcript(transcript_path: str, session_id: str) -> dict:
-    """Read the transcript delta once; extract assistant responses and the
-    attachments (images/files) on user messages. Single read so the shared
-    file offset only advances once.
-
-    Returns {"responses": [(ts, text, model, usage, interrupted)],
-    "thoughts": [(ts, text, usage, interrupted)], "attachments": [(ts, [att])]}.
-    """
-    empty: dict[str, list] = {"responses": [], "thoughts": [], "attachments": []}
-    new_text = _read_transcript_delta(transcript_path, session_id)
-    if not new_text:
-        return empty
-
-    # Ordered records so a user-stop can flag the message it cut off (the last
-    # assistant thought/response before the interruption marker).
-    msgs: list[dict] = []
-    attachments: list[tuple] = []
-    user_prompts: dict[str, str] = {}
-    pending_usage: dict | None = None
-    seen_msg_ids: set[str] = set()
-    for line in new_text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
-        role = obj.get("role") or message.get("role") or obj.get("type")
-        content = obj.get("content")
-        if content is None:
-            content = message.get("content")
-        ts = obj.get("timestamp")
-
-        if role == "assistant" or obj.get("type") == "assistant":
-            msg_id = message.get("id")
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "thinking":
-                        think = block.get("thinking")
-                        if think and not (msg_id and f"t:{msg_id}" in seen_msg_ids):
-                            msgs.append({"kind": "thought", "ts": ts, "text": str(think),
-                                         "model": None, "usage": None, "interrupted": False})
-                            if msg_id:
-                                seen_msg_ids.add(f"t:{msg_id}")
-            text_val = _text_from_blocks(content) if isinstance(content, list) else (content or "")
-            model = message.get("model") or obj.get("model")
-            usage = message.get("usage") if isinstance(message.get("usage"), dict) else None
-            if text_val and not (msg_id and f"r:{msg_id}" in seen_msg_ids):
-                if pending_usage:
-                    usage = _merge_usage(pending_usage, usage) if usage else pending_usage
-                    pending_usage = None
-                msgs.append({"kind": "response", "ts": ts, "text": str(text_val),
-                             "model": model, "usage": usage, "interrupted": False})
-                if msg_id:
-                    seen_msg_ids.add(f"r:{msg_id}")
-            elif usage:
-                pending_usage = _merge_usage(pending_usage, usage)
-        elif role == "user" and isinstance(content, list):
-            user_text = _text_from_blocks(content, clean_user=True)
-            uuid = obj.get("uuid")
-            if uuid and user_text:
-                user_prompts[str(uuid)] = user_text
-            if _is_interruption(user_text) and msgs:
-                msgs[-1]["interrupted"] = True
-            atts = _message_attachments(content)
-            if atts:
-                attachments.append((ts, user_text, atts))
-        elif obj.get("type") == "attachment":
-            att = obj.get("attachment") if isinstance(obj.get("attachment"), dict) else {}
-            meta = _file_attachment_meta(att)
-            parent_uuid = obj.get("parentUuid")
-            parent_text = user_prompts.get(str(parent_uuid)) if parent_uuid else None
-            if meta and _file_attachment_matches_text(att, parent_text):
-                attachments.append((ts, parent_text, [meta]))
-
-    if pending_usage and msgs:
-        last = msgs[-1]
-        last["usage"] = _merge_usage(pending_usage, last["usage"]) if last["usage"] else pending_usage
-
-    thoughts = [(m["ts"], m["text"], m["usage"], m["interrupted"]) for m in msgs if m["kind"] == "thought"]
-    responses = [(m["ts"], m["text"], m["model"], m["usage"], m["interrupted"]) for m in msgs if m["kind"] == "response"]
-    return {"responses": responses, "thoughts": thoughts, "attachments": attachments}
-
-
-def _scan_codex_transcript(transcript_path: str, session_id: str) -> dict:
-    """Read Codex rollout JSONL deltas.
-
-    Codex mirrors each assistant line twice (``agent_message`` then
-    ``output_text`` with identical text). Only ingest the ``response_item``
-    and split by ``phase``: ``commentary`` → thought, ``final_answer`` → response.
-    """
-    empty: dict[str, list] = {
-        "thoughts": [],
-        "responses": [],
-        "attachments": [],
-        "web_searches": [],
-    }
-    new_text = _read_transcript_delta(transcript_path, session_id)
-    if not new_text:
-        return empty
-
-    # Each emitted assistant message gets a mutable record so we can fold the
-    # per-turn ``token_count`` deltas (which arrive after the message) onto it.
-    msgs: list[dict] = []
-    attachments: list[tuple] = []
-    web_searches: list[tuple] = []
-    for line in new_text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        ts = obj.get("timestamp")
-        kind = obj.get("type")
-        payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
-
-        if kind == "response_item":
-            pt = payload.get("type")
-            if pt == "message" and payload.get("role") == "assistant":
-                text_val = _text_from_blocks(payload.get("content"))
-                if not text_val:
-                    continue
-                model = payload.get("model") or obj.get("model")
-                phase = payload.get("phase") or ""
-                # final_answer → response; commentary / unknown phase → thought.
-                msgs.append({
-                    "kind": "response" if phase == "final_answer" else "thought",
-                    "ts": ts,
-                    "text": text_val,
-                    "model": model,
-                    "usage": None,
-                    "interrupted": False,
-                })
-            elif pt == "message" and payload.get("role") == "user":
-                content = payload.get("content")
-                if isinstance(content, list):
-                    user_text = _text_from_blocks(content, clean_user=True)
-                    if _is_interruption(user_text) and msgs:
-                        msgs[-1]["interrupted"] = True
-                    atts = _message_attachments(content)
-                    if atts:
-                        attachments.append((ts, user_text, atts))
-            elif pt == "web_search_call":
-                action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
-                query = action.get("query") or payload.get("query") or ""
-                if query:
-                    web_searches.append((ts, str(query), action, payload.get("status")))
-        elif kind == "event_msg" and payload.get("type") == "token_count":
-            # Attribute the per-turn token delta to the message it followed.
-            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
-            last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else None
-            if last and msgs:
-                msgs[-1]["usage"] = _merge_usage(msgs[-1].get("usage"), last)
-
-    thoughts = [(m["ts"], m["text"], m["usage"], m["interrupted"]) for m in msgs if m["kind"] == "thought"]
-    responses = [(m["ts"], m["text"], m["model"], m["usage"], m["interrupted"]) for m in msgs if m["kind"] == "response"]
-    return {
-        "thoughts": thoughts,
-        "responses": responses,
-        "attachments": attachments,
-        "web_searches": web_searches,
-    }
-
-
-def _emit_synthetic_messages(
-    source: str,
-    body: dict,
-    scanned: dict,
-) -> None:
-    session_id = body.get("session_id")
-    if not session_id:
-        return
-    for ts, text, atts in scanned.get("attachments", []):
-        _post(
-            f"{COT_ENDPOINT}/v1/ingest/{source}",
-            {
-                "session_id": session_id,
-                "cwd": body.get("cwd"),
-                "_attach_to_prompt": True,
-                "text": text,
-                "attachments": atts,
-                "timestamp": ts or body.get("timestamp"),
-            },
-        )
-    for ts, msg, usage, interrupted in scanned.get("thoughts", []):
-        _post(
-            f"{COT_ENDPOINT}/v1/ingest/{source}",
-            {
-                "session_id": session_id,
-                "cwd": body.get("cwd"),
-                "hook_event_name": "afterAgentThought",
-                "thought": msg,
-                "_synthetic_category": "thought",
-                "timestamp": ts or body.get("timestamp"),
-                "model": body.get("model"),
-                "usage": usage,
-                "interrupted": interrupted,
-            },
-        )
-    for ts, msg, model, usage, interrupted in scanned.get("responses", []):
-        _post(
-            f"{COT_ENDPOINT}/v1/ingest/{source}",
-            {
-                "session_id": session_id,
-                "cwd": body.get("cwd"),
-                "hook_event_name": "afterAgentResponse",
-                "response": msg,
-                "_synthetic_category": "response",
-                "timestamp": ts or body.get("timestamp"),
-                "model": model or body.get("model"),
-                "usage": usage,
-                "interrupted": interrupted,
-            },
-        )
-    for ts, query, action, status in scanned.get("web_searches", []):
-        _post(
-            f"{COT_ENDPOINT}/v1/ingest/{source}",
-            {
-                "session_id": session_id,
-                "cwd": body.get("cwd"),
-                "hook_event_name": "PostToolUse",
-                "tool_name": "WebSearch",
-                "tool_input": {"query": query, "queries": action.get("queries", [])},
-                "tool_response": {"status": status, "action": action},
-                "timestamp": ts or body.get("timestamp"),
-                "model": body.get("model"),
-            },
-        )
-
-
-def _emit_claude_responses(body: dict, source: str) -> None:
-    hook = body.get("hook_event_name") or body.get("hook") or ""
-    if hook not in ("Stop", "SubagentStop"):
-        return
-    transcript = body.get("transcript_path")
-    session_id = body.get("session_id")
-    if not transcript or not session_id:
-        return
-    scanned = _scan_transcript(transcript, session_id)
-    _emit_synthetic_messages(source, body, scanned)
-
-
-def _collapse_response_text(text: object) -> str:
+def _response_equality_key(text: object) -> str:
     return " ".join(str(text or "").lower().split())
 
 
-def _scan_cursor_artifacts(transcript_path: str, session_id: str, response_text: str = "") -> dict:
-    """Extract Cursor transcript-only artifacts.
+def _read_live_transcript_lines(transcript_path: str, session_id: str) -> list[tuple[int, str]]:
+    """Read complete new JSONL records with their absolute byte offsets."""
+    path = Path(transcript_path)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    if size > _MAX_TRANSCRIPT_BYTES:
+        return []
+    offsets = _load_offsets()
+    key = f"{session_id}:{transcript_path}"
+    start = offsets.get(key, 0)
+    if start > size:
+        start = 0
+    try:
+        with path.open("rb") as fh:
+            fh.seek(start)
+            chunk = fh.read()
+    except OSError:
+        return []
+    last_nl = chunk.rfind(b"\n")
+    if last_nl < 0:
+        return []
+    consumed = chunk[: last_nl + 1]
+    out: list[tuple[int, str]] = []
+    relative = 0
+    for raw_line in consumed.splitlines(keepends=True):
+        absolute = start + relative
+        relative += len(raw_line)
+        line = raw_line.rstrip(b"\r\n").decode("utf-8", errors="replace").strip()
+        if line:
+            out.append((absolute, line))
+    offsets[key] = start + len(consumed)
+    _save_offsets(offsets)
+    return out
 
-    In plan mode Cursor generates the plan through an internal ``CreatePlan``
-    tool that fires no tool hooks; ``afterAgentResponse`` then arrives with empty
-    text. Cursor question prompts similarly appear as ``AskQuestion`` tool_use
-    blocks without pre/post tool hooks. Recover both in one transcript pass so
-    one artifact scanner does not consume another scanner's offset."""
-    new_text = _read_transcript_delta(transcript_path, session_id)
-    out: dict[str, list] = {"plans": [], "questions": [], "attachments": [], "responses": []}
-    if not new_text:
-        return out
-    plans: list[dict] = []
-    questions: list[dict] = []
-    attachments: list[tuple] = []
-    responses: list[str] = []
-    for line in new_text.splitlines():
-        line = line.strip()
-        if not line:
+
+def _origin_dedup_key(origin: str, source: str, key: str | None) -> str | None:
+    if not key:
+        return None
+    return key if origin == "import" else f"live:{source}:{key}"
+
+
+def _scoped_dedup_key(
+    origin: str,
+    source: str,
+    suffix: str,
+    *,
+    import_anchor: str | None,
+    live_anchor: str | None,
+    live_only: bool = False,
+) -> str | None:
+    """Apply the shared import/live dedup scope to one Ingest Event."""
+    if live_only and origin != "hook":
+        return None
+    anchor = import_anchor if origin == "import" else live_anchor
+    return _origin_dedup_key(origin, source, f"{anchor}:{suffix}" if anchor else None)
+
+
+def _keep_live_event(source: str, event: dict) -> bool:
+    kind = event.get("kind")
+    if kind in ("response", "thought", "attachment", "interruption", "plan"):
+        return True
+    if kind == "tool_call":
+        name = event.get("tool_name")
+        return (source == "cursor" and name == "AskQuestion") or (
+            source == "codex" and name == "WebSearch"
+        )
+    return False
+
+
+def _filter_live_events_with_usage(source: str, events: list[dict]) -> list[dict]:
+    """Drop hook-delivered kinds while preserving every parsed usage delta."""
+    kept: list[dict] = []
+    pending: dict | None = None
+    for original in events:
+        event = dict(original)
+        usage = event.get("usage") if isinstance(event.get("usage"), dict) else None
+        if not _keep_live_event(source, event):
+            if usage:
+                pending = _merge_usage(pending, usage)
             continue
+        if pending:
+            event["usage"] = _merge_usage(pending, usage or {})
+            pending = None
+        kept.append(event)
+    if pending and kept:
+        last = dict(kept[-1])
+        last["usage"] = _merge_usage(last.get("usage"), pending)
+        kept[-1] = last
+    elif pending:
+        # No transcript-only Event exists in this delta. Keep the tokens inside
+        # the canonical list as session metadata; the live shell folds this
+        # marker onto the hook body before the body is posted.
+        kept.append({
+            "kind": "session_metadata",
+            "metadata_type": "usage",
+            "origin": "hook",
+            "usage": pending,
+        })
+    return kept
+
+
+def _collapse_consecutive_responses(events: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for event in events:
+        if (
+            event.get("kind") == "response"
+            and out
+            and out[-1].get("kind") == "response"
+            and _response_equality_key(out[-1].get("text"))
+            == _response_equality_key(event.get("text"))
+        ):
+            continue
+        out.append(event)
+    return out
+
+
+def _apply_interruption_markers(events: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for event in events:
+        if event.get("kind") != "interruption":
+            out.append(event)
+            continue
+        if out:
+            prior = dict(out[-1])
+            prior["interrupted"] = True
+            out[-1] = prior
+    return out
+
+
+def _prepare_ingest_events(
+    source: str,
+    events: list[dict],
+    *,
+    origin: str,
+    hook_timestamp: object = None,
+) -> list[dict]:
+    """Apply the shared pure event-list transformations for either Origin."""
+    prepared = [dict(event) for event in events]
+    if origin == "hook":
+        prepared = _filter_live_events_with_usage(source, prepared)
+    # Only Cursor is configured for this shared transform: its transcript
+    # format is the one observed to repeat identical commentary blocks. Both
+    # Cursor Origins pass through this gate; enabling it for another source is
+    # a policy choice, not another parser implementation.
+    if source == "cursor":
+        prepared = _collapse_consecutive_responses(prepared)
+    prepared = _apply_interruption_markers(prepared)
+    if origin == "hook" and source == "cursor":
+        prepared = [
+            {**event, "timestamp": _ordered_ts(hook_timestamp, index)}
+            for index, event in enumerate(prepared)
+        ]
+    return prepared
+
+
+def _scan_live_ingest_events(
+    source: str,
+    transcript_path: str,
+    session_id: str,
+    hook_timestamp: object,
+) -> list[dict]:
+    """Parse one transcript delta through the same line-parser as import."""
+    parser = _ingest_line_parser(source)
+    state: dict = {}
+    events: list[dict] = []
+    path = str(transcript_path)
+    for lineno, (byte_offset, line) in enumerate(
+        _read_live_transcript_lines(transcript_path, session_id)
+    ):
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
-        content = obj.get("content")
-        if content is None:
-            content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        role = obj.get("role") or message.get("role") or obj.get("type")
-        if role == "user":
-            atts = _message_attachments(content)
-            if atts:
-                attachments.append((obj.get("timestamp"), _text_from_blocks(content, clean_user=True), atts))
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            # Cursor's afterAgentResponse hook only delivers the final text per
-            # turn, so the intermediate commentary between tool calls lives only
-            # here. Collect every assistant text block, in order.
-            if block.get("type") == "text" and role == "assistant":
-                t = str(block.get("text") or "").strip()
-                if t:
-                    responses.append(t)
-                continue
-            if block.get("type") != "tool_use":
-                continue
-            name = block.get("name")
-            if name == "CreatePlan":
-                inp = block.get("input") if isinstance(block.get("input"), dict) else {}
-                plans.append(
-                    {
-                        "name": inp.get("name") or "Plan",
-                        "overview": inp.get("overview") or "",
-                        "plan": inp.get("plan") or "",
-                        "todos": inp.get("todos") if isinstance(inp.get("todos"), list) else [],
-                    }
-                )
-            elif name == "AskQuestion":
-                inp = block.get("input") if isinstance(block.get("input"), dict) else {}
-                questions.append(
-                    {
-                        "input": inp,
-                        "response_text": response_text,
-                    }
-                )
-    out["plans"] = plans
-    out["questions"] = questions
-    out["attachments"] = attachments
-    out["responses"] = responses
+        events.extend(
+            parser(
+                obj,
+                session_id,
+                lineno=lineno,
+                state=state,
+                path=path,
+                origin="hook",
+                byte_offset=byte_offset,
+            )
+        )
+    if source == "codex":
+        events.extend(_codex_flush_pending_ingest_events(state))
+    return _prepare_ingest_events(
+        source, events, origin="hook", hook_timestamp=hook_timestamp
+    )
+
+
+def _ingest_line_parser(source: str):
+    return {
+        "claude": _claude_line_to_ingest_events,
+        "cursor": _cursor_line_to_ingest_events,
+        "codex": _codex_line_to_ingest_events,
+    }[source]
+
+
+def _import_line_to_hook_payloads(
+    source: str,
+    obj: dict,
+    session_id: str,
+    *,
+    lineno: int = 0,
+    mtime: float | None = None,
+    state: dict | None = None,
+    path: str = "",
+) -> list[dict]:
+    """Run one import line through the authoritative canonical pipeline."""
+    events = _ingest_line_parser(source)(
+        obj,
+        session_id,
+        lineno=lineno,
+        mtime=mtime,
+        state=state,
+        path=path,
+        origin="import",
+    )
+    return _ingest_events_to_hook_payloads(
+        _prepare_ingest_events(source, events, origin="import")
+    )
+
+
+def _enrich_live_events(events: list[dict], body: dict) -> list[dict]:
+    out: list[dict] = []
+    for original in events:
+        event = dict(original)
+        event.setdefault("origin", "hook")
+        if not event.get("session_id"):
+            event["session_id"] = body.get("session_id")
+        if not event.get("cwd") and body.get("cwd"):
+            event["cwd"] = body.get("cwd")
+        if not event.get("model") and body.get("model"):
+            event["model"] = body.get("model")
+        if not event.get("composer_mode") and body.get("composer_mode"):
+            event["composer_mode"] = body.get("composer_mode")
+        out.append(event)
     return out
 
 
-def _emit_cursor_artifacts(body: dict, source: str) -> bool:
-    """Recover Cursor artifacts that are present only in transcript JSONL.
+def _fold_usage_metadata_into_hook_body(events: list[dict], body: dict) -> list[dict]:
+    """Fold internal usage metadata onto the hook body and remove the marker."""
+    out: list[dict] = []
+    for event in events:
+        if event.get("kind") == "session_metadata" and event.get("metadata_type") == "usage":
+            usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+            if usage:
+                body["usage"] = _merge_usage(body.get("usage"), usage)
+            continue
+        out.append(event)
+    return out
 
-    Returns True when this was a plan turn and the function has already posted
-    both the (text-filled) response and a structured plan event, so the caller
-    skips the default post."""
+
+def _post_ingest_events(source: str, events: list[dict]) -> None:
+    for event in events:
+        _post(
+            f"{COT_ENDPOINT}/v1/ingest/{source}",
+            _ingest_event_to_hook_payload(event),
+        )
+
+
+def _shell_dedup_key(source: str, label: str, body: dict, text: str) -> str:
+    raw = f"{body.get('timestamp') or ''}\0{text}".encode("utf-8", "replace")
+    return f"live:{source}:{label}:{hashlib.sha1(raw).hexdigest()[:16]}"
+
+
+def _shell_response_event(
+    source: str,
+    body: dict,
+    text: str,
+    *,
+    label: str | None = None,
+    timestamp: object = None,
+    composer_mode: str | None = None,
+    dedup_key: str | None = None,
+) -> dict:
+    """Build the canonical response shape used by live-shell fallbacks."""
+    if dedup_key is None:
+        if not label:
+            raise ValueError("shell response requires a label or explicit dedup key")
+        dedup_key = _shell_dedup_key(source, label, body, text)
+    return {
+        "kind": "response",
+        "origin": "hook",
+        "session_id": body.get("session_id"),
+        "cwd": body.get("cwd"),
+        "model": body.get("model"),
+        "composer_mode": composer_mode or body.get("composer_mode"),
+        "text": text,
+        "timestamp": timestamp if timestamp is not None else body.get("timestamp"),
+        "dedup_key": dedup_key,
+    }
+
+
+def _emit_claude_events(body: dict, source: str) -> None:
     hook = body.get("hook_event_name") or body.get("hook") or ""
-    # afterAgentResponse carries the turn-final text; stop is a backstop that
-    # flushes any transcript text written after the last afterAgentResponse.
-    if hook not in ("afterAgentResponse", "stop"):
-        return False
     transcript = body.get("transcript_path")
     session_id = body.get("session_id")
-    if not transcript or not session_id:
+    if hook not in ("Stop", "SubagentStop") or not transcript or not session_id:
+        return
+    events = _scan_live_ingest_events(source, transcript, session_id, body.get("timestamp"))
+    events = _fold_usage_metadata_into_hook_body(events, body)
+    _post_ingest_events(source, _enrich_live_events(events, body))
+
+
+def _emit_cursor_events(body: dict, source: str) -> bool:
+    """Run Cursor's shared parser and retain only trigger-context behavior."""
+    hook = body.get("hook_event_name") or body.get("hook") or ""
+    transcript = body.get("transcript_path")
+    session_id = body.get("session_id")
+    if hook not in ("afterAgentResponse", "stop") or not transcript or not session_id:
         return False
-    scanned = _scan_cursor_artifacts(transcript, session_id, str(body.get("text") or body.get("response") or ""))
-    plans = scanned.get("plans", [])
-    questions = scanned.get("questions", [])
-    for ts, text, atts in scanned.get("attachments", []):
-        _post(
-            f"{COT_ENDPOINT}/v1/ingest/{source}",
-            {
-                "session_id": session_id,
-                "cwd": body.get("cwd"),
-                "_attach_to_prompt": True,
-                "text": text,
-                "attachments": atts,
-                "timestamp": ts or body.get("timestamp"),
-            },
-        )
-    for q in questions:
-        for hook_name in ("preToolUse", "postToolUse"):
-            _post(
-                f"{COT_ENDPOINT}/v1/ingest/{source}",
-                {
-                    "session_id": session_id,
-                    "cwd": body.get("cwd"),
-                    "hook_event_name": hook_name,
-                    "tool_name": "AskQuestion",
-                    "tool_input": q["input"],
-                    "tool_response": {},
-                    "composer_mode": body.get("composer_mode"),
-                    "model": body.get("model"),
-                    "timestamp": body.get("timestamp"),
-                },
-            )
-        if str(q.get("response_text") or "").strip():
+    events = _scan_live_ingest_events(source, transcript, session_id, body.get("timestamp"))
+    events = _fold_usage_metadata_into_hook_body(events, body)
+    events = _enrich_live_events(events, body)
+    body_text = str(body.get("text") or body.get("response") or "").strip()
+
+    questions = [
+        event for event in events
+        if event.get("kind") == "tool_call" and event.get("tool_name") == "AskQuestion"
+    ]
+    responses = [event for event in events if event.get("kind") == "response"]
+    plans = [event for event in events if event.get("kind") == "plan"]
+    if body_text and (
+        not responses
+        or _response_equality_key(responses[-1].get("text"))
+        != _response_equality_key(body_text)
+    ):
+        events.append(_shell_response_event(
+            source,
+            body,
+            body_text,
+            label="safety",
+            timestamp=_ordered_ts(body.get("timestamp"), len(events)),
+        ))
+        responses.append(events[-1])
+    if plans and not responses:
+        plan = plans[-1]
+        plan_text = str(plan.get("body") or plan.get("overview") or "").strip()
+        if plan_text:
+            events.append(_shell_response_event(
+                source,
+                body,
+                plan_text,
+                composer_mode="plan",
+                timestamp=_ordered_ts(body.get("timestamp"), len(events)),
+                dedup_key=f"{plan.get('dedup_key')}:fallback",
+            ))
+            responses.append(events[-1])
+
+    _post_ingest_events(source, events)
+    if body_text:
+        for question in questions:
             _post(
                 f"{COT_ENDPOINT}/v1/questions/answer",
-                _question_answer_payload(session_id, q["input"], q["response_text"]),
+                _question_answer_payload(
+                    session_id, question.get("tool_input") or {}, body_text
+                ),
             )
-    # Emit every assistant text block from the transcript delta. Cursor's
-    # afterAgentResponse hook carries only the turn-final text, so this is the
-    # only place the intermediate commentary is available.
-    # Deduplicate consecutive identical texts: Cursor transcripts often repeat
-    # the same brief commentary across many assistant messages within a turn
-    # (e.g. 56 identical blocks), and the final response can appear twice.
-    responses = scanned.get("responses", [])
-    deduped: list[str] = []
-    for r in responses:
-        if not deduped or _collapse_response_text(deduped[-1]) != _collapse_response_text(r):
-            deduped.append(r)
-    body_text = str(body.get("text") or body.get("response") or "").strip()
-    emit_list = list(deduped)
-    # Safety net: if the hook's final text wasn't in the delta yet, include it
-    # (deduped against the last transcript block).
-    if body_text and (not emit_list or _collapse_response_text(emit_list[-1]) != _collapse_response_text(body_text)):
-        emit_list.append(body_text)
-    for i, text in enumerate(emit_list):
-        _post(
-            f"{COT_ENDPOINT}/v1/ingest/{source}",
-            {
-                "session_id": session_id,
-                "cwd": body.get("cwd"),
-                "hook_event_name": "afterAgentResponse",
-                "_synthetic_category": "response",
-                "response": text,
-                "composer_mode": body.get("composer_mode"),
-                "model": body.get("model"),
-                "timestamp": _ordered_ts(body.get("timestamp"), i),
-            },
-        )
-
-    # Structured plan artifact (name + overview + todo checklist). A distinct
-    # hook name routes it via _synthetic_category, not afterAgentResponse.
-    for p in plans:
-        _post(
-            f"{COT_ENDPOINT}/v1/ingest/{source}",
-            {
-                "session_id": session_id,
-                "cwd": body.get("cwd"),
-                "hook_event_name": "createPlan",
-                "_synthetic_category": "plan",
-                "plan_name": p["name"],
-                "plan_overview": p["overview"],
-                "plan_body": p["plan"],
-                "plan_todos": p["todos"],
-                "composer_mode": "plan",
-                "model": body.get("model"),
-                "timestamp": body.get("timestamp"),
-            },
-        )
-
-    # Plan-only turn with no text response: surface the plan body so the
-    # conversation view isn't blank.
-    if plans and not emit_list:
-        last = plans[-1]
-        plan_text = last.get("plan") or last.get("overview") or ""
-        if plan_text:
-            _post(
-                f"{COT_ENDPOINT}/v1/ingest/{source}",
-                {
-                    "session_id": session_id,
-                    "cwd": body.get("cwd"),
-                    "hook_event_name": "afterAgentResponse",
-                    "_synthetic_category": "response",
-                    "response": plan_text,
-                    "composer_mode": "plan",
-                    "model": body.get("model"),
-                    "timestamp": body.get("timestamp"),
-                },
-            )
-            emit_list.append(plan_text)
-
-    # On 'stop', let the caller still post the lifecycle "Session ended" body —
-    # we only emitted responses here, which don't duplicate it.
-    if hook == "stop":
-        return False
-    # On afterAgentResponse we've emitted the response(s) ourselves; tell the
-    # caller to skip the default body post (which would duplicate the final).
-    # Only when we emitted nothing do we let the caller post the raw body.
-    return bool(emit_list or plans)
+    return hook != "stop" and bool(responses or plans)
 
 
 def _find_codex_transcript(session_id: str) -> str | None:
@@ -1006,42 +899,26 @@ def _codex_read_session_posture(session_id: str) -> dict:
     return out
 
 
-def _emit_codex_responses(body: dict, source: str) -> None:
-    """Codex stores commentary and assistant text in rollout JSONL transcripts.
-
-    Scan the transcript so intermediate thoughts, responses, web searches, and
-    token usage appear while the turn is in progress. The transcript is located
-    from the session id when the hook payload omits ``transcript_path``. Fall
-    back to ``last_assistant_message`` on Stop when the transcript can't be read.
-    """
+def _emit_codex_events(body: dict, source: str) -> None:
+    """Run Codex's shared parser, with its no-transcript Stop fallback."""
     session_id = body.get("session_id")
     transcript = body.get("transcript_path") or _find_codex_transcript(session_id)
     hook = body.get("hook_event_name") or body.get("hook") or ""
-
-    scanned: dict = {"thoughts": [], "responses": [], "attachments": [], "web_searches": []}
-    if transcript and session_id:
-        scanned = _scan_codex_transcript(transcript, session_id)
-        _emit_synthetic_messages(source, body, scanned)
-
-    # Fallback only when no transcript could be read at all. When a transcript
-    # was scanned it is authoritative: the final answer is already emitted (here
-    # or on an earlier hook), so adding last_assistant_message would duplicate it
-    # — the per-scan ``responses`` check can't see the earlier emit.
-    if hook in ("Stop", "SubagentStop") and session_id and not transcript:
-        msg = body.get("last_assistant_message")
-        if msg:
-            _post(
-                f"{COT_ENDPOINT}/v1/ingest/{source}",
-                {
-                    "session_id": session_id,
-                    "cwd": body.get("cwd"),
-                    "hook_event_name": "afterAgentResponse",
-                    "response": msg,
-                    "_synthetic_category": "response",
-                    "timestamp": body.get("timestamp"),
-                    "model": body.get("model"),
-                },
-            )
+    readable = bool(transcript and Path(str(transcript)).is_file())
+    if readable and session_id:
+        events = _scan_live_ingest_events(
+            source, str(transcript), session_id, body.get("timestamp")
+        )
+        events = _fold_usage_metadata_into_hook_body(events, body)
+        _post_ingest_events(source, _enrich_live_events(events, body))
+    if hook not in ("Stop", "SubagentStop") or not session_id or readable:
+        return
+    msg = str(body.get("last_assistant_message") or "").strip()
+    if not msg:
+        return
+    _post_ingest_events(source, [
+        _shell_response_event(source, body, msg, label="fallback")
+    ])
 
 
 def _hook_response(source: str, body: dict) -> dict | None:
@@ -2202,12 +2079,12 @@ def _sync_subagent_links(agents: list[str], *, verbose: bool = False) -> int:
 
 
 def _import_cursor_subagent_responses(path: Path, child_id: str) -> None:
-    """Post a subagent's prompt/thought/response events from its transcript,
-    dropping tool_use (the child's live tool hooks already captured those).
+    """Post a subagent's prompt/thought/response Ingest Events from its transcript,
+    dropping tool_call Events (the child's live tool hooks already captured those).
 
-    Idempotent: the parser stamps each line with a stable ``_dedup_key`` and
-    ``_import``, so the collector dedups on (session, key) with no time window —
-    re-running on every stop hook is safe."""
+    Transcript-position keyed conversation Ingest Events are idempotent across
+    stop hooks. Imported attachment Ingest Events intentionally retain their
+    historical unkeyed, time-windowed dedup behavior."""
     try:
         mtime = path.stat().st_mtime
         lines = path.read_text(errors="replace").splitlines()
@@ -2215,6 +2092,7 @@ def _import_cursor_subagent_responses(path: Path, child_id: str) -> None:
         return
     state: dict = {}
     path_str = str(path)
+    parsed_events: list[dict] = []
     for lineno, raw in enumerate(lines):
         raw = raw.strip()
         if not raw:
@@ -2223,14 +2101,26 @@ def _import_cursor_subagent_responses(path: Path, child_id: str) -> None:
             obj = json.loads(raw)
         except json.JSONDecodeError:
             continue
-        for ev in _cursor_line_to_events(
-            obj, child_id, lineno=lineno, mtime=mtime, state=state, path=path_str
-        ):
-            if ev.get("tool_name") is not None or ev.get("hook_event_name") == "PostToolUse":
-                continue
-            if ev.get("_dedup_key") is None:
-                ev.pop("_dedup_key", None)
-            _post(f"{COT_ENDPOINT}/v1/ingest/cursor", ev)
+        parsed_events.extend(
+            _cursor_line_to_ingest_events(
+                obj,
+                child_id,
+                lineno=lineno,
+                mtime=mtime,
+                state=state,
+                path=path_str,
+                origin="import",
+            )
+        )
+    parsed_events = [
+        event for event in parsed_events if event.get("kind") != "tool_call"
+    ]
+    events = _prepare_ingest_events("cursor", parsed_events, origin="import")
+    for event in events:
+        payload = _ingest_event_to_hook_payload(event)
+        if payload.get("_dedup_key") is None:
+            payload.pop("_dedup_key", None)
+        _post(f"{COT_ENDPOINT}/v1/ingest/cursor", payload)
 
 
 def _reconcile_cursor_subagents(body: dict) -> None:
@@ -2277,6 +2167,8 @@ def _claude_line_to_ingest_events(
     mtime: float | None = None,
     state: dict | None = None,
     path: str = "",
+    origin: str = "import",
+    byte_offset: int | None = None,
 ) -> list[dict]:
     """Map a single Claude transcript JSONL line to canonical ingest events.
 
@@ -2297,14 +2189,29 @@ def _claude_line_to_ingest_events(
     cwd = obj.get("cwd")
     model = message.get("model") or obj.get("model")
     usage = message.get("usage") if isinstance(message.get("usage"), dict) else None
+    fallback_anchor = f"{path}:{byte_offset if byte_offset is not None else lineno}"
+
+    def _dedup(suffix: str, *, live_only: bool = False) -> str | None:
+        return _scoped_dedup_key(
+            origin,
+            "claude",
+            suffix,
+            import_anchor=str(uuid) if uuid else None,
+            live_anchor=str(uuid or fallback_anchor),
+            live_only=live_only,
+        )
+
     base = {
         "session_id": sid,
         "cwd": cwd,
-        "origin": "import",
+        "origin": origin,
         "timestamp": ts,
     }
 
     if role == "user":
+        text = _text_from_blocks(content, clean_user=True) if isinstance(content, list) else _clean_user_text(str(content or ""))
+        if uuid and text:
+            state.setdefault("_user_prompts", {})[str(uuid)] = text
         # Tool results ride in user messages; pair them to the earlier call.
         if isinstance(content, list):
             for i, block in enumerate(content):
@@ -2329,15 +2236,20 @@ def _claude_line_to_ingest_events(
                     "tool_input": matched_input,
                     "tool_response": result_text,
                     "model": model,
-                    "dedup_key": f"{uuid}:post:{tool_use_id or i}" if uuid else None,
+                    "dedup_key": _dedup(f"post:{tool_use_id or i}"),
                 })
-        text = _text_from_blocks(content, clean_user=True) if isinstance(content, list) else _clean_user_text(str(content or ""))
-        if text and not _is_interruption(text):
+        if _is_interruption(text):
+            events.append({
+                **base,
+                "kind": "interruption",
+                "dedup_key": _dedup("interruption"),
+            })
+        elif text:
             events.append({
                 **base,
                 "kind": "prompt",
                 "text": text,
-                "dedup_key": f"{uuid}:prompt" if uuid else None,
+                "dedup_key": _dedup("prompt"),
             })
         if isinstance(content, list):
             atts = _message_attachments(content)
@@ -2347,6 +2259,7 @@ def _claude_line_to_ingest_events(
                     "kind": "attachment",
                     "text": text,
                     "attachments": atts,
+                    "dedup_key": _dedup("attachment", live_only=True),
                 })
     elif role == "assistant":
         if isinstance(content, list):
@@ -2368,7 +2281,7 @@ def _claude_line_to_ingest_events(
                             "text": str(think),
                             "model": model,
                             "usage": block_usage,
-                            "dedup_key": f"{uuid}:think:{i}" if uuid else None,
+                            "dedup_key": _dedup(f"think:{i}"),
                         })
                 elif btype == "text":
                     text = block.get("text")
@@ -2379,7 +2292,7 @@ def _claude_line_to_ingest_events(
                             "text": str(text),
                             "model": model,
                             "usage": block_usage,
-                            "dedup_key": f"{uuid}:resp:{i}" if uuid else None,
+                            "dedup_key": _dedup(f"resp:{i}"),
                         })
                 elif btype == "tool_use":
                     tool_name = block.get("name") or ""
@@ -2396,7 +2309,7 @@ def _claude_line_to_ingest_events(
                         "tool_input": tool_input,
                         "model": model,
                         "usage": block_usage,
-                        "dedup_key": f"{uuid}:pre:{tool_id or i}" if uuid else None,
+                        "dedup_key": _dedup(f"pre:{tool_id or i}"),
                     })
         else:
             text = str(content or "").strip()
@@ -2407,8 +2320,21 @@ def _claude_line_to_ingest_events(
                     "text": text,
                     "model": model,
                     "usage": usage,
-                    "dedup_key": f"{uuid}:resp" if uuid else None,
+                    "dedup_key": _dedup("resp"),
                 })
+    elif obj.get("type") == "attachment":
+        attachment = obj.get("attachment") if isinstance(obj.get("attachment"), dict) else {}
+        meta = _file_attachment_meta(attachment)
+        parent_uuid = obj.get("parentUuid")
+        parent_text = state.get("_user_prompts", {}).get(str(parent_uuid)) if parent_uuid else None
+        if meta and _file_attachment_matches_text(attachment, parent_text):
+            events.append({
+                **base,
+                "kind": "attachment",
+                "text": parent_text,
+                "attachments": [meta],
+                "dedup_key": _dedup("attachment", live_only=True),
+            })
 
     return events
 
@@ -2423,10 +2349,14 @@ def _claude_line_to_events(
     path: str = "",
 ) -> list[dict]:
     """Map a Claude transcript line to current collector hook payloads."""
-    return _ingest_events_to_hook_payloads(
-        _claude_line_to_ingest_events(
-            obj, session_id, lineno=lineno, mtime=mtime, state=state, path=path
-        )
+    return _import_line_to_hook_payloads(
+        "claude",
+        obj,
+        session_id,
+        lineno=lineno,
+        mtime=mtime,
+        state=state,
+        path=path,
     )
 
 
@@ -2471,6 +2401,8 @@ def _ingest_event_to_hook_payload(event: dict) -> dict:
         out["interrupted"] = True
     if event.get("codex"):
         out["codex"] = event.get("codex")
+    if event.get("composer_mode"):
+        out["composer_mode"] = event.get("composer_mode")
 
     kind = event.get("kind")
     if kind == "prompt":
@@ -2484,6 +2416,14 @@ def _ingest_event_to_hook_payload(event: dict) -> dict:
         out["hook_event_name"] = "afterAgentThought"
         out["_synthetic_category"] = "thought"
         out["thought"] = event.get("text") or ""
+    elif kind == "plan":
+        out["hook_event_name"] = "createPlan"
+        out["_synthetic_category"] = "plan"
+        out["plan_name"] = event.get("name") or "Plan"
+        out["plan_overview"] = event.get("overview") or ""
+        out["plan_body"] = event.get("body") or ""
+        out["plan_todos"] = event.get("todos") or []
+        out["composer_mode"] = "plan"
     elif kind == "tool_call":
         phase = event.get("phase") or "instant"
         if phase == "start":
@@ -2525,6 +2465,8 @@ def _cursor_line_to_ingest_events(
     mtime: float | None = None,
     state: dict | None = None,
     path: str = "",
+    origin: str = "import",
+    byte_offset: int | None = None,
 ) -> list[dict]:
     """Map a Cursor transcript line to canonical ingest events.
 
@@ -2541,21 +2483,48 @@ def _cursor_line_to_ingest_events(
     if content is None:
         content = message.get("content")
 
+    def _dedup(suffix: str, *, live_only: bool = False) -> str | None:
+        return _scoped_dedup_key(
+            origin,
+            "cursor",
+            suffix,
+            import_anchor=f"{path}:{lineno}",
+            live_anchor=str(byte_offset if byte_offset is not None else lineno),
+            live_only=live_only,
+        )
+
     def _base(block_idx: int = 0) -> dict:
         return {
-            "origin": "import",
+            "origin": origin,
             "session_id": session_id,
             "timestamp": _cursor_import_ts(mtime, lineno, block_idx),
         }
 
+    if (
+        obj.get("type") == "turn_ended"
+        and obj.get("status") in ("error", "aborted")
+        and _is_interruption(str(obj.get("error") or ""))
+    ):
+        return [{
+            **_base(),
+            "kind": "interruption",
+            "dedup_key": _dedup("interruption"),
+        }]
+
     if role == "user":
         text = _text_from_blocks(content, clean_user=True) if isinstance(content, list) else _clean_user_text(str(content or ""))
-        if text and not _is_interruption(text):
+        if _is_interruption(text):
+            events.append({
+                **_base(),
+                "kind": "interruption",
+                "dedup_key": _dedup("interruption"),
+            })
+        elif text:
             events.append({
                 **_base(),
                 "kind": "prompt",
                 "text": text,
-                "dedup_key": f"{path}:{lineno}:prompt",
+                "dedup_key": _dedup("prompt"),
             })
         if isinstance(content, list):
             atts = _message_attachments(content)
@@ -2565,6 +2534,7 @@ def _cursor_line_to_ingest_events(
                     "kind": "attachment",
                     "text": text,
                     "attachments": atts,
+                    "dedup_key": _dedup("attachment", live_only=True),
                 })
         return events
 
@@ -2580,7 +2550,7 @@ def _cursor_line_to_ingest_events(
                         **_base(i),
                         "kind": "response",
                         "text": str(text),
-                        "dedup_key": f"{path}:{lineno}:resp:{i}",
+                        "dedup_key": _dedup(f"resp:{i}"),
                     })
             elif btype == "thinking":
                 think = block.get("thinking")
@@ -2589,7 +2559,7 @@ def _cursor_line_to_ingest_events(
                         **_base(i),
                         "kind": "thought",
                         "text": str(think),
-                        "dedup_key": f"{path}:{lineno}:think:{i}",
+                        "dedup_key": _dedup(f"think:{i}"),
                     })
             elif btype == "tool_use":
                 name = block.get("name") or ""
@@ -2597,15 +2567,28 @@ def _cursor_line_to_ingest_events(
                 # ApplyPatch sends a raw patch string; keep dict or str as-is so
                 # normalize can pull the target path out of either shape.
                 tool_input = inp if isinstance(inp, (dict, str)) else {}
-                events.append({
-                    **_base(i),
-                    "kind": "tool_call",
-                    "phase": "instant",
-                    "status": "ok",
-                    "tool_name": name,
-                    "tool_input": tool_input,
-                    "dedup_key": f"{path}:{lineno}:tool:{i}",
-                })
+                if name == "CreatePlan":
+                    plan_input = tool_input if isinstance(tool_input, dict) else {}
+                    events.append({
+                        **_base(i),
+                        "kind": "plan",
+                        "name": plan_input.get("name") or "Plan",
+                        "overview": plan_input.get("overview") or "",
+                        "body": plan_input.get("plan") or "",
+                        "todos": plan_input.get("todos")
+                        if isinstance(plan_input.get("todos"), list) else [],
+                        "dedup_key": _dedup(f"plan:{i}"),
+                    })
+                else:
+                    events.append({
+                        **_base(i),
+                        "kind": "tool_call",
+                        "phase": "instant",
+                        "status": "ok",
+                        "tool_name": name,
+                        "tool_input": tool_input,
+                        "dedup_key": _dedup(f"tool:{i}"),
+                    })
         return events
 
     return events
@@ -2621,10 +2604,14 @@ def _cursor_line_to_events(
     path: str = "",
 ) -> list[dict]:
     """Map a Cursor transcript line to current collector hook payloads."""
-    return _ingest_events_to_hook_payloads(
-        _cursor_line_to_ingest_events(
-            obj, session_id, lineno=lineno, mtime=mtime, state=state, path=path
-        )
+    return _import_line_to_hook_payloads(
+        "cursor",
+        obj,
+        session_id,
+        lineno=lineno,
+        mtime=mtime,
+        state=state,
+        path=path,
     )
 
 
@@ -2722,17 +2709,19 @@ def _codex_session_config(meta: dict | None, turn: dict | None) -> dict:
     return cfg
 
 
-def _codex_session_start_event(session_id: str, ts, state: dict) -> dict:
+def _codex_session_start_event(
+    session_id: str, ts, state: dict, *, origin: str = "import"
+) -> dict:
     """A SessionStart lifecycle event for an imported Codex session, carrying the
     sandbox/approval posture that Codex only records on its metadata lines."""
     ev: dict = {
         "session_id": session_id,
-        "origin": "import",
+        "origin": origin,
         "timestamp": ts,
         "kind": "session_metadata",
         "metadata_type": "session_start",
         "cwd": state.get("cwd"),
-        "dedup_key": "session:start",
+        "dedup_key": _origin_dedup_key(origin, "codex", "session:start"),
     }
     cfg = _codex_session_config(state.get("_codex_meta"), state.get("_codex_turn"))
     if cfg.get("model"):
@@ -2750,6 +2739,8 @@ def _codex_line_to_ingest_events(
     mtime: float | None = None,
     state: dict | None = None,
     path: str = "",
+    origin: str = "import",
+    byte_offset: int | None = None,
 ) -> list[dict]:
     """Map a Codex rollout JSONL line to canonical ingest events.
 
@@ -2764,6 +2755,22 @@ def _codex_line_to_ingest_events(
     kind = obj.get("type")
     payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
     line_id = obj.get("id") or ""
+    fallback_anchor = str(byte_offset if byte_offset is not None else lineno)
+
+    def _dedup(
+        suffix: str,
+        *,
+        anchor_override: str | None = None,
+        live_only: bool = False,
+    ) -> str | None:
+        return _scoped_dedup_key(
+            origin,
+            "codex",
+            suffix,
+            import_anchor=anchor_override or (str(line_id) if line_id else None),
+            live_anchor=anchor_override or str(line_id or fallback_anchor),
+            live_only=live_only,
+        )
 
     # Codex never repeats cwd/model on message lines; it records them once on
     # session_meta and per-turn on turn_context. Capture them in per-file state
@@ -2784,7 +2791,7 @@ def _codex_line_to_ingest_events(
         # emit the SessionStart here, once, with everything gathered so far.
         if not state.get("_session_started") and isinstance(state.get("_codex_meta"), dict):
             state["_session_started"] = True
-            return [_codex_session_start_event(session_id, ts, state)]
+            return [_codex_session_start_event(session_id, ts, state, origin=origin)]
         return events
     # Per-turn token usage and interruptions arrive on event_msg lines *after*
     # the assistant message, so fold them onto the deferred pending message.
@@ -2796,14 +2803,21 @@ def _codex_line_to_ingest_events(
             last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else None
             if last:
                 pending["usage"] = _merge_usage(pending.get("usage"), last)
-        elif ptype == "turn_aborted" and isinstance(pending, dict):
-            pending["interrupted"] = True
+        elif ptype == "turn_aborted":
+            events.extend(_codex_flush_pending_ingest_events(state))
+            events.append({
+                "session_id": session_id,
+                "origin": origin,
+                "timestamp": ts,
+                "kind": "interruption",
+                "dedup_key": _dedup("interruption"),
+            })
         return events
 
     if kind != "response_item":
         return events
 
-    base: dict = {"session_id": session_id, "origin": "import", "timestamp": ts}
+    base: dict = {"session_id": session_id, "origin": origin, "timestamp": ts}
     if state.get("cwd"):
         base["cwd"] = state["cwd"]
 
@@ -2820,7 +2834,7 @@ def _codex_line_to_ingest_events(
                 "kind": "response",
                 "text": text_val,
                 "model": model,
-                "dedup_key": f"{line_id}:resp" if line_id else None,
+                "dedup_key": _dedup("resp"),
             }
         else:
             ev = {
@@ -2828,7 +2842,7 @@ def _codex_line_to_ingest_events(
                 "kind": "thought",
                 "text": text_val,
                 "model": model,
-                "dedup_key": f"{line_id}:think" if line_id else None,
+                "dedup_key": _dedup("think"),
             }
         # Defer so a trailing token_count / turn_aborted line can fold usage and
         # interrupted status onto this message before it is posted. The prior
@@ -2836,7 +2850,10 @@ def _codex_line_to_ingest_events(
         flushed = _codex_flush_pending_ingest_events(state)
         state["_pending_msg"] = ev
         return flushed
-    elif pt == "message" and payload.get("role") == "user":
+    else:
+        events.extend(_codex_flush_pending_ingest_events(state))
+
+    if pt == "message" and payload.get("role") == "user":
         content = payload.get("content")
         raw_text = _text_from_blocks(content, clean_user=False) if isinstance(content, list) else str(content or "")
         env_block, _ = _extract_env_context(raw_text)
@@ -2844,16 +2861,18 @@ def _codex_line_to_ingest_events(
             events.append(_env_context_event(base, env_block))
         text_val = _clean_user_text(raw_text)
         if _is_interruption(text_val):
-            pending = state.get("_pending_msg")
-            if isinstance(pending, dict):
-                pending["interrupted"] = True
+            events.append({
+                **base,
+                "kind": "interruption",
+                "dedup_key": _dedup("interruption"),
+            })
             return events
         if text_val:
             events.append({
                 **base,
                 "kind": "prompt",
                 "text": text_val,
-                "dedup_key": f"{line_id}:prompt" if line_id else None,
+                "dedup_key": _dedup("prompt"),
             })
         if isinstance(content, list):
             atts = _message_attachments(content)
@@ -2863,6 +2882,7 @@ def _codex_line_to_ingest_events(
                     "kind": "attachment",
                     "text": text_val,
                     "attachments": atts,
+                    "dedup_key": _dedup("attachment", live_only=True),
                 })
     elif pt == "reasoning":
         text_val = _codex_reasoning_text(payload)
@@ -2871,7 +2891,7 @@ def _codex_line_to_ingest_events(
                 **base,
                 "kind": "thought",
                 "text": text_val,
-                "dedup_key": f"{line_id}:reason" if line_id else None,
+                "dedup_key": _dedup("reason"),
             })
     elif pt == "web_search_call":
         action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
@@ -2885,7 +2905,7 @@ def _codex_line_to_ingest_events(
                 "tool_name": "WebSearch",
                 "tool_input": {"query": str(query)},
                 "tool_response": {"status": payload.get("status"), "action": action},
-                "dedup_key": f"{line_id}:web" if line_id else None,
+                "dedup_key": _dedup("web"),
             })
     elif pt in ("function_call", "custom_tool_call"):
         name = payload.get("name") or ""
@@ -2894,7 +2914,7 @@ def _codex_line_to_ingest_events(
         tool_name, tool_input = _codex_map_tool(name, raw_args)
         if call_id:
             state[call_id] = (tool_name, tool_input)
-        dk = f"{call_id}:pre" if call_id else (f"{line_id}:pre" if line_id else None)
+        dk = _dedup("pre", anchor_override=str(call_id) if call_id else None)
         events.append({
             **base,
             "kind": "tool_call",
@@ -2911,7 +2931,7 @@ def _codex_line_to_ingest_events(
         tool_name, tool_input = state.get(call_id, ("", {}))
         status = payload.get("status")
         is_error = status not in (None, "completed", "success")
-        dk = f"{call_id}:post" if call_id else (f"{line_id}:post" if line_id else None)
+        dk = _dedup("post", anchor_override=str(call_id) if call_id else None)
         events.append({
             **base,
             "kind": "tool_call",
@@ -2936,10 +2956,14 @@ def _codex_line_to_events(
     path: str = "",
 ) -> list[dict]:
     """Map a Codex rollout JSONL line to current collector hook payloads."""
-    return _ingest_events_to_hook_payloads(
-        _codex_line_to_ingest_events(
-            obj, session_id, lineno=lineno, mtime=mtime, state=state, path=path
-        )
+    return _import_line_to_hook_payloads(
+        "codex",
+        obj,
+        session_id,
+        lineno=lineno,
+        mtime=mtime,
+        state=state,
+        path=path,
     )
 
 
@@ -2995,11 +3019,7 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
         print(f"cot import: no {agent} transcripts found", file=sys.stderr)
         return 0
 
-    line_parser = {
-        "claude": _claude_line_to_events,
-        "cursor": _cursor_line_to_events,
-        "codex": _codex_line_to_events,
-    }[agent]
+    line_parser = _ingest_line_parser(agent)
 
     source = agent
     posted = 0
@@ -3057,34 +3077,34 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
         # tool call with its result; reset per file so ids never bleed across).
         state: dict = {}
         path_str = str(path)
+        parsed_events: list[dict] = []
         for lineno, line in enumerate(lines):
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            events = line_parser(
-                obj, sid, lineno=lineno, mtime=mtime, state=state, path=path_str
+            parsed_events.extend(
+                line_parser(
+                    obj,
+                    sid,
+                    lineno=lineno,
+                    mtime=mtime,
+                    state=state,
+                    path=path_str,
+                    origin="import",
+                )
             )
-            for ev in events:
-                # Subagent transcripts: live hooks already hold the tool calls,
-                # so import only the conversation text the hooks never deliver.
-                if responses_only and (
-                    ev.get("tool_name") is not None
-                    or ev.get("hook_event_name") == "PostToolUse"
-                ):
-                    continue
-                # Strip None dedup keys
-                if ev.get("_dedup_key") is None:
-                    ev.pop("_dedup_key", None)
-                _post(f"{COT_ENDPOINT}/v1/ingest/{source}", ev)
-                posted += 1
-
-        # Release any message held back to absorb its trailing token_count /
-        # turn_aborted (Codex only; a no-op for the other parsers).
-        for ev in _codex_flush_pending(state):
-            if ev.get("_dedup_key") is None:
-                ev.pop("_dedup_key", None)
-            _post(f"{COT_ENDPOINT}/v1/ingest/{source}", ev)
+        parsed_events.extend(_codex_flush_pending_ingest_events(state))
+        events = _prepare_ingest_events(agent, parsed_events, origin="import")
+        for event in events:
+            # Subagent transcripts: live hooks already hold the tool calls, so
+            # import only the conversation text the hooks never deliver.
+            if responses_only and event.get("kind") == "tool_call":
+                continue
+            payload = _ingest_event_to_hook_payload(event)
+            if payload.get("_dedup_key") is None:
+                payload.pop("_dedup_key", None)
+            _post(f"{COT_ENDPOINT}/v1/ingest/{source}", payload)
             posted += 1
 
         offsets[str(path)] = new_offset
@@ -3452,32 +3472,39 @@ def main() -> int:
         if isinstance(prompt, str):
             env_block, remainder = _extract_env_context(prompt)
             if env_block:
+                event = _env_context_event(
+                    {
+                        "session_id": body.get("session_id"),
+                        "cwd": body.get("cwd"),
+                        "origin": "hook",
+                        "timestamp": body.get("timestamp"),
+                    },
+                    env_block,
+                )
+                # This is hook-derived rather than scanner-recovered, so keep
+                # the Collector's ordinary five-second payload-hash dedup.
+                event.pop("dedup_key", None)
                 _post(
                     f"{COT_ENDPOINT}/v1/ingest/{source}",
-                    _env_context_event(
-                        {
-                            "session_id": body.get("session_id"),
-                            "cwd": body.get("cwd"),
-                            "timestamp": body.get("timestamp"),
-                        },
-                        env_block,
-                    ),
+                    _ingest_event_to_hook_payload(event),
                 )
                 body["prompt"] = remainder
                 suppress = not remainder
     redundant = source == "cursor" and hook in CURSOR_REDUNDANT_HOOKS
-    # Cursor transcript-only artifacts are posted by _emit_cursor_artifacts. For
-    # plan-mode turns it also posts the filled response, so skip the default
-    # empty response in that case.
-    handled = source == "cursor" and _emit_cursor_artifacts(body, source)
+    handled = False
+    if source == "cursor":
+        # Cursor's shell derives whether its canonical response/plan Events
+        # replace the raw afterAgentResponse hook body.
+        handled = _emit_cursor_events(body, source)
+    elif source == "claude":
+        _emit_claude_events(body, source)
+    elif source == "codex":
+        _emit_codex_events(body, source)
     if not redundant and not handled and not suppress:
         _post(f"{COT_ENDPOINT}/v1/ingest/{source}", body)
     if source == "claude":
-        _emit_claude_responses(body, source)
         if hook in ("SessionStart", "sessionStart"):
             _log_launch(body)
-    elif source == "codex":
-        _emit_codex_responses(body, source)
     elif source == "cursor" and hook in ("subagentStop", "stop"):
         # A subagent just finished (or the turn ended): fold its transcript-only
         # responses in now, so active sessions don't wait for cot watch/import.
