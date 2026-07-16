@@ -89,6 +89,201 @@ def test_namespaced_live_event_supersedes_import_and_retry_is_idempotent():
     assert db.session_origins()[sid] == "hook"
 
 
+def test_claude_stop_ends_turn_session_end_closes_and_session_start_reopens():
+    sid = "claude-desktop-lifecycle"
+    db.record_ingest(
+        "claude",
+        {
+            "hook_event_name": "SessionStart",
+            "session_id": sid,
+            "cwd": "/repo",
+            "timestamp": "2026-07-16T03:20:29Z",
+        },
+    )
+    db.record_ingest(
+        "claude",
+        {
+            "hook_event_name": "Stop",
+            "session_id": sid,
+            "cwd": "/repo",
+            "timestamp": "2026-07-16T03:20:58Z",
+            "last_assistant_message": "Check complete.",
+        },
+    )
+
+    detail = db.get_session_detail(sid)
+    assert detail is not None
+    assert detail["summary"]["ended_at"] is None
+    assert [event["title"] for event in detail["events"]] == [
+        "Session started",
+        "Turn ended",
+    ]
+
+    db.record_ingest(
+        "claude",
+        {
+            "hook_event_name": "SessionEnd",
+            "session_id": sid,
+            "cwd": "/repo",
+            "timestamp": "2026-07-16T03:21:30Z",
+            "reason": "other",
+        },
+    )
+
+    detail = db.get_session_detail(sid)
+    assert detail is not None
+    assert detail["summary"]["ended_at"] == "2026-07-16T03:21:30+00:00"
+    assert [event["title"] for event in detail["events"]] == [
+        "Session started",
+        "Turn ended",
+        "Session ended",
+    ]
+
+    db.record_ingest(
+        "claude",
+        {
+            "hook_event_name": "SessionStart",
+            "session_id": sid,
+            "cwd": "/repo",
+            "timestamp": "2026-07-16T03:22:00Z",
+        },
+    )
+
+    detail = db.get_session_detail(sid)
+    assert detail is not None
+    assert detail["summary"]["ended_at"] is None
+
+
+def test_claude_desktop_suggestion_subagent_is_evidence_not_a_timeline_event():
+    sid = "claude-desktop-suggestions"
+    db.record_ingest(
+        "claude",
+        {
+            "hook_event_name": "SessionStart",
+            "session_id": sid,
+            "cwd": "/repo",
+            "timestamp": "2026-07-16T03:20:29Z",
+        },
+    )
+
+    suggestion = db.record_ingest(
+        "claude",
+        {
+            "hook_event_name": "SubagentStop",
+            "session_id": sid,
+            "cwd": "/repo",
+            "timestamp": "2026-07-16T03:21:15Z",
+            "agent_id": "a1ea05adf9a1d9b17",
+            "agent_type": "",
+            "agent_transcript_path": "/repo/subagents/agent-a1ea05adf9a1d9b17.jsonl",
+            "last_assistant_message": "update the readme",
+        },
+    )
+    explicit = db.record_ingest(
+        "claude",
+        {
+            "hook_event_name": "SubagentStop",
+            "session_id": sid,
+            "cwd": "/repo",
+            "timestamp": "2026-07-16T03:22:15Z",
+            "agent_id": "af7b1027e6e6d8880",
+            "agent_type": "Explore",
+            "agent_transcript_path": "/repo/subagents/agent-af7b1027e6e6d8880.jsonl",
+            "last_assistant_message": "Repository inspection complete.",
+        },
+    )
+
+    assert suggestion["raw_status"] == "ignored"
+    assert suggestion["event_id"] is None
+    assert explicit["raw_status"] == "projected"
+    detail = db.get_session_detail(sid)
+    assert detail is not None
+    subagents = [
+        event for event in detail["events"] if event["category"] == "subagent"
+    ]
+    assert len(subagents) == 1
+    assert subagents[0]["title"] == "Explore"
+
+
+def test_migration_repairs_stored_claude_desktop_lifecycle_and_suggestions():
+    sid = "stored-claude-desktop-session"
+    db.record_ingest(
+        "claude",
+        {
+            "hook_event_name": "SessionStart",
+            "session_id": sid,
+            "cwd": "/repo",
+            "timestamp": "2026-07-16T03:20:29Z",
+        },
+    )
+    stop = db.record_ingest(
+        "claude",
+        {
+            "hook_event_name": "Stop",
+            "session_id": sid,
+            "cwd": "/repo",
+            "timestamp": "2026-07-16T03:20:58Z",
+            "last_assistant_message": "Check complete.",
+        },
+    )
+    suggestion_payload = {
+        "hook_event_name": "SubagentStop",
+        "session_id": sid,
+        "cwd": "/repo",
+        "timestamp": "2026-07-16T03:21:15Z",
+        "agent_id": "a1ea05adf9a1d9b17",
+        "agent_type": "",
+        "last_assistant_message": "update the readme",
+    }
+    with store.write() as conn:
+        store.insert_event(
+            conn,
+            session_id=sid,
+            source="claude",
+            hook="SubagentStop",
+            phase="end",
+            ts="2026-07-16T03:21:15Z",
+            payload=suggestion_payload,
+            category="subagent",
+            title="Subagent",
+            detail="update the readme",
+            target="a1ea05adf9a1d9b17",
+            status="ok",
+            created_at="2026-07-16T03:21:15Z",
+        )
+        conn.execute(
+            "UPDATE events SET title = 'Session ended' WHERE id = ?",
+            (stop["event_id"],),
+        )
+        conn.execute(
+            "UPDATE sessions SET status = 'completed', ended_at = ? WHERE id = ?",
+            ("2026-07-16T03:20:58Z", sid),
+        )
+        conn.execute(
+            "UPDATE settings SET value = 'pre-claude-desktop-repair'"
+            " WHERE key = 'migrations_version'"
+        )
+        conn.execute("UPDATE events SET origin = NULL WHERE session_id = ?", (sid,))
+
+    db.init_db()
+
+    detail = db.get_session_detail(sid)
+    assert detail is not None
+    assert detail["summary"]["ended_at"] is None
+    assert [event["title"] for event in detail["events"]] == [
+        "Session started",
+        "Turn ended",
+    ]
+    suggestion_raw = [
+        row
+        for row in db.raw_ingest_events()
+        if row["session_id_guess"] == sid and row["raw_kind"] == "SubagentStop"
+    ]
+    assert len(suggestion_raw) == 1
+    assert suggestion_raw[0]["status"] == "ignored"
+    assert suggestion_raw[0]["event_id"] is None
+
+
 def test_malformed_raw_input_is_evidence_not_a_timeline_event():
     result = db.record_malformed_ingest(
         "codex",

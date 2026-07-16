@@ -17,12 +17,10 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import __version__, store, timeutil
-from .normalize import APPROVAL_REVIEW_PREFIX, categorize, normalize
+from .normalize import APPROVAL_REVIEW_PREFIX, categorize, lifecycle_boundary, normalize
 from .pricing import cost_for, normalize_model
 from .question_recovery import ANSWER_SOURCE_ASSISTANT_SUMMARY, recover_cursor_question_response
 
-_SESSION_END_HOOKS = {"Stop", "stop", "SessionEnd", "sessionEnd"}
-_SESSION_START_HOOKS = {"SessionStart", "sessionStart"}
 _APPROVAL_REVIEW_RE = re.compile(r"\bReviewed Codex session id:\s*([0-9a-fA-F-]{36})\b")
 
 
@@ -401,6 +399,85 @@ def _recategorize_subagents(conn: sqlite3.Connection) -> None:
         )
 
 
+def _is_claude_desktop_suggestion(
+    source: str, hook: str, raw: dict[str, Any], origin: str
+) -> bool:
+    """Identify Claude Desktop's internal follow-up suggestion hook."""
+    return (
+        source == "claude"
+        and origin == "hook"
+        and hook == "SubagentStop"
+        and not str(raw.get("agent_type") or "").strip()
+    )
+
+
+def _repair_claude_desktop_events(conn: sqlite3.Connection) -> None:
+    """Repair lifecycle and internal-suggestion rows from Claude Desktop."""
+    suggestion_rows = conn.execute(
+        "SELECT id, source, hook, origin, raw_ingest_id, payload FROM events"
+        " WHERE source = 'claude' AND hook = 'SubagentStop'"
+    ).fetchall()
+    for row in suggestion_rows:
+        try:
+            raw = json.loads(row["payload"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        if not _is_claude_desktop_suggestion(
+            row["source"], row["hook"], raw, row["origin"]
+        ):
+            continue
+        if row["raw_ingest_id"] is not None:
+            conn.execute(
+                "UPDATE raw_ingest_events SET status = 'ignored', event_id = NULL"
+                " WHERE id = ?",
+                (row["raw_ingest_id"],),
+            )
+        else:
+            _append_raw_ingest(
+                conn, "claude", raw, origin="hook", status="ignored"
+            )
+        conn.execute("DELETE FROM events WHERE id = ?", (row["id"],))
+
+    conn.execute(
+        "UPDATE events SET title = 'Turn ended'"
+        " WHERE source = 'claude' AND hook IN ('Stop', 'stop')"
+    )
+
+    lifecycle_rows = conn.execute(
+        "SELECT session_id, hook, ts FROM events"
+        " WHERE source = 'claude' AND origin = 'hook'"
+        " AND category = 'lifecycle'"
+        " ORDER BY ts ASC, id ASC"
+    ).fetchall()
+    bounds: dict[str, dict[str, tuple[datetime, str] | None]] = {}
+    for row in lifecycle_rows:
+        parsed = timeutil.parse_ts(row["ts"])
+        if parsed is None:
+            continue
+        boundary = lifecycle_boundary("claude", row["hook"])
+        if boundary not in ("session_start", "session_end"):
+            continue
+        state = bounds.setdefault(row["session_id"], {"start": None, "end": None})
+        key = "start" if boundary == "session_start" else "end"
+        current = state[key]
+        if current is None or parsed >= current[0]:
+            state[key] = (parsed, row["ts"])
+
+    for session_id, state in bounds.items():
+        start = state["start"]
+        end = state["end"]
+        if end is not None and (start is None or end[0] >= start[0]):
+            conn.execute(
+                "UPDATE sessions SET status = 'completed', ended_at = ? WHERE id = ?",
+                (end[1], session_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE sessions SET status = 'active', ended_at = NULL WHERE id = ?",
+                (session_id,),
+            )
+
+
 def _recategorize_cursor_tools(conn: sqlite3.Connection) -> None:
     """Cursor's generic pre/postToolUse events used to fall through to ``other``
     (only MCP was rescued). They now categorize like Claude/Codex tool calls —
@@ -509,9 +586,23 @@ def _drop_redundant_cursor_hooks(conn: sqlite3.Connection) -> None:
     )
 
 
-def should_ignore_event(norm: dict[str, Any]) -> bool:
-    """Return True for hook rows intentionally excluded from storage."""
-    return norm.get("source") == "cursor" and norm.get("hook") in _CURSOR_GRANULAR_HOOKS
+def should_ignore_event(
+    norm: dict[str, Any], raw: dict[str, Any] | None = None
+) -> bool:
+    """Return True for hook rows intentionally excluded from Event storage."""
+    if norm.get("source") == "cursor" and norm.get("hook") in _CURSOR_GRANULAR_HOOKS:
+        return True
+    # Claude Desktop uses untyped, ephemeral subagents to generate suggested
+    # follow-up prompts after a turn. Real Claude Code subagents carry the
+    # documented agent_type field; keep the internal suggestions in the raw
+    # ingest ledger without presenting them as user-created subagent Events.
+    body = raw or {}
+    return _is_claude_desktop_suggestion(
+        str(norm.get("source") or ""),
+        str(norm.get("hook") or ""),
+        body,
+        "import" if body.get("_import") else "hook",
+    )
 
 
 def _recategorize_web_search(conn: sqlite3.Connection) -> None:
@@ -981,7 +1072,7 @@ def _question_response_obj(detail: Any) -> dict[str, Any] | None:
     return obj if isinstance(obj, dict) else None
 
 
-_MIGRATIONS_VERSION = "8"
+_MIGRATIONS_VERSION = "9"
 _RAW_PAYLOAD_MAX_BYTES = 64 * 1024
 
 
@@ -1006,8 +1097,12 @@ def init_db() -> None:
         if stored and stored["value"] == _MIGRATIONS_VERSION:
             return
         _backfill(conn)
+        # Older Event rows predate Origin; normalize them before migrations
+        # whose reconciliation policy depends on distinguishing hook/import.
+        conn.execute("UPDATE events SET origin = 'hook' WHERE origin IS NULL")
         _recategorize_network_calls(conn)
         _recategorize_subagents(conn)
+        _repair_claude_desktop_events(conn)
         _recategorize_cursor_tools(conn)
         _recategorize_web_targets(conn)
         _recategorize_questions(conn)
@@ -1020,9 +1115,6 @@ def init_db() -> None:
         _backfill_cursor_questions(conn)
         _recategorize_other_tools(conn)
         _purge_import_for_hook_sessions(conn)
-        conn.execute(
-            "UPDATE events SET origin = 'hook' WHERE origin IS NULL"
-        )
         conn.execute(
             "INSERT INTO settings (key, value) VALUES ('migrations_version', ?)"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1264,7 +1356,8 @@ def _raw_received_at(raw: Any) -> str:
     return timeutil.now()
 
 
-def append_raw_ingest(
+def _append_raw_ingest(
+    conn: sqlite3.Connection,
     source: str,
     raw: Any,
     *,
@@ -1275,29 +1368,47 @@ def append_raw_ingest(
     payload, truncated = _raw_payload_text(raw)
     now = timeutil.now()
     received_at = _raw_received_at(raw)
+    cur = conn.execute(
+        "INSERT INTO raw_ingest_events (source, origin, received_at, session_id_guess,"
+        " raw_kind, raw_payload, raw_payload_truncated, raw_hash, parser_version,"
+        " agent_version, status, projection_error, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            source,
+            origin,
+            received_at,
+            _session_id_guess(source, raw),
+            _raw_kind(raw),
+            payload,
+            truncated,
+            _raw_hash(payload),
+            __version__,
+            _agent_version(raw),
+            status,
+            projection_error,
+            now,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def append_raw_ingest(
+    source: str,
+    raw: Any,
+    *,
+    origin: str = "hook",
+    status: str = "pending",
+    projection_error: str | None = None,
+) -> int:
     with store.write() as conn:
-        cur = conn.execute(
-            "INSERT INTO raw_ingest_events (source, origin, received_at, session_id_guess,"
-            " raw_kind, raw_payload, raw_payload_truncated, raw_hash, parser_version,"
-            " agent_version, status, projection_error, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                source,
-                origin,
-                received_at,
-                _session_id_guess(source, raw),
-                _raw_kind(raw),
-                payload,
-                truncated,
-                _raw_hash(payload),
-                __version__,
-                _agent_version(raw),
-                status,
-                projection_error,
-                now,
-            ),
+        return _append_raw_ingest(
+            conn,
+            source,
+            raw,
+            origin=origin,
+            status=status,
+            projection_error=projection_error,
         )
-        return int(cur.lastrowid)
 
 
 def mark_raw_ingest(
@@ -1352,7 +1463,7 @@ def record_ingest(source: str, raw: dict[str, Any]) -> dict[str, Any]:
     raw_id = append_raw_ingest(source, raw, origin="import" if raw.get("_import") else "hook")
     try:
         norm = normalize(source, raw)
-        if should_ignore_event(norm):
+        if should_ignore_event(norm, raw):
             mark_raw_ingest(raw_id, "ignored")
             return {
                 "ok": True,
@@ -1431,17 +1542,19 @@ def record_event(
                 )
             return (sid, event_id, False) if return_status else (sid, event_id)
 
+        boundary = lifecycle_boundary(norm["source"], norm["hook"])
         row = conn.execute("SELECT id FROM sessions WHERE id = ?", (sid,)).fetchone()
-        if row is None or norm["hook"] in _SESSION_START_HOOKS:
+        if row is None or boundary == "session_start":
             if row is None:
                 conn.execute(
                     "INSERT INTO sessions (id, source, cwd, started_at, status, created_at)"
                     " VALUES (?, ?, ?, ?, 'active', ?)",
                     (sid, norm["source"], norm["cwd"], ts, timeutil.now()),
                 )
-            elif norm["hook"] in _SESSION_START_HOOKS:
+            elif boundary == "session_start":
                 conn.execute(
-                    "UPDATE sessions SET status = 'active', cwd = COALESCE(?, cwd)"
+                    "UPDATE sessions SET status = 'active', ended_at = NULL,"
+                    " cwd = COALESCE(?, cwd)"
                     " WHERE id = ?",
                     (norm["cwd"], sid),
                 )
@@ -1460,7 +1573,7 @@ def record_event(
                 (ts, sid, ts),
             )
 
-        if norm["hook"] in _SESSION_END_HOOKS:
+        if boundary == "session_end":
             conn.execute(
                 "UPDATE sessions SET status = 'completed', ended_at = ? WHERE id = ?",
                 (ts, sid),
