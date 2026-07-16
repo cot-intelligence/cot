@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Literal
 
 from . import timeutil
 from .tool_classification import (
@@ -20,6 +20,7 @@ from .tool_classification import (
 )
 
 Source = str  # 'claude' | 'cursor' | 'codex'
+LifecycleBoundary = Literal["session_start", "turn_end", "session_end"]
 APPROVAL_REVIEW_PREFIX = "The following is the Codex agent history"
 
 _START_HOOKS = {
@@ -54,6 +55,17 @@ def _phase(hook: str) -> str:
     if hook in _END_HOOKS:
         return "end"
     return "instant"
+
+
+def lifecycle_boundary(source: Source, hook: str) -> LifecycleBoundary | None:
+    """Classify lifecycle hooks once for both display and Session state."""
+    if hook in ("SessionStart", "sessionStart"):
+        return "session_start"
+    if hook in ("SessionEnd", "sessionEnd"):
+        return "session_end"
+    if hook in ("Stop", "stop"):
+        return "turn_end" if source == "claude" else "session_end"
+    return None
 
 
 def _short(text: str | None, limit: int = 80) -> str:
@@ -182,7 +194,8 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
         }
 
     # --- Lifecycle ---
-    if hook in ("SessionStart", "sessionStart"):
+    boundary = lifecycle_boundary(source, hook)
+    if boundary == "session_start":
         return {
             "category": "lifecycle",
             "title": "Session started",
@@ -191,10 +204,19 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
             "status": "ok",
             "duration_ms": duration_ms,
         }
-    if hook in ("SessionEnd", "sessionEnd", "Stop", "stop"):
+    if boundary == "session_end":
         return {
             "category": "lifecycle",
             "title": "Session ended",
+            "target": None,
+            "detail": _json_detail(body),
+            "status": "ok",
+            "duration_ms": duration_ms,
+        }
+    if boundary == "turn_end":
+        return {
+            "category": "lifecycle",
+            "title": "Turn ended",
             "target": None,
             "detail": _json_detail(body),
             "status": "ok",
