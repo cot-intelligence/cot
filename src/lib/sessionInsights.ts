@@ -1,7 +1,7 @@
 import type { SessionDetail } from './api';
 import type { IconName } from '../components/ui/icons';
 import { formatDuration } from './categoryMeta';
-import { splitPath } from './sessionView';
+import { parentTimelineItems, splitPath } from './sessionView';
 
 export interface Insight {
   icon: IconName;
@@ -28,7 +28,8 @@ export interface SessionInsights {
 }
 
 export function buildInsights(detail: SessionDetail): SessionInsights {
-  const { summary, components, timeline } = detail;
+  const { summary, components } = detail;
+  const events = parentTimelineItems(detail);
   const insights: Insight[] = [];
 
   const dur = formatDuration(null, summary.duration_seconds);
@@ -96,7 +97,7 @@ export function buildInsights(detail: SessionDetail): SessionInsights {
       icon: 'terminal',
       title: `Ran ${components.shell_count} shell command${components.shell_count > 1 ? 's' : ''}`,
       detail: list(
-        timeline.filter((t) => t.category === 'shell').map((t) => t.target || t.title),
+        events.filter((t) => t.category === 'shell').map((t) => t.target || t.title),
       ),
     });
   }
@@ -117,7 +118,7 @@ export function buildInsights(detail: SessionDetail): SessionInsights {
     });
   }
 
-  const errors = timeline.filter((t) => t.status === 'error' || t.status === 'blocked');
+  const errors = events.filter((t) => t.status === 'error' || t.status === 'blocked');
   if (errors.length) {
     insights.push({
       icon: 'warn',
@@ -127,7 +128,7 @@ export function buildInsights(detail: SessionDetail): SessionInsights {
     });
   }
 
-  const stopped = timeline.filter((t) => t.status === 'interrupted');
+  const stopped = events.filter((t) => t.status === 'interrupted');
   if (stopped.length) {
     const stoppedResponses = stopped.filter((t) => t.category === 'response').length;
     const stoppedThoughts = stopped.filter((t) => t.category === 'thought').length;

@@ -26,7 +26,7 @@ os.environ["COT_DB_PATH"] = os.path.join(_TMP, "bootstrap.db")
 
 from datetime import datetime, timedelta, timezone  # noqa: E402
 
-from app import ai_insights, db, main  # noqa: E402
+from app import ai_insights, db, main, store, timeutil  # noqa: E402
 
 _NOW = datetime.now(timezone.utc)
 
@@ -51,24 +51,29 @@ def _fresh_db() -> None:
 
 
 def _session(sid: str) -> None:
-    with db._connect() as conn:
+    with store.write() as conn:
         conn.execute(
             "INSERT OR IGNORE INTO sessions (id, source, cwd, started_at, status,"
             " archived, created_at) VALUES (?, 'claude', '/proj', ?, 'active', 0, ?)",
-            (sid, _ts(days_ago=1), db._now()),
+            (sid, _ts(days_ago=1), timeutil.now()),
         )
 
 
 def _event(sid: str, *, category: str, detail: str | None = None,
            ts: str | None = None) -> int:
     _session(sid)
-    with db._connect() as conn:
-        cur = conn.execute(
-            "INSERT INTO events (session_id, source, hook, tool, phase, ts, category,"
-            " detail, created_at) VALUES (?, 'claude', 'Stop', NULL, 'end', ?, ?, ?, ?)",
-            (sid, ts or _ts(), category, detail, db._now()),
+    with store.write() as conn:
+        return store.insert_event(
+            conn,
+            session_id=sid,
+            source="claude",
+            hook="Stop",
+            phase="end",
+            ts=ts or _ts(),
+            category=category,
+            detail=detail,
+            created_at=timeutil.now(),
         )
-        return cur.lastrowid
 
 
 class _FakeResponse(io.BytesIO):

@@ -18,7 +18,7 @@ _TMP = tempfile.mkdtemp(prefix="cot-retention-test-")
 sys.path.insert(0, _BACKEND)
 os.environ["COT_DB_PATH"] = os.path.join(_TMP, "bootstrap.db")
 
-from app import db  # noqa: E402
+from app import db, store, timeutil  # noqa: E402
 
 _NOW = datetime.now(timezone.utc)
 _case = 0
@@ -36,17 +36,24 @@ def _fresh_db() -> None:
 
 
 def _session_with_event(sid: str, *, days_ago: float, pad: int = 0) -> None:
-    with db._connect() as conn:
+    with store.write() as conn:
         conn.execute(
             "INSERT OR IGNORE INTO sessions (id, source, cwd, started_at, status,"
             " archived, created_at) VALUES (?, 'claude', '/proj', ?, 'active', 0, ?)",
-            (sid, _ts(days_ago), db._now()),
+            (sid, _ts(days_ago), timeutil.now()),
         )
-        conn.execute(
-            "INSERT INTO events (session_id, source, hook, phase, ts, payload, category,"
-            " dedup_key, origin, created_at)"
-            " VALUES (?, 'claude', 'PostToolUse', 'end', ?, ?, 'shell', ?, 'hook', ?)",
-            (sid, _ts(days_ago), "x" * pad, f"dk-{sid}", db._now()),
+        store.insert_event(
+            conn,
+            session_id=sid,
+            source="claude",
+            hook="PostToolUse",
+            phase="end",
+            ts=_ts(days_ago),
+            payload="x" * pad,
+            category="shell",
+            dedup_key=f"dk-{sid}",
+            origin="hook",
+            created_at=timeutil.now(),
         )
 
 
@@ -66,7 +73,7 @@ def test_cleanup_deletes_only_aged_sessions():
 
     result = db.cleanup_retention(dry_run=False)
     assert result["deleted_sessions"] == 1
-    with db._connect() as conn:
+    with store.read() as conn:
         ids = {r["id"] for r in conn.execute("SELECT id FROM sessions").fetchall()}
     assert ids == {"recent"}
 
@@ -79,7 +86,7 @@ def test_disabled_policy_deletes_nothing_but_previews():
     assert result["deleted_sessions"] == 0
     # ...but status still previews what a policy *would* remove, for the UI nudge.
     assert db.retention_status()["preview_sessions"] == 1
-    with db._connect() as conn:
+    with store.read() as conn:
         count = conn.execute("SELECT COUNT(*) AS c FROM sessions").fetchone()["c"]
     assert count == 1
 
@@ -110,7 +117,7 @@ def test_dry_run_never_deletes_or_vacuums():
     assert result["deleted_sessions"] == 0
     assert result["reclaimed_bytes"] == 0
     assert result["eligible_sessions"] == 1
-    with db._connect() as conn:
+    with store.read() as conn:
         count = conn.execute("SELECT COUNT(*) AS c FROM sessions").fetchone()["c"]
     assert count == 1
 

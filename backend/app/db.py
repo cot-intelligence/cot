@@ -11,7 +11,6 @@ import json
 import re
 import sqlite3
 import string
-import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,14 +20,11 @@ if TYPE_CHECKING:
     from .insight_snapshot import InsightInputs
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .normalize import categorize, normalize
+from . import __version__, session_read, store, timeutil
+from .normalize import APPROVAL_REVIEW_PREFIX, categorize, lifecycle_boundary, normalize
 from .pricing import cost_for, normalize_model
+from .question_recovery import ANSWER_SOURCE_ASSISTANT_SUMMARY, recover_cursor_question_response
 
-_write_lock = threading.Lock()
-
-_SESSION_END_HOOKS = {"Stop", "stop", "SessionEnd", "sessionEnd"}
-_SESSION_START_HOOKS = {"SessionStart", "sessionStart"}
-_APPROVAL_REVIEW_PREFIX = "The following is the Codex agent history"
 _APPROVAL_REVIEW_RE = re.compile(r"\bReviewed Codex session id:\s*([0-9a-fA-F-]{36})\b")
 
 
@@ -47,7 +43,7 @@ def _clean_upload_wrapper_text(text: str | None) -> str:
 
 def _approval_review_origin_from_text(text: str | None) -> str | None:
     body = str(text or "").lstrip()
-    if not body.startswith(_APPROVAL_REVIEW_PREFIX):
+    if not body.startswith(APPROVAL_REVIEW_PREFIX):
         return None
     match = _APPROVAL_REVIEW_RE.search(body)
     return match.group(1).lower() if match else None
@@ -59,54 +55,6 @@ _CURSOR_GRANULAR_HOOKS = {
     "beforeReadFile",
     "afterFileEdit",
 }
-
-# A session is reported "active" only while it keeps emitting events. After this
-# much silence we treat it as completed, regardless of whether a Stop/SessionEnd
-# hook ever arrived. This makes "active" mean "running now" rather than the
-# stored flag, which is unreliable: Stop fires after every turn, and sessions
-# that never send an end hook would otherwise linger as active forever.
-_ACTIVE_WINDOW_SECONDS = 600
-
-
-def _parse_ts(value: Any) -> datetime | None:
-    """Parse an event timestamp into an aware datetime.
-
-    Timestamps are usually ISO strings, but legacy rows store a numeric epoch
-    (seconds or milliseconds) — ``body["timestamp"]`` from some agents is an
-    int, and SQLite keeps it as an integer storage class, so ``MAX(ts)`` comes
-    back as an ``int`` rather than text.
-    """
-    if value is None or value == "":
-        return None
-    if isinstance(value, (int, float)):
-        # Heuristic: values past ~year 2286 in seconds are really milliseconds.
-        seconds = value / 1000 if value > 1e11 else value
-        try:
-            return datetime.fromtimestamp(seconds, tz=timezone.utc)
-        except (ValueError, OSError, OverflowError):
-            return None
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
-
-
-def _format_ts(value: Any) -> str | None:
-    """Serialize a stored timestamp as an ISO string for API responses."""
-    dt = _parse_ts(value)
-    return dt.isoformat() if dt else None
-
-
-def _live_status(last_ts: Any) -> str:
-    """Effective status derived from recency of the last event."""
-    dt = _parse_ts(last_ts)
-    if dt is None:
-        return "completed"
-    age = (datetime.now(timezone.utc) - dt).total_seconds()
-    return "active" if age <= _ACTIVE_WINDOW_SECONDS else "completed"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -143,7 +91,9 @@ CREATE TABLE IF NOT EXISTS events (
     attachments TEXT,
     dedup_key   TEXT,
     origin      TEXT,
+    raw_ingest_id INTEGER,
     created_at  TEXT NOT NULL,
+    FOREIGN KEY (raw_ingest_id) REFERENCES raw_ingest_events(id) ON DELETE SET NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
@@ -152,6 +102,29 @@ CREATE INDEX IF NOT EXISTS idx_events_session_category ON events(session_id, cat
 CREATE INDEX IF NOT EXISTS idx_events_session_model ON events(session_id, model);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_sessions_archived_source ON sessions(archived, source);
+
+CREATE TABLE IF NOT EXISTS raw_ingest_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source      TEXT NOT NULL,
+    origin      TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    session_id_guess TEXT,
+    raw_kind    TEXT,
+    raw_payload TEXT,
+    raw_payload_truncated INTEGER NOT NULL DEFAULT 0,
+    raw_hash    TEXT NOT NULL,
+    parser_version TEXT,
+    agent_version TEXT,
+    status      TEXT NOT NULL,
+    event_id    INTEGER,
+    projection_error TEXT,
+    created_at  TEXT NOT NULL,
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_ingest_source_received ON raw_ingest_events(source, received_at);
+CREATE INDEX IF NOT EXISTS idx_raw_ingest_status ON raw_ingest_events(status);
+CREATE INDEX IF NOT EXISTS idx_raw_ingest_event ON raw_ingest_events(event_id);
 
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
@@ -207,18 +180,13 @@ CREATE INDEX IF NOT EXISTS idx_ai_analyses_created ON ai_analyses(created_at);
 
 
 def db_path() -> Path:
-    import os
-
-    env = os.environ.get("COT_DB_PATH")
-    if env:
-        return Path(env)
-    return Path.home() / ".cot" / "cot.db"
+    return store.path()
 
 
 def db_size_bytes() -> int:
     """On-disk size of the database, including a transient rollback journal.
     DELETE journal mode means there is no persistent -wal/-shm to account for."""
-    p = db_path()
+    p = store.path()
     total = 0
     for path in (p, p.with_name(p.name + "-journal")):
         try:
@@ -228,54 +196,46 @@ def db_size_bytes() -> int:
     return total
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-_EVENT_INSERT_SQL = (
-    "INSERT INTO events (session_id, source, hook, tool, phase, ts, payload,"
-    " category, title, detail, target, status, duration_ms, model,"
-    " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
-    " dedup_key, origin, created_at)"
-    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-)
-
-
 def _dedup_key(raw: dict[str, Any]) -> str:
     return hashlib.sha1(
         json.dumps(raw, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
     ).hexdigest()
 
 
-def _event_params(
+def _insert_normalized_event(
+    conn: sqlite3.Connection,
     norm: dict[str, Any],
     raw: dict[str, Any],
     dedup_key: str,
+    *,
     ts: str | None = None,
     origin: str = "hook",
-) -> tuple[Any, ...]:
-    return (
-        norm["session_id"],
-        norm["source"],
-        norm["hook"],
-        norm["tool"],
-        norm["phase"],
-        ts or norm["ts"],
-        json.dumps(raw, ensure_ascii=False, default=str),
-        norm.get("category"),
-        norm.get("title"),
-        norm.get("detail"),
-        norm.get("target"),
-        norm.get("status"),
-        norm.get("duration_ms"),
-        norm.get("model"),
-        norm.get("input_tokens"),
-        norm.get("output_tokens"),
-        norm.get("cache_read_tokens"),
-        norm.get("cache_write_tokens"),
-        dedup_key,
-        origin,
-        _now(),
+    raw_ingest_id: int | None = None,
+) -> int:
+    return store.insert_event(
+        conn,
+        session_id=norm["session_id"],
+        source=norm["source"],
+        hook=norm["hook"],
+        tool=norm["tool"],
+        phase=norm["phase"],
+        ts=ts or norm["ts"],
+        payload=raw,
+        category=norm.get("category"),
+        title=norm.get("title"),
+        detail=norm.get("detail"),
+        target=norm.get("target"),
+        status=norm.get("status"),
+        duration_ms=norm.get("duration_ms"),
+        model=norm.get("model"),
+        input_tokens=norm.get("input_tokens"),
+        output_tokens=norm.get("output_tokens"),
+        cache_read_tokens=norm.get("cache_read_tokens"),
+        cache_write_tokens=norm.get("cache_write_tokens"),
+        dedup_key=dedup_key,
+        origin=origin,
+        raw_ingest_id=raw_ingest_id,
+        created_at=timeutil.now(),
     )
 
 
@@ -295,25 +255,6 @@ def _tokens_from_parts(i: Any, o: Any, cr: Any, cw: Any) -> dict[str, int]:
         "cache_write": cw,
         "total": i + o + cr + cw,
     }
-
-
-def _connect() -> sqlite3.Connection:
-    path = db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # DELETE journal mode: WAL breaks on Docker bind mounts (macOS virtiofs disk I/O).
-    conn = sqlite3.connect(path, check_same_thread=False, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000;")
-    journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
-    if str(journal_mode).lower() != "delete":
-        conn.execute("PRAGMA journal_mode=DELETE;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    # Keep sort/temp B-trees in RAM. The container runs read-only with a tiny
-    # (~16MB) /tmp tmpfs, so spilling a large session's ORDER BY to a temp file
-    # raised SQLITE_FULL ("database or disk is full"). Memory temp store avoids
-    # the tmpfs entirely; query working sets here are well within RAM.
-    conn.execute("PRAGMA temp_store=MEMORY;")
-    return conn
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -352,8 +293,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("attachments", "TEXT"),
         ("dedup_key", "TEXT"),
         ("origin", "TEXT"),
+        ("raw_ingest_id", "INTEGER"),
     ):
         _add_column_if_missing(conn, "events", name, col_def, event_cols)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_raw_ingest ON events(raw_ingest_id)"
+    )
 
     session_cols = _table_columns(conn, "sessions")
     for name, col_def in (
@@ -386,7 +331,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             ")"
         )
 
-    now = _now()
+    now = timeutil.now()
     conn.execute(
         "UPDATE events SET ts = ? WHERE ts IS NULL OR ts = ''",
         (now,),
@@ -487,6 +432,85 @@ def _recategorize_subagents(conn: sqlite3.Connection) -> None:
                 row["id"],
             ),
         )
+
+
+def _is_claude_desktop_suggestion(
+    source: str, hook: str, raw: dict[str, Any], origin: str
+) -> bool:
+    """Identify Claude Desktop's internal follow-up suggestion hook."""
+    return (
+        source == "claude"
+        and origin == "hook"
+        and hook == "SubagentStop"
+        and not str(raw.get("agent_type") or "").strip()
+    )
+
+
+def _repair_claude_desktop_events(conn: sqlite3.Connection) -> None:
+    """Repair lifecycle and internal-suggestion rows from Claude Desktop."""
+    suggestion_rows = conn.execute(
+        "SELECT id, source, hook, origin, raw_ingest_id, payload FROM events"
+        " WHERE source = 'claude' AND hook = 'SubagentStop'"
+    ).fetchall()
+    for row in suggestion_rows:
+        try:
+            raw = json.loads(row["payload"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        if not _is_claude_desktop_suggestion(
+            row["source"], row["hook"], raw, row["origin"]
+        ):
+            continue
+        if row["raw_ingest_id"] is not None:
+            conn.execute(
+                "UPDATE raw_ingest_events SET status = 'ignored', event_id = NULL"
+                " WHERE id = ?",
+                (row["raw_ingest_id"],),
+            )
+        else:
+            _append_raw_ingest(
+                conn, "claude", raw, origin="hook", status="ignored"
+            )
+        conn.execute("DELETE FROM events WHERE id = ?", (row["id"],))
+
+    conn.execute(
+        "UPDATE events SET title = 'Turn ended'"
+        " WHERE source = 'claude' AND hook IN ('Stop', 'stop')"
+    )
+
+    lifecycle_rows = conn.execute(
+        "SELECT session_id, hook, ts FROM events"
+        " WHERE source = 'claude' AND origin = 'hook'"
+        " AND category = 'lifecycle'"
+        " ORDER BY ts ASC, id ASC"
+    ).fetchall()
+    bounds: dict[str, dict[str, tuple[datetime, str] | None]] = {}
+    for row in lifecycle_rows:
+        parsed = timeutil.parse_ts(row["ts"])
+        if parsed is None:
+            continue
+        boundary = lifecycle_boundary("claude", row["hook"])
+        if boundary not in ("session_start", "session_end"):
+            continue
+        state = bounds.setdefault(row["session_id"], {"start": None, "end": None})
+        key = "start" if boundary == "session_start" else "end"
+        current = state[key]
+        if current is None or parsed >= current[0]:
+            state[key] = (parsed, row["ts"])
+
+    for session_id, state in bounds.items():
+        start = state["start"]
+        end = state["end"]
+        if end is not None and (start is None or end[0] >= start[0]):
+            conn.execute(
+                "UPDATE sessions SET status = 'completed', ended_at = ? WHERE id = ?",
+                (end[1], session_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE sessions SET status = 'active', ended_at = NULL WHERE id = ?",
+                (session_id,),
+            )
 
 
 def _recategorize_cursor_tools(conn: sqlite3.Connection) -> None:
@@ -597,9 +621,23 @@ def _drop_redundant_cursor_hooks(conn: sqlite3.Connection) -> None:
     )
 
 
-def should_ignore_event(norm: dict[str, Any]) -> bool:
-    """Return True for hook rows intentionally excluded from storage."""
-    return norm.get("source") == "cursor" and norm.get("hook") in _CURSOR_GRANULAR_HOOKS
+def should_ignore_event(
+    norm: dict[str, Any], raw: dict[str, Any] | None = None
+) -> bool:
+    """Return True for hook rows intentionally excluded from Event storage."""
+    if norm.get("source") == "cursor" and norm.get("hook") in _CURSOR_GRANULAR_HOOKS:
+        return True
+    # Claude Desktop uses untyped, ephemeral subagents to generate suggested
+    # follow-up prompts after a turn. Real Claude Code subagents carry the
+    # documented agent_type field; keep the internal suggestions in the raw
+    # ingest ledger without presenting them as user-created subagent Events.
+    body = raw or {}
+    return _is_claude_desktop_suggestion(
+        str(norm.get("source") or ""),
+        str(norm.get("hook") or ""),
+        body,
+        "import" if body.get("_import") else "hook",
+    )
 
 
 def _recategorize_web_search(conn: sqlite3.Connection) -> None:
@@ -713,227 +751,6 @@ def _dedup_cursor_subagent_starts(conn: sqlite3.Connection) -> None:
     )
 
 
-def _norm_choice(text: object) -> str:
-    return " ".join(str(text or "").lower().replace("_", " ").split())
-
-
-def _contains_positive(haystack: str, needle: str) -> bool:
-    if not needle:
-        return False
-    start = haystack.find(needle)
-    if start < 0:
-        return False
-    before = haystack[max(0, start - 24) : start].split()
-    return not any(tok in {"no", "not", "without"} for tok in before[-3:])
-
-
-def _choice_matches(label: str, option_id: str, response_text: str) -> bool:
-    haystack = _norm_choice(response_text)
-    candidates = [label, label.split(" (", 1)[0]]
-    if " for now" in label:
-        candidates.append(label.split(" for now", 1)[0])
-    if " — " in label:
-        candidates.append(label.split(" — ", 1)[0])
-    if any(len(_norm_choice(c)) >= 4 and _contains_positive(haystack, _norm_choice(c)) for c in candidates):
-        return True
-    oid = _norm_choice(option_id.replace("_", " "))
-    # Option ids only count as a match when reasonably long; short ids are
-    # often common English words (e.g. "accept", "keep") that appear in prose
-    # by coincidence and produce false positives.
-    if len(oid) >= 8 and _contains_positive(haystack, oid):
-        return True
-    return False
-
-
-# The agent states its choice up front (acknowledgment + a "settling on X"
-# sentence); the long deliberation tail re-mentions every option and only adds
-# ambiguity. Bounding the match to this leading window keeps recall (the choice
-# is usually within a few sentences) without letting an essay trigger a wrong
-# match — and the uniqueness guard rejects anything still ambiguous.
-_ANSWER_REGION_CHARS = 700
-
-
-def _answer_region(text: str) -> str:
-    region = str(text or "").strip()
-    markers = (
-        "\n---",
-        "\n## Full picture",
-        "\n## Suggested",
-        "\n**Suggested roadmap",
-        "\n**Still unanswered",
-        "\n**Two optional follow-ups",
-    )
-    for marker in markers:
-        idx = region.find(marker)
-        if idx >= 0:
-            region = region[:idx]
-    return region[:_ANSWER_REGION_CHARS]
-
-
-# Generic words that carry no option-identifying signal; dropped before the
-# title-token match so they don't inflate the overlap score.
-_TITLE_STOPWORDS = frozenset(
-    {
-        "the", "a", "an", "and", "or", "then", "with", "your", "you", "for",
-        "now", "via", "use", "using", "run", "not", "but", "its", "this",
-        "that", "into", "etc", "all", "any", "per", "are", "was", "will",
-    }
-)
-
-
-def _option_title(label: str) -> str:
-    """The short, identifying head of an option label — the part before the
-    first ':', em/en dash, or '(' — e.g. "Rebuild prod image + restart" out of
-    "Rebuild prod image + restart (Recommended): docker build ..."."""
-    t = str(label or "")
-    for sep in (":", " — ", " - ", " ("):
-        if sep in t:
-            t = t.split(sep, 1)[0]
-    return t.strip()
-
-
-def _word_tokens(text: str) -> list[str]:
-    return [w for w in re.split(r"[^a-z0-9]+", str(text or "").lower()) if w]
-
-
-def _title_tokens(title: str) -> list[str]:
-    return [w for w in _word_tokens(title) if len(w) >= 3 and w not in _TITLE_STOPWORDS]
-
-
-def _token_present(tok: str, resp_tokens: list[str]) -> bool:
-    """Prefix-tolerant match so "rebuild" matches "rebuilding", "image" matches
-    "images", etc. without a full stemmer."""
-    for rt in resp_tokens:
-        if len(rt) < 3:
-            continue
-        if rt.startswith(tok) or tok.startswith(rt):
-            return True
-    return False
-
-
-_TITLE_MATCH_MIN_RATIO = 0.6
-
-
-def _unique_title_match(options: list[Any], match_text: str, min_margin: float = 0.2) -> str | None:
-    """Recover a paraphrased selection by title-word overlap, committing only
-    to a *clear* winner.
-
-    Each option scores by the fraction of its title words present in the prose.
-    We return the top option only when it clears the ratio bar AND beats the
-    runner-up by ``min_margin`` — so a short generic label that coincidentally
-    edges out the real (longer) answer, or two near-tied options, abstains
-    rather than recording a wrong choice. Callers pass a smaller margin for the
-    high-signal decision region and a larger one for the noisier fallback."""
-    resp_tokens = _word_tokens(match_text)
-    if not resp_tokens:
-        return None
-    scored: list[tuple[float, int, str]] = []
-    for opt in options:
-        if not isinstance(opt, dict):
-            continue
-        label = str(opt.get("label") or "").strip()
-        oid = str(opt.get("id") or "").strip()
-        tt = _title_tokens(_option_title(label))
-        if len(tt) < 2:
-            scored.append((0.0, 0, label or oid))
-            continue
-        present = sum(1 for t in tt if _token_present(t, resp_tokens))
-        scored.append((present / len(tt), present, label or oid))
-    if not scored:
-        return None
-    scored.sort(key=lambda x: (-x[0], -x[1]))
-    best_ratio, best_present, best_label = scored[0]
-    second_ratio = scored[1][0] if len(scored) > 1 else 0.0
-    if (
-        best_present >= 2
-        and best_ratio >= _TITLE_MATCH_MIN_RATIO
-        and best_ratio - second_ratio >= min_margin
-    ):
-        return best_label
-    return None
-
-
-# Phrases with which the agent explicitly restates the user's pick. The text
-# right after one of these is a high-signal "decision span" — far more reliable
-# than loose token overlap across the whole reply.
-_DECISION_ANCHORS = re.compile(
-    r"\b(?:went with|going with|go with|i'?ll go with|let'?s go with|you chose|"
-    r"i chose|we chose|chose|settling on|settle on|decided (?:on|to)|decided|"
-    r"picked|selected|opting for|opted for)\b"
-    r"|^\s*(?:got it|ok|okay|sounds good|perfect|great)\b[\s,:\u2014-]",
-    re.I | re.M,
-)
-_DECISION_SPAN_CHARS = 200
-
-
-def _decision_region(text: str) -> str:
-    """Concatenate the short spans that follow each decision phrase. Empty when
-    the reply states no explicit choice (e.g. it defers to more questions)."""
-    s = str(text or "")
-    spans = [s[m.start() : m.start() + _DECISION_SPAN_CHARS] for m in _DECISION_ANCHORS.finditer(s)]
-    return " ".join(spans)
-
-
-def _match_question(options: list[Any], region: str, min_margin: float = 0.2) -> list[str]:
-    """Match options against a region: exact label/id hits first, then the
-    margin-based title-token fallback (commits only on a clear winner)."""
-    labels: list[str] = []
-    for opt in options:
-        if not isinstance(opt, dict):
-            continue
-        label = str(opt.get("label") or "").strip()
-        oid = str(opt.get("id") or "").strip()
-        if _choice_matches(label, oid, region):
-            labels.append(label or oid)
-    if not labels:
-        single = _unique_title_match(options, region, min_margin)
-        if single:
-            labels = [single]
-    return labels
-
-
-def _cursor_question_response(tool_input: dict[str, Any], response_text: str) -> dict[str, Any]:
-    """Recover Cursor AskQuestion selections from the assistant summary.
-
-    Cursor writes the AskQuestion prompt to its transcript, but current hooks do
-    not include a tool result. The next assistant response normally names the
-    selected option labels. Match only explicit labels/ids so we do not invent
-    free-form answers.
-    """
-    questions = tool_input.get("questions") if isinstance(tool_input.get("questions"), list) else []
-    answer_region = _answer_region(response_text)
-    decision_region = _decision_region(response_text)
-    haystack = _norm_choice(response_text)
-    mentions_skip = any(word in haystack for word in ("skipped", "unanswered", "still open"))
-    answers: dict[str, dict[str, list[str]]] = {}
-    skipped: list[str] = []
-
-    for q in questions:
-        if not isinstance(q, dict):
-            continue
-        qid = str(q.get("id") or "")
-        if not qid:
-            continue
-        options = q.get("options") if isinstance(q.get("options"), list) else []
-        # Explicit decision span first (highest signal → smaller margin), then
-        # fall back to the leading reply region (noisier → larger margin).
-        labels = _match_question(options, decision_region, 0.15) if decision_region else []
-        if not labels:
-            labels = _match_question(options, answer_region, 0.25)
-        if labels:
-            answers[qid] = {"answers": labels}
-        elif mentions_skip:
-            skipped.append(qid)
-
-    out: dict[str, Any] = {}
-    if answers:
-        out["answers"] = answers
-        out["answer_source"] = "assistant_summary"
-    if skipped:
-        out["skipped"] = skipped
-    return out
-
-
 def _safe_cursor_transcript_path(path: str) -> Path | None:
     try:
         candidate = Path(path).expanduser()
@@ -1015,7 +832,7 @@ def _scan_cursor_question_artifacts(transcript_path: Path) -> list[dict[str, Any
                             "id": artifact_id,
                             "line": item["line"],
                             "input": inp,
-                            "response": _cursor_question_response(inp, response_text),
+                            "response": recover_cursor_question_response(inp, response_text),
                             "response_text": response_text,
                         }
                     )
@@ -1057,7 +874,7 @@ def _response_fingerprint(text: Any) -> str:
 
 
 def _timestamp_before(value: Any, milliseconds: int = 1) -> str:
-    dt = _parse_ts(value) or datetime.now(timezone.utc)
+    dt = timeutil.parse_ts(value) or datetime.now(timezone.utc)
     return (dt - timedelta(milliseconds=milliseconds)).isoformat()
 
 
@@ -1154,7 +971,7 @@ def _insert_cursor_question_event(
     ).fetchone():
         return
     norm = normalize("cursor", raw)
-    conn.execute(_EVENT_INSERT_SQL, _event_params(norm, raw, dk))
+    _insert_normalized_event(conn, norm, raw, dk)
 
 
 def _insert_backfilled_cursor_question(
@@ -1290,12 +1107,15 @@ def _question_response_obj(detail: Any) -> dict[str, Any] | None:
     return obj if isinstance(obj, dict) else None
 
 
-_MIGRATIONS_VERSION = "8"
+_MIGRATIONS_VERSION = "9"
+_RAW_PAYLOAD_MAX_BYTES = 64 * 1024
 
 
 def init_db() -> None:
-    with _connect() as conn:
-        conn.executescript(SCHEMA)
+    with store.write() as conn:
+        for statement in SCHEMA.split(";"):
+            if statement.strip():
+                conn.execute(statement)
         _migrate(conn)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source)"
@@ -1312,8 +1132,12 @@ def init_db() -> None:
         if stored and stored["value"] == _MIGRATIONS_VERSION:
             return
         _backfill(conn)
+        # Older Event rows predate Origin; normalize them before migrations
+        # whose reconciliation policy depends on distinguishing hook/import.
+        conn.execute("UPDATE events SET origin = 'hook' WHERE origin IS NULL")
         _recategorize_network_calls(conn)
         _recategorize_subagents(conn)
+        _repair_claude_desktop_events(conn)
         _recategorize_cursor_tools(conn)
         _recategorize_web_targets(conn)
         _recategorize_questions(conn)
@@ -1327,9 +1151,6 @@ def init_db() -> None:
         _recategorize_other_tools(conn)
         _purge_import_for_hook_sessions(conn)
         conn.execute(
-            "UPDATE events SET origin = 'hook' WHERE origin IS NULL"
-        )
-        conn.execute(
             "INSERT INTO settings (key, value) VALUES ('migrations_version', ?)"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (_MIGRATIONS_VERSION,),
@@ -1338,14 +1159,14 @@ def init_db() -> None:
 
 def get_setting(key: str, default: str | None = None) -> str | None:
     """Read a key/value preference, returning ``default`` when unset."""
-    with _connect() as conn:
+    with store.read() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
     return row["value"] if row is not None else default
 
 
 def set_setting(key: str, value: str) -> None:
     """Upsert a key/value preference."""
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         conn.execute(
             "INSERT INTO settings (key, value) VALUES (?, ?)"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1362,8 +1183,8 @@ def insert_ai_analysis(
     status: str = "ok",
     error: str | None = None,
 ) -> int:
-    now = _now()
-    with _write_lock, _connect() as conn:
+    now = timeutil.now()
+    with store.write() as conn:
         cur = conn.execute(
             "INSERT INTO ai_analyses (created_at, provider, model, window_days,"
             " input_summary, result, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1382,7 +1203,7 @@ def insert_ai_analysis(
 
 
 def get_ai_analysis(analysis_id: int) -> dict[str, Any] | None:
-    with _connect() as conn:
+    with store.read() as conn:
         row = conn.execute(
             "SELECT * FROM ai_analyses WHERE id = ?", (analysis_id,)
         ).fetchone()
@@ -1391,7 +1212,7 @@ def get_ai_analysis(analysis_id: int) -> dict[str, Any] | None:
 
 def list_ai_analyses(limit: int = 10) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 50))
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT * FROM ai_analyses ORDER BY created_at DESC, id DESC LIMIT ?",
             (limit,),
@@ -1410,7 +1231,7 @@ def _ai_analysis_row(r: Any) -> dict[str, Any]:
 
     return {
         "id": r["id"],
-        "created_at": _format_ts(r["created_at"]) or r["created_at"],
+        "created_at": timeutil.format_ts(r["created_at"]) or r["created_at"],
         "provider": r["provider"],
         "model": r["model"],
         "window_days": r["window_days"],
@@ -1438,8 +1259,8 @@ def record_audit_event(
     payload = None
     if detail is not None:
         payload = json.dumps(detail, ensure_ascii=False, default=str)
-    now = _now()
-    with _write_lock, _connect() as conn:
+    now = timeutil.now()
+    with store.write() as conn:
         cur = conn.execute(
             "INSERT INTO audit_events (action, actor, target, status, detail, ts, created_at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1450,7 +1271,7 @@ def record_audit_event(
 
 def audit_events(limit: int = 100) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 500))
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT * FROM audit_events ORDER BY ts DESC, id DESC LIMIT ?",
             (limit,),
@@ -1471,7 +1292,7 @@ def audit_events(limit: int = 100) -> list[dict[str, Any]]:
                 "target": r["target"],
                 "status": r["status"],
                 "detail": detail,
-                "ts": _format_ts(r["ts"]) or r["ts"],
+                "ts": timeutil.format_ts(r["ts"]) or r["ts"],
             }
         )
     return out
@@ -1522,13 +1343,13 @@ def _retention_candidates(conn: sqlite3.Connection, cutoff: str) -> tuple[list[s
 def retention_status() -> dict[str, Any]:
     policy = retention_policy()
     cutoff = _retention_cutoff(policy["days"])
-    with _connect() as conn:
+    with store.read() as conn:
         sessions, events = _retention_candidates(conn, cutoff)
         oldest = conn.execute("SELECT MIN(ts) AS ts FROM events").fetchone()["ts"]
     return {
         "policy": policy,
         "cutoff": cutoff,
-        "oldest_event": _format_ts(oldest),
+        "oldest_event": timeutil.format_ts(oldest),
         "eligible_sessions": len(sessions) if policy["enabled"] else 0,
         "eligible_events": events if policy["enabled"] else 0,
         "preview_sessions": len(sessions),
@@ -1540,7 +1361,7 @@ def retention_status() -> dict[str, Any]:
 def cleanup_retention(*, dry_run: bool = True) -> dict[str, Any]:
     policy = retention_policy()
     cutoff = _retention_cutoff(policy["days"])
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         sessions, events = _retention_candidates(conn, cutoff)
         deleted_sessions = deleted_events = 0
         if policy["enabled"] and not dry_run and sessions:
@@ -1552,9 +1373,7 @@ def cleanup_retention(*, dry_run: bool = True) -> dict[str, Any]:
         # Deletes leave free pages behind; VACUUM returns the space to the OS so
         # the DB file actually shrinks. Must run outside a transaction.
         before = db_size_bytes()
-        with _write_lock, _connect() as conn:
-            conn.isolation_level = None
-            conn.execute("VACUUM")
+        store.vacuum()
         reclaimed_bytes = max(0, before - db_size_bytes())
     result = {
         "dry_run": dry_run,
@@ -1595,14 +1414,222 @@ def get_install_id() -> str:
     return new_id
 
 
-def record_event(norm: dict[str, Any], raw: dict[str, Any]) -> tuple[str, int]:
+def _raw_hash(raw_text: str) -> str:
+    return hashlib.sha1(raw_text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _raw_payload_text(raw: Any) -> tuple[str, int]:
+    if isinstance(raw, str):
+        text = raw
+    else:
+        text = json.dumps(raw, ensure_ascii=False, default=str)
+    data = text.encode("utf-8", errors="replace")
+    if len(data) <= _RAW_PAYLOAD_MAX_BYTES:
+        return text, 0
+    clipped = data[:_RAW_PAYLOAD_MAX_BYTES].decode("utf-8", errors="ignore")
+    return clipped, 1
+
+
+def _session_id_guess(source: str, raw: Any) -> str | None:
+    if not isinstance(raw, dict):
+        return None
+    if source == "cursor":
+        value = raw.get("conversation_id") or raw.get("session_id") or raw.get("generation_id")
+    else:
+        value = raw.get("session_id")
+    return str(value) if value not in (None, "") else None
+
+
+def _raw_kind(raw: Any) -> str | None:
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get("hook_event_name") or raw.get("hook") or raw.get("event") or raw.get("raw_kind")
+    return str(value) if value not in (None, "") else None
+
+
+def _agent_version(raw: Any) -> str | None:
+    if not isinstance(raw, dict):
+        return None
+    value = (
+        raw.get("agent_version")
+        or raw.get("cursor_version")
+        or raw.get("claude_version")
+        or raw.get("codex_version")
+        or raw.get("cli_version")
+    )
+    return str(value) if value not in (None, "") else None
+
+
+def _raw_received_at(raw: Any) -> str:
+    if isinstance(raw, dict):
+        value = raw.get("timestamp") or raw.get("ts") or raw.get("created_at")
+        if value not in (None, ""):
+            return str(value)
+    return timeutil.now()
+
+
+def _append_raw_ingest(
+    conn: sqlite3.Connection,
+    source: str,
+    raw: Any,
+    *,
+    origin: str = "hook",
+    status: str = "pending",
+    projection_error: str | None = None,
+) -> int:
+    payload, truncated = _raw_payload_text(raw)
+    now = timeutil.now()
+    received_at = _raw_received_at(raw)
+    cur = conn.execute(
+        "INSERT INTO raw_ingest_events (source, origin, received_at, session_id_guess,"
+        " raw_kind, raw_payload, raw_payload_truncated, raw_hash, parser_version,"
+        " agent_version, status, projection_error, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            source,
+            origin,
+            received_at,
+            _session_id_guess(source, raw),
+            _raw_kind(raw),
+            payload,
+            truncated,
+            _raw_hash(payload),
+            __version__,
+            _agent_version(raw),
+            status,
+            projection_error,
+            now,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def append_raw_ingest(
+    source: str,
+    raw: Any,
+    *,
+    origin: str = "hook",
+    status: str = "pending",
+    projection_error: str | None = None,
+) -> int:
+    with store.write() as conn:
+        return _append_raw_ingest(
+            conn,
+            source,
+            raw,
+            origin=origin,
+            status=status,
+            projection_error=projection_error,
+        )
+
+
+def mark_raw_ingest(
+    raw_ingest_id: int,
+    status: str,
+    *,
+    event_id: int | None = None,
+    projection_error: str | None = None,
+) -> None:
+    with store.write() as conn:
+        conn.execute(
+            "UPDATE raw_ingest_events SET status = ?, event_id = ?, projection_error = ?"
+            " WHERE id = ?",
+            (status, event_id, projection_error, raw_ingest_id),
+        )
+
+
+def raw_ingest_events(limit: int = 100) -> list[dict[str, Any]]:
+    limit = max(1, min(limit, 500))
+    with store.read() as conn:
+        rows = conn.execute(
+            "SELECT * FROM raw_ingest_events ORDER BY id ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def record_malformed_ingest(
+    source: str,
+    raw_text: str,
+    *,
+    origin: str = "hook",
+    error: str | None = None,
+) -> dict[str, Any]:
+    raw_id = append_raw_ingest(
+        source,
+        raw_text,
+        origin=origin,
+        status="malformed",
+        projection_error=error,
+    )
+    return {
+        "ok": True,
+        "raw_ingest_id": raw_id,
+        "raw_status": "malformed",
+        "session_id": None,
+        "event_id": None,
+    }
+
+
+def record_ingest(source: str, raw: dict[str, Any]) -> dict[str, Any]:
+    raw_id = append_raw_ingest(source, raw, origin="import" if raw.get("_import") else "hook")
+    try:
+        norm = normalize(source, raw)
+        if should_ignore_event(norm, raw):
+            mark_raw_ingest(raw_id, "ignored")
+            return {
+                "ok": True,
+                "ignored": True,
+                "raw_ingest_id": raw_id,
+                "raw_status": "ignored",
+                "session_id": norm["session_id"],
+                "event_id": None,
+                "hook": norm["hook"],
+                "category": norm.get("category"),
+            }
+        session_id, event_id, inserted = record_event(
+            norm, raw, raw_ingest_id=raw_id, return_status=True
+        )
+    except Exception as exc:
+        mark_raw_ingest(raw_id, "failed", projection_error=str(exc))
+        return {
+            "ok": True,
+            "raw_ingest_id": raw_id,
+            "raw_status": "failed",
+            "session_id": _session_id_guess(source, raw),
+            "event_id": None,
+            "error": str(exc),
+        }
+
+    raw_status = "projected" if inserted else "duplicate"
+    mark_raw_ingest(raw_id, raw_status, event_id=event_id)
+    return {
+        "ok": True,
+        "raw_ingest_id": raw_id,
+        "raw_status": raw_status,
+        "session_id": session_id,
+        "event_id": event_id,
+        "hook": norm["hook"],
+        "category": norm.get("category"),
+        "ignored": False,
+        "duplicate": not inserted,
+    }
+
+
+def record_event(
+    norm: dict[str, Any],
+    raw: dict[str, Any],
+    *,
+    raw_ingest_id: int | None = None,
+    return_status: bool = False,
+) -> tuple[str, int] | tuple[str, int, bool]:
     sid = norm["session_id"]
     ts = norm["ts"]
     origin = "import" if raw.get("_import") else "hook"
     explicit_dk = raw.get("_dedup_key")
     dk = str(explicit_dk) if explicit_dk else _dedup_key(raw)
 
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         if explicit_dk:
             # Import path: dedup on (session_id, dedup_key) with no time window.
             dup = conn.execute(
@@ -1618,19 +1645,28 @@ def record_event(norm: dict[str, Any], raw: dict[str, Any]) -> tuple[str, int]:
                 (sid, dk, cutoff),
             ).fetchone()
         if dup is not None:
-            return sid, int(dup["id"])
+            event_id = int(dup["id"])
+            if raw_ingest_id is not None:
+                conn.execute(
+                    "UPDATE raw_ingest_events SET status = 'duplicate', event_id = ?"
+                    " WHERE id = ?",
+                    (event_id, raw_ingest_id),
+                )
+            return (sid, event_id, False) if return_status else (sid, event_id)
 
+        boundary = lifecycle_boundary(norm["source"], norm["hook"])
         row = conn.execute("SELECT id FROM sessions WHERE id = ?", (sid,)).fetchone()
-        if row is None or norm["hook"] in _SESSION_START_HOOKS:
+        if row is None or boundary == "session_start":
             if row is None:
                 conn.execute(
                     "INSERT INTO sessions (id, source, cwd, started_at, status, created_at)"
                     " VALUES (?, ?, ?, ?, 'active', ?)",
-                    (sid, norm["source"], norm["cwd"], ts, _now()),
+                    (sid, norm["source"], norm["cwd"], ts, timeutil.now()),
                 )
-            elif norm["hook"] in _SESSION_START_HOOKS:
+            elif boundary == "session_start":
                 conn.execute(
-                    "UPDATE sessions SET status = 'active', cwd = COALESCE(?, cwd)"
+                    "UPDATE sessions SET status = 'active', ended_at = NULL,"
+                    " cwd = COALESCE(?, cwd)"
                     " WHERE id = ?",
                     (norm["cwd"], sid),
                 )
@@ -1649,14 +1685,20 @@ def record_event(norm: dict[str, Any], raw: dict[str, Any]) -> tuple[str, int]:
                 (ts, sid, ts),
             )
 
-        if norm["hook"] in _SESSION_END_HOOKS:
+        if boundary == "session_end":
             conn.execute(
                 "UPDATE sessions SET status = 'completed', ended_at = ? WHERE id = ?",
                 (ts, sid),
             )
 
-        cur = conn.execute(
-            _EVENT_INSERT_SQL, _event_params(norm, raw, dk, ts, origin)
+        event_id = _insert_normalized_event(
+            conn,
+            norm,
+            raw,
+            dk,
+            ts=ts,
+            origin=origin,
+            raw_ingest_id=raw_ingest_id,
         )
 
         if (
@@ -1689,15 +1731,7 @@ def record_event(norm: dict[str, Any], raw: dict[str, Any]) -> tuple[str, int]:
                         (bounds["mn"], sid),
                     )
 
-        return sid, int(cur.lastrowid)
-
-
-def _duration_seconds(first: Any, last: Any) -> float | None:
-    first_dt = _parse_ts(first)
-    last_dt = _parse_ts(last)
-    if first_dt is None or last_dt is None:
-        return None
-    return round((last_dt - first_dt).total_seconds(), 2)
+        return (sid, event_id, True) if return_status else (sid, event_id)
 
 
 def _summary_title(detail: Any) -> str | None:
@@ -1729,7 +1763,7 @@ def _approval_review_origin(conn: sqlite3.Connection, session_id: str) -> str | 
         "SELECT detail FROM events"
         " WHERE session_id=? AND category='prompt' AND detail LIKE ?"
         " ORDER BY id ASC",
-        (session_id, f"{_APPROVAL_REVIEW_PREFIX}%"),
+        (session_id, f"{APPROVAL_REVIEW_PREFIX}%"),
     ).fetchall()
     for row in rows:
         origin = _approval_review_origin_from_text(row["detail"])
@@ -1753,23 +1787,38 @@ def _session_link_item(
         " FROM events WHERE session_id = ?",
         (session_id,),
     ).fetchone()
+    status_event = conn.execute(
+        "SELECT status FROM events WHERE session_id = ?"
+        " AND status IS NOT NULL AND status != ''"
+        " ORDER BY ts DESC, id DESC LIMIT 1",
+        (session_id,),
+    ).fetchone()
     # Subagent sessions rarely have a user prompt; fall back to the label the
     # importer derived from the parent's Task launch.
     title = _first_prompt(conn, row["id"]) or label
+    recent_status = timeutil.live_status(agg["last_ts"])
+    stored_status = row["status"] or "completed"
+    last_status = status_event["status"] if status_event else None
+    if last_status in ("error", "blocked", "interrupted"):
+        status = last_status
+    elif row["ended_at"] and stored_status != "active":
+        status = stored_status
+    else:
+        status = recent_status
     return {
         "type": link_type,
         "session_id": row["id"],
         "source": row["source"],
-        "status": _live_status(agg["last_ts"]),
-        "started_at": _format_ts(row["started_at"]) or str(row["started_at"] or ""),
-        "last_activity": _format_ts(agg["last_ts"]),
+        "status": status,
+        "started_at": timeutil.format_ts(row["started_at"]) or str(row["started_at"] or ""),
+        "last_activity": timeutil.format_ts(agg["last_ts"]),
         "event_count": agg["events"] or 0,
         "title": title,
         "label": label,
     }
 
 
-def _session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[dict[str, Any]]]:
+def session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[dict[str, Any]]]:
     """Parent/child links for a session, unified across providers.
 
     Two link kinds feed the same structure (and the same inline-merge path):
@@ -1803,7 +1852,7 @@ def _session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[
         " WHERE category='prompt' AND detail LIKE ?"
         " GROUP BY session_id, detail"
         " ORDER BY first_ts ASC",
-        (f"{_APPROVAL_REVIEW_PREFIX}%",),
+        (f"{APPROVAL_REVIEW_PREFIX}%",),
     ).fetchall()
     for row in rows:
         review_session_id = row["session_id"]
@@ -1834,92 +1883,7 @@ def _session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[
     return {"parents": parents, "children": children}
 
 
-def _is_approval_history_dump(detail: str | None) -> bool:
-    return str(detail or "").lstrip().startswith(_APPROVAL_REVIEW_PREFIX)
-
-
-def _fetch_inlined_session_events(
-    conn: sqlite3.Connection,
-    session_id: str,
-    *,
-    skip_history_dump: bool,
-    inline_kind: str,
-) -> list[dict[str, Any]]:
-    rows = conn.execute(
-        "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
-        (session_id,),
-    ).fetchall()
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        if skip_history_dump and row["category"] == "prompt" and _is_approval_history_dump(row["detail"]):
-            continue
-        item: dict[str, Any] = {
-            **_event_row(row),
-            "start_ts": _format_ts(row["ts"]),
-            "end_ts": _format_ts(row["ts"]),
-            "ongoing": False,
-            "event_session_id": session_id,
-        }
-        if inline_kind == "approval_review":
-            item["inlined_approval_review"] = True
-        elif inline_kind == "reviewed_session":
-            item["inlined_reviewed_session"] = True
-        elif inline_kind == "subagent":
-            item["inlined_subagent"] = True
-        out.append(item)
-    return out
-
-
-def _merge_linked_session_events(
-    conn: sqlite3.Connection,
-    events: list[dict[str, Any]],
-    links: dict[str, list[dict[str, Any]]],
-) -> list[dict[str, Any]]:
-    """Flatten linked child sessions into one timeline, by link kind.
-
-    - ``approval_review`` child: inline its events (skipping the history dump).
-    - ``subagent`` child: inline its events so they nest under the parent's
-      subagent run window (this is what gives Cursor parity with Claude, whose
-      subagent lines already fold into the parent).
-    - ``approval_review`` parent: inline the reviewed work session's events.
-
-    A ``subagent`` *parent* is intentionally not inlined: when viewing the child
-    subagent session we only show a back-link, never the parent's whole
-    timeline."""
-    children = links.get("children") or []
-    parents = links.get("parents") or []
-    if not children and not parents:
-        return events
-    merged = list(events)
-    for link in children:
-        if link.get("type") == "subagent":
-            merged.extend(
-                _fetch_inlined_session_events(
-                    conn, link["session_id"],
-                    skip_history_dump=False, inline_kind="subagent",
-                )
-            )
-        else:
-            merged.extend(
-                _fetch_inlined_session_events(
-                    conn, link["session_id"],
-                    skip_history_dump=True, inline_kind="approval_review",
-                )
-            )
-    for link in parents:
-        if link.get("type") == "subagent":
-            continue
-        merged.extend(
-            _fetch_inlined_session_events(
-                conn, link["session_id"],
-                skip_history_dump=False, inline_kind="reviewed_session",
-            )
-        )
-    merged.sort(key=lambda e: (e.get("ts") or "", e.get("id") or 0))
-    return merged
-
-
-def _session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
     agg = conn.execute(
         "SELECT COUNT(*) AS events,"
         " SUM(CASE WHEN tool IS NOT NULL THEN 1 ELSE 0 END) AS tools,"
@@ -1965,13 +1929,13 @@ def _session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, An
         "cwd": row["cwd"],
         "models": models,
         "archived": bool(row["archived"]),
-        "status": _live_status(last_ts),
-        "started_at": _format_ts(row["started_at"]) or str(row["started_at"] or ""),
-        "ended_at": _format_ts(row["ended_at"]),
-        "last_activity": _format_ts(last_ts),
+        "status": timeutil.live_status(last_ts),
+        "started_at": timeutil.format_ts(row["started_at"]) or str(row["started_at"] or ""),
+        "ended_at": timeutil.format_ts(row["ended_at"]),
+        "last_activity": timeutil.format_ts(last_ts),
         "event_count": agg["events"] or 0,
         "tool_count": agg["tools"] or 0,
-        "duration_seconds": _duration_seconds(agg["first_ts"], last_ts),
+        "duration_seconds": timeutil.duration_seconds(agg["first_ts"], last_ts),
         "title": _first_prompt(conn, row["id"]),
         "category_counts": _category_counts(conn, row["id"]),
         "tokens": _tokens_dict(tok),
@@ -2030,13 +1994,13 @@ def _batched_session_summaries(
                 "cwd": row["cwd"],
                 "models": [mr["model"] for mr in model_rows],
                 "archived": bool(row["archived"]),
-                "status": _live_status(last_ts),
-                "started_at": _format_ts(row["started_at"]) or str(row["started_at"] or ""),
-                "ended_at": _format_ts(row["ended_at"]),
-                "last_activity": _format_ts(last_ts),
+                "status": timeutil.live_status(last_ts),
+                "started_at": timeutil.format_ts(row["started_at"]) or str(row["started_at"] or ""),
+                "ended_at": timeutil.format_ts(row["ended_at"]),
+                "last_activity": timeutil.format_ts(last_ts),
                 "event_count": row["event_count"] or 0,
                 "tool_count": row["tool_count"] or 0,
-                "duration_seconds": _duration_seconds(row["first_ts"], last_ts),
+                "duration_seconds": timeutil.duration_seconds(row["first_ts"], last_ts),
                 "title": _summary_title(row["prompt_detail"]),
                 "category_counts": category_counts.get(row["id"], {}),
                 "tokens": _tokens_from_parts(row["i"], row["o"], row["cr"], row["cw"]),
@@ -2081,7 +2045,7 @@ def _metrics_time_buckets(
     day_counts: dict[str, int] = {}
     hour_counts: dict[int, int] = {}
     for r in conn.execute("SELECT ts FROM events WHERE ts IS NOT NULL"):
-        dt = _parse_ts(r["ts"])
+        dt = timeutil.parse_ts(r["ts"])
         if dt is None:
             continue
         local = dt.astimezone(tz)
@@ -2097,7 +2061,7 @@ def _metrics_time_buckets(
 def metrics(tz: str | None = None) -> dict[str, Any]:
     """Cross-session aggregates for the metrics dashboard."""
     zone = _resolve_tz(tz)
-    with _connect() as conn:
+    with store.read() as conn:
         one = lambda sql, *p: conn.execute(sql, p).fetchone()  # noqa: E731
         rows = lambda sql, *p: conn.execute(sql, p).fetchall()  # noqa: E731
 
@@ -2107,7 +2071,7 @@ def metrics(tz: str | None = None) -> dict[str, Any]:
         projects = one("SELECT COUNT(DISTINCT cwd) n FROM sessions WHERE cwd IS NOT NULL")["n"]
 
         last_rows = rows("SELECT session_id, MAX(ts) lt FROM events GROUP BY session_id")
-        active = sum(1 for r in last_rows if _live_status(r["lt"]) == "active")
+        active = sum(1 for r in last_rows if timeutil.live_status(r["lt"]) == "active")
 
         durs = rows(
             "SELECT (julianday(MAX(ts))-julianday(MIN(ts)))*86400 d"
@@ -2197,7 +2161,7 @@ def metrics(tz: str | None = None) -> dict[str, Any]:
                 "cwd": r["cwd"],
                 "sessions": r["s"],
                 "events": r["e"],
-                "last_activity": _format_ts(r["lt"]),
+                "last_activity": timeutil.format_ts(r["lt"]),
             }
             for r in rows(
                 "SELECT s.cwd, COUNT(DISTINCT s.id) s, COUNT(ev.id) e, MAX(ev.ts) lt"
@@ -2322,7 +2286,7 @@ def metrics_history(category: str, limit: int = 200) -> list[dict[str, Any]]:
     each with enough info to deep-link to the originating event."""
     if category not in ("shell", "web"):
         return []
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT e.id, e.session_id, e.target, e.title, e.ts, e.source,"
             " e.duration_ms, e.status, s.cwd"
@@ -2338,7 +2302,7 @@ def metrics_history(category: str, limit: int = 200) -> list[dict[str, Any]]:
             "session_id": r["session_id"],
             "target": r["target"],
             "title": r["title"],
-            "ts": _format_ts(r["ts"]),
+            "ts": timeutil.format_ts(r["ts"]),
             "source": r["source"],
             "duration_ms": r["duration_ms"],
             "status": r["status"],
@@ -2354,7 +2318,7 @@ def connections() -> list[dict[str, Any]]:
     A source counts as connected if it produced an event within the active
     window (same recency rule as live sessions).
     """
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT source, COUNT(*) AS events, COUNT(DISTINCT session_id) AS sessions,"
             " MAX(ts) AS last_ts"
@@ -2365,15 +2329,15 @@ def connections() -> list[dict[str, Any]]:
             "source": r["source"],
             "sessions": r["sessions"],
             "events": r["events"],
-            "last_event": _format_ts(r["last_ts"]),
-            "connected": _live_status(r["last_ts"]) == "active",
+            "last_event": timeutil.format_ts(r["last_ts"]),
+            "connected": timeutil.live_status(r["last_ts"]) == "active",
         }
         for r in rows
     ]
 
 
 def set_archived(session_id: str, archived: bool) -> bool:
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         cur = conn.execute(
             "UPDATE sessions SET archived = ? WHERE id = ?",
             (1 if archived else 0, session_id),
@@ -2391,7 +2355,7 @@ def set_subagent_links(links: list[dict[str, Any]]) -> int:
     the child session exists and the parent differs from the child. Idempotent.
     Returns the number of links newly applied or updated."""
     applied = 0
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         for link in links or []:
             child = str(link.get("child") or "").strip()
             parent = str(link.get("parent") or "").strip()
@@ -2460,7 +2424,7 @@ def export_sessions(
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
 
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
             f" s.status, s.archived, s.created_at,"
@@ -2515,7 +2479,7 @@ def _export_event_row(row: sqlite3.Row) -> dict[str, Any]:
         "hook": row["hook"],
         "tool": row["tool"],
         "phase": row["phase"],
-        "ts": _format_ts(row["ts"]),
+        "ts": timeutil.format_ts(row["ts"]),
         "source": row["source"],
         "category": row["category"],
         "title": row["title"],
@@ -2542,7 +2506,7 @@ def _export_event_row(row: sqlite3.Row) -> dict[str, Any]:
 
 def _export_events(session_id: str) -> list[dict[str, Any]]:
     """Full event list for export with token counts and payloads."""
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
             (session_id,),
@@ -2597,13 +2561,15 @@ def enrich_sessions(
             ]
 
         if "clarifications" in want:
-            with _connect() as conn:
+            from .session_read import build_clarifications
+
+            with store.read() as conn:
                 ev_rows = conn.execute(
                     "SELECT id, category, detail, ts, hook, tool FROM events"
                     " WHERE session_id=? ORDER BY ts ASC, id ASC",
                     (sid,),
                 ).fetchall()
-            clars, _ = _build_clarifications(ev_rows)
+            clars, _ = build_clarifications(ev_rows)
             s["clarifications"] = clars
     return summaries
 
@@ -2627,7 +2593,7 @@ def list_sessions(
         params.extend([f"%{q}%", f"%{q}%"])
     where = f"WHERE {' AND '.join(clauses)}"
     params.append(limit)
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
             f" s.status, s.archived, s.created_at,"
@@ -2657,7 +2623,7 @@ def list_sessions(
             params,
         ).fetchall()
         summaries = _batched_session_summaries(conn, rows)
-    # "active"/"completed" is recency-derived (see _live_status), so the status
+    # "active"/"completed" is recency-derived (see timeutil.live_status), so the status
     # filter is applied here rather than in SQL.
     if status:
         summaries = [s for s in summaries if s["status"] == status]
@@ -2723,7 +2689,7 @@ def search(query: str, limit: int = 40) -> list[dict[str, Any]]:
         )
         params.extend([like, like, like])
     params.append(limit)
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT e.id, e.session_id, e.category, e.title, e.target, e.detail,"
             " e.ts, e.source, e.model, s.cwd AS cwd"
@@ -2739,7 +2705,7 @@ def search(query: str, limit: int = 40) -> list[dict[str, Any]]:
             "category": r["category"],
             "title": r["title"],
             "target": r["target"],
-            "ts": _format_ts(r["ts"]),
+            "ts": timeutil.format_ts(r["ts"]),
             "source": r["source"],
             "model": r["model"],
             "cwd": r["cwd"],
@@ -2747,37 +2713,6 @@ def search(query: str, limit: int = 40) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
-
-
-def _event_row(row: sqlite3.Row) -> dict[str, Any]:
-    out: dict[str, Any] = {
-        "id": row["id"],
-        "hook": row["hook"],
-        "tool": row["tool"],
-        "phase": row["phase"],
-        "ts": _format_ts(row["ts"]),
-        "source": row["source"],
-        "category": row["category"],
-        "title": row["title"],
-        "detail": row["detail"],
-        "target": row["target"],
-        "status": row["status"],
-        "duration_ms": row["duration_ms"],
-        "model": row["model"],
-        "attachments": json.loads(row["attachments"]) if row["attachments"] else None,
-    }
-    # The raw payload blob is large (~half the session response) and unused by
-    # the dashboard — only composer_mode is needed, so extract it and drop the
-    # rest from the wire.
-    if row["payload"]:
-        try:
-            body = json.loads(row["payload"])
-        except (json.JSONDecodeError, TypeError):
-            body = {}
-        mode = body.get("composer_mode")
-        if isinstance(mode, str) and mode != "agent":
-            out["composer_mode"] = mode
-    return out
 
 
 def attach_to_prompt(
@@ -2789,7 +2724,7 @@ def attach_to_prompt(
     """Merge file/image metadata onto the matching prompt event."""
     if not attachments:
         return False
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         row = None
         if text:
             row = conn.execute(
@@ -2818,7 +2753,7 @@ def attach_to_prompt(
                 (session_id, timestamp),
             ).fetchone()
         if row is None and timestamp:
-            target_ts = _parse_ts(timestamp)
+            target_ts = timeutil.parse_ts(timestamp)
             if target_ts is not None:
                 candidates = conn.execute(
                     "SELECT id, ts, attachments FROM events"
@@ -2829,7 +2764,7 @@ def attach_to_prompt(
                 best: sqlite3.Row | None = None
                 best_delta = 999999.0
                 for candidate in candidates:
-                    candidate_ts = _parse_ts(candidate["ts"])
+                    candidate_ts = timeutil.parse_ts(candidate["ts"])
                     if candidate_ts is None:
                         continue
                     delta = abs((candidate_ts - target_ts).total_seconds())
@@ -2855,153 +2790,27 @@ def attach_to_prompt(
         return True
 
 
-_EMPTY = (None, "", {}, [])
-
-
-def _merge_detail(start_detail: Any, end_detail: Any) -> Any:
-    """Combine a start event's detail (rich input, e.g. diff) with the end
-    event's detail (result/response), so edits keep both before/after and result."""
-    def _load(raw: Any) -> Any:
-        if not isinstance(raw, str):
-            return raw
-        try:
-            return json.loads(raw)
-        except (ValueError, TypeError):
-            return raw
-
-    s = _load(start_detail)
-    e = _load(end_detail)
-    if not isinstance(s, dict) or not isinstance(e, dict):
-        return end_detail or start_detail
-
-    merged = dict(s)
-    for key, val in e.items():
-        if (
-            key in ("input", "arguments", "tool_input")
-            and isinstance(val, dict)
-            and isinstance(merged.get(key), dict)
-        ):
-            combined = dict(val)
-            combined.update({k: v for k, v in merged[key].items() if v not in _EMPTY})
-            merged[key] = combined
-        elif val not in _EMPTY:
-            merged[key] = val
-    return json.dumps(merged, indent=2, ensure_ascii=False, default=str)
-
-
 def timeline(session_id: str) -> list[dict[str, Any]]:
-    """Build timeline items, merging start/end pairs into spans."""
-    with _connect() as conn:
-        rows = conn.execute(
-            "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
-            (session_id,),
-        ).fetchall()
-        events = [_event_row(r) for r in rows]
+    from .session_read import build_timeline_items
 
-    spans: dict[str, dict[str, Any]] = {}
-    items: list[dict[str, Any]] = []
-    # Claude subagents open with a PreToolUse(Agent) start keyed by tool_use_id
-    # and later fire a SubagentStop whose payload carries no tool_use_id, so it
-    # can't key-match. For background agents the PostToolUse(Agent) "launched"
-    # ack closes the span almost instantly, leaving a near-zero window plus an
-    # orphan SubagentStop. Track open subagent spans and finalized launches so
-    # the trailing SubagentStop attaches to its run (FIFO — no shared id).
-    open_subagent_keys: list[str] = []
-    pending_subagent_stops: list[dict[str, Any]] = []
-
-    def _is_subagent_stop(e: dict[str, Any]) -> bool:
-        return (e.get("hook") or "") in ("SubagentStop", "subagentStop")
-
-    def _extend(span: dict[str, Any], end_ts: str, status: Any) -> None:
-        if (end_ts or "") > (span.get("end_ts") or ""):
-            span["end_ts"] = end_ts
-            span["ongoing"] = False
-            span["duration_ms"] = int((_duration_seconds(span["start_ts"], end_ts) or 0) * 1000)
-            span["status"] = status or span.get("status")
-
-    for ev in events:
-        cat = ev.get("category") or "other"
-        target = ev.get("target") or ""
-        phase = ev.get("phase") or "instant"
-        key = f"{cat}::{target}"
-
-        if phase == "superseded":
-            continue
-
-        if phase == "start":
-            spans[key] = {**ev, "start_ts": ev["ts"], "end_ts": None, "ongoing": True}
-            if cat == "subagent":
-                open_subagent_keys.append(key)
-            continue
-
-        if phase == "end" and key in spans:
-            start = spans.pop(key)
-            if cat == "subagent" and key in open_subagent_keys:
-                open_subagent_keys.remove(key)
-            dur = ev.get("duration_ms") or start.get("duration_ms")
-            if dur is None:
-                dur = int((_duration_seconds(start["start_ts"], ev["ts"]) or 0) * 1000)
-            merged = {
-                **start,
-                "end_ts": ev["ts"],
-                "ongoing": False,
-                "duration_ms": dur,
-                "detail": _merge_detail(start.get("detail"), ev.get("detail")),
-                "status": ev.get("status") or start.get("status"),
-            }
-            items.append(merged)
-            # A PostToolUse(Agent) end may just be the launch ack; keep the span
-            # so a later SubagentStop can extend it to real completion. The stop
-            # itself (Cursor keys match) is the true end and needs no extending.
-            if cat == "subagent" and not _is_subagent_stop(ev):
-                pending_subagent_stops.append(merged)
-            continue
-
-        # Orphan subagent end (Claude SubagentStop): attach to its launch.
-        if cat == "subagent" and phase == "end":
-            if open_subagent_keys:
-                start = spans.pop(open_subagent_keys.pop(0))
-                dur = int((_duration_seconds(start["start_ts"], ev["ts"]) or 0) * 1000)
-                items.append({
-                    **start,
-                    "end_ts": ev["ts"],
-                    "ongoing": False,
-                    "duration_ms": dur,
-                    "status": ev.get("status") or start.get("status"),
-                })
-                continue
-            if pending_subagent_stops:
-                _extend(pending_subagent_stops.pop(0), ev["ts"], ev.get("status"))
-                continue
-            if _is_subagent_stop(ev):
-                # A SubagentStop with no captured launch: no window, no content,
-                # generic label. Drop it instead of rendering an empty group.
-                continue
-
-        items.append({**ev, "start_ts": ev["ts"], "end_ts": ev["ts"], "ongoing": False})
-
-    for pending in spans.values():
-        items.append({**pending, "end_ts": None})
-
-    items.sort(key=lambda x: x.get("start_ts") or x.get("ts") or "")
-    return items
+    return build_timeline_items(session_id)
 
 
 def events_list(session_id: str) -> list[dict[str, Any]]:
     """Every stored event, one row per hook fire (no start/end merging)."""
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
             (session_id,),
         ).fetchall()
     return [
-        {**_event_row(r), "start_ts": r["ts"], "end_ts": r["ts"], "ongoing": False}
+        {**store.event_row(r), "start_ts": r["ts"], "end_ts": r["ts"], "ongoing": False}
         for r in rows
     ]
 
 
 def session_components(session_id: str) -> dict[str, Any]:
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT category, target, title, phase FROM events WHERE session_id=?",
             (session_id,),
@@ -3058,366 +2867,18 @@ def session_components(session_id: str) -> dict[str, Any]:
     }
 
 
-# Only structured questions count: the agent explicitly asking the user via
-# Claude's AskUserQuestion, Cursor's AskQuestion, or Codex's request_user_input.
-# We never guess from assistant prose alone.
-_QUESTION_TOOLS = {"AskUserQuestion", "AskQuestion", "request_user_input"}
-_QUESTION_END_HOOKS = {"PostToolUse", "postToolUse"}
-
-
-def _coerce_dict(val: Any) -> dict[str, Any]:
-    if isinstance(val, dict):
-        return val
-    if isinstance(val, str) and val.strip():
-        try:
-            parsed = json.loads(val)
-            return parsed if isinstance(parsed, dict) else {}
-        except (ValueError, TypeError):
-            return {}
-    return {}
-
-
-def _parse_questions(detail: Any) -> list[dict[str, Any]]:
-    """Break a structured-question event (AskUserQuestion / AskQuestion /
-    request_user_input)
-    into its individual sub-questions, each paired with the user's chosen answer
-    when it's recoverable.
-
-    A single tool call can pose several questions at once; this returns one entry
-    per question: ``{header, question, options, answer, skipped}``. Codex and
-    recovered Cursor prompts carry answers keyed by each question's ``id``;
-    Claude doesn't put the selection in the hook, so ``answer`` is ``None`` there.
-    """
-    obj = _coerce_dict(detail)
-    if not obj:
-        return []
-    src = obj.get("input") if isinstance(obj.get("input"), dict) else obj
-    qs = src.get("questions") if isinstance(src.get("questions"), list) else []
-    # Codex/Cursor response: {"answers": {<question id>: {"answers": [<label>, ...]}}}.
-    # Claude response: {"answers": {<question text>: "<answer text>"}}.
-    resp = _coerce_dict(obj.get("response") or obj.get("output"))
-    answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
-    skipped_raw = resp.get("skipped") or resp.get("skipped_questions") or []
-    skipped = {str(v) for v in skipped_raw if v} if isinstance(skipped_raw, list) else set()
-
-    out: list[dict[str, Any]] = []
-    for q in qs:
-        if not isinstance(q, dict) or not (q.get("question") or q.get("prompt")):
-            continue
-        ans: str | None = None
-        picked = answers.get(q.get("id")) if q.get("id") else None
-        if picked is None:
-            picked = answers.get(q.get("question")) or answers.get(q.get("prompt"))
-        if isinstance(picked, dict) and isinstance(picked.get("answers"), list):
-            ans = ", ".join(str(a) for a in picked["answers"] if a)
-        elif isinstance(picked, list):
-            ans = ", ".join(str(a) for a in picked if a)
-        elif isinstance(picked, str):
-            ans = picked
-        options = [
-            str(o.get("label"))
-            for o in (q.get("options") or [])
-            if isinstance(o, dict) and o.get("label")
-        ]
-        qid = str(q.get("id") or "")
-        out.append(
-            {
-                "header": q.get("header"),
-                "question": str(q.get("question") or q.get("prompt")),
-                "options": options,
-                "answer": ans or None,
-                "skipped": bool(qid and qid in skipped and not ans),
-            }
-        )
-    return out
-
-
-def _question_text(detail: Any) -> str:
-    """Pull the human-readable question(s) out of a structured-question detail."""
-    return " · ".join(q["question"] for q in _parse_questions(detail))
-
-
-def _excerpt(text: str | None, limit: int = 200) -> str:
-    if not text:
-        return ""
-    collapsed = " ".join(str(text).split())
-    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
-
-
-def _build_clarifications(
-    ev_rows: list[sqlite3.Row],
-) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
-    """Flag the agent's explicit questions to the user (AskUserQuestion) and how
-    they were answered.
-
-    The PreToolUse fires when the question is posed; the PostToolUse fires once
-    the user has answered through the structured prompt UI, so a completed pair
-    = answered. A later plain chat prompt is not treated as the answer; if the
-    structured prompt was never shown or was unavailable, it remains unanswered.
-    Annotations are keyed by the question's start event id — the same id the
-    merged timeline span carries — so the badge lands on the right item.
-    """
-    questions: list[dict[str, Any]] = []
-    pending: dict[str, Any] | None = None
-
-    def _new(row: sqlite3.Row, answered: bool) -> dict[str, Any]:
-        return {
-            "start_id": row["id"],
-            "ts": row["ts"],
-            "detail": row["detail"],
-            "answered": answered,
-            "answer_id": None,
-            "answer_ts": None,
-            "answer_detail": None,
-        }
-
-    for r in ev_rows:
-        if r["tool"] in _QUESTION_TOOLS:
-            if r["hook"] in _QUESTION_END_HOOKS:
-                # Answer was returned inline to the agent by the tool end event.
-                if pending is not None:
-                    pending["answered"] = True
-                    pending["answer_id"] = r["id"]
-                    pending["answer_ts"] = r["ts"]
-                    pending["answer_detail"] = r["detail"]
-                else:
-                    pending = _new(r, answered=True)
-                questions.append(pending)
-                pending = None
-            else:
-                if pending is not None:
-                    questions.append(pending)
-                pending = _new(r, answered=False)
-    if pending is not None:
-        questions.append(pending)
-
-    clarifications: list[dict[str, Any]] = []
-    annotations: dict[int, dict[str, Any]] = {}
-    for q in questions:
-        annotations[q["start_id"]] = {
-            "is_question": True,
-            "answered": q["answered"],
-            "answer_event_id": q["answer_id"],
-        }
-        if q["answer_id"] is not None:
-            annotations[q["answer_id"]] = {"answers_event_id": q["start_id"]}
-        clarifications.append(
-            {
-                "question_event_id": q["start_id"],
-                "question_ts": q["ts"],
-                "question_excerpt": _excerpt(_question_text(q["detail"])),
-                "answer_event_id": q["answer_id"],
-                "answer_ts": q["answer_ts"],
-                "answer_excerpt": _excerpt(q["answer_detail"]) if q["answer_detail"] else None,
-                "answered": q["answered"],
-            }
-        )
-    return clarifications, annotations
-
-
-def _synthesize_child_subagent_spans(
-    events: list[dict[str, Any]],
-    timeline_items: list[dict[str, Any]],
-    links: dict[str, list[dict[str, Any]]],
-    parent_session_id: str,
-) -> None:
-    """Give every inlined child session exactly one ``subagent`` run group so
-    all providers render the same collapsible view.
-
-    Claude folds subagent work into the parent natively and emits real
-    ``subagent`` start/stop spans. Cursor subagents and Codex approval-reviews
-    live in *separate* child sessions whose events we inline (see
-    ``_merge_linked_session_events``). There are two cases:
-
-    - The parent already has a native span for the run (Cursor captured the
-      ``subagentStop`` hook). We **adopt** that span — stamping it with the
-      child session id — rather than fabricating a duplicate bar.
-    - No native span exists (older/interrupted Cursor runs, all Codex reviews).
-      We **fabricate** one bracketing the child's events.
-
-    Either way the span carries ``subagent_child_session`` (so the frontend
-    groups by origin session, not a fuzzy time window) and ``subagent_run_kind``
-    (so the header reads "Subagent" vs "Review")."""
-    children = links.get("children") or []
-    if not children:
-        return
-    # Bucket the already-inlined events by the child session they came from.
-    by_child: dict[str, list[dict[str, Any]]] = {}
-    for ev in events:
-        sid = ev.get("event_session_id")
-        if sid and sid != parent_session_id:
-            by_child.setdefault(sid, []).append(ev)
-
-    # Native subagent spans already in the timeline (from subagentStart/Stop).
-    # Adopt one per child instead of duplicating it.
-    native_spans = [
-        it
-        for it in timeline_items
-        if it.get("category") == "subagent" and not it.get("subagent_child_session")
-    ]
-    claimed: set[int] = set()
-
-    def _start_of(span: dict[str, Any]) -> str:
-        return span.get("start_ts") or span.get("ts") or ""
-
-    synthetic_id = -1
-    for link in children:
-        child_id = link.get("session_id")
-        if not child_id:
-            continue
-        child_events = by_child.get(child_id)
-        if not child_events:
-            continue
-        kind = "subagent" if link.get("type") == "subagent" else "approval_review"
-        starts = [
-            e.get("start_ts") or e.get("ts")
-            for e in child_events
-            if (e.get("start_ts") or e.get("ts"))
-        ]
-        ends = [
-            e.get("end_ts") or e.get("ts") or e.get("start_ts")
-            for e in child_events
-            if (e.get("end_ts") or e.get("ts") or e.get("start_ts"))
-        ]
-        if not starts:
-            continue
-        ts_first = min(starts)
-        ts_last = max(ends) if ends else ts_first
-        if kind == "approval_review":
-            label = "Approval review"
-        else:
-            label = (link.get("title") or link.get("label") or "Subagent").strip() or "Subagent"
-
-        # Adopt the native span launched for this run: the latest unclaimed span
-        # starting at/before the child (the launch point), else the earliest
-        # remaining one. Codex reviews never have a native span.
-        adopt_idx: int | None = None
-        if kind == "subagent":
-            cands = [i for i in range(len(native_spans)) if i not in claimed]
-            le = [i for i in cands if _start_of(native_spans[i]) <= ts_first]
-            if le:
-                adopt_idx = max(le, key=lambda i: _start_of(native_spans[i]))
-            elif cands:
-                adopt_idx = min(cands, key=lambda i: _start_of(native_spans[i]))
-        if adopt_idx is not None:
-            claimed.add(adopt_idx)
-            span = native_spans[adopt_idx]
-            span["subagent_child_session"] = child_id
-            span["subagent_run_kind"] = kind
-            # Keep the native window/duration; grouping is by child id, not time.
-            continue
-
-        # No native span — fabricate one bracketing the child's events.
-        dur = int((_duration_seconds(ts_first, ts_last) or 0) * 1000)
-        span = {
-            "id": synthetic_id,
-            "hook": None,
-            "tool": None,
-            "phase": "start",
-            "ts": ts_first,
-            "source": link.get("source"),
-            "category": "subagent",
-            "title": label,
-            "detail": None,
-            "target": f"child::{child_id}",
-            "status": "success",
-            "duration_ms": dur,
-            "model": None,
-            "attachments": None,
-            "start_ts": ts_first,
-            "end_ts": ts_last,
-            "ongoing": False,
-            "subagent_child_session": child_id,
-            "subagent_run_kind": kind,
-        }
-        synthetic_id -= 1
-        events.append(dict(span))
-        timeline_items.append(dict(span))
-
-
 def get_session_detail(session_id: str) -> dict[str, Any] | None:
-    with _connect() as conn:
-        row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
-        if row is None:
-            return None
-        summary = _session_summary(conn, row)
-        ev_rows = conn.execute(
-            "SELECT id, category, detail, ts, hook, tool FROM events"
-            " WHERE session_id=? ORDER BY ts ASC, id ASC",
-            (session_id,),
-        ).fetchall()
-        links = _session_links(conn, session_id)
-        clarifications, annotations = _build_clarifications(ev_rows)
-        events = events_list(session_id)
-        tl = timeline(session_id)
-        for item in events:
-            extra = annotations.get(item["id"])
-            if extra:
-                item.update(extra)
-            if item.get("category") == "question":
-                item["questions"] = _parse_questions(item.get("detail"))
-            _trim_detail_inplace(item)
-        events = _merge_linked_session_events(conn, events, links)
-        for item in events:
-            if (
-                item.get("inlined_approval_review")
-                or item.get("inlined_reviewed_session")
-                or item.get("inlined_subagent")
-            ):
-                _trim_detail_inplace(item)
-        # Cursor subagents and Codex reviews live in separate child sessions with
-        # no native subagent span in the parent. Fabricate one span per child so
-        # every provider renders the same collapsible run group (Claude already
-        # emits real spans and folds its subagent work in natively).
-        _synthesize_child_subagent_spans(events, tl, links, session_id)
-        for item in tl:
-            extra = annotations.get(item["id"])
-            if extra:
-                item.update(extra)
-            if item.get("category") == "question":
-                item["questions"] = _parse_questions(item.get("detail"))
-            # The merged timeline is consumed only to derive subagent run windows;
-            # its detail bodies are never rendered, so drop them entirely.
-            item["detail"] = None
+    from .session_read import build_session_detail
 
-    return {
-        "summary": summary,
-        "links": links,
-        "components": session_components(session_id),
-        "events": events,
-        "timeline": tl,
-        "clarifications": clarifications,
-    }
-
-
-_DETAIL_PREVIEW_CHARS = 4000
-
-
-def _trim_detail_inplace(item: dict[str, Any]) -> None:
-    """Shrink an oversized detail body to a preview, flagging that the full
-    text must be fetched on demand. Small bodies (the common conversation
-    case) are left intact so they render instantly without a follow-up call."""
-    detail = item.get("detail")
-    if isinstance(detail, str) and len(detail) > _DETAIL_PREVIEW_CHARS:
-        item["detail"] = detail[:_DETAIL_PREVIEW_CHARS]
-        item["detail_truncated"] = True
+    return build_session_detail(session_id)
 
 
 def get_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:
     """Full detail + attachments for a single event (lazy-loaded by the UI when
     a truncated event is selected)."""
-    with _connect() as conn:
-        row = conn.execute(
-            "SELECT detail, attachments FROM events WHERE session_id=? AND id=?",
-            (session_id, event_id),
-        ).fetchone()
-    if row is None:
-        return None
-    return {
-        "id": event_id,
-        "detail": row["detail"],
-        "attachments": json.loads(row["attachments"]) if row["attachments"] else None,
-    }
+    from .session_read import build_event_detail
+
+    return build_event_detail(session_id, event_id)
 
 
 def get_session(session_id: str) -> dict[str, Any] | None:
@@ -3427,7 +2888,7 @@ def get_session(session_id: str) -> dict[str, Any] | None:
 def session_origins() -> dict[str, str]:
     """Return the dominant origin per session: 'hook' if any hook events exist,
     else 'import'. Used by the bridge to skip already-hooked sessions."""
-    with _connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(
             "SELECT session_id,"
             " MAX(CASE WHEN origin = 'hook' OR origin IS NULL THEN 1 ELSE 0 END) AS has_hook"
@@ -3441,7 +2902,7 @@ def session_origins() -> dict[str, str]:
 
 def import_summary() -> dict[str, Any]:
     """Stats about transcript-imported data."""
-    with _connect() as conn:
+    with store.read() as conn:
         row = conn.execute(
             "SELECT COUNT(DISTINCT session_id) AS sessions,"
             " COALESCE(SUM(input_tokens), 0) AS input_tok,"
@@ -3482,23 +2943,23 @@ def set_question_answer(
     session_id: str,
     title: str | None,
     qids: list[str],
-    response: dict[str, Any],
+    response: dict[str, Any] | None = None,
+    response_text: str | None = None,
 ) -> int:
     """Merge a recovered answer onto stored AskQuestion event(s).
 
     The collector runs in Docker without access to the agent transcript files,
-    and stored transcript paths are host-absolute — so answer recovery from the
-    agent's follow-up prose happens on the host (the bridge) and is pushed here.
-    Matches the question by its (title, question-ids) signature and only fills
-    events whose response is still blank, so a real answer is never overwritten.
+    and stored transcript paths are host-absolute, so the bridge pushes the raw
+    follow-up prose here. The collector owns interpreting that prose. A legacy
+    pre-derived response is still accepted when prose is absent.
     """
-    if not session_id or not isinstance(response, dict) or not response.get("answers"):
+    has_prose = isinstance(response_text, str) and bool(response_text.strip())
+    legacy_response = response if isinstance(response, dict) else {}
+    if not session_id or (not has_prose and not _has_recovered_question_response(legacy_response)):
         return 0
-    response = dict(response)
-    response.setdefault("answer_source", "assistant_summary")
     wanted = (str(title or ""), tuple(str(q) for q in qids))
     updated = 0
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         rows = conn.execute(
             "SELECT id, detail FROM events WHERE session_id = ?"
             " AND tool IN ('AskUserQuestion', 'AskQuestion', 'request_user_input')"
@@ -3512,18 +2973,33 @@ def set_question_answer(
             inp = obj.get("input") if isinstance(obj.get("input"), dict) else {}
             if not inp or _question_signature(inp) != wanted:
                 continue
-            existing = obj.get("response")
-            # Any non-empty response is a real answer (dict with answers, or a
-            # plain string from the tool result) — only fill blanks.
-            if existing:
+            next_response = (
+                recover_cursor_question_response(inp, response_text or "")
+                if has_prose
+                else dict(legacy_response)
+            )
+            if not _has_recovered_question_response(next_response):
                 continue
-            obj["response"] = response
+            next_response.setdefault("answer_source", ANSWER_SOURCE_ASSISTANT_SUMMARY)
+            existing = obj.get("response")
+            if existing and not (
+                isinstance(existing, dict)
+                and existing.get("answer_source") == ANSWER_SOURCE_ASSISTANT_SUMMARY
+            ):
+                continue
+            if existing == next_response:
+                continue
+            obj["response"] = next_response
             conn.execute(
                 "UPDATE events SET detail = ? WHERE id = ?",
                 (json.dumps(obj, indent=2, ensure_ascii=False, default=str), row["id"]),
             )
             updated += 1
     return updated
+
+
+def _has_recovered_question_response(response: dict[str, Any]) -> bool:
+    return bool(response.get("answers") or response.get("skipped"))
 
 
 def clear_recovered_answers() -> int:
@@ -3533,7 +3009,7 @@ def clear_recovered_answers() -> int:
     Real answers carried in the tool result (Claude/Codex) are never tagged
     this way, so they are left intact."""
     cleared = 0
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         rows = conn.execute(
             "SELECT id, detail FROM events"
             " WHERE tool IN ('AskUserQuestion', 'AskQuestion', 'request_user_input')"
@@ -3544,7 +3020,7 @@ def clear_recovered_answers() -> int:
             if obj is None:
                 continue
             resp = obj.get("response")
-            if isinstance(resp, dict) and resp.get("answer_source") == "assistant_summary":
+            if isinstance(resp, dict) and resp.get("answer_source") == ANSWER_SOURCE_ASSISTANT_SUMMARY:
                 obj["response"] = {}
                 conn.execute(
                     "UPDATE events SET detail = ? WHERE id = ?",
@@ -3561,7 +3037,7 @@ def reset_imported() -> dict[str, Any]:
     reimport`` to clear out a previous import before re-ingesting transcripts
     with the current parsers.
     """
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         events = conn.execute(
             "SELECT COUNT(*) n FROM events WHERE origin = 'import'"
         ).fetchone()["n"]
@@ -3579,6 +3055,96 @@ def reset_imported() -> dict[str, Any]:
     return result
 
 
+def _week_start(value: Any) -> str:
+    dt = timeutil.parse_ts(value) or datetime.now(timezone.utc)
+    return (dt.date() - timedelta(days=dt.weekday())).isoformat()
+
+
+def drift_report() -> dict[str, Any]:
+    """Weekly source-level ingest drift metrics.
+
+    Projected events provide the current unknown-rate signal. Raw ledger rows
+    add health counts for input that was ignored, malformed, duplicated, or
+    failed before it became a timeline event.
+    """
+    with store.read() as conn:
+        event_rows = conn.execute(
+            "SELECT source, ts, category, hook, tool FROM events"
+        ).fetchall()
+        raw_rows = conn.execute(
+            "SELECT source, received_at, status FROM raw_ingest_events"
+        ).fetchall()
+
+    buckets: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def bucket(source: str | None, period: str) -> dict[str, Any]:
+        key = (source or "unknown", period)
+        if key not in buckets:
+            buckets[key] = {
+                "source": key[0],
+                "period_start": period,
+                "total_events": 0,
+                "other_events": 0,
+                "_unknown_hooks": {},
+                "_unknown_tools": {},
+                "raw_status_counts": {},
+            }
+        return buckets[key]
+
+    for row in event_rows:
+        b = bucket(row["source"], _week_start(row["ts"]))
+        b["total_events"] += 1
+        if row["category"] == "other":
+            b["other_events"] += 1
+            hook = row["hook"] or "unknown"
+            tool = row["tool"] or "unknown"
+            b["_unknown_hooks"][hook] = b["_unknown_hooks"].get(hook, 0) + 1
+            b["_unknown_tools"][tool] = b["_unknown_tools"].get(tool, 0) + 1
+
+    for row in raw_rows:
+        b = bucket(row["source"], _week_start(row["received_at"]))
+        status = row["status"] or "unknown"
+        counts = b["raw_status_counts"]
+        counts[status] = counts.get(status, 0) + 1
+
+    weeks: list[dict[str, Any]] = []
+    for b in buckets.values():
+        total = int(b["total_events"] or 0)
+        other = int(b["other_events"] or 0)
+
+        def top(counter: dict[str, int], key: str) -> list[dict[str, Any]]:
+            return [
+                {key: name, "events": count}
+                for name, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:5]
+            ]
+
+        weeks.append(
+            {
+                "source": b["source"],
+                "period_start": b["period_start"],
+                "total_events": total,
+                "other_events": other,
+                "other_rate": round(other / total, 4) if total else 0.0,
+                "top_unknown_hooks": top(b["_unknown_hooks"], "hook"),
+                "top_unknown_tools": top(b["_unknown_tools"], "tool"),
+                "raw_status_counts": dict(sorted(b["raw_status_counts"].items())),
+            }
+        )
+
+    prior_rates = {
+        (row["source"], row["period_start"]): row["other_rate"]
+        for row in weeks
+    }
+    for row in weeks:
+        prior = (
+            datetime.fromisoformat(row["period_start"]).date() - timedelta(days=7)
+        ).isoformat()
+        row["previous_other_rate"] = prior_rates.get((row["source"], prior))
+
+    weeks.sort(key=lambda row: (row["period_start"], row["source"]), reverse=True)
+    return {"generated_at": timeutil.now(), "weeks": weeks}
+
+
 def import_quality() -> dict[str, Any]:
     """Per-source ingestion quality + coverage, so regressions are visible and
     the "which agent logs what" picture is explicit rather than implied.
@@ -3587,7 +3153,7 @@ def import_quality() -> dict[str, Any]:
     through to ``other`` (and the percentage), and token/model coverage. The
     token coverage doubles as the per-agent capability table (e.g. Cursor logs
     no tokens, so its coverage is ~0 by data, not by bug)."""
-    with _connect() as conn:
+    with store.read() as conn:
         src_rows = conn.execute(
             "SELECT source,"
             " COUNT(*) events,"
@@ -3625,7 +3191,7 @@ def import_quality() -> dict[str, Any]:
         for r in src_rows
     ]
     return {
-        "generated_at": _now(),
+        "generated_at": timeutil.now(),
         "by_source": by_source,
         "by_category": [{"category": r["category"], "events": r["n"]} for r in cat_rows],
         "by_origin": {r["origin"] or "hook": r["n"] for r in origin_rows},
@@ -3639,7 +3205,7 @@ def complete_imported_sessions() -> dict[str, Any]:
     stay 'active' forever.  This closes them using the timestamp of
     their most recent event as ended_at.
     """
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         rows = conn.execute(
             "SELECT s.id, MAX(e.ts) AS last_ts"
             " FROM sessions s"
@@ -3660,7 +3226,7 @@ def complete_imported_sessions() -> dict[str, Any]:
 
 
 def stats() -> dict[str, Any]:
-    with _connect() as conn:
+    with store.read() as conn:
         by_source = {
             r["source"]: r["n"]
             for r in conn.execute(
@@ -3677,7 +3243,7 @@ def stats() -> dict[str, Any]:
             " (julianday(MAX(ts)) - julianday(MIN(ts))) * 86400 AS duration"
             " FROM events GROUP BY session_id"
         ).fetchall()
-        active = sum(1 for r in event_rows if _live_status(r["last_ts"]) == "active")
+        active = sum(1 for r in event_rows if timeutil.live_status(r["last_ts"]) == "active")
         by_status = {"active": active, "completed": max(sessions - active, 0)}
         events = sum(r["events"] or 0 for r in event_rows)
         tool_calls = sum(r["tools"] or 0 for r in event_rows)
@@ -3702,11 +3268,11 @@ def stats() -> dict[str, Any]:
 
 # Shared domain helpers the insights layer legitimately reuses, exposed under
 # public names so callers don't reach into private helpers.
-now = _now
-parse_ts = _parse_ts
-live_status = _live_status
-build_clarifications = _build_clarifications
-QUESTION_TOOLS = _QUESTION_TOOLS
+now = timeutil.now
+parse_ts = timeutil.parse_ts
+live_status = timeutil.live_status
+build_clarifications = session_read.build_clarifications
+QUESTION_TOOLS = session_read.QUESTION_TOOLS
 
 _INSIGHT_EVENT_COLUMNS = (
     "e.id, e.session_id, e.ts, e.category, e.tool, e.target, e.status, e.hook,"
@@ -3735,7 +3301,7 @@ def read_insight_inputs(
     if session_id:
         where += " AND e.session_id = ?"
         params.append(session_id)
-    with _connect() as conn:
+    with store.read() as conn:
         events = [
             dict(r)
             for r in conn.execute(
@@ -3780,7 +3346,7 @@ def read_insight_inputs(
 
 
 def session_exists(session_id: str) -> bool:
-    with _connect() as conn:
+    with store.read() as conn:
         return (
             conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()
             is not None
@@ -3838,13 +3404,13 @@ class InsightFindingsRepo:
 @contextmanager
 def insight_findings_repo() -> Iterator[InsightFindingsRepo]:
     """A findings repository over a single connection/transaction."""
-    with _connect() as conn:
+    with store.write() as conn:
         yield InsightFindingsRepo(conn)
 
 
 def set_insight_finding_status(fingerprint: str, status: str, dismissed_at: str | None) -> bool:
     """Manual lifecycle control (dismiss/restore). False if the fingerprint is unknown."""
-    with _write_lock, _connect() as conn:
+    with store.write() as conn:
         cur = conn.execute(
             "UPDATE insight_findings SET status = ?, dismissed_at = ? WHERE fingerprint = ?",
             (status, dismissed_at, fingerprint),

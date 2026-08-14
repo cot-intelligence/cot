@@ -6,40 +6,35 @@ key-match. For background agents the PostToolUse(Agent) "launched" ack closes
 the span almost instantly. The merge must attach the trailing SubagentStop to
 its launch (correct window, no duplicate) and drop truly-orphan stops.
 
-Runnable with pytest or directly: ``python3 backend/tests/test_timeline.py``.
+Run with pytest via ``just check``.
 """
 
 from __future__ import annotations
 
-import os
-import sys
-import tempfile
 from datetime import datetime, timedelta, timezone
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_BACKEND = os.path.dirname(_HERE)
-_TMP = tempfile.mkdtemp(prefix="cot-timeline-test-")
+import pytest
 
-sys.path.insert(0, _BACKEND)
-os.environ["COT_DB_PATH"] = os.path.join(_TMP, "bootstrap.db")
-
-from app import db  # noqa: E402
+from app import db, store, timeutil  # noqa: E402
 
 _NOW = datetime(2026, 7, 3, 12, 0, 0, tzinfo=timezone.utc)
 _case = 0
 
 
+@pytest.fixture(autouse=True)
+def _use_fresh_db(fresh_db):
+    return fresh_db
+
+
 def _fresh() -> str:
     global _case
     _case += 1
-    os.environ["COT_DB_PATH"] = os.path.join(_TMP, f"case{_case}.db")
-    db.init_db()
     sid = f"s{_case}"
-    with db._connect() as conn:
+    with store.write() as conn:
         conn.execute(
             "INSERT INTO sessions (id, source, cwd, started_at, status, archived, created_at)"
             " VALUES (?, 'claude', '/p', ?, 'active', 0, ?)",
-            (sid, _NOW.isoformat(), db._now()),
+            (sid, _NOW.isoformat(), timeutil.now()),
         )
     return sid
 
@@ -47,13 +42,20 @@ def _fresh() -> str:
 def _ev(sid, *, source="claude", hook, tool=None, phase, category, target, title=None,
         secs=0.0, status="ok"):
     ts = (_NOW + timedelta(seconds=secs)).isoformat()
-    with db._connect() as conn:
-        conn.execute(
-            "INSERT INTO events (session_id, source, hook, tool, phase, ts, category,"
-            " title, target, status, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (sid, source, hook, tool, phase, ts, category, title or "Subagent", target,
-             status, db._now()),
+    with store.write() as conn:
+        store.insert_event(
+            conn,
+            session_id=sid,
+            source=source,
+            hook=hook,
+            tool=tool,
+            phase=phase,
+            ts=ts,
+            category=category,
+            title=title or "Subagent",
+            target=target,
+            status=status,
+            created_at=timeutil.now(),
         )
 
 
@@ -113,16 +115,3 @@ def test_cursor_matched_stop_still_merges_normally():
     subs = _subs(sid)
     assert len(subs) == 1
     assert subs[0]["duration_ms"] >= 29_000
-
-
-if __name__ == "__main__":
-    failures = 0
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-                print(f"ok   {name}")
-            except AssertionError as exc:
-                failures += 1
-                print(f"FAIL {name}: {exc}")
-    sys.exit(1 if failures else 0)

@@ -27,7 +27,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from . import __version__, db, insights
+from . import __version__, db, insights, store
 
 PROVIDERS = ("anthropic", "openai")
 DEFAULT_MODELS = {"anthropic": "claude-sonnet-5", "openai": "gpt-4o"}
@@ -161,7 +161,7 @@ def build_payload(days: int = 30) -> dict[str, Any]:
         params.append(cutoff)
     sql += " ORDER BY ts DESC LIMIT ?"
     params.append(MAX_EXCERPTS)
-    with db._connect() as conn:
+    with store.read() as conn:
         rows = conn.execute(sql, params).fetchall()
     excerpts = [
         {

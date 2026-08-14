@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TimelineItem } from '../../../../lib/api';
 import { formatClock, formatDateTime, getCategoryMeta } from '../../../../lib/categoryMeta';
 import {
+  PROVENANCE_META,
   eventKey,
   sortEventsByTime,
   type SubagentRun,
@@ -309,9 +310,7 @@ function SidebarList({
                 <span className="flex items-center justify-between gap-1">
                   <span className={`truncate font-mono text-[0.5rem] font-bold uppercase tracking-widest ${meta.color}`}>
                     {meta.label}
-                    {item.inlined_approval_review ? ' · review' : ''}
-                    {item.inlined_reviewed_session ? ' · reviewed' : ''}
-                    {item.inlined_subagent ? ' · subagent' : ''}
+                    {item.provenance ? ` · ${PROVENANCE_META[item.provenance].sidebar}` : ''}
                   </span>
                   <span className="shrink-0 font-mono text-[0.48rem] tabular-nums text-fg/25" title={formatDateTime(item.start_ts || item.ts)}>
                     {formatClock(item.start_ts || item.ts)}

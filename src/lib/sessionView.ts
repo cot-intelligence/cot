@@ -1,4 +1,4 @@
-import type { SessionDetail, TimelineItem } from './api';
+import type { SessionDetail, TimelineItem, TimelineRun } from './api';
 import type { IconName } from '../components/ui/icons';
 import { toTimestampString } from './categoryMeta';
 
@@ -171,6 +171,10 @@ export function sortEventsByTime(items: TimelineItem[], order: TimeSort): Timeli
  * Categories that represent concrete agent *actions* (as opposed to
  * conversation or lifecycle markers). Only these are attributed to a
  * main-vs-subagent lane by run-window membership.
+ *
+ * Backend session_read.RUN_CONTENT_CATEGORIES is the broader grouping
+ * counterpart for server-owned run membership; review both when changing
+ * action categories.
  */
 const ACTION_CATEGORIES = new Set([
   'shell',
@@ -182,15 +186,34 @@ const ACTION_CATEGORIES = new Set([
   'memory',
 ]);
 
-const SUBAGENT_CONTENT_CATEGORIES = new Set([
-  ...ACTION_CATEGORIES,
-  'response',
-  'thought',
-  'plan',
-  'question',
-]);
-
 export type AgentLane = 'main' | 'subagent';
+type EventProvenance = NonNullable<TimelineItem['provenance']>;
+
+export const PROVENANCE_META: Record<EventProvenance, {
+  label: string;
+  sidebar: string;
+  accent: string;
+  pillClass: string;
+}> = {
+  approval_review: {
+    label: 'Review',
+    sidebar: 'review',
+    accent: 'border-l-2 border-l-cobalt/25',
+    pillClass: 'bg-cobalt/10 text-cobalt',
+  },
+  reviewed_session: {
+    label: 'Reviewed session',
+    sidebar: 'reviewed',
+    accent: 'border-l-2 border-l-fg/15',
+    pillClass: 'bg-fg/8 text-fg/45',
+  },
+  subagent: {
+    label: 'Subagent',
+    sidebar: 'subagent',
+    accent: '',
+    pillClass: 'bg-fg/8 text-fg/45',
+  },
+};
 
 /** A subagent's execution window plus display metadata. */
 export interface SubagentRun {
@@ -206,60 +229,44 @@ export interface SubagentRun {
   ongoing: boolean;
   /** What the run represents: a launched subagent or an inlined review. */
   kind: 'subagent' | 'review';
-  /**
-   * For synthetic spans (Cursor subagents, Codex reviews) the child session
-   * whose inlined events this run groups. Native Claude spans leave this unset
-   * and fall back to time-window membership.
-   */
+  /** Linked child/review session represented by this run, when known. */
   childSessionId?: string;
 }
 
-function inWindow(ts: string, start: string, end: string | null): boolean {
-  if (ts < start) return false;
-  return end == null ? true : ts <= end;
+function fromReadModelRun(run: TimelineRun): SubagentRun {
+  return {
+    item: run.item,
+    label: run.label,
+    start: toTimestampString(run.start),
+    end: run.end == null ? null : toTimestampString(run.end),
+    status: run.status ?? null,
+    durationMs: run.duration_ms ?? null,
+    ongoing: run.ongoing,
+    kind: run.kind,
+    childSessionId: run.child_session_id,
+  };
 }
 
-/**
- * Subagent runs in a session, built from the merged timeline's `subagent`
- * spans. Pass the merged `detail.timeline` (not `detail.events`, which is
- * unmerged and would double-count Pre/Post).
- */
-export function subagentRuns(timeline: TimelineItem[]): SubagentRun[] {
-  return timeline
-    .filter((it) => it.category === 'subagent' && (it.start_ts || it.ts))
-    .map((it): SubagentRun => ({
-      item: it,
-      label: subagentLabel(it),
-      start: toTimestampString(it.start_ts || it.ts),
-      end: it.end_ts == null ? null : toTimestampString(it.end_ts),
-      status: it.status ?? null,
-      durationMs: it.duration_ms ?? null,
-      ongoing: it.ongoing ?? it.end_ts == null,
-      kind: it.subagent_run_kind === 'approval_review' ? 'review' : 'subagent',
-      childSessionId: it.subagent_child_session,
-    }))
-    .sort((a, b) => a.start.localeCompare(b.start));
+export function sessionRuns(detail: SessionDetail): SubagentRun[] {
+  return detail.timeline_runs.map(fromReadModelRun);
 }
 
-/** Human label for a subagent span — title holds type/description; target is the stable id. */
-function subagentLabel(it: TimelineItem): string {
-  const title = it.title?.trim();
-  if (title && title !== 'Subagent') return title;
-  const target = it.target?.trim();
-  if (target && !target.startsWith('call_') && !target.startsWith('toolu_')) return target;
-  return 'Subagent';
+export function parentTimelineItems(detail: SessionDetail): TimelineItem[] {
+  return (
+    detail.timeline ??
+    detail.events.filter((item) => eventSessionId(item, detail.summary.id) === detail.summary.id)
+  );
 }
 
-/** Whether an action falls within any subagent run window. */
-export function itemLane(item: TimelineItem, runs: SubagentRun[]): AgentLane {
+/** Whether an action belongs to a backend-owned subagent/review run. */
+export function itemLane(item: TimelineItem): AgentLane {
   if (!ACTION_CATEGORIES.has(item.category)) return 'main';
-  const ts = eventTimestamp(item);
-  return runs.some((r) => inWindow(ts, r.start, r.end)) ? 'subagent' : 'main';
+  return item.run_id == null && !item.run_ids?.length ? 'main' : 'subagent';
 }
 
 /** Session that owns an event row (parent session or an inlined review session). */
 export function eventSessionId(item: TimelineItem, parentSessionId: string): string {
-  return item.event_session_id ?? parentSessionId;
+  return item.owner_session_id ?? item.event_session_id ?? parentSessionId;
 }
 
 /** Stable key for selection/scrolling when parent and review sessions share event ids. */
@@ -267,27 +274,18 @@ export function eventKey(item: TimelineItem, parentSessionId: string): string {
   return `${eventSessionId(item, parentSessionId)}:${item.id}`;
 }
 
-/** Action events whose timestamp falls inside a single run's window. */
+/** Action events that belong to a single backend-owned run. */
 export function actionsInRun(items: TimelineItem[], run: SubagentRun): TimelineItem[] {
-  return items.filter(
-    (it) => ACTION_CATEGORIES.has(it.category) && inWindow(eventTimestamp(it), run.start, run.end),
-  );
+  return items.filter((it) => ACTION_CATEGORIES.has(it.category) && eventBelongsToRun(it, run.item.id));
 }
 
 /** Events worth showing inside a subagent group. */
 export function eventsInRun(items: TimelineItem[], run: SubagentRun): TimelineItem[] {
-  // Synthetic spans (Cursor subagents, Codex reviews) own a whole child
-  // session: group by that session id so every event nests — including the
-  // child's own prompt and lifecycle rows that the category filter would drop.
-  if (run.childSessionId) {
-    return items.filter(
-      (it) => it.event_session_id === run.childSessionId && it.id !== run.item.id,
-    );
-  }
-  // Native Claude spans: members are whatever falls inside the time window.
-  return items.filter(
-    (it) => SUBAGENT_CONTENT_CATEGORIES.has(it.category) && inWindow(eventTimestamp(it), run.start, run.end),
-  );
+  return items.filter((it) => eventBelongsToRun(it, run.item.id) && it.id !== run.item.id);
+}
+
+function eventBelongsToRun(item: TimelineItem, runId: number): boolean {
+  return item.run_id === runId || item.run_ids?.includes(runId) === true;
 }
 
 /** Whether any two runs overlap in time (i.e. ran in parallel). */
@@ -336,7 +334,8 @@ export interface MetricCard {
 }
 
 export function metricCardsFor(detail: SessionDetail): MetricCard[] {
-  const { summary, components, timeline } = detail;
+  const { summary, components } = detail;
+  const timeline = parentTimelineItems(detail);
   const count = (cat: string) => timeline.filter((t) => t.category === cat).length;
   const cards: MetricCard[] = [
     { key: 'events', label: 'Events', value: summary.event_count, icon: 'event' },
