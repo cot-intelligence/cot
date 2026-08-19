@@ -2,3 +2,6 @@ target-version = "py312"
 
 [lint]
 select = ["SLF001"]
+
+[lint.per-file-ignores]
+"backend/tests/**" = ["SLF001"]

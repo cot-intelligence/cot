@@ -978,7 +978,7 @@ def _repeat_blocked(snap: Snapshot) -> list[dict[str, Any]]:
 # --- engine -------------------------------------------------------------------
 
 
-def _cutoff_iso(days: int) -> str | None:
+def cutoff_iso(days: int) -> str | None:
     if days <= 0:
         return None
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
@@ -1071,7 +1071,7 @@ def compute_insights(days: int = 30, session_id: str | None = None) -> dict[str,
     lifecycle; per-session mode is ephemeral.
     """
     snap = build_snapshot(
-        cutoff=None if session_id else _cutoff_iso(days),
+        cutoff=None if session_id else cutoff_iso(days),
         session_id=session_id,
     )
     findings: list[dict[str, Any]] = []

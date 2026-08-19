@@ -183,7 +183,7 @@ def build_payload(days: int = 30) -> dict[str, Any]:
         "fun": m.get("fun"),
     }
 
-    cutoff = insights._cutoff_iso(days)
+    cutoff = insights.cutoff_iso(days)
     sql = (
         "SELECT session_id, ts, category, detail FROM events"
         " WHERE category IN ('thought', 'response')"

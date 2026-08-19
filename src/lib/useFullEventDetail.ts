@@ -6,13 +6,13 @@ type FullDetail = {
   attachments: TimelineItem['attachments'];
 };
 
-function lookupFor(item: TimelineItem, fallbackSessionId: string) {
+function lookupFor(item: TimelineItem, fallbackSessionId?: string) {
   const sessionId = item.detail_lookup?.session_id ?? fallbackSessionId;
   const eventId = item.detail_lookup?.event_id ?? item.id;
-  return { sessionId, eventId, key: `${sessionId}:${eventId}` };
+  return { sessionId, eventId, key: sessionId ? `${sessionId}:${eventId}` : null };
 }
 
-export function useFullEventDetail(item: TimelineItem | null, sessionId: string) {
+export function useFullEventDetail(item: TimelineItem | null, sessionId?: string) {
   const [fullByKey, setFullByKey] = useState<Record<string, FullDetail>>({});
   const [failedKey, setFailedKey] = useState<string | null>(null);
   const lookup = item ? lookupFor(item, sessionId) : null;

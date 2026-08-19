@@ -285,7 +285,7 @@ function SubagentResultCard({ item, sessionId }: { item: TimelineItem; sessionId
   return (
     <ConversationCard
       item={{
-        ...resolved,
+        ...(resolved ?? item),
         category: 'response',
         title: 'Agent response',
         detail: message,
