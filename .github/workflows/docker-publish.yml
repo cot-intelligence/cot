@@ -65,3 +65,33 @@ jobs:
             -f visibility=public
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  create-release:
+    if: github.ref_type == 'tag'
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub release
+        run: |
+          release_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}"
+          if curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "${release_url}" >/dev/null; then
+            exit 0
+          fi
+
+          payload=$(jq --null-input \
+            --arg tag "${GITHUB_REF_NAME}" \
+            '{tag_name: $tag, name: $tag, generate_release_notes: true}')
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases" \
+            --data "${payload}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
