@@ -26,13 +26,16 @@ type DashboardRoute =
   | { view: 'list' }
   | { view: 'session'; sessionId: string; focusEventId?: number }
   | { view: 'overview' }
-  | { view: 'metrics-history' }
+  | { view: 'metrics-history'; tab?: MetricsHistoryTab }
   | { view: 'settings' };
+
+type MetricsHistoryTab = 'shell' | 'web';
 
 function parseHash(): DashboardRoute {
   const hash = window.location.hash.replace(/^#\/?/, '');
   if (hash === 'settings') return { view: 'settings' };
-  if (hash === 'metrics-history') return { view: 'metrics-history' };
+  const historyMatch = hash.match(/^metrics-history(?:\?tab=(shell|web))?$/);
+  if (historyMatch) return { view: 'metrics-history', tab: historyMatch[1] as MetricsHistoryTab | undefined };
   // Legacy #/metrics and #/insights merged into the unified Overview page.
   if (hash === 'overview' || hash === 'metrics' || hash === 'insights') return { view: 'overview' };
   // #/session/<id> optionally followed by ?e=<eventId> to focus one event.
@@ -120,9 +123,9 @@ export function Dashboard({ onSetup }: DashboardProps) {
     window.location.hash = '#/overview';
   }, []);
 
-  const goMetricsHistory = useCallback(() => {
-    setRoute({ view: 'metrics-history' });
-    window.location.hash = '#/metrics-history';
+  const goMetricsHistory = useCallback((tab: MetricsHistoryTab = 'shell') => {
+    setRoute({ view: 'metrics-history', tab });
+    window.location.hash = tab === 'web' ? '#/metrics-history?tab=web' : '#/metrics-history';
   }, []);
 
   const selectedId = route.view === 'session' ? route.sessionId : null;
@@ -243,7 +246,11 @@ export function Dashboard({ onSetup }: DashboardProps) {
         ) : onMetricsHistory ? (
           <main className="flex min-w-0 flex-1 flex-col bg-bg/80">
             <Suspense fallback={<MetricsSkeleton />}>
-              <MetricsHistoryView onSelect={selectSession} onBack={goOverview} />
+              <MetricsHistoryView
+                onSelect={selectSession}
+                onBack={goOverview}
+                initialTab={route.view === 'metrics-history' ? route.tab : undefined}
+              />
             </Suspense>
           </main>
         ) : onOverview ? (

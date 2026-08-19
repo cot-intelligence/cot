@@ -6,7 +6,7 @@ import {
   type AiInsightItem,
   type Settings,
 } from '../../lib/api';
-import { formatRelative } from '../../lib/categoryMeta';
+import { formatDateTime, formatRelative } from '../../lib/categoryMeta';
 import { Icon } from '../ui/icons';
 import { SeverityBadge } from './insightStrip';
 
@@ -105,37 +105,48 @@ export function AiInsightsSection({
     }
   };
 
+  const runControls = (
+    <div className="flex flex-wrap items-center gap-3">
+      <button
+        type="button"
+        onClick={run}
+        disabled={running || !configured || envDisabled}
+        title={disabledHint ?? 'Send masked aggregates to your provider for analysis'}
+        className="flex shrink-0 items-center gap-2 border border-fg/25 px-3 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/75 shadow-brutal-sm transition-colors enabled:hover:border-vermilion enabled:hover:text-vermilion disabled:cursor-not-allowed disabled:opacity-50 focus-visible:border-vermilion focus-visible:outline-none">
+        <Icon name="brain" className="h-3.5 w-3.5" />
+        {running ? 'Analyzing… (can take a minute)' : 'Run analysis'}
+      </button>
+      {disabledHint && (
+        <span className="font-mono text-[0.62rem] text-fg/45">
+          {disabledHint}
+          {!envDisabled && (
+            <>
+              {' — '}
+              <a href="#/settings" className="underline transition-colors hover:text-vermilion">
+                open Settings
+              </a>
+            </>
+          )}
+        </span>
+      )}
+      {latest && !running && (
+        <span
+          className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/35"
+          title={formatDateTime(latest.created_at)}>
+          Generated {formatRelative(latest.created_at)}
+        </span>
+      )}
+      {!latest && configured && !envDisabled && !running && (
+        <span className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/35">
+          Secret-masked before sending · never automatic
+        </span>
+      )}
+    </div>
+  );
+
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          onClick={run}
-          disabled={running || !configured || envDisabled}
-          title={disabledHint ?? 'Send masked aggregates to your provider for analysis'}
-          className="flex shrink-0 items-center gap-2 border border-fg/25 px-3 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/75 shadow-brutal-sm transition-colors enabled:hover:border-vermilion enabled:hover:text-vermilion disabled:cursor-not-allowed disabled:opacity-50 focus-visible:border-vermilion focus-visible:outline-none">
-          <Icon name="brain" className="h-3.5 w-3.5" />
-          {running ? 'Analyzing… (can take a minute)' : 'Run analysis'}
-        </button>
-        {disabledHint && (
-          <span className="font-mono text-[0.62rem] text-fg/45">
-            {disabledHint}
-            {!envDisabled && (
-              <>
-                {' — '}
-                <a href="#/settings" className="underline transition-colors hover:text-vermilion">
-                  open Settings
-                </a>
-              </>
-            )}
-          </span>
-        )}
-        {configured && !envDisabled && !running && (
-          <span className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/35">
-            Uses your {settings?.ai_provider} key · secret-masked before sending · never automatic
-          </span>
-        )}
-      </div>
+      {!latest && runControls}
 
       {runError && (
         <p className="border-l-[3px] border-vermilion pl-2.5 font-mono text-[0.68rem] leading-relaxed text-vermilion">
@@ -202,6 +213,8 @@ export function AiInsightsSection({
           )}
         </div>
       )}
+
+      {latest && runControls}
     </div>
   );
 }

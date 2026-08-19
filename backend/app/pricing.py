@@ -27,17 +27,26 @@ _DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
 _CLAUDE_RE = re.compile(r"^(claude-(?:opus|sonnet|haiku|fable)-\d+-\d+)")
 # Claude 3.x legacy: claude-3-5-sonnet-20241022 → claude-3-5-sonnet
 _CLAUDE3_RE = re.compile(r"^(claude-3(?:-\d)?-(?:opus|sonnet|haiku))")
-# Alternate naming: claude-<version>-<family> (e.g. claude-4.5-sonnet)
-_CLAUDE_ALT_RE = re.compile(r"^claude-[\d.]+-(?:opus|sonnet|haiku|fable)$")
 # Remap claude-<version>-<family> → claude-<family>-<major>
-_CLAUDE_ALT_REMAP_RE = re.compile(r"^claude-([\d.]+)-(opus|sonnet|haiku|fable)$")
+_CLAUDE_ALT_REMAP_RE = re.compile(
+    r"^claude-([\d.]+)-(opus|sonnet|haiku|fable)"
+    r"(?:-(?:low|medium|high|xhigh))?$"
+)
 # Trailing noise: [1m], -thinking-high, etc.
 _TRAILING_NOISE_RE = re.compile(r"(\[.*\]|-thinking(?:-\w+)?)$")
 # GPT routing variants: gpt-5.5-codex → gpt-5.5, gpt-5.5-medium → gpt-5.5
 # Only for models with a dot-version (5.4+); gpt-5-codex is a distinct model.
 _GPT_VARIANT_RE = re.compile(r"^(gpt-\d+\.\d+)-(codex|medium)$")
-# Composer fast variant: composer-2.5-fast → composer-2.5
-_COMPOSER_FAST_RE = re.compile(r"^(composer-[\d.]+)-fast$")
+# Effort suffixes do not change GPT pricing.
+_GPT_EFFORT_RE = re.compile(
+    r"^(gpt-\d+(?:\.\d+)?(?:-(?:sol|terra|luna|codex))?)"
+    r"-(?:low|medium|high|xhigh)$"
+)
+# Cursor Grok slugs encode effort and speed. Effort is free; Fast has its own rate.
+_CURSOR_GROK_RE = re.compile(
+    r"^(?:cursor-)?grok-(\d+\.\d+)"
+    r"(?:-(?:low|medium|high|xhigh))?(-fast)?$"
+)
 
 
 def _load_bundled() -> dict[str, dict[str, float]]:
@@ -160,14 +169,25 @@ def normalize_model(model: str | None) -> str | None:
         version = alt.group(1).replace(".", "-")
         family = alt.group(2)
         return f"claude-{family}-{version}"
+    # cursor-grok-4.5-high-fast → cursor-grok-4.5-fast
+    grok = _CURSOR_GROK_RE.match(m)
+    if grok:
+        fast = "-fast" if grok.group(2) else ""
+        return f"cursor-grok-{grok.group(1)}{fast}"
+    # gpt-5.6-sol-medium → gpt-5.6-sol
+    effort = _GPT_EFFORT_RE.match(m)
+    if effort:
+        return effort.group(1)
+    # GPT-5.3 Codex is a separately priced model, not a routing suffix.
+    if m == "gpt-5.3-codex":
+        return m
+    # The Codex product records code-review work under a routing alias.
+    if m == "codex-auto-review":
+        return "gpt-5.3-codex"
     # gpt-5.5-codex → gpt-5.5 (codex is a routing variant, same model pricing)
     gpt = _GPT_VARIANT_RE.match(m)
     if gpt:
         return gpt.group(1)
-    # composer-2.5-fast → composer-2.5 (fast is a tier, not a different model)
-    comp = _COMPOSER_FAST_RE.match(m)
-    if comp:
-        return comp.group(1)
     return m
 
 

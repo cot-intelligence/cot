@@ -31,7 +31,7 @@ import { ShareCardModal } from './ShareCardModal';
 
 interface OverviewViewProps {
   onSelect: (id: string, eventId?: number) => void;
-  onHistory?: () => void;
+  onHistory?: (tab?: 'shell' | 'web') => void;
 }
 
 const WINDOWS: { label: string; days: number }[] = [
@@ -487,11 +487,11 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
           <FadeIn delay={0.11}>
             <Section n="10" title="By the numbers">
               <Grid cols="grid-cols-2 sm:grid-cols-3">
-                <Fact icon="terminal" label="Shell commands" value={compact(fun.shell_commands)} onClick={onHistory} />
+                <Fact icon="terminal" label="Shell commands" value={compact(fun.shell_commands)} onClick={() => onHistory?.('shell')} />
                 <Fact icon="file" label="Files touched" value={compact(fun.files_touched)} />
                 <Fact icon="edit" label="Edits / reads" value={`${compact(fun.files_edited)} / ${compact(fun.files_read)}`} />
                 <Fact icon="plug" label="MCP calls" value={compact(fun.mcp_calls)} />
-                <Fact icon="globe" label="Web fetches" value={compact(fun.web_calls)} onClick={onHistory} />
+                <Fact icon="globe" label="Web fetches" value={compact(fun.web_calls)} onClick={() => onHistory?.('web')} />
                 <Fact icon="chat" label="Prompts / replies" value={`${compact(fun.prompts)} / ${compact(fun.responses)}`} />
                 <Fact icon="brain" label="Thoughts" value={compact(fun.thoughts)} />
                 <Fact icon="search" label="Favorite tool" value={fun.top_tool ?? '—'} />

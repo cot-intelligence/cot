@@ -58,6 +58,8 @@ export function SettingsView({
   const [exportOpen, setExportOpen] = useState(false);
   const [aiKeyInput, setAiKeyInput] = useState('');
   const [aiModelInput, setAiModelInput] = useState('');
+  const [aiEndpointInput, setAiEndpointInput] = useState('');
+  const [aiConnectionOpen, setAiConnectionOpen] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const savedAgents = readSavedAgents();
@@ -76,6 +78,8 @@ export function SettingsView({
         if (active) {
           setSettings(data);
           setAiModelInput(data.ai_model ?? '');
+          setAiEndpointInput(data.ai_endpoint ?? '');
+          setAiConnectionOpen(!data.ai_configured);
         }
       })
       .catch(() => {
@@ -133,6 +137,38 @@ export function SettingsView({
     const value = aiKeyInput.trim();
     if (!value) return;
     if (await patchAi({ ai_api_key: value })) setAiKeyInput('');
+  };
+
+  const saveAiModel = async () => {
+    if (!settings) return;
+    const value = aiModelInput.trim();
+    if (value === (settings.ai_model ?? '')) return;
+    const next = await patchAi({ ai_model: value });
+    if (next) setAiModelInput(next.ai_model ?? '');
+  };
+
+  const saveAiEndpoint = async () => {
+    if (!settings) return;
+    const value = aiEndpointInput.trim();
+    if (value === (settings.ai_endpoint ?? '')) return;
+    const next = await patchAi({ ai_endpoint: value });
+    if (next) setAiEndpointInput(next.ai_endpoint ?? '');
+  };
+
+  const saveAiConnection = async () => {
+    if (!settings) return;
+    const patch: Parameters<typeof updateSettings>[0] = {
+      ai_model: aiModelInput.trim(),
+      ai_endpoint: aiEndpointInput.trim(),
+    };
+    if (aiKeyInput.trim()) patch.ai_api_key = aiKeyInput.trim();
+    const next = await patchAi(patch);
+    if (next) {
+      setAiKeyInput('');
+      setAiModelInput(next.ai_model ?? '');
+      setAiEndpointInput(next.ai_endpoint ?? '');
+      setAiConnectionOpen(false);
+    }
   };
 
   const setRetentionEnabled = async (enabled: boolean) => {
@@ -346,19 +382,29 @@ export function SettingsView({
                   Disabled for this deployment via COT_DISABLE_LLM.
                 </p>
               )}
-              <PreferenceRow label="Provider" hint="Which API your key belongs to.">
-                <div className="flex gap-1 rounded-md bg-panel p-1">
-                  {(['anthropic', 'openai'] as const).map((p) => (
-                    <ToggleChip
-                      key={p}
-                      label={p === 'anthropic' ? 'Anthropic' : 'OpenAI'}
-                      active={settings?.ai_provider === p}
-                      disabled={!settings || settings.ai_env_disabled || aiBusy}
-                      onClick={() => void patchAi({ ai_provider: p })}
-                    />
-                  ))}
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-surface p-4 shadow-soft">
+                <div className="min-w-0 space-y-1">
+                  <p className="font-mono text-sm font-bold text-fg">
+                    {settings?.ai_configured ? 'AI connection configured' : 'No AI connection'}
+                  </p>
+                  <p className="truncate font-mono text-xs text-fg/45" title={settings?.ai_effective_endpoint}>
+                    {settings
+                      ? `${settings.ai_provider === 'openai' ? 'OpenAI' : 'Anthropic'} · ${
+                          settings.ai_model ?? settings.ai_default_model
+                        } · ${settings.ai_effective_endpoint}`
+                      : 'Loading connection state…'}
+                  </p>
                 </div>
-              </PreferenceRow>
+                <button
+                  type="button"
+                  onClick={() => setAiConnectionOpen((open) => !open)}
+                  disabled={!settings || settings.ai_env_disabled || aiBusy}
+                  className="shrink-0 border border-fg/25 px-3 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/75 shadow-soft transition-colors hover:border-vermilion hover:text-vermilion disabled:cursor-not-allowed disabled:opacity-40">
+                  {aiConnectionOpen ? 'Hide form' : settings?.ai_configured ? 'Edit connection' : 'Add connection'}
+                </button>
+              </div>
+              {aiConnectionOpen && (
+                <div className="space-y-4 rounded-lg bg-surface p-4 shadow-soft">
               <PreferenceRow
                 label="API key"
                 hint={
@@ -373,27 +419,12 @@ export function SettingsView({
                     type="password"
                     value={aiKeyInput}
                     onChange={(e) => setAiKeyInput(e.target.value)}
+                    onBlur={() => void saveAiKey()}
                     placeholder={settings?.ai_provider === 'openai' ? 'sk-…' : 'sk-ant-…'}
                     autoComplete="off"
-                    disabled={!settings || settings.ai_env_disabled || aiBusy}
+                    disabled={!settings || settings.ai_env_disabled}
                     className="w-52 rounded-md bg-panel px-3 py-1.5 font-mono text-xs text-fg placeholder:text-fg/30 focus:outline-none focus:ring-1 focus:ring-vermilion disabled:cursor-not-allowed disabled:opacity-40"
                   />
-                  <button
-                    type="button"
-                    onClick={() => void saveAiKey()}
-                    disabled={!settings || settings.ai_env_disabled || aiBusy || !aiKeyInput.trim()}
-                    className="rounded px-3 py-1.5 font-mono text-[0.65rem] font-bold uppercase tracking-widest bg-surface text-fg shadow-soft transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40">
-                    Save
-                  </button>
-                  {settings?.ai_configured && settings.ai_key_source === 'db' && (
-                    <button
-                      type="button"
-                      onClick={() => void patchAi({ ai_api_key: '' })}
-                      disabled={aiBusy}
-                      className="rounded px-3 py-1.5 font-mono text-[0.65rem] font-bold uppercase tracking-widest text-fg/45 transition-colors hover:text-vermilion disabled:cursor-not-allowed disabled:opacity-40">
-                      Clear
-                    </button>
-                  )}
                 </div>
               </PreferenceRow>
               <PreferenceRow
@@ -404,25 +435,48 @@ export function SettingsView({
                     type="text"
                     value={aiModelInput}
                     onChange={(e) => setAiModelInput(e.target.value)}
+                    onBlur={() => void saveAiModel()}
                     placeholder={settings?.ai_default_model}
                     autoComplete="off"
-                    disabled={!settings || settings.ai_env_disabled || aiBusy}
+                    disabled={!settings || settings.ai_env_disabled}
                     className="w-52 rounded-md bg-panel px-3 py-1.5 font-mono text-xs text-fg placeholder:text-fg/30 focus:outline-none focus:ring-1 focus:ring-vermilion disabled:cursor-not-allowed disabled:opacity-40"
                   />
-                  <button
-                    type="button"
-                    onClick={() => void patchAi({ ai_model: aiModelInput.trim() })}
-                    disabled={
-                      !settings ||
-                      settings.ai_env_disabled ||
-                      aiBusy ||
-                      aiModelInput.trim() === (settings.ai_model ?? '')
-                    }
-                    className="rounded px-3 py-1.5 font-mono text-[0.65rem] font-bold uppercase tracking-widest bg-surface text-fg shadow-soft transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40">
-                    Save
-                  </button>
                 </div>
               </PreferenceRow>
+              <PreferenceRow
+                label="Endpoint"
+                hint={`Optional override — default is ${settings?.ai_default_endpoint ?? '…'}.`}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="url"
+                    value={aiEndpointInput}
+                    onChange={(e) => setAiEndpointInput(e.target.value)}
+                    onBlur={() => void saveAiEndpoint()}
+                    placeholder={settings?.ai_default_endpoint}
+                    autoComplete="off"
+                    disabled={!settings || settings.ai_env_disabled}
+                    className="w-full min-w-[16rem] max-w-md rounded-md bg-panel px-3 py-1.5 font-mono text-xs text-fg placeholder:text-fg/30 focus:outline-none focus:ring-1 focus:ring-vermilion disabled:cursor-not-allowed disabled:opacity-40"
+                  />
+                </div>
+              </PreferenceRow>
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => void saveAiConnection()}
+                  disabled={
+                    !settings ||
+                    settings.ai_env_disabled ||
+                    aiBusy ||
+                    (!aiKeyInput.trim() &&
+                      aiModelInput.trim() === (settings.ai_model ?? '') &&
+                      aiEndpointInput.trim() === (settings.ai_endpoint ?? ''))
+                  }
+                  className="border border-fg bg-fg px-4 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-bg shadow-soft transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40">
+                  Save connection
+                </button>
+              </div>
+                </div>
+              )}
               {aiError && <p className="font-mono text-xs text-vermilion">{aiError}</p>}
             </div>
           </Section>

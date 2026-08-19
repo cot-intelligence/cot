@@ -46,7 +46,13 @@ def _fresh_db() -> None:
     _case_counter += 1
     os.environ["COT_DB_PATH"] = os.path.join(_TMP, f"case{_case_counter}.db")
     db.init_db()
-    for var in ("COT_ANTHROPIC_API_KEY", "COT_OPENAI_API_KEY", "COT_DISABLE_LLM"):
+    for var in (
+        "COT_ANTHROPIC_API_KEY",
+        "COT_OPENAI_API_KEY",
+        "COT_ANTHROPIC_ENDPOINT",
+        "COT_OPENAI_ENDPOINT",
+        "COT_DISABLE_LLM",
+    ):
         os.environ.pop(var, None)
 
 
@@ -179,6 +185,35 @@ def test_resolve_config_model_defaults_and_override():
     assert ai_insights.resolve_config().model == "my-custom-model"
 
 
+def test_resolve_config_endpoint_defaults_db_and_env_override():
+    _fresh_db()
+    db.set_setting("ai_api_key", "k")
+    cfg = ai_insights.resolve_config()
+    assert cfg is not None
+    assert cfg.endpoint == ai_insights.ANTHROPIC_URL
+
+    db.set_setting(ai_insights.endpoint_setting_key("anthropic"), "http://localhost:4000/v1/messages")
+    assert ai_insights.resolve_config().endpoint == "http://localhost:4000/v1/messages"
+
+    os.environ["COT_ANTHROPIC_ENDPOINT"] = "http://localhost:5000/v1/messages"
+    assert ai_insights.resolve_config().endpoint == "http://localhost:5000/v1/messages"
+
+
+def test_provider_call_endpoint_accepts_openai_compatible_base_url():
+    assert (
+        ai_insights.provider_call_endpoint("openai", "http://localhost:4000/v1")
+        == "http://localhost:4000/v1/chat/completions"
+    )
+    assert (
+        ai_insights.provider_call_endpoint("openai", "http://localhost:4000/v1/chat/completions")
+        == "http://localhost:4000/v1/chat/completions"
+    )
+    assert (
+        ai_insights.provider_call_endpoint("anthropic", "http://localhost:4000/v1")
+        == "http://localhost:4000/v1/messages"
+    )
+
+
 # --- provider adapters -----------------------------------------------------------
 
 def test_provider_request_shape_anthropic():
@@ -201,6 +236,24 @@ def test_provider_request_shape_anthropic():
     assert body["messages"][0]["content"] == '{"x":1}'
 
 
+def test_provider_request_uses_custom_anthropic_endpoint():
+    _fresh_db()
+    captured: list = []
+    original = _patch_urlopen(_anthropic_response("hello"), captured)
+    try:
+        cfg = ai_insights.AiConfig(
+            "anthropic",
+            FAKE_ANT_KEY,
+            "claude-sonnet-5",
+            "db",
+            "http://localhost:4000/v1/messages",
+        )
+        ai_insights._call_anthropic(cfg, '{"x":1}')
+    finally:
+        urllib.request.urlopen = original
+    assert captured[0].full_url == "http://localhost:4000/v1/messages"
+
+
 def test_provider_request_shape_openai():
     _fresh_db()
     captured: list = []
@@ -218,6 +271,42 @@ def test_provider_request_shape_openai():
     assert body["model"] == "gpt-4o"
     assert body["response_format"] == {"type": "json_object"}
     assert body["messages"][0]["role"] == "system"
+
+
+def test_provider_request_uses_custom_openai_endpoint():
+    _fresh_db()
+    captured: list = []
+    original = _patch_urlopen(_openai_response("hi"), captured)
+    try:
+        cfg = ai_insights.AiConfig(
+            "openai",
+            FAKE_OAI_KEY,
+            "gpt-4o",
+            "db",
+            "http://localhost:4001/v1/chat/completions",
+        )
+        ai_insights._call_openai(cfg, '{"x":1}')
+    finally:
+        urllib.request.urlopen = original
+    assert captured[0].full_url == "http://localhost:4001/v1/chat/completions"
+
+
+def test_provider_request_expands_openai_base_endpoint():
+    _fresh_db()
+    captured: list = []
+    original = _patch_urlopen(_openai_response("hi"), captured)
+    try:
+        cfg = ai_insights.AiConfig(
+            "openai",
+            FAKE_OAI_KEY,
+            "gpt-4o",
+            "db",
+            "http://localhost:4001/v1",
+        )
+        ai_insights._call_openai(cfg, '{"x":1}')
+    finally:
+        urllib.request.urlopen = original
+    assert captured[0].full_url == "http://localhost:4001/v1/chat/completions"
 
 
 # --- result parsing --------------------------------------------------------------
@@ -351,14 +440,29 @@ def test_settings_update_validates_and_audits_without_key():
 
     result = asyncio.run(
         main.update_settings(_FakeRequest({
-            "ai_provider": "openai", "ai_api_key": FAKE_OAI_KEY, "ai_model": "gpt-4o-mini",
+            "ai_provider": "openai",
+            "ai_api_key": FAKE_OAI_KEY,
+            "ai_model": "gpt-4o-mini",
+            "ai_endpoint": "http://localhost:4001/v1/chat/completions",
         }))
     )
     assert result["ai_provider"] == "openai"
     assert result["ai_model"] == "gpt-4o-mini"
+    assert result["ai_endpoint"] == "http://localhost:4001/v1/chat/completions"
+    assert result["ai_effective_endpoint"] == "http://localhost:4001/v1/chat/completions"
     assert FAKE_OAI_KEY not in json.dumps(result)
     audit = json.dumps(db.audit_events())
     assert FAKE_OAI_KEY not in audit
+
+    result = asyncio.run(main.update_settings(_FakeRequest({"ai_endpoint": ""})))
+    assert result["ai_endpoint"] is None
+    assert result["ai_effective_endpoint"] == ai_insights.OPENAI_URL
+
+    try:
+        asyncio.run(main.update_settings(_FakeRequest({"ai_endpoint": "localhost:4001"})))
+        assert False, "expected 400"
+    except HTTPException as exc:
+        assert exc.status_code == 400
 
     try:
         asyncio.run(main.update_settings(_FakeRequest({"ai_provider": "gemini"})))

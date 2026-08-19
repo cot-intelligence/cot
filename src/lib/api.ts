@@ -253,6 +253,9 @@ export interface Settings {
   ai_provider: AiProvider;
   ai_model: string | null;
   ai_default_model: string;
+  ai_endpoint: string | null;
+  ai_default_endpoint: string;
+  ai_effective_endpoint: string;
   ai_configured: boolean;
   /** Shape only (first4+last4); the raw key is never returned. */
   ai_key_masked: string | null;

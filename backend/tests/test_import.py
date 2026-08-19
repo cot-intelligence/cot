@@ -592,6 +592,23 @@ def test_pricing_variants_normalize_to_same_rate():
     assert a == b and a is not None
 
 
+def test_pricing_current_model_aliases_use_published_rates():
+    # Cursor model slugs include effort/speed routing details that are not
+    # separate model families, but Fast variants do have distinct prices.
+    assert _cost_for("composer-2.5-fast", 1_000_000, 0, 0, 0) == 3.0
+    assert _cost_for("cursor-grok-4.5-high-fast", 1_000_000, 0, 0, 0) == 4.0
+    assert _cost_for("cursor-grok-4.6-high-fast", 0, 1_000_000, 0, 0) == 12.0
+    assert _cost_for("claude-4.6-sonnet-medium-thinking", 0, 0, 0, 1_000_000) == 3.75
+
+
+def test_pricing_new_model_families_use_exact_rates():
+    assert _cost_for("claude-opus-5-thinking-high", 0, 1_000_000, 0, 0) == 25.0
+    assert _cost_for("claude-sonnet-5", 0, 1_000_000, 0, 0) == 10.0
+    assert _cost_for("gpt-5.6-sol-medium", 1_000_000, 0, 0, 0) == 5.0
+    assert _cost_for("gpt-5.3-codex", 1_000_000, 0, 0, 0) == 1.75
+    assert _cost_for("codex-auto-review", 0, 0, 1_000_000, 0) == 0.175
+
+
 # --- Hook install merge ------------------------------------------------------
 
 def test_hook_command_uses_home():

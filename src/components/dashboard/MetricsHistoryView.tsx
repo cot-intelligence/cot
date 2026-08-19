@@ -12,6 +12,7 @@ import { TableRowsSkeleton } from '../ui/Skeleton';
 interface MetricsHistoryViewProps {
   onSelect: (sessionId: string, eventId?: number) => void;
   onBack: () => void;
+  initialTab?: Tab;
 }
 
 interface GroupedEntry {
@@ -130,14 +131,18 @@ function groupBg(expanded: boolean) {
   return expanded ? 'bg-surface/25' : '';
 }
 
-export function MetricsHistoryView({ onSelect, onBack }: MetricsHistoryViewProps) {
-  const [tab, setTab] = useState<Tab>('shell');
+export function MetricsHistoryView({ onSelect, onBack, initialTab = 'shell' }: MetricsHistoryViewProps) {
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [items, setItems] = useState<MetricsHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [filter, setFilter] = useState('');
   const [sort, setSort] = useState<SortKey>('recent');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    setTab(initialTab);
+  }, [initialTab]);
 
   useEffect(() => {
     let active = true;
@@ -182,6 +187,11 @@ export function MetricsHistoryView({ onSelect, onBack }: MetricsHistoryViewProps
   const switchTab = (next: Tab) => {
     setTab(next);
     setFilter('');
+    window.history.replaceState(
+      null,
+      '',
+      next === 'web' ? '#/metrics-history?tab=web' : '#/metrics-history',
+    );
   };
 
   return (

@@ -13,6 +13,7 @@ import platform as _platform
 import re
 import threading
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -419,6 +420,7 @@ async def _telemetry_loop() -> None:
 def get_settings() -> dict[str, Any]:
     provider = ai_insights.stored_provider()
     cfg = ai_insights.resolve_config()
+    endpoint_override = ai_insights.stored_endpoint(provider)
     return {
         "install_id": db.get_install_id(),
         "telemetry_enabled": _telemetry_enabled(),
@@ -427,12 +429,30 @@ def get_settings() -> dict[str, Any]:
         "ai_provider": provider,
         "ai_model": (db.get_setting("ai_model") or "").strip() or None,
         "ai_default_model": ai_insights.default_model(provider),
+        "ai_endpoint": endpoint_override,
+        "ai_default_endpoint": ai_insights.default_endpoint(provider),
+        "ai_effective_endpoint": ai_insights.provider_call_endpoint(
+            provider, ai_insights.resolve_endpoint(provider)
+        ),
         "ai_configured": cfg is not None,
         # Shape only (first4+last4); the raw key is never returned.
         "ai_key_masked": insights.mask_secret(cfg.api_key) if cfg else None,
         "ai_key_source": cfg.key_source if cfg else None,
         "ai_env_disabled": ai_insights.env_disabled(),
     }
+
+
+def _validate_ai_endpoint(value: str) -> str:
+    endpoint = value.strip()
+    if not endpoint:
+        return ""
+    parsed = urllib.parse.urlparse(endpoint)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise HTTPException(
+            status_code=400,
+            detail="ai_endpoint must be a full http(s) URL",
+        )
+    return endpoint
 
 
 @app.put("/v1/settings")
@@ -463,6 +483,13 @@ async def update_settings(request: Request) -> dict[str, Any]:
     if "ai_model" in body:
         db.set_setting("ai_model", str(body["ai_model"] or "").strip())
         ai_changed = True
+    if "ai_endpoint" in body:
+        provider = ai_insights.stored_provider()
+        db.set_setting(
+            ai_insights.endpoint_setting_key(provider),
+            _validate_ai_endpoint(str(body["ai_endpoint"] or "")),
+        )
+        ai_changed = True
     if "ai_api_key" in body:
         # Write-only: stored, audited as a boolean, never echoed back.
         db.set_setting("ai_api_key", str(body["ai_api_key"] or "").strip())
@@ -474,6 +501,7 @@ async def update_settings(request: Request) -> dict[str, Any]:
             detail={
                 "provider": db.get_setting("ai_provider", "anthropic"),
                 "model": (db.get_setting("ai_model") or "").strip() or None,
+                "endpoint_set": bool(ai_insights.stored_endpoint(ai_insights.stored_provider())),
                 "key_set": bool((db.get_setting("ai_api_key") or "").strip()),
             },
         )

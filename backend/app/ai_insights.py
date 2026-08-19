@@ -32,15 +32,20 @@ from . import __version__, db, insights, store
 PROVIDERS = ("anthropic", "openai")
 DEFAULT_MODELS = {"anthropic": "claude-sonnet-5", "openai": "gpt-4o"}
 ENV_KEYS = {"anthropic": "COT_ANTHROPIC_API_KEY", "openai": "COT_OPENAI_API_KEY"}
+ENV_ENDPOINTS = {
+    "anthropic": "COT_ANTHROPIC_ENDPOINT",
+    "openai": "COT_OPENAI_ENDPOINT",
+}
 
 MAX_FINDINGS = 50
 MAX_EXCERPTS = 40
 MAX_EXCERPT_CHARS = 1500
 REQUEST_TIMEOUT = 120  # seconds; provider calls run 10-60s
-MAX_OUTPUT_TOKENS = 4096
+MAX_OUTPUT_TOKENS = 2000
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+DEFAULT_ENDPOINTS = {"anthropic": ANTHROPIC_URL, "openai": OPENAI_URL}
 
 SYSTEM_PROMPT = """You are an analyst for "cot", a local observability tool for AI coding agents (Claude Code, Cursor, Codex). You receive a JSON payload with:
 - "findings": rule-based issues already detected locally (pillars: usability, cost, security)
@@ -83,6 +88,7 @@ class AiConfig:
     api_key: str
     model: str
     key_source: str  # 'env' | 'db'
+    endpoint: str | None = None
 
 
 def env_disabled() -> bool:
@@ -98,6 +104,33 @@ def default_model(provider: str) -> str:
     return DEFAULT_MODELS.get(provider, DEFAULT_MODELS["anthropic"])
 
 
+def default_endpoint(provider: str) -> str:
+    return DEFAULT_ENDPOINTS.get(provider, DEFAULT_ENDPOINTS["anthropic"])
+
+
+def endpoint_setting_key(provider: str) -> str:
+    return f"ai_{provider}_endpoint"
+
+
+def stored_endpoint(provider: str) -> str | None:
+    return (db.get_setting(endpoint_setting_key(provider)) or "").strip() or None
+
+
+def resolve_endpoint(provider: str) -> str:
+    env_endpoint = os.environ.get(ENV_ENDPOINTS[provider], "").strip()
+    return env_endpoint or stored_endpoint(provider) or default_endpoint(provider)
+
+
+def provider_call_endpoint(provider: str, endpoint: str | None) -> str:
+    """Final URL to call. OpenAI-compatible proxies often ask for just /v1."""
+    raw = (endpoint or default_endpoint(provider)).rstrip("/")
+    if provider == "openai" and raw.endswith("/v1"):
+        return f"{raw}/chat/completions"
+    if provider == "anthropic" and raw.endswith("/v1"):
+        return f"{raw}/messages"
+    return raw
+
+
 def resolve_config() -> AiConfig | None:
     """Effective provider/key/model, or None when no key is configured."""
     provider = stored_provider()
@@ -110,7 +143,8 @@ def resolve_config() -> AiConfig | None:
     if not key:
         return None
     model = (db.get_setting("ai_model") or "").strip() or default_model(provider)
-    return AiConfig(provider=provider, api_key=key, model=model, key_source=source)
+    endpoint = resolve_endpoint(provider)
+    return AiConfig(provider=provider, api_key=key, model=model, key_source=source, endpoint=endpoint)
 
 
 def mask_text(text: str) -> str:
@@ -214,7 +248,7 @@ def _post_json(url: str, headers: dict[str, str], body: dict[str, Any]) -> dict[
 
 def _call_anthropic(cfg: AiConfig, payload_json: str) -> str:
     data = _post_json(
-        ANTHROPIC_URL,
+        provider_call_endpoint("anthropic", cfg.endpoint),
         {"x-api-key": cfg.api_key, "anthropic-version": "2023-06-01"},
         {
             "model": cfg.model,
@@ -231,7 +265,7 @@ def _call_anthropic(cfg: AiConfig, payload_json: str) -> str:
 
 def _call_openai(cfg: AiConfig, payload_json: str) -> str:
     data = _post_json(
-        OPENAI_URL,
+        provider_call_endpoint("openai", cfg.endpoint),
         {"Authorization": f"Bearer {cfg.api_key}"},
         {
             "model": cfg.model,
