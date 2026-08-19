@@ -231,7 +231,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
         </div>
       </header>
 
-      <div className="relative z-10 flex flex-1 overflow-hidden">
+      <div className="relative z-10 flex min-h-0 flex-1 overflow-hidden">
         {onSettings ? (
           <main className="flex min-w-0 flex-1 flex-col bg-bg/80">
             <SettingsView
@@ -272,7 +272,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
                 onToggle={toggleSidebar}
               />
             </div>
-            <main className="flex min-w-0 flex-1 flex-col bg-bg/80">
+            <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-bg/80">
               <SessionDetailView
                 sessionId={selectedId}
                 focusEventId={route.view === 'session' ? route.focusEventId : undefined}

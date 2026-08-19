@@ -143,7 +143,7 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
     && categories.every((c) => c.cat === 'subagent' || hidden.has(c.cat));
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       {/* Filter bar */}
       <div className="shrink-0 border-b border-line/10 px-6 py-2 sm:px-8">
         <div className="mx-auto flex max-w-7xl items-center gap-2">
@@ -208,11 +208,11 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
 
       {/* Sidebar + Chat body */}
       <div className="min-h-0 flex-1 px-6 py-3 sm:px-8">
-        <div className="mx-auto flex h-full max-w-7xl overflow-hidden rounded-lg border border-line/10">
+        <div className="mx-auto flex h-full min-h-0 max-w-7xl overflow-hidden rounded-lg border border-line/10">
           {/* Sidebar */}
           <div
             ref={sidebarRef}
-            className="scroll-thin hidden w-60 shrink-0 overflow-y-auto border-r border-line/10 bg-bg lg:block"
+            className="scroll-thin hidden min-h-0 w-60 shrink-0 overflow-y-auto border-r border-line/10 bg-bg lg:block"
           >
             {nested ? (
               <SubagentNestedList
@@ -233,7 +233,7 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
           </div>
 
           {/* Chat body */}
-          <div className="min-w-0 flex-1">
+          <div className="min-h-0 min-w-0 flex-1">
             {sorted.length === 0 && items.length > 0 ? (
               <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
                 <span className="font-mono text-3xl text-fg/10">⦰</span>
@@ -288,7 +288,7 @@ function SidebarList({
   onSelect: (item: TimelineItem) => void;
 }) {
   return (
-    <ul className="divide-y divide-line/10">
+    <ul className="divide-y divide-line/10 pb-4">
       {items.map((item) => {
         const meta = getCategoryMeta(item.category);
         const key = eventKey(item, sessionId);

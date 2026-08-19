@@ -52,7 +52,7 @@ export function MetricsSkeleton() {
 
 export function SessionDetailSkeleton() {
   return (
-    <div className="flex flex-1 flex-col overflow-hidden">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {/* Header */}
       <div className="shrink-0 border-b border-line/10 px-6 py-4 sm:px-8">
         <div className="mx-auto max-w-7xl space-y-2">
@@ -76,7 +76,7 @@ export function SessionDetailSkeleton() {
 
       {/* Sidebar + Chat body */}
       <div className="min-h-0 flex-1 px-6 py-3 sm:px-8">
-        <div className="mx-auto flex h-full max-w-7xl overflow-hidden rounded-lg border border-line/10">
+        <div className="mx-auto flex h-full min-h-0 max-w-7xl overflow-hidden rounded-lg border border-line/10">
           {/* Sidebar skeleton */}
           <div className="hidden w-60 shrink-0 space-y-1 border-r border-line/10 p-2 lg:block">
             {Array.from({ length: 12 }).map((_, i) => (
