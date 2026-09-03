@@ -57,7 +57,12 @@ if [ "${APP_ONLY}" = "0" ]; then
     "${MAC_DIR}/packaging/cot-collector.spec"
 fi
 
-# --- 3. Swift shell -----------------------------------------------------------
+# --- 3. App icon --------------------------------------------------------------
+step "Rendering app icon"
+swift "${MAC_DIR}/packaging/make_icon.swift" "${BUILD_DIR}" >/dev/null
+iconutil -c icns -o "${BUILD_DIR}/AppIcon.icns" "${BUILD_DIR}/AppIcon.iconset"
+
+# --- 4. Swift shell -----------------------------------------------------------
 step "Compiling SwiftUI app"
 rm -rf "${APP}"
 mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
@@ -75,8 +80,10 @@ swiftc \
   -o "${APP}/Contents/MacOS/cot" \
   "${MAC_DIR}"/Sources/*.swift
 
-# --- 4. Assemble --------------------------------------------------------------
+# --- 5. Assemble --------------------------------------------------------------
 step "Assembling bundle"
+cp "${BUILD_DIR}/AppIcon.icns" "${APP}/Contents/Resources/AppIcon.icns"
+
 if [ -d "${BUILD_DIR}/dist/cot-collector" ]; then
   cp -R "${BUILD_DIR}/dist/cot-collector" "${APP}/Contents/Resources/cot-collector"
 else

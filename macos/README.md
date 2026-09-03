@@ -27,6 +27,23 @@ The bundle is ad-hoc signed, which is enough to run locally and to register the
 login item. For a distributable build set `COT_SIGN_IDENTITY` to a Developer ID
 Application identity; the script then also enables the hardened runtime.
 
+## Chrome
+
+The stock titlebar is replaced with a 42pt brand bar: the app icon, and a live
+status pill for the collector (state and port). Traffic lights, drag, and
+double-click-to-zoom all still work.
+
+The dashboard keeps its theme in `localStorage`, not in the system appearance,
+so the bar can't read `colorScheme` — a user script reports `data-theme` back
+over a `WKScriptMessageHandler` and the bar, the window background, and the
+traffic lights follow the page.
+
+`packaging/make_icon.swift` draws `AppIcon.icns` at build time from the same
+mark as `public/apple-touch-icon.svg` — an ink squircle with the vermilion
+italic wordmark — rendering each size at native pixels rather than downscaling
+one master. The titlebar reads the icon back out of the bundle, so redesigning
+the icon updates the Dock, the Finder, and the bar together.
+
 ## How it behaves at launch
 
 The app resolves a port from `~/.cot/config.json` (default **31337**, same as

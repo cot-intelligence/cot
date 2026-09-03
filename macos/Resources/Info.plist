@@ -8,6 +8,8 @@
 	<string>cot</string>
 	<key>CFBundleExecutable</key>
 	<string>cot</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>run.cot.app</string>
 	<key>CFBundlePackageType</key>

@@ -15,6 +15,7 @@ struct CotApp: App {
                 }
         }
         .defaultSize(width: 1280, height: 860)
+        .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(after: .toolbar) {
                 Button("Reload Dashboard") { reloadToken += 1 }
@@ -35,18 +36,27 @@ struct CotApp: App {
 private struct DashboardScene: View {
     @ObservedObject var collector: CollectorController
     let reloadToken: Int
+    /// Mirrors the dashboard's own theme; the status screens have no page to
+    /// read from, so they keep the last theme the dashboard reported.
+    @State private var theme: DashboardTheme = .light
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
+            TitleBarView(collector: collector, theme: theme)
+
             if let url = collector.dashboardURL {
-                DashboardWebView(url: url, reloadToken: reloadToken)
+                DashboardWebView(url: url, reloadToken: reloadToken) { theme = $0 }
             } else {
-                CollectorStatusView(state: collector.state) {
+                CollectorStatusView(state: collector.state, theme: theme) {
                     Task { await collector.restart() }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(theme.background)
             }
         }
         .frame(minWidth: 900, minHeight: 600)
+        .ignoresSafeArea(.container, edges: .top)
+        .background(WindowChrome(theme: theme))
     }
 }
 
