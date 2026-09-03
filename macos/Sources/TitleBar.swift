@@ -1,157 +1,90 @@
 import SwiftUI
 
-/// Brand palette from _DESIGN_LANGUAGE.md. The dashboard owns its own theme
-/// (localStorage, not system appearance), so the titlebar takes its cue from
-/// the page rather than from `colorScheme`.
+/// Brand palette from _DESIGN_LANGUAGE.md.
 enum Brand {
     static let ink = Color(red: 0x11 / 255, green: 0x11 / 255, blue: 0x11 / 255)
     static let cream = Color(red: 0xF4 / 255, green: 0xF0 / 255, blue: 0xEA / 255)
-    static let creamDark = Color(red: 0xE8 / 255, green: 0xE4 / 255, blue: 0xDE / 255)
-    static let vermilion = Color(red: 1, green: 0x45 / 255, blue: 0)
-    static let cobalt = Color(red: 0x2B / 255, green: 0x5C / 255, blue: 0xE6 / 255)
-    static let olive = Color(red: 0x3A / 255, green: 0x4D / 255, blue: 0x39 / 255)
-    /// Olive is near-black against ink; lift it so "live" reads in dark mode.
-    static let oliveLifted = Color(red: 0x7C / 255, green: 0x9A / 255, blue: 0x6B / 255)
 }
 
+/// The dashboard owns its theme (localStorage, not system appearance), so the
+/// window has to hear about it from the page rather than read `colorScheme`.
 enum DashboardTheme: String {
     case light
     case dark
 
-    static let inkRaised = Color(red: 0x1A / 255, green: 0x1A / 255, blue: 0x1A / 255)
-
     var background: Color { self == .dark ? Brand.ink : Brand.cream }
-    /// A half-step off the page ground — `cream-dark` is the design language's
-    /// own "section alternate", and ink gets the same treatment upward.
-    var barBackground: Color { self == .dark ? Self.inkRaised : Brand.creamDark }
     var foreground: Color { self == .dark ? Brand.cream : Brand.ink }
-    var success: Color { self == .dark ? Brand.oliveLifted : Brand.olive }
 
     var appearance: NSAppearance? {
         NSAppearance(named: self == .dark ? .darkAqua : .aqua)
     }
 }
 
-/// The window's own titlebar, replaced. Height matches the dashboard's header
-/// so the two read as one bar; the leading inset clears the traffic lights.
-struct TitleBarView: View {
-    @ObservedObject var collector: CollectorController
-    let theme: DashboardTheme
-
-    private var statusColor: Color {
-        switch collector.state {
-        case .running, .attached: return theme.success
-        case .starting: return Brand.cobalt
-        case .apiOnly, .failed: return Brand.vermilion
-        case .stopped: return theme.foreground.opacity(0.35)
-        }
-    }
-
-    private var statusLabel: String {
-        switch collector.state {
-        case let .running(port, _): return "collecting · \(String(port))"
-        case let .attached(port, _): return "attached · \(String(port))"
-        case .starting: return "starting"
-        case let .apiOnly(port, _): return "api only · \(String(port))"
-        case .stopped: return "stopped"
-        case .failed: return "failed"
-        }
-    }
-
-    var body: some View {
-        ZStack {
-            WindowDragArea()
-
-            HStack(spacing: 10) {
-                AppIconMark()
-                    .frame(width: 20, height: 20)
-
-                StatusPill(color: statusColor, label: statusLabel, theme: theme)
-
-                Spacer(minLength: 0)
-            }
-            .padding(.leading, 78)
-            .padding(.trailing, 16)
-        }
-        .frame(height: 42)
-        .background(theme.barBackground)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(theme.foreground.opacity(0.12))
-                .frame(height: 1)
-        }
-    }
+/// Geometry shared by the window chrome and the injected page CSS: the header
+/// row the dashboard draws, and where the traffic lights have to sit to land on
+/// it. A standard titlebar centres its buttons at y=16, which would force the
+/// header flush against the top edge — so the titlebar is grown instead and the
+/// buttons re-centred in it, leaving the row real breathing room.
+enum HeaderMetrics {
+    /// Height of the shell header's content box (a 32px control row).
+    static let rowHeight: CGFloat = 32
+    /// Breathing room above that row.
+    static let topPadding: CGFloat = 14
+    /// Where the row's centre lands, and so where the traffic lights must.
+    static var rowCenterY: CGFloat { topPadding + rowHeight / 2 }
+    /// Titlebar tall enough to hold the buttons at that centre.
+    static var titlebarHeight: CGFloat { rowCenterY * 2 }
+    /// Left edge of the page content, clear of the buttons.
+    static let contentLeading: CGFloat = 92
 }
 
-/// The app's own icon, read from the bundle — one source of truth with the Dock
-/// and the Finder, so a redesigned icns lands here too.
-private struct AppIconMark: View {
-    var body: some View {
-        if let icon = NSApp.applicationIconImage {
-            Image(nsImage: icon)
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
+/// A chromeless window passes every event in the titlebar band straight through
+/// to the web view, so there is nothing left to drag the window by. This puts a
+/// real handle back in the empty middle of the shell header — clear of the
+/// wordmark on the left and the header controls on the right, which stay
+/// clickable because nothing covers them.
+///
+/// It is installed into the window's frame view — the traffic lights' own
+/// superview — rather than anywhere inside the SwiftUI hierarchy. Both a
+/// representable in an `.overlay` and a subview of the content view draw in the
+/// right place but never receive the mouse: the hosting view hit-tests the
+/// SwiftUI tree, finds nothing interactive, and hands the event to the web view.
+private final class WindowDragHandle: NSView {
+    static let leadingClearance: CGFloat = 150
+    static let trailingClearance: CGFloat = 300
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 {
+            window?.performZoom(nil)
         } else {
-            RoundedRectangle(cornerRadius: 4)
-                .fill(Brand.ink)
-                .overlay(
-                    Text("c")
-                        .font(.system(size: 11, weight: .bold, design: .serif))
-                        .italic()
-                        .foregroundStyle(Brand.vermilion)
-                )
+            window?.performDrag(with: event)
         }
+    }
+
+    static func install(in window: NSWindow) {
+        guard let frameView = window.contentView?.superview,
+              !frameView.subviews.contains(where: { $0 is WindowDragHandle })
+        else { return }
+
+        let handle = WindowDragHandle(frame: .zero)
+        handle.translatesAutoresizingMaskIntoConstraints = false
+        frameView.addSubview(handle, positioned: .above, relativeTo: nil)
+
+        NSLayoutConstraint.activate([
+            handle.topAnchor.constraint(equalTo: frameView.topAnchor),
+            handle.heightAnchor.constraint(
+                equalToConstant: HeaderMetrics.rowCenterY + HeaderMetrics.rowHeight / 2
+            ),
+            handle.leadingAnchor.constraint(equalTo: frameView.leadingAnchor, constant: leadingClearance),
+            handle.trailingAnchor.constraint(equalTo: frameView.trailingAnchor, constant: -trailingClearance),
+        ])
     }
 }
 
-private struct StatusPill: View {
-    let color: Color
-    let label: String
-    let theme: DashboardTheme
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(color)
-                .frame(width: 6, height: 6)
-
-            Text(label)
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .tracking(1.1)
-                .textCase(.uppercase)
-                .foregroundStyle(theme.foreground.opacity(0.6))
-        }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 4)
-        .overlay(
-            Rectangle()
-                .stroke(theme.foreground.opacity(0.12), lineWidth: 1)
-        )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Collector \(label)")
-    }
-}
-
-/// Restores click-drag and double-click-to-zoom, which a `fullSizeContentView`
-/// window loses along with its titlebar.
-private struct WindowDragArea: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { DragView() }
-    func updateNSView(_ nsView: NSView, context: Context) {}
-
-    private final class DragView: NSView {
-        override func mouseDown(with event: NSEvent) {
-            if event.clickCount == 2 {
-                window?.performZoom(nil)
-            } else {
-                window?.performDrag(with: event)
-            }
-        }
-    }
-}
-
-/// Strips the stock titlebar and keeps the window's appearance in step with the
-/// dashboard's theme, so the traffic lights and resize chrome match the page.
+/// There is no titlebar view: the window is chromeless and the dashboard renders
+/// edge to edge beneath the traffic lights, which the page's own header row is
+/// shifted to sit alongside. This keeps the window's appearance in step with the
+/// page so the traffic lights and resize chrome match it.
 struct WindowChrome: NSViewRepresentable {
     let theme: DashboardTheme
 
@@ -180,7 +113,12 @@ struct WindowChrome: NSViewRepresentable {
             window.titleVisibility = .hidden
             window.titlebarSeparatorStyle = .none
             window.isMovableByWindowBackground = false
+            growTitlebar(window)
+            WindowDragHandle.install(in: window)
+            coordinator.keepTrafficLightsCentered(on: window)
         }
+
+        centerTrafficLights(in: window)
 
         guard coordinator.appliedTheme != theme else { return }
         coordinator.appliedTheme = theme
@@ -188,8 +126,66 @@ struct WindowChrome: NSViewRepresentable {
         window.appearance = theme.appearance
     }
 
+    /// An empty accessory is the supported way to make the titlebar taller; it
+    /// is hit-transparent so the page underneath keeps receiving clicks.
+    private func growTitlebar(_ window: NSWindow) {
+        let content = window.contentRect(forFrameRect: window.frame)
+        let extra = HeaderMetrics.titlebarHeight - (window.frame.height - content.height)
+        guard extra > 0 else { return }
+
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.layoutAttribute = .bottom
+        accessory.view = PassthroughView(frame: NSRect(x: 0, y: 0, width: 1, height: extra))
+        accessory.view.translatesAutoresizingMaskIntoConstraints = false
+        accessory.view.heightAnchor.constraint(equalToConstant: extra).isActive = true
+        window.addTitlebarAccessoryViewController(accessory)
+    }
+
     final class Coordinator {
         var didConfigureChrome = false
         var appliedTheme: DashboardTheme?
+        private var observers: [NSObjectProtocol] = []
+
+        /// AppKit puts the buttons back in the top 28pt on resize and on
+        /// full-screen transitions, so re-centre them whenever the window moves.
+        func keepTrafficLightsCentered(on window: NSWindow) {
+            let center = NotificationCenter.default
+            for name in [
+                NSWindow.didResizeNotification,
+                NSWindow.didBecomeKeyNotification,
+                NSWindow.didEnterFullScreenNotification,
+                NSWindow.didExitFullScreenNotification,
+            ] {
+                let token = center.addObserver(forName: name, object: window, queue: .main) { note in
+                    guard let window = note.object as? NSWindow else { return }
+                    centerTrafficLights(in: window)
+                }
+                observers.append(token)
+            }
+        }
+
+        deinit {
+            observers.forEach(NotificationCenter.default.removeObserver)
+        }
     }
+}
+
+/// Moves the traffic lights down into the grown titlebar so they land on the
+/// dashboard's header row rather than in the top 28pt AppKit defaults them to.
+private func centerTrafficLights(in window: NSWindow) {
+    let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton]
+        .compactMap { window.standardWindowButton($0) }
+    guard buttons.count == 3, let container = buttons[0].superview else { return }
+
+    for button in buttons {
+        // The titlebar container is unflipped, so y counts up from its bottom.
+        let targetY = container.bounds.height - HeaderMetrics.rowCenterY - button.frame.height / 2
+        guard abs(button.frame.origin.y - targetY) > 0.5 else { continue }
+        button.setFrameOrigin(NSPoint(x: button.frame.origin.x, y: targetY))
+    }
+}
+
+/// Lets mouse events fall through to the web view beneath the titlebar.
+private final class PassthroughView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

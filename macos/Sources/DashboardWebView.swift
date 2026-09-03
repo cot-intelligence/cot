@@ -16,12 +16,12 @@ struct DashboardWebView: NSViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
 
-        // The dashboard keeps its theme in localStorage and on `data-theme`, not
-        // in the system appearance, so the titlebar has to hear it from the page.
+        // Reports the page's theme and clears room for the traffic lights in the
+        // shell header — see `Coordinator.chromeBridge`.
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: Coordinator.themeChannel)
         controller.addUserScript(
-            WKUserScript(source: Coordinator.themeBridge, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+            WKUserScript(source: Coordinator.chromeBridge, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         )
         configuration.userContentController = controller
 
@@ -45,16 +45,62 @@ struct DashboardWebView: NSViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         static let themeChannel = "cotTheme"
-        static let themeBridge = """
+
+        /// Two jobs, both about making the window chromeless rather than
+        /// changing the dashboard: report the page's theme so the window
+        /// appearance can follow it, and clear a landing strip for the traffic
+        /// lights in the app shell's own header.
+        ///
+        /// The shell header's 32px content box is pinned below `topPadding` so
+        /// the row is not flush against the window edge, and the titlebar is
+        /// grown to match (see `HeaderMetrics`) so the traffic lights land on
+        /// that same row. The left pad clears the lights themselves. Only the
+        /// shell header is touched: the app has other <header> elements nested
+        /// inside pages.
+        static let chromeBridge = """
         (function () {
-          var send = function () {
-            var theme = document.documentElement.getAttribute('data-theme') || 'light';
-            window.webkit.messageHandlers.\(themeChannel).postMessage(theme);
+          var CHROME_CLASS = 'cot-native-chrome';
+
+          var style = document.createElement('style');
+          style.textContent =
+            '.' + CHROME_CLASS + '{padding-top:\(Int(HeaderMetrics.topPadding))px!important;' +
+            'padding-left:\(Int(HeaderMetrics.contentLeading))px!important}';
+          document.head.appendChild(style);
+
+          var markShellHeader = function () {
+            var headers = document.querySelectorAll('header');
+            var shell = null;
+            for (var i = 0; i < headers.length; i++) {
+              var box = headers[i].getBoundingClientRect();
+              var spansWindow = box.width > window.innerWidth * 0.8;
+              // Already shifted, or sitting at the top edge and full width.
+              if (spansWindow && (box.top <= \(Int(HeaderMetrics.topPadding)) || headers[i].classList.contains(CHROME_CLASS))) {
+                shell = headers[i];
+                break;
+              }
+            }
+            for (var j = 0; j < headers.length; j++) {
+              headers[j].classList.toggle(CHROME_CLASS, headers[j] === shell);
+            }
           };
-          new MutationObserver(send).observe(document.documentElement, {
+
+          var sendTheme = function () {
+            window.webkit.messageHandlers.\(themeChannel).postMessage(
+              document.documentElement.getAttribute('data-theme') || 'light'
+            );
+          };
+
+          new MutationObserver(sendTheme).observe(document.documentElement, {
             attributes: true, attributeFilter: ['data-theme']
           });
-          send();
+          // Routes swap the shell header out, so re-mark on any body change.
+          new MutationObserver(markShellHeader).observe(document.body, {
+            childList: true, subtree: true
+          });
+          window.addEventListener('hashchange', markShellHeader);
+
+          markShellHeader();
+          sendTheme();
         })();
         """
 

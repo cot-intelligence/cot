@@ -29,20 +29,35 @@ Application identity; the script then also enables the hardened runtime.
 
 ## Chrome
 
-The stock titlebar is replaced with a 42pt brand bar: the app icon, and a live
-status pill for the collector (state and port). Traffic lights, drag, and
-double-click-to-zoom all still work.
+There is no titlebar. The window is `fullSizeContentView` with a transparent,
+title-less titlebar, so the dashboard renders edge to edge and its own header
+row is the only header — the traffic lights sit on that row beside the wordmark.
+
+Two pieces make that work, and they share their geometry through
+`HeaderMetrics`:
+
+- A user script pads the shell header down from the window edge and in past the
+  buttons. It marks only the header at the top of the page — the app has other
+  `<header>` elements nested inside pages — and re-marks on route changes.
+- The titlebar is grown with an empty, hit-transparent accessory and the traffic
+  lights are re-centred in it, since AppKit centres them at y=16 and puts them
+  back there on every resize and full-screen transition.
+
+That leaves the window with nothing to drag by: a transparent titlebar hands
+every event to the web view. `WindowDragHandle` puts a handle back in the empty
+middle of the header row, clear of the wordmark and the header controls. It is
+installed into the window's frame view, not the SwiftUI hierarchy — a
+representable in an `.overlay`, or a subview of the content view, draws in the
+right place but never receives the mouse, because the hosting view hit-tests the
+SwiftUI tree, finds nothing interactive, and passes the event down to the page.
 
 The dashboard keeps its theme in `localStorage`, not in the system appearance,
-so the bar can't read `colorScheme` — a user script reports `data-theme` back
-over a `WKScriptMessageHandler` and the bar, the window background, and the
-traffic lights follow the page.
+so the window can't read `colorScheme` — the same user script reports
+`data-theme` back and the window background and traffic lights follow the page.
 
 `packaging/make_icon.swift` draws `AppIcon.icns` at build time from the same
-mark as `public/apple-touch-icon.svg` — an ink squircle with the vermilion
-italic wordmark — rendering each size at native pixels rather than downscaling
-one master. The titlebar reads the icon back out of the bundle, so redesigning
-the icon updates the Dock, the Finder, and the bar together.
+mark as `public/apple-touch-icon.svg`, rendering each size at native pixels
+rather than downscaling one master.
 
 ## How it behaves at launch
 

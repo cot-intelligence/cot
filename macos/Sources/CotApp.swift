@@ -41,9 +41,7 @@ private struct DashboardScene: View {
     @State private var theme: DashboardTheme = .light
 
     var body: some View {
-        VStack(spacing: 0) {
-            TitleBarView(collector: collector, theme: theme)
-
+        Group {
             if let url = collector.dashboardURL {
                 DashboardWebView(url: url, reloadToken: reloadToken) { theme = $0 }
             } else {
@@ -55,7 +53,9 @@ private struct DashboardScene: View {
             }
         }
         .frame(minWidth: 900, minHeight: 600)
-        .ignoresSafeArea(.container, edges: .top)
+        // The page runs under the traffic lights; the drag handle is installed
+        // into the window itself by WindowChrome.
+        .ignoresSafeArea(.all)
         .background(WindowChrome(theme: theme))
     }
 }
