@@ -14,3 +14,6 @@ secrets.json
 .env.production
 .env.*
 _DESIGN_LANGUAGE.md
+
+# macOS app build output
+macos/build/

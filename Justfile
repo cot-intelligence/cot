@@ -222,3 +222,20 @@ smoke:
     done
 
     python3 scripts/smoke_e2e.py "${endpoint}"
+
+# macOS app: build cot.app (SwiftUI shell + frozen collector + dashboard).
+#   just mac build      full build
+#   just mac app        Swift shell only, for iterating on the UI
+#   just mac run        build and launch
+#   just mac clean      drop macos/build
+mac action="build":
+    #!/usr/bin/env sh
+    set -eu
+
+    case "{{action}}" in
+      build) macos/build.sh ;;
+      app)   macos/build.sh --app-only ;;
+      run)   macos/build.sh --run ;;
+      clean) rm -rf macos/build && printf '%s\n' "removed macos/build" ;;
+      *) printf '%s\n' "unknown action: {{action}} (build|app|run|clean)" >&2; exit 2 ;;
+    esac
