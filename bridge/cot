@@ -55,8 +55,10 @@ DEFAULT_ENDPOINT = "http://127.0.0.1:31337"
 # meta categorization; 3 = codex token usage, cwd/model, interruptions, and a
 # SessionStart carrying sandbox/approval posture; 4 = codex environment_context
 # lifted into its own system event instead of leaking as a prompt; 5 = shared
-# live/import parsers, Cursor plans, interruption markers, and response collapse.)
-IMPORT_PARSER_VERSION = "5"
+# live/import parsers, Cursor plans, interruption markers, and response collapse;
+# 6 = postToolUseFailure phase, [REDACTED] dedup, WebSearch/WebFetch keep;
+# 7 = ReadLints/TodoWrite/SwitchMode/Glob keep-list + hook-supplement import.)
+IMPORT_PARSER_VERSION = "7"
 
 # Skip transcript files larger than this. Guards against a runaway/hostile file
 # exhausting memory; real transcripts are far smaller.
@@ -284,6 +286,31 @@ def _audit_self(action: str, *, target: str | None = None, status: str = "ok", d
 
 def _now_z() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _get_turn_anchors(session_id: str, hook_timestamp: str) -> dict | None:
+    """Query the collector for tool-event timestamps in the current turn.
+
+    Returns ``{prompt_ts: str, anchors: [{ts, ...}]}`` or None on failure.
+    """
+    ts_param = urllib.parse.quote(str(hook_timestamp), safe="")
+    url = f"{COT_ENDPOINT}/v1/internal/turn-anchors/{session_id}?before={ts_param}"
+    try:
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            return json.loads(resp.read())
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+        return None
+
+
+def _interpolate_ts(start: str, end: str, fraction: float) -> str:
+    """Return a timestamp at *fraction* of the way from *start* to *end*."""
+    try:
+        s = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        e = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        dt = s + (e - s) * max(0.0, min(1.0, fraction))
+        return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    except (ValueError, TypeError):
+        return end
 
 
 def _ordered_ts(base: object, index: int) -> str:
@@ -607,7 +634,8 @@ def _merge_usage(acc: dict | None, usage: dict) -> dict:
 
 
 def _response_equality_key(text: object) -> str:
-    return " ".join(str(text or "").lower().split())
+    s = str(text or "").replace("[REDACTED]", "")
+    return " ".join(s.lower().split())
 
 
 def _read_live_transcript_lines(transcript_path: str, session_id: str) -> list[tuple[int, str]]:
@@ -675,9 +703,23 @@ def _keep_live_event(source: str, event: dict) -> bool:
         return True
     if kind == "tool_call":
         name = event.get("tool_name")
-        return (source == "cursor" and name == "AskQuestion") or (
-            source == "codex" and name == "WebSearch"
-        )
+        # Tools NOT in Cursor's hook tool allowlist (BSb map) — they fire no
+        # preToolUse/postToolUse and would be lost without transcript capture.
+        # WebSearch/WebFetch DO fire hooks but are kept defensively; dedup
+        # prevents double-counting.
+        return (
+            source == "cursor"
+            and name
+            in (
+                "AskQuestion",
+                "WebSearch",
+                "WebFetch",
+                "ReadLints",
+                "TodoWrite",
+                "SwitchMode",
+                "Glob",
+            )
+        ) or (source == "codex" and name in ("WebSearch", "WebFetch"))
     return False
 
 
@@ -716,10 +758,11 @@ def _filter_live_events_with_usage(source: str, events: list[dict]) -> list[dict
 def _collapse_consecutive_responses(events: list[dict]) -> list[dict]:
     out: list[dict] = []
     for event in events:
+        kind = event.get("kind")
         if (
-            event.get("kind") == "response"
+            kind in ("response", "thought")
             and out
-            and out[-1].get("kind") == "response"
+            and out[-1].get("kind") == kind
             and _response_equality_key(out[-1].get("text"))
             == _response_equality_key(event.get("text"))
         ):
@@ -750,6 +793,49 @@ def _prepare_ingest_events(
 ) -> list[dict]:
     """Apply the shared pure event-list transformations for either Origin."""
     prepared = [dict(event) for event in events]
+
+    # Before filtering tool_calls for the Cursor hook path, record each
+    # event's fractional position within its turn so we can proportionally
+    # interpolate response timestamps across [prompt_ts, hook_ts].
+    has_tool_ordinals = False
+    total_before_filter = len(prepared)
+    if origin == "hook" and source == "cursor":
+        # First pass: find turn boundaries and count events per turn.
+        turn_idx = 0
+        turn_start: dict[int, int] = {0: 0}  # turn_idx → first event index
+        tool_in_turn = 0
+        for i, event in enumerate(prepared):
+            if event.get("kind") == "prompt":
+                turn_idx += 1
+                turn_start[turn_idx] = i
+                tool_in_turn = 0
+            event["_turn_idx"] = turn_idx
+            event["_tool_ordinal"] = tool_in_turn
+            if event.get("kind") == "tool_call":
+                tool_in_turn += 1
+
+        # Second pass: compute per-event fractional position within its turn.
+        # Count events per turn (excluding prompt and turn_end markers).
+        turn_counts: dict[int, int] = {}
+        for event in prepared:
+            tidx = event["_turn_idx"]
+            kind = event.get("kind")
+            if kind not in ("prompt", None) and event.get("_turn_idx") is not None:
+                turn_counts[tidx] = turn_counts.get(tidx, 0) + 1
+
+        turn_pos: dict[int, int] = {}  # running position per turn
+        for event in prepared:
+            tidx = event["_turn_idx"]
+            kind = event.get("kind")
+            if kind == "prompt":
+                continue
+            pos = turn_pos.get(tidx, 0)
+            total = turn_counts.get(tidx, 1)
+            event["_event_frac"] = pos / max(total, 1)
+            turn_pos[tidx] = pos + 1
+
+        has_tool_ordinals = True
+
     if origin == "hook":
         prepared = _filter_live_events_with_usage(source, prepared)
     # Only Cursor is configured for this shared transform: its transcript
@@ -760,11 +846,108 @@ def _prepare_ingest_events(
         prepared = _collapse_consecutive_responses(prepared)
     prepared = _apply_interruption_markers(prepared)
     if origin == "hook" and source == "cursor":
-        prepared = [
-            {**event, "timestamp": _ordered_ts(hook_timestamp, index)}
-            for index, event in enumerate(prepared)
-        ]
+        prepared = _assign_cursor_response_timestamps(
+            prepared, hook_timestamp, has_tool_ordinals
+        )
     return prepared
+
+
+def _assign_cursor_response_timestamps(
+    events: list[dict],
+    hook_timestamp: object,
+    has_tool_ordinals: bool,
+) -> list[dict]:
+    """Assign timestamps to Cursor transcript-derived events.
+
+    Instead of clustering all events at hook_timestamp (end of turn), query
+    the collector for the turn's prompt timestamp and interpolate each
+    response proportionally across [prompt_ts, hook_ts] based on its position
+    in the unfiltered transcript event list.
+
+    Each event carries ``_turn_idx`` (incremented at each prompt),
+    ``_tool_ordinal`` (unused now but kept for possible future use), and
+    ``_event_frac`` — the event's fractional position (0‥1) in the turn's
+    full event list before filtering.
+    """
+    _INTERNAL = ("_tool_ordinal", "_turn_idx", "_event_frac")
+
+    def _strip(ev: dict) -> dict:
+        return {k: v for k, v in ev.items() if k not in _INTERNAL}
+
+    if not events:
+        return events
+
+    session_id = next(
+        (e.get("session_id") for e in events if e.get("session_id")), None
+    )
+    hook_ts_str = str(hook_timestamp)
+
+    if not (session_id and hook_timestamp and has_tool_ordinals):
+        return [
+            {**_strip(event), "timestamp": _ordered_ts(hook_timestamp, idx)}
+            for idx, event in enumerate(events)
+        ]
+
+    # Query the collector for prompts — we need the prompt_ts to define the
+    # interpolation range [prompt_ts, hook_ts].
+    # For multi-turn deltas, get all prompts so each turn has its own range.
+    all_prompts = _get_all_prompt_timestamps(session_id)
+    if not all_prompts:
+        return [
+            {**_strip(event), "timestamp": _ordered_ts(hook_timestamp, idx)}
+            for idx, event in enumerate(events)
+        ]
+
+    # Build a per-turn time range map: turn_idx → (start_ts, end_ts).
+    # turn_idx in the event list starts at 1 (set when a prompt is seen).
+    # The last turn's end is the hook timestamp; earlier turns end at the
+    # next prompt's timestamp.
+    turn_ranges: dict[int, tuple[str, str]] = {}
+    turn_indices = sorted({e.get("_turn_idx", 0) for e in events})
+    for i, tidx in enumerate(turn_indices):
+        # Match this turn_idx to a prompt. turn_idx=1 → first prompt seen in
+        # this delta. If the delta spans multiple turns, we take prompts from
+        # the end of the list (most recent prompts correspond to this delta).
+        prompt_offset = len(all_prompts) - len(turn_indices) + i
+        if prompt_offset < 0:
+            prompt_offset = 0
+        prompt_ts = all_prompts[prompt_offset] if prompt_offset < len(all_prompts) else all_prompts[-1]
+        # End of turn = next prompt's ts, or hook_ts for the last turn.
+        if prompt_offset + 1 < len(all_prompts) and i + 1 < len(turn_indices):
+            end_ts = all_prompts[prompt_offset + 1]
+        else:
+            end_ts = hook_ts_str
+        turn_ranges[tidx] = (prompt_ts, end_ts)
+
+    out: list[dict] = []
+    for i, event in enumerate(events):
+        event = dict(event)
+        tidx = event.get("_turn_idx", 0)
+        frac = event.get("_event_frac")
+        start_ts, end_ts = turn_ranges.get(tidx, (all_prompts[-1], hook_ts_str))
+
+        if frac is not None:
+            # Place at proportional position within the turn's time range.
+            # Add a small offset per event to break ties.
+            ts = _interpolate_ts(start_ts, end_ts, frac)
+        else:
+            ts = _ordered_ts(hook_ts_str, i)
+
+        event["timestamp"] = ts
+        out.append(_strip(event))
+    return out
+
+
+def _get_all_prompt_timestamps(session_id: str) -> list[str]:
+    """Fetch all prompt timestamps for a session, oldest first."""
+    try:
+        enc_sid = urllib.parse.quote(session_id, safe="")
+        req_url = f"{COT_ENDPOINT}/v1/internal/prompt-timestamps/{enc_sid}"
+        with urllib.request.urlopen(req_url, timeout=2) as resp:
+            data = json.loads(resp.read())
+            return data.get("timestamps", [])
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+        return []
 
 
 def _scan_live_ingest_events(
@@ -3214,8 +3397,17 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
         # map, so `cot watch` can't briefly duplicate a fresh subagent's tools.
         is_cursor_subagent = agent == "cursor" and path.parent.name == "subagents"
         responses_only = is_cursor_subagent
-        # v1: skip other sessions already fully covered by live hooks.
-        if origins.get(sid) == "hook" and not is_cursor_subagent:
+        # For hook-origin Cursor sessions, supplement with transcript-only
+        # tool_calls that don't fire preToolUse hooks (ReadLints, TodoWrite,
+        # SwitchMode, Glob, etc.). Responses/thoughts/prompts are already
+        # covered by hooks — only the no-hook tools live solely in the
+        # transcript.
+        hook_supplement = (
+            agent == "cursor"
+            and origins.get(sid) == "hook"
+            and not is_cursor_subagent
+        )
+        if origins.get(sid) == "hook" and not is_cursor_subagent and not hook_supplement:
             continue
 
         # Apply --since filter on file mtime as a cheap pre-filter
@@ -3270,6 +3462,15 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
             # import only the conversation text the hooks never deliver.
             if responses_only and event.get("kind") == "tool_call":
                 continue
+            # Hook-supplemented sessions: hooks already cover responses,
+            # thoughts, and hooked tool calls. Only import tool_call events
+            # for tools that the hook system never fires (the same set that
+            # _keep_live_event preserves during live mode).
+            if hook_supplement:
+                if event.get("kind") != "tool_call":
+                    continue
+                if not _keep_live_event(source, event):
+                    continue
             payload = _ingest_event_to_hook_payload(event)
             if payload.get("_dedup_key") is None:
                 payload.pop("_dedup_key", None)
@@ -3670,7 +3871,20 @@ def main() -> int:
     elif source == "codex":
         _emit_codex_events(body, source)
     if not redundant and not handled and not suppress:
-        _post(f"{COT_ENDPOINT}/v1/ingest/{source}", body)
+        # Cursor double-fires afterAgentThought: first with model:"default",
+        # then ~15 ms later with the real model name + extra metadata.
+        # Suppress the "default" copy so the richer second fire is the one
+        # that gets stored. The thought text is also in the JSONL transcript,
+        # so in the unlikely case the second fire never arrives, transcript
+        # reconciliation on stop/subagentStop still captures it.
+        if (
+            source == "cursor"
+            and hook == "afterAgentThought"
+            and str(body.get("model") or "").strip().lower() == "default"
+        ):
+            pass  # suppress — wait for the real-model copy
+        else:
+            _post(f"{COT_ENDPOINT}/v1/ingest/{source}", body)
     if source == "claude":
         if hook in ("SessionStart", "sessionStart"):
             _log_launch(body)

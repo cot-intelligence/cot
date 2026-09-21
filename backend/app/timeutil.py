@@ -1,4 +1,4 @@
-"""Timestamp normalization shared across Collector modules."""
+"""Time utilities for event normalization."""
 
 from __future__ import annotations
 

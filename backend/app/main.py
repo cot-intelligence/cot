@@ -338,14 +338,50 @@ def _telemetry_enabled() -> bool:
     return db.get_setting("telemetry_enabled", "1") in ("1", "true", "yes", "on")
 
 
+def _complete_event_breakdown(
+    rows: list[dict[str, Any]],
+    dimension: str,
+    total_events: int,
+) -> list[dict[str, Any]]:
+    breakdown = [
+        {dimension: row.get(dimension), "events": row.get("events", 0)}
+        for row in rows
+    ]
+    unattributed_events = max(
+        0,
+        total_events - sum(row["events"] for row in breakdown),
+    )
+    if unattributed_events:
+        breakdown.append({dimension: "unknown", "events": unattributed_events})
+    return breakdown
+
+
 def _telemetry_payload() -> dict[str, Any]:
     """Build the anonymous aggregate report. Content-free by construction: we
     hand-pick count-only fields and drop anything path/text-bearing."""
-    m = db.metrics()
+    install_id = db.get_install_id()
+    installed_at = db.get_setting("installed_at")
+    m = db.metrics(active_since=installed_at)
     totals = m.get("totals", {})
     fun = m.get("fun", {})
+    activity_days = m.get("by_day", [])
+    days_active = m.get("active_days_since")
+    if days_active is None:
+        days_active = len(activity_days)
+    by_model = _complete_event_breakdown(
+        m.get("by_model", []),
+        "model",
+        totals.get("events", 0),
+    )
+    by_category = _complete_event_breakdown(
+        m.get("by_category", []),
+        "category",
+        totals.get("events", 0),
+    )
     return {
-        "install_id": db.get_install_id(),
+        "schema_version": 2,
+        "report_kind": "current_database_snapshot",
+        "install_id": install_id,
         "version": __version__,
         "sent_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "runtime": {
@@ -362,13 +398,15 @@ def _telemetry_payload() -> dict[str, Any]:
             "permissions": totals.get("permissions", 0),
             "error_rate": fun.get("error_rate", 0.0),
             "tokens_total": m.get("tokens", {}).get("total", 0),
-            "days_active": len(m.get("by_day", [])),
-            "installed_at": db.get_setting("installed_at"),
+            "days_active": days_active,
+            "history_days_active": len(activity_days),
+            "installed_at": installed_at,
             "by_source": [
                 {"source": r.get("source"), "events": r.get("events", 0)}
                 for r in m.get("by_source", [])
             ],
-            "by_category": m.get("by_category", []),
+            "by_category": by_category,
+            "by_model": by_model,
         },
     }
 
@@ -836,6 +874,50 @@ def reset_import() -> dict[str, Any]:
     """Delete previously imported transcript data so it can be re-ingested with
     the current parsers. Live hook events are preserved."""
     return db.reset_imported()
+
+
+@app.get("/v1/internal/prompt-timestamps/{session_id}")
+def get_prompt_timestamps(session_id: str) -> dict[str, Any]:
+    """Return all prompt timestamps for a session, oldest first."""
+    with store.read() as conn:
+        rows = conn.execute(
+            "SELECT ts FROM events WHERE session_id = ? AND category = 'prompt'"
+            " ORDER BY ts ASC",
+            (session_id,),
+        ).fetchall()
+    return {"timestamps": [r["ts"] for r in rows]}
+
+
+@app.get("/v1/internal/turn-anchors/{session_id}")
+def get_turn_anchors(session_id: str, before: str | None = None) -> dict[str, Any]:
+    """Return ordered tool-event timestamps for the latest turn of a session.
+
+    The bridge calls this when it needs to interpolate transcript-derived
+    response timestamps between hook-delivered tool events.  ``before`` is the
+    hook timestamp of the stop/afterAgentResponse that triggered the query.
+    """
+    return db.get_turn_anchors(session_id, before=before)
+
+
+@app.post("/v1/realign/cursor-responses")
+async def realign_cursor_responses(request: Request) -> dict[str, Any]:
+    """Redistribute clustered Cursor response timestamps across their turns."""
+    body = await _json_body(request)
+    return db.realign_cursor_responses(dry_run=bool(body.get("dry_run", True)))
+
+
+@app.post("/v1/dedup/cursor-thoughts")
+async def dedup_cursor_thoughts(request: Request) -> dict[str, Any]:
+    """Remove duplicate Cursor thought events caused by Cursor's double-fire."""
+    body = await _json_body(request)
+    return db.dedup_cursor_thoughts(dry_run=bool(body.get("dry_run", True)))
+
+
+@app.post("/v1/backfill/cursor-thought-models")
+async def backfill_cursor_thought_models(request: Request) -> dict[str, Any]:
+    """Fill in NULL model on Cursor thoughts from sibling events."""
+    body = await _json_body(request)
+    return db.backfill_cursor_thought_models(dry_run=bool(body.get("dry_run", True)))
 
 
 @app.post("/v1/questions/reset-recovered")

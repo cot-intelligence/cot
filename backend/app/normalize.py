@@ -38,6 +38,8 @@ _START_HOOKS = {
 _END_HOOKS = {
     "PostToolUse",
     "postToolUse",
+    "PostToolUseFailure",
+    "postToolUseFailure",
     "afterFileEdit",
     "afterShellExecution",
     "afterMCPExecution",

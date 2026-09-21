@@ -728,6 +728,86 @@ def test_session_detail_annotates_inlined_child_questions():
     ), detail["clarifications"]
 
 
+def test_cursor_duplicate_preToolUse_and_subagentStart_deduped():
+    """Cursor fires both preToolUse for the Task tool AND subagentStart for the
+    same subagent.  The timeline should produce a single subagent run, not two."""
+    sid = "abababab-abab-abab-abab-abababababab"
+    _session(sid)
+    _event(sid, seconds=0, category="lifecycle", phase="start", hook="sessionStart")
+    _event(sid, seconds=1, category="prompt", detail="launch a subagent")
+    start_id = _event(
+        sid,
+        seconds=2,
+        category="subagent",
+        phase="start",
+        hook="preToolUse",
+        tool="Task",
+        title="explore · Map ingest",
+        target="call-abc-123",
+        detail='{"input": {"description": "Map ingest"}}',
+    )
+    # Duplicate from subagentStart with same target
+    _event(
+        sid,
+        seconds=3,
+        category="subagent",
+        phase="start",
+        hook="subagentStart",
+        title="explore · Map ingest full prompt",
+        target="call-abc-123",
+        detail='{"subagent_type": "explore", "model": "grok-4.6"}',
+    )
+    _event(sid, seconds=5, category="shell", title="Grep", target="telemetry")
+    _event(sid, seconds=10, category="lifecycle", phase="end", hook="stop")
+
+    detail = db.get_session_detail(sid)
+    assert detail is not None
+
+    # Only one subagent run, not two
+    assert len(detail["timeline_runs"]) == 1, detail["timeline_runs"]
+    run = detail["timeline_runs"][0]
+    assert run["id"] == start_id
+    assert run["label"] == "explore · Map ingest"
+
+    # The run should be auto-closed at session end time, not ongoing
+    assert run["ongoing"] is False
+    assert run["end"] is not None
+
+    # The shell event should belong to the single run
+    shell_events = [e for e in detail["events"] if e["category"] == "shell"]
+    assert len(shell_events) == 1
+    assert shell_events[0]["run_id"] == start_id
+
+
+def test_ongoing_subagent_auto_closed_on_session_end():
+    """When the session ends but a subagent span has no stop event,
+    the span should be auto-closed at the session end time."""
+    sid = "cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd"
+    _session(sid)
+    _event(sid, seconds=0, category="lifecycle", phase="start", hook="sessionStart")
+    start_id = _event(
+        sid,
+        seconds=5,
+        category="subagent",
+        phase="start",
+        hook="subagentStart",
+        title="explore · Investigate",
+        target="sub_999",
+    )
+    _event(sid, seconds=10, category="shell", title="Grep", target="something")
+    _event(sid, seconds=30, category="lifecycle", phase="end", hook="stop")
+
+    detail = db.get_session_detail(sid)
+    assert detail is not None
+    assert len(detail["timeline_runs"]) == 1
+    run = detail["timeline_runs"][0]
+    assert run["id"] == start_id
+    assert run["ongoing"] is False
+    assert run["end"] is not None
+    assert run["duration_ms"] is not None
+    assert run["duration_ms"] >= 20_000  # ~25 seconds
+
+
 def test_session_detail_inlines_approval_review_as_review_run():
     parent = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     review = "ffffffff-1111-2222-3333-444444444444"
