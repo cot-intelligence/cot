@@ -31,7 +31,7 @@ function DirectoryName({ cwd }: { cwd: string }) {
         onClick={() => copy(cwd)}
         title={cwd}
         aria-label={copied ? 'Directory path copied' : `Copy directory path ${cwd}`}
-        className={`min-w-0 truncate font-mono text-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-vermilion ${
+        className={`min-w-0 truncate font-mono text-[0.68rem] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-vermilion ${
           copied ? 'text-olive' : 'text-fg/65 hover:text-fg'
         }`}>
         {name}
@@ -50,22 +50,16 @@ export function SessionMeta({ summary, links, onToggleBookmark }: SessionMetaPro
   const parents = links?.parents ?? [];
   const subagentChildren = (links?.children ?? []).filter((l) => l.type === 'subagent');
 
+  const sep = <span className="text-fg/20" aria-hidden="true">·</span>;
+
   return (
-    <header className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <AgentMark id={summary.source} className="h-4 w-4 text-fg/60" />
-        <span className="font-mono text-[0.65rem] uppercase tracking-widest text-fg/50">
-          {summary.source}
-        </span>
-        <span className="text-fg/25">·</span>
-        <span
-          className={`font-mono text-[0.65rem] uppercase tracking-widest ${
-            isActive ? 'text-cobalt' : 'text-fg/50'
-          }`}>
-          {summary.status}
-        </span>
-        <span className="text-fg/25">·</span>
-        <SessionHash id={summary.id} />
+    <header className="space-y-2">
+      <div className="flex items-start justify-between gap-6">
+        <h1
+          className="min-w-0 truncate font-serif text-[1.35rem] font-normal leading-tight tracking-[-0.02em] text-fg sm:text-[1.6rem]"
+          title={summary.title || summary.id}>
+          {summary.title || summary.id}
+        </h1>
         {onToggleBookmark && (
           <button
             type="button"
@@ -73,47 +67,48 @@ export function SessionMeta({ summary, links, onToggleBookmark }: SessionMetaPro
             aria-pressed={summary.bookmarked}
             aria-label={summary.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
             title={summary.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
-            className={`ml-auto flex items-center gap-1.5 rounded border px-2 py-1 font-mono text-[0.6rem] uppercase tracking-widest transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-vermilion ${
-              summary.bookmarked
-                ? 'border-vermilion/40 text-vermilion hover:border-vermilion/70'
-                : 'border-fg/20 text-fg/55 hover:border-fg/50 hover:text-fg'
-            }`}>
+            className={`btn mt-0.5 ${summary.bookmarked ? '!border-vermilion/40 !text-vermilion hover:!border-vermilion/70' : ''}`}>
             <Icon
               name={summary.bookmarked ? 'bookmark-filled' : 'bookmark'}
               className="h-3.5 w-3.5"
             />
-            {summary.bookmarked ? 'Bookmarked' : 'Bookmark'}
+            <span className="hidden sm:inline">{summary.bookmarked ? 'Bookmarked' : 'Bookmark'}</span>
           </button>
         )}
       </div>
 
-      <h1 className="font-serif text-xl font-bold leading-snug text-fg sm:text-2xl">
-        {summary.title || summary.id}
-      </h1>
-
-      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-xs text-fg/50">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[0.68rem] text-fg/45">
+        <span className="inline-flex items-center gap-1.5 uppercase tracking-[0.14em]">
+          <AgentMark id={summary.source} className="h-3.5 w-3.5 text-fg/60" />
+          {summary.source}
+        </span>
+        {sep}
+        <span className={`uppercase tracking-[0.14em] ${isActive ? 'text-cobalt' : ''}`}>{summary.status}</span>
+        {sep}
+        <SessionHash id={summary.id} />
         {summary.cwd && (
           <>
+            {sep}
             <DirectoryName cwd={summary.cwd} />
-            <span className="text-fg/25">·</span>
           </>
         )}
+        {sep}
         {formatRelative(summary.started_at)}
-        <span className="text-fg/25">·</span>
+        {sep}
         {formatDuration(null, summary.duration_seconds)}
-        <span className="text-fg/25">·</span>
-        {summary.event_count} events
-        <span className="text-fg/25">·</span>
-        {summary.tool_count} tools
+        {sep}
+        <span className="tabular-nums">{summary.event_count} events</span>
+        {sep}
+        <span className="tabular-nums">{summary.tool_count} tools</span>
         {summary.has_cost && (
           <>
-            <span className="text-fg/25">·</span>
-            <span className="text-vermilion/80" title="Estimated cost (cache-aware)">
+            {sep}
+            <span className="tabular-nums text-vermilion/80" title="Estimated cost (cache-aware)">
               {formatCost(summary.cost_usd)}
             </span>
           </>
         )}
-      </p>
+      </div>
 
       {parents.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5 font-mono text-[0.58rem] uppercase tracking-widest text-fg/35">
