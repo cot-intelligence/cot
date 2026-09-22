@@ -104,7 +104,12 @@ resolve_python() {
   original_ifs="${IFS}"
   IFS=:
   for python_dir in ${PATH}; do
-    [ -n "${python_dir}" ] || python_dir="."
+    # The pinned interpreter becomes the bridge's shebang and hooks run from
+    # other directories, so skip relative (and empty, i.e. ".") PATH entries.
+    case "${python_dir}" in
+      /*) ;;
+      *) continue ;;
+    esac
     python_candidate="${python_dir}/python3"
     if python_works "${python_candidate}"; then
       PYTHON_BIN="${python_candidate}"

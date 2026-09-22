@@ -28,7 +28,9 @@ def _fake_curl(path: Path) -> None:
     )
 
 
-def _run_installer(home: Path, path: str, installer: Path = INSTALLER):
+def _run_installer(
+    home: Path, path: str, installer: Path = INSTALLER, cwd: Path | None = None
+):
     env = {
         **os.environ,
         "HOME": str(home),
@@ -42,6 +44,7 @@ def _run_installer(home: Path, path: str, installer: Path = INSTALLER):
     return subprocess.run(
         ["/bin/sh", str(installer)],
         env=env,
+        cwd=cwd,
         capture_output=True,
         text=True,
         timeout=15,
@@ -71,6 +74,25 @@ def test_installer_uses_working_python_later_on_path():
         result = _run_installer(home, f"{broken_bin}:{working_bin}:/usr/bin:/bin")
         assert result.returncode == 0, result.stderr
         assert _pinned_interpreter(home) == str(working_bin / "python3")
+
+
+def test_installer_never_pins_a_relative_python():
+    # An empty PATH entry means the cwd. Pinning "./python3" as the shebang
+    # would break every hook that runs from another directory.
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        tmp = Path(raw_tmp)
+        home = tmp / "home"
+        cwd = tmp / "cwd"
+        tools = tmp / "tools"
+        home.mkdir()
+        cwd.mkdir()
+        tools.mkdir()
+        _write_executable(cwd / "python3", 'exec /usr/bin/python3 "$@"')
+        _fake_curl(tools / "curl")
+
+        result = _run_installer(home, f":rel:{tools}:/usr/bin:/bin", cwd=cwd)
+        assert result.returncode == 0, result.stderr
+        assert _pinned_interpreter(home).startswith("/")
 
 
 def test_installer_skips_python_older_than_39():
