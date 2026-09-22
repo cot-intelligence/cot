@@ -178,6 +178,12 @@ def _spool_append(url: str, payload: dict) -> None:
     path = parsed.path
     if parsed.query:
         path = f"{path}?{parsed.query}"
+    # Most hook payloads carry no timestamp, so the collector stamps arrival
+    # time. Pin the capture time now or a replay lands at flush time, out of
+    # order with transcript-timed events. Only spooled events get this: the live
+    # path's dedup hashes the raw payload, and a fresh ts would defeat it.
+    if not payload.get("timestamp"):
+        payload = {**payload, "timestamp": datetime.now(timezone.utc).isoformat()}
     record = json.dumps({"path": path, "payload": payload}, ensure_ascii=False, default=str)
     line = record + "\n"
     with _SpoolLock():

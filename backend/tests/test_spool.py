@@ -89,6 +89,25 @@ def test_post_spools_when_collector_down():
     _with_temp_spool(body)
 
 
+def test_spooled_event_keeps_capture_time_not_replay_time():
+    # Codex/Claude hook payloads carry no timestamp, so the collector stamps
+    # arrival time. A replayed event must keep when it happened, or a whole
+    # outage's tool calls land after the transcript-timed thoughts around them.
+    def body(_state):
+        sink = _Sink(up=False)
+        bridge._send_once = sink.send
+        bridge._post(INGEST, {"event_id": "e1"})
+        bridge._post(INGEST, {"event_id": "e2", "timestamp": "2026-01-01T00:00:00Z"})
+        captured = [r["payload"].get("timestamp") for r in _spool_lines()]
+        assert captured[0] and captured[0].endswith("+00:00")
+        assert captured[1] == "2026-01-01T00:00:00Z"  # an agent-supplied ts wins
+
+        sink.up = True
+        assert bridge._spool_flush() is True
+        assert [p.get("timestamp") for p in sink.delivered] == captured
+    _with_temp_spool(body)
+
+
 def test_flush_retargets_legacy_url_to_current_endpoint():
     def body(_state):
         sink = _Sink(up=True)
