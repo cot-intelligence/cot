@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install backend deps + pytest
-        run: pip install -r backend/requirements.txt pytest
+        run: pip install -r backend/requirements.txt -r backend/requirements-dev.txt
       - name: pytest
         run: python -m pytest backend/tests -q
 
