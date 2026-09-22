@@ -102,6 +102,13 @@ CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_session_category ON events(session_id, category);
 CREATE INDEX IF NOT EXISTS idx_events_session_model ON events(session_id, model);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+-- Covering index for the per-session rollups in list_sessions() and stats().
+-- Without it those GROUP BYs fetch every events row (payload/detail blobs and
+-- all) from the table, which reads nearly the whole DB file on each call.
+CREATE INDEX IF NOT EXISTS idx_events_session_agg ON events(
+    session_id, ts, tool, category,
+    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
+);
 CREATE INDEX IF NOT EXISTS idx_sessions_archived_source ON sessions(archived, source);
 
 CREATE TABLE IF NOT EXISTS raw_ingest_events (

@@ -1,4 +1,5 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { activateOnKey } from '../../lib/a11y';
 import {
   getSessions,
@@ -8,6 +9,7 @@ import {
 } from '../../lib/api';
 import { formatRelative, toTimestampString } from '../../lib/categoryMeta';
 import { sourceLabel } from '../../lib/sourceLabels';
+import { usePolling } from '../../lib/usePolling';
 import { Icon } from '../ui/icons';
 import { SourceBadge } from '../ui/SourceBadge';
 import { Select } from '../ui/Select';
@@ -32,8 +34,6 @@ function readGroupBy(): GroupKey {
 }
 
 export function SessionsTable({ onSelect }: SessionsTableProps) {
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [loaded, setLoaded] = useState(false);
   const [status, setStatus] = useState('');
   const [source, setSource] = useState('');
   const [q, setQ] = useState('');
@@ -45,33 +45,27 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
   // which is "only the most recent group is open".
   const [expandOverrides, setExpandOverrides] = useState<Record<string, boolean>>({});
 
-  useEffect(() => {
-    let active = true;
-    const load = async () => {
-      try {
-        const data = await getSessions({
-          limit: 200,
-          status: status || undefined,
-          source: source || undefined,
-          q: q || undefined,
-          archived: showArchived,
-          bookmarked: onlyBookmarked,
-        });
-        if (active) {
-          setSessions(data);
-          setLoaded(true);
-        }
-      } catch {
-        /* collector offline */
-      }
-    };
-    load();
-    const t = window.setInterval(load, 3000);
-    return () => {
-      active = false;
-      window.clearInterval(t);
-    };
-  }, [status, source, q, showArchived, onlyBookmarked]);
+  // Shared react-query cache: revisiting the page renders instantly, and the
+  // live stream (QueryProvider) drives freshness instead of a tight poll.
+  const queryClient = useQueryClient();
+  const queryKey = ['sessionsTable', status, source, q, showArchived, onlyBookmarked];
+  const { data } = usePolling<SessionSummary[]>(
+    queryKey,
+    () =>
+      getSessions({
+        limit: 200,
+        status: status || undefined,
+        source: source || undefined,
+        q: q || undefined,
+        archived: showArchived,
+        bookmarked: onlyBookmarked,
+      }),
+    3000,
+  );
+  const loaded = data !== null;
+  const sessions = useMemo(() => data ?? [], [data]);
+  const setSessions = (update: (prev: SessionSummary[]) => SessionSummary[]) =>
+    queryClient.setQueryData<SessionSummary[]>(queryKey, (prev) => update(prev ?? []));
 
   const changeGroupBy = (g: GroupKey) => {
     setGroupBy(g);
@@ -85,19 +79,21 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
 
   const toggleArchive = async (s: SessionSummary) => {
     // Active view → archive; archived view → restore. Either way the row leaves
-    // the current list, so drop it optimistically; the poll reconciles.
+    // the current list, so drop it optimistically; the refetch reconciles.
     setSessions((prev) => prev.filter((x) => x.id !== s.id));
     try {
       await setSessionArchived(s.id, !showArchived);
     } catch {
-      /* poll will restore the row if it failed */
+      /* collector offline — the refetch below restores the row */
+    } finally {
+      void queryClient.invalidateQueries({ queryKey: ['sessionsTable'] });
     }
   };
 
   const toggleBookmark = async (s: SessionSummary) => {
     const next = !s.bookmarked;
     // Unbookmarking inside the bookmarked-only view drops the row; otherwise
-    // flip the flag in place. The poll reconciles either way.
+    // flip the flag in place. The refetch reconciles either way.
     setSessions((prev) =>
       !next && onlyBookmarked
         ? prev.filter((x) => x.id !== s.id)
@@ -106,7 +102,9 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
     try {
       await setSessionBookmarked(s.id, next);
     } catch {
-      /* poll will restore the row if it failed */
+      /* collector offline — the refetch below restores the row */
+    } finally {
+      void queryClient.invalidateQueries({ queryKey: ['sessionsTable'] });
     }
   };
 
