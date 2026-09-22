@@ -1,6 +1,7 @@
 const SIDEBAR_KEY = 'cot.sidebar.open';
 const NAV_COLLAPSED_KEY = 'cot.nav.collapsed';
 const ONBOARDED_KEY = 'cot.onboarded';
+const TIMELINE_SIDEBAR_KEY = 'cot.timeline.sidebar';
 const AGENTS_KEY = 'cot.onboarding.agents';
 const LEGACY_AGENT_KEY = 'cot.onboarding.agent';
 
@@ -32,6 +33,25 @@ export function readNavCollapsed(): boolean {
 export function writeNavCollapsed(collapsed: boolean): void {
   try {
     localStorage.setItem(NAV_COLLAPSED_KEY, collapsed ? '1' : '0');
+  } catch {
+    /* ignore */
+  }
+}
+
+export type TimelineSidebarMode = 'events' | 'map';
+
+/** Left panel of the session timeline: event list or activity map. Default: events. */
+export function readTimelineSidebarMode(): TimelineSidebarMode {
+  try {
+    return localStorage.getItem(TIMELINE_SIDEBAR_KEY) === 'map' ? 'map' : 'events';
+  } catch {
+    return 'events';
+  }
+}
+
+export function writeTimelineSidebarMode(mode: TimelineSidebarMode): void {
+  try {
+    localStorage.setItem(TIMELINE_SIDEBAR_KEY, mode);
   } catch {
     /* ignore */
   }

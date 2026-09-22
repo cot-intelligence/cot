@@ -8,7 +8,13 @@ import {
   type SubagentRun,
   type TimeSort,
 } from '../../../../lib/sessionView';
+import {
+  readTimelineSidebarMode,
+  writeTimelineSidebarMode,
+  type TimelineSidebarMode,
+} from '../../../../lib/settings';
 import { Icon } from '../../../ui/icons';
+import { ActivityMap } from '../ActivityMap';
 import { ChatTimeline, type ChatTimelineHandle, type ExpansionRequest } from '../ChatTimeline';
 import { SubagentNestedList } from '../SubagentNestedList';
 
@@ -30,6 +36,8 @@ export function TimelineTab({ items, runs, focusEventId, sessionId, tabs }: Time
   const [activeKey, setActiveKey] = useState<string | null>(
     focusEventId != null ? `${sessionId}:${focusEventId}` : null,
   );
+  const [sidebarMode, setSidebarMode] = useState<TimelineSidebarMode>(readTimelineSidebarMode);
+  const [pendingJump, setPendingJump] = useState<string | null>(null);
   const chatRef = useRef<ChatTimelineHandle>(null);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const sidebarRaf = useRef(0);
@@ -127,6 +135,41 @@ export function TimelineTab({ items, runs, focusEventId, sessionId, tabs }: Time
     chatRef.current?.scrollToAndExpand(key);
   }, [sessionId]);
 
+  // Map click → reveal the event if a filter hides it, then scroll the chat to it
+  const onMapJump = useCallback((item: TimelineItem) => {
+    setHidden((prev) => {
+      if (!prev.has(item.category)) return prev;
+      const next = new Set(prev);
+      next.delete(item.category);
+      return next;
+    });
+    if (item.model) {
+      const model = item.model;
+      setHiddenModels((prev) => {
+        if (!prev.has(model)) return prev;
+        const next = new Set(prev);
+        next.delete(model);
+        return next;
+      });
+    }
+    const key = eventKey(item, sessionId);
+    setActiveKey(key);
+    setPendingJump(key);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (pendingJump == null) return;
+    if (!sorted.some((it) => eventKey(it, sessionId) === pendingJump)) return;
+    const key = pendingJump;
+    setPendingJump(null);
+    requestAnimationFrame(() => chatRef.current?.scrollToAndExpand(key));
+  }, [pendingJump, sorted, sessionId]);
+
+  const changeSidebarMode = useCallback((mode: TimelineSidebarMode) => {
+    setSidebarMode(mode);
+    writeTimelineSidebarMode(mode);
+  }, []);
+
   // Smooth sidebar auto-scroll — debounced with rAF to prevent jumpiness
   useEffect(() => {
     if (activeKey == null || !sidebarRef.current) return;
@@ -215,9 +258,35 @@ export function TimelineTab({ items, runs, focusEventId, sessionId, tabs }: Time
           {/* Sidebar */}
           <div
             ref={sidebarRef}
-            className="scroll-thin hidden min-h-0 w-60 shrink-0 overflow-y-auto border-r border-line/10 bg-bg lg:block"
+            className={`scroll-thin hidden min-h-0 shrink-0 overflow-y-auto border-r border-line/10 bg-bg transition-[width] duration-200 ease-out lg:block ${
+              sidebarMode === 'map' ? 'w-[26rem]' : 'w-60'
+            }`}
           >
-            {nested ? (
+            <div className="sticky top-0 z-10 border-b border-line/10 bg-bg px-3 py-2">
+              <div className="seg w-full" role="tablist" aria-label="Sidebar view">
+                {(['events', 'map'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="tab"
+                    aria-selected={sidebarMode === mode}
+                    aria-pressed={sidebarMode === mode}
+                    onClick={() => changeSidebarMode(mode)}
+                    className="seg-item flex-1"
+                  >
+                    {mode === 'events' ? 'Events' : 'Map'}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {sidebarMode === 'map' ? (
+              <ActivityMap
+                items={items}
+                sessionId={sessionId}
+                activeKey={activeKey}
+                onJump={onMapJump}
+              />
+            ) : nested ? (
               <SubagentNestedList
                 items={items}
                 runs={runs}
