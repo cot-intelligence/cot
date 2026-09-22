@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 from typing import Any, Iterable
 
 _HERE = Path(__file__).resolve().parent
@@ -29,6 +30,7 @@ sys.path.insert(0, str(_BACKEND))
 
 from app import db  # noqa: E402
 import app.normalize as normalize_module  # noqa: E402
+import app.timeutil as timeutil_module  # noqa: E402
 from app.normalize import normalize  # noqa: E402
 
 
@@ -147,7 +149,12 @@ def _isolated_collector_db():
 
 @contextmanager
 def _deterministic_ingest_clock():
-    old_now = normalize_module._now
+    """Pin the timestamp normalize() falls back to for undated payloads.
+
+    Only normalize's view of the clock is faked: the store's created_at must stay
+    on real time, since live duplicate suppression compares it to a window
+    measured from the real now."""
+    old_timeutil = normalize_module.timeutil
     base = datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
     counter = 0
 
@@ -157,11 +164,14 @@ def _deterministic_ingest_clock():
         counter += 1
         return timestamp.isoformat()
 
-    normalize_module._now = fake_now
+    normalize_module.timeutil = SimpleNamespace(
+        **{name: getattr(timeutil_module, name) for name in dir(timeutil_module) if not name.startswith("__")},
+    )
+    normalize_module.timeutil.now = fake_now
     try:
         yield
     finally:
-        normalize_module._now = old_now
+        normalize_module.timeutil = old_timeutil
 
 
 def _record_payload(source: str, payload: dict[str, Any]) -> None:
@@ -182,7 +192,7 @@ def _ingest_live_fixture(fixture: CoreIngestFixture) -> None:
     from fastapi.testclient import TestClient
     from app.main import app
 
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://127.0.0.1")
     for payload in _read_jsonl(fixture.input_path):
         response = client.post(f"/v1/ingest/{fixture.agent}", json=payload)
         assert response.status_code == 200, response.text
@@ -208,6 +218,12 @@ def _ingest_history_fixture(fixture: CoreIngestFixture) -> None:
             if event.get("_dedup_key") is None:
                 event.pop("_dedup_key", None)
             _record_payload(fixture.agent, event)
+    # The importer flushes the message the parser holds back for token usage at
+    # end of file; without this the session's final answer is dropped.
+    for event in bridge._codex_flush_pending(state):
+        if event.get("_dedup_key") is None:
+            event.pop("_dedup_key", None)
+        _record_payload(fixture.agent, event)
 
 
 def _ingest_once(fixture: CoreIngestFixture) -> None:
