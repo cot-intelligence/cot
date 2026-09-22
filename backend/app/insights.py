@@ -180,6 +180,16 @@ def _fmt_usd(v: float) -> str:
     return f"${v:.2f}"
 
 
+# Claude/Codex store a ``PreToolUse`` row (status "ok") before every tool's
+# ``PostToolUse``/``PostToolUseFailure`` row. Counting rules must skip the start
+# half, or every run counts twice and every failure streak resets on "ok".
+_TOOL_START_HOOKS = frozenset({"PreToolUse", "preToolUse"})
+
+
+def _is_tool_start(e: Event) -> bool:
+    return e.hook in _TOOL_START_HOOKS
+
+
 def _recent(events: list[Event], limit: int = 5000) -> list[Event]:
     """Most-recent ``limit`` events, newest first — the Python equivalent of the
     security rules' ``ORDER BY e.ts DESC LIMIT 5000`` bound on how much history
@@ -196,7 +206,7 @@ def _automate_command(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["usability.automate_command"]
     groups: dict[str, dict[str, Any]] = {}
     for e in snap.events:
-        if e.category != "shell" or e.target is None:
+        if e.category != "shell" or e.target is None or _is_tool_start(e):
             continue
         g = groups.setdefault(e.target, {"n": 0, "sessions": set(), "ids": [], "sids": [], "tss": []})
         g["n"] += 1
@@ -238,6 +248,7 @@ def _retry_loops(snap: Snapshot) -> list[dict[str, Any]]:
     rows = [
         e for e in snap.events
         if e.tool is not None and e.target is not None and e.status is not None
+        and not _is_tool_start(e)
     ]
     runs: dict[tuple[str, str, str], list[Any]] = {}
     best: dict[tuple[str, str, str], list[Any]] = {}
@@ -274,7 +285,9 @@ def _retry_loops(snap: Snapshot) -> list[dict[str, Any]]:
 @rule(id="usability.permission_friction", pillar="usability", tier=1)
 def _permission_friction(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["usability.permission_friction"]
-    tool_calls = sum(1 for e in snap.events if e.tool is not None and e.status is not None)
+    tool_calls = sum(
+        1 for e in snap.events if e.tool is not None and e.status is not None and not _is_tool_start(e)
+    )
     perm_events = [e for e in snap.events if e.category == "permission"]
     perms = len(perm_events)
     out = []
@@ -395,7 +408,7 @@ def _reread_churn(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["usability.reread_churn"]
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     for e in snap.events:
-        if e.category not in ("file_read", "context_read") or e.target is None:
+        if e.category not in ("file_read", "context_read") or e.target is None or _is_tool_start(e):
             continue
         g = groups.setdefault(
             (e.session_id, e.target),
@@ -794,7 +807,8 @@ def _risky_commands(snap: Snapshot) -> list[dict[str, Any]]:
 @rule(id="security.sensitive_files", pillar="security", tier=1)
 def _sensitive_files(snap: Snapshot) -> list[dict[str, Any]]:
     rows = _recent(
-        [e for e in snap.events if e.category in ("file_read", "file_edit") and e.target is not None]
+        [e for e in snap.events
+         if e.category in ("file_read", "file_edit") and e.target is not None and not _is_tool_start(e)]
     )
     by_path: dict[str, dict[str, Any]] = {}
     for r in rows:
@@ -829,7 +843,7 @@ def _sensitive_files(snap: Snapshot) -> list[dict[str, Any]]:
 
 @rule(id="security.secrets_exposure", pillar="security", tier=1)
 def _secrets_exposure(snap: Snapshot) -> list[dict[str, Any]]:
-    rows = _recent([e for e in snap.events if e.category in ("prompt", "shell")])
+    rows = _recent([e for e in snap.events if e.category in ("prompt", "shell") and not _is_tool_start(e)])
     by_secret: dict[str, dict[str, Any]] = {}
     for r in rows:
         text = " ".join(filter(None, (r["target"], r["title"], r["detail"])))
@@ -911,7 +925,8 @@ def _read_then_exfil(snap: Snapshot) -> list[dict[str, Any]]:
 @rule(id="security.out_of_cwd_edits", pillar="security", tier=2)
 def _out_of_cwd_edits(snap: Snapshot) -> list[dict[str, Any]]:
     rows = _recent(
-        [e for e in snap.events if e.category == "file_edit" and e.target is not None and e.cwd]
+        [e for e in snap.events
+         if e.category == "file_edit" and e.target is not None and e.cwd and not _is_tool_start(e)]
     )
     by_path: dict[str, dict[str, Any]] = {}
     for r in rows:

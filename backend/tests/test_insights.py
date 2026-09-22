@@ -115,6 +115,30 @@ def test_retry_loops_critical_at_five():
     assert hits and hits[0]["severity"] == "critical"
 
 
+def _pre_post(sid: str, target: str, status: str, minutes_ago: float) -> None:
+    """A live Claude tool call: PreToolUse (ok) followed by its result row."""
+    _event(sid, category="shell", tool="Bash", target=target, status="ok",
+           hook="PreToolUse", phase="start", ts=_ts(minutes_ago=minutes_ago))
+    _event(sid, category="shell", tool="Bash", target=target, status=status,
+           hook="PostToolUseFailure" if status == "error" else "PostToolUse",
+           ts=_ts(minutes_ago=minutes_ago - 0.5))
+
+
+def test_retry_loops_ignore_pre_tool_use_rows():
+    for m in range(4):
+        _pre_post("s1", "pytest -q", "error", minutes_ago=20 - 2 * m)
+    hits = _rules(insights.compute_insights(), "usability.retry_loops")
+    assert len(hits) == 1
+    assert len(hits[0]["evidence"]) == 4
+
+
+def test_automate_command_counts_each_run_once():
+    for m in range(5):
+        _pre_post("s1", "npm run build && npm test", "ok", minutes_ago=20 - 2 * m)
+    hits = _rules(insights.compute_insights(), "usability.automate_command")
+    assert hits and "5 times" in hits[0]["title"]
+
+
 def test_permission_friction_fires_on_high_ratio():
     for n in range(20):
         _event("s1", tool="Read", target=f"/proj/f{n}.py", status="ok")
@@ -583,3 +607,14 @@ def test_pure_reconcile_lifecycle_with_fake_store_no_db():
     findings_store.rows[fp]["last_seen"] = (_NOW - timedelta(days=4)).isoformat()  # stopped firing, past grace
     out = insights._reconcile(findings_store, [])
     assert len(out) == 1 and out[0]["status"] == "resolved"
+
+
+def test_sensitive_file_and_reread_count_each_read_once():
+    for m in range(5):
+        for hook, phase in (("PreToolUse", "start"), ("PostToolUse", "end")):
+            _event("s1", category="file_read", tool="Read", target="/proj/.env", status="ok",
+                   hook=hook, phase=phase, ts=_ts(minutes_ago=20 - 2 * m))
+    churn = _rules(insights.compute_insights(), "usability.reread_churn")
+    assert churn and "5 times" in churn[0]["title"]
+    sens = _rules(insights.compute_insights(), "security.sensitive_files")
+    assert sens and "5 time(s)" in sens[0]["detail"]
