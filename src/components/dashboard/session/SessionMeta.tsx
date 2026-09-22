@@ -2,12 +2,14 @@ import type { SessionLink, SessionLinks, SessionSummary } from '../../../lib/api
 import { formatDuration, formatRelative } from '../../../lib/categoryMeta';
 import { formatCost } from '../../../lib/format';
 import { AgentMark } from '../../ui/AgentMark';
+import { Icon } from '../../ui/icons';
 import { SessionHash } from '../../ui/SessionHash';
 import { useCopy } from '../../ui/useCopy';
 
 interface SessionMetaProps {
   summary: SessionSummary;
   links?: SessionLinks;
+  onToggleBookmark?: () => void;
 }
 
 function DirectoryName({ cwd }: { cwd: string }) {
@@ -43,7 +45,7 @@ const PARENT_LABEL: Record<SessionLink['type'], string> = {
   subagent: 'Subagent of',
 };
 
-export function SessionMeta({ summary, links }: SessionMetaProps) {
+export function SessionMeta({ summary, links, onToggleBookmark }: SessionMetaProps) {
   const isActive = summary.status === 'active';
   const parents = links?.parents ?? [];
   const subagentChildren = (links?.children ?? []).filter((l) => l.type === 'subagent');
@@ -64,6 +66,25 @@ export function SessionMeta({ summary, links }: SessionMetaProps) {
         </span>
         <span className="text-fg/25">·</span>
         <SessionHash id={summary.id} />
+        {onToggleBookmark && (
+          <button
+            type="button"
+            onClick={onToggleBookmark}
+            aria-pressed={summary.bookmarked}
+            aria-label={summary.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
+            title={summary.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
+            className={`ml-auto flex items-center gap-1.5 rounded border px-2 py-1 font-mono text-[0.6rem] uppercase tracking-widest transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-vermilion ${
+              summary.bookmarked
+                ? 'border-vermilion/40 text-vermilion hover:border-vermilion/70'
+                : 'border-fg/20 text-fg/55 hover:border-fg/50 hover:text-fg'
+            }`}>
+            <Icon
+              name={summary.bookmarked ? 'bookmark-filled' : 'bookmark'}
+              className="h-3.5 w-3.5"
+            />
+            {summary.bookmarked ? 'Bookmarked' : 'Bookmark'}
+          </button>
+        )}
       </div>
 
       <h1 className="font-serif text-xl font-bold leading-snug text-fg sm:text-2xl">

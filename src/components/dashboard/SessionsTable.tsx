@@ -1,6 +1,11 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { activateOnKey } from '../../lib/a11y';
-import { getSessions, setSessionArchived, type SessionSummary } from '../../lib/api';
+import {
+  getSessions,
+  setSessionArchived,
+  setSessionBookmarked,
+  type SessionSummary,
+} from '../../lib/api';
 import { formatRelative, toTimestampString } from '../../lib/categoryMeta';
 import { sourceLabel } from '../../lib/sourceLabels';
 import { Icon } from '../ui/icons';
@@ -35,6 +40,7 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
   const [sort, setSort] = useState<SortKey>('recent');
   const [groupBy, setGroupBy] = useState<GroupKey>(readGroupBy);
   const [showArchived, setShowArchived] = useState(false);
+  const [onlyBookmarked, setOnlyBookmarked] = useState(false);
   // Explicit expand/collapse choices by group key. Absent ⇒ use the default,
   // which is "only the most recent group is open".
   const [expandOverrides, setExpandOverrides] = useState<Record<string, boolean>>({});
@@ -49,6 +55,7 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
           source: source || undefined,
           q: q || undefined,
           archived: showArchived,
+          bookmarked: onlyBookmarked,
         });
         if (active) {
           setSessions(data);
@@ -64,7 +71,7 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
       active = false;
       window.clearInterval(t);
     };
-  }, [status, source, q, showArchived]);
+  }, [status, source, q, showArchived, onlyBookmarked]);
 
   const changeGroupBy = (g: GroupKey) => {
     setGroupBy(g);
@@ -82,6 +89,22 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
     setSessions((prev) => prev.filter((x) => x.id !== s.id));
     try {
       await setSessionArchived(s.id, !showArchived);
+    } catch {
+      /* poll will restore the row if it failed */
+    }
+  };
+
+  const toggleBookmark = async (s: SessionSummary) => {
+    const next = !s.bookmarked;
+    // Unbookmarking inside the bookmarked-only view drops the row; otherwise
+    // flip the flag in place. The poll reconciles either way.
+    setSessions((prev) =>
+      !next && onlyBookmarked
+        ? prev.filter((x) => x.id !== s.id)
+        : prev.map((x) => (x.id === s.id ? { ...x, bookmarked: next } : x)),
+    );
+    try {
+      await setSessionBookmarked(s.id, next);
     } catch {
       /* poll will restore the row if it failed */
     }
@@ -187,6 +210,19 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
         />
         <button
           type="button"
+          onClick={() => setOnlyBookmarked((v) => !v)}
+          aria-pressed={onlyBookmarked}
+          title={onlyBookmarked ? 'Show all sessions' : 'Show bookmarked sessions only'}
+          className={`flex h-8 items-center gap-1.5 border px-2.5 font-mono text-[0.6rem] uppercase tracking-widest transition-colors focus-visible:border-vermilion focus-visible:outline-none ${
+            onlyBookmarked
+              ? 'border-fg/50 bg-surface text-fg'
+              : 'border-fg/20 text-fg/55 hover:border-fg/50 hover:text-fg'
+          }`}>
+          <Icon name={onlyBookmarked ? 'bookmark-filled' : 'bookmark'} className="h-3.5 w-3.5" />
+          Bookmarked
+        </button>
+        <button
+          type="button"
           onClick={() => setShowArchived((v) => !v)}
           aria-pressed={showArchived}
           title={showArchived ? 'Show active sessions' : 'Show archived sessions'}
@@ -245,6 +281,7 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
                       showArchived={showArchived}
                       onSelect={onSelect}
                       onArchive={toggleArchive}
+                      onBookmark={toggleBookmark}
                     />
                   ))}
               </Fragment>
@@ -253,7 +290,9 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
 
         {loaded && !sessions.length && (
           <p className="p-8 text-center font-mono text-xs text-fg/40">
-            No sessions match. Run an agent with hooks configured, or adjust filters.
+            {onlyBookmarked
+              ? 'No bookmarked sessions here. Bookmark one from its row or detail page.'
+              : 'No sessions match. Run an agent with hooks configured, or adjust filters.'}
           </p>
         )}
       </div>
@@ -267,9 +306,17 @@ interface BoardSessionRowProps {
   showArchived: boolean;
   onSelect: (id: string) => void;
   onArchive: (s: SessionSummary) => void;
+  onBookmark: (s: SessionSummary) => void;
 }
 
-function BoardSessionRow({ session: s, slot1, showArchived, onSelect, onArchive }: BoardSessionRowProps) {
+function BoardSessionRow({
+  session: s,
+  slot1,
+  showArchived,
+  onSelect,
+  onArchive,
+  onBookmark,
+}: BoardSessionRowProps) {
   return (
     <div
       role="button"
@@ -302,6 +349,23 @@ function BoardSessionRow({ session: s, slot1, showArchived, onSelect, onArchive 
         <span className="w-12 shrink-0 text-right font-mono text-[0.65rem] text-fg/45">
           {formatRelative(s.last_activity || s.started_at)}
         </span>
+
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onBookmark(s);
+          }}
+          aria-label={s.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
+          aria-pressed={s.bookmarked}
+          title={s.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
+          className={`rounded p-1 transition hover:bg-panel focus-visible:opacity-100 focus-visible:outline-none ${
+            s.bookmarked
+              ? 'text-vermilion'
+              : 'text-fg/35 opacity-0 hover:text-fg group-hover:opacity-100'
+          }`}>
+          <Icon name={s.bookmarked ? 'bookmark-filled' : 'bookmark'} className="h-3.5 w-3.5" />
+        </button>
 
         <button
           type="button"

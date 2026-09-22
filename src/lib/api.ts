@@ -28,6 +28,7 @@ export interface SessionSummary {
   cwd: string | null;
   models: string[];
   archived: boolean;
+  bookmarked: boolean;
   started_at: string;
   ended_at: string | null;
   last_activity: string | null;
@@ -221,6 +222,7 @@ export interface SessionFilters {
   source?: string;
   q?: string;
   archived?: boolean;
+  bookmarked?: boolean;
 }
 
 async function json<T>(res: Response): Promise<T> {
@@ -640,6 +642,7 @@ export async function getSessions(filters: SessionFilters = {}): Promise<Session
   if (filters.source) params.set('source', filters.source);
   if (filters.q) params.set('q', filters.q);
   if (filters.archived) params.set('archived', 'true');
+  if (filters.bookmarked) params.set('bookmarked', 'true');
   const qs = params.toString();
   const data = await json<{ sessions: SessionSummary[] }>(
     await fetch(`/v1/sessions${qs ? `?${qs}` : ''}`),
@@ -665,6 +668,11 @@ export async function getEventDetail(sessionId: string, eventId: number): Promis
 
 export async function setSessionArchived(id: string, archived: boolean): Promise<void> {
   const action = archived ? 'archive' : 'unarchive';
+  await json(await fetch(`/v1/sessions/${id}/${action}`, { method: 'POST' }));
+}
+
+export async function setSessionBookmarked(id: string, bookmarked: boolean): Promise<void> {
+  const action = bookmarked ? 'bookmark' : 'unbookmark';
   await json(await fetch(`/v1/sessions/${id}/${action}`, { method: 'POST' }));
 }
 

@@ -804,11 +804,17 @@ def get_sessions(
     source: str | None = None,
     q: str | None = None,
     archived: bool = False,
+    bookmarked: bool = False,
 ) -> dict[str, Any]:
     limit = max(1, min(limit, 500))
     return {
         "sessions": db.list_sessions(
-            limit, status=status, source=source, q=q, archived=archived
+            limit,
+            status=status,
+            source=source,
+            q=q,
+            archived=archived,
+            bookmarked=bookmarked,
         )
     }
 
@@ -827,6 +833,22 @@ def unarchive_session(session_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Session not found")
     db.record_audit_event("session.unarchived", target=session_id)
     return {"ok": True, "archived": False}
+
+
+@app.post("/v1/sessions/{session_id}/bookmark")
+def bookmark_session(session_id: str) -> dict[str, Any]:
+    if not db.set_bookmarked(session_id, True):
+        raise HTTPException(status_code=404, detail="Session not found")
+    db.record_audit_event("session.bookmarked", target=session_id)
+    return {"ok": True, "bookmarked": True}
+
+
+@app.post("/v1/sessions/{session_id}/unbookmark")
+def unbookmark_session(session_id: str) -> dict[str, Any]:
+    if not db.set_bookmarked(session_id, False):
+        raise HTTPException(status_code=404, detail="Session not found")
+    db.record_audit_event("session.unbookmarked", target=session_id)
+    return {"ok": True, "bookmarked": False}
 
 
 @app.get("/v1/sessions/origins")

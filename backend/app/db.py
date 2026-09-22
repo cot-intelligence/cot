@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     ended_at    TEXT,
     status      TEXT NOT NULL DEFAULT 'active',
     archived    INTEGER NOT NULL DEFAULT 0,
+    bookmarked  INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL
 );
 
@@ -308,6 +309,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("ended_at", "TEXT"),
         ("status", "TEXT NOT NULL DEFAULT 'active'"),
         ("archived", "INTEGER NOT NULL DEFAULT 0"),
+        ("bookmarked", "INTEGER NOT NULL DEFAULT 0"),
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
         # A subagent session launched by a parent agent. Derived deterministically
         # from the on-disk transcript nesting (.../<parent>/subagents/<child>.jsonl)
@@ -2190,6 +2192,7 @@ def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any
         "cwd": row["cwd"],
         "models": models,
         "archived": bool(row["archived"]),
+        "bookmarked": bool(row["bookmarked"]),
         "status": timeutil.live_status(last_ts),
         "started_at": timeutil.format_ts(row["started_at"]) or str(row["started_at"] or ""),
         "ended_at": timeutil.format_ts(row["ended_at"]),
@@ -2255,6 +2258,7 @@ def _batched_session_summaries(
                 "cwd": row["cwd"],
                 "models": [mr["model"] for mr in model_rows],
                 "archived": bool(row["archived"]),
+                "bookmarked": bool(row["bookmarked"]),
                 "status": timeutil.live_status(last_ts),
                 "started_at": timeutil.format_ts(row["started_at"]) or str(row["started_at"] or ""),
                 "ended_at": timeutil.format_ts(row["ended_at"]),
@@ -2628,6 +2632,15 @@ def set_archived(session_id: str, archived: bool) -> bool:
         return cur.rowcount > 0
 
 
+def set_bookmarked(session_id: str, bookmarked: bool) -> bool:
+    with store.write() as conn:
+        cur = conn.execute(
+            "UPDATE sessions SET bookmarked = ? WHERE id = ?",
+            (1 if bookmarked else 0, session_id),
+        )
+        return cur.rowcount > 0
+
+
 def set_subagent_links(links: list[dict[str, Any]]) -> int:
     """Record child→parent subagent relationships.
 
@@ -2710,7 +2723,7 @@ def export_sessions(
     with store.read() as conn:
         rows = conn.execute(
             f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
-            f" s.status, s.archived, s.created_at,"
+            f" s.status, s.archived, s.bookmarked, s.created_at,"
             f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
             f" e.i, e.o, e.cr, e.cw,"
             f" (SELECT fp.detail FROM events fp"
@@ -2863,9 +2876,12 @@ def list_sessions(
     source: str | None = None,
     q: str | None = None,
     archived: bool = False,
+    bookmarked: bool = False,
 ) -> list[dict[str, Any]]:
     clauses: list[str] = ["s.archived = ?"]
     params: list[Any] = [1 if archived else 0]
+    if bookmarked:
+        clauses.append("s.bookmarked = 1")
     # Subagent sessions embed under their parent, so they don't list standalone.
     clauses.append("s.parent_session_id IS NULL")
     if source:
@@ -2879,7 +2895,7 @@ def list_sessions(
     with store.read() as conn:
         rows = conn.execute(
             f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
-            f" s.status, s.archived, s.created_at,"
+            f" s.status, s.archived, s.bookmarked, s.created_at,"
             f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
             f" e.i, e.o, e.cr, e.cw,"
             f" (SELECT fp.detail FROM events fp"
