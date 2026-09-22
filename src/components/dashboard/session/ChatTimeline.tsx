@@ -108,7 +108,12 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
         });
         const el = cardRefs.current.get(key);
         if (!el || !containerRef.current) return;
-        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        // Rows mounting around the target replace their height estimates and shift
+        // it, so jump instantly and re-align a few times while they settle.
+        el.scrollIntoView({ block: 'start' });
+        for (const ms of [80, 200, 400]) {
+          window.setTimeout(() => el.scrollIntoView({ block: 'start' }), ms);
+        }
       },
     }), []);
 
@@ -121,7 +126,8 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
       else cardRefs.current.delete(key);
     }, []);
 
-    const renderEvent = (item: TimelineItem) => {
+    // Top-level rows register their scroll ref on the LazyRow wrapper instead.
+    const renderEvent = (item: TimelineItem, withRef = true) => {
       const itemKey = keyFor(item);
       const itemSessionId = eventSessionId(item, sessionId);
       const isConvo = isConversationCategory(item.category);
@@ -131,7 +137,7 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
           item={item}
           sessionId={itemSessionId}
           eventKey={itemKey}
-          ref={(el) => setCardRef(itemKey, el)}
+          ref={withRef ? (el) => setCardRef(itemKey, el) : undefined}
         />
       ) : (
         <ActionCard
@@ -141,7 +147,7 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
           eventKey={itemKey}
           forceOpen={forceExpanded.has(itemKey)}
           expansionRequest={expansionRequest}
-          ref={(el) => setCardRef(itemKey, el)}
+          ref={withRef ? (el) => setCardRef(itemKey, el) : undefined}
         />
       );
     };
@@ -155,14 +161,26 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
     }, [onCardClick]);
 
     return (
-      <div ref={containerRef} className="scroll-thin h-full overflow-y-auto" onClick={handleClick}>
+      <div ref={containerRef} data-chat-scroll className="scroll-thin h-full overflow-y-auto" onClick={handleClick}>
         <div className="mx-auto max-w-4xl space-y-1 px-4 py-4 pb-48 sm:px-6">
           {segments.map((seg) =>
             seg.type === 'event' ? (
-              renderEvent(seg.item)
+              <LazyRow
+                key={keyFor(seg.item)}
+                estimate={estimateRowHeight(seg.item)}
+                refKeys={[keyFor(seg.item)]}
+                setCardRef={setCardRef}
+              >
+                {renderEvent(seg.item, false)}
+              </LazyRow>
             ) : (
+              <LazyRow
+                key={`run:${seg.run.item.id}`}
+                estimate={ACTION_ROW_HEIGHT}
+                refKeys={[keyFor(seg.run.item), keyFor(seg.item), keyFor(seg.resultItem)]}
+                setCardRef={setCardRef}
+              >
               <SubagentGroup
-                key={seg.run.item.id}
                 run={seg.run}
                 resultItem={seg.resultItem}
                 sessionId={sessionId}
@@ -173,14 +191,10 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
                   forceExpanded.has(keyFor(seg.resultItem)) ||
                   seg.children.some((child) => forceExpanded.has(keyFor(child)))
                 }
-                ref={(el) => {
-                  setCardRef(keyFor(seg.run.item), el);
-                  setCardRef(keyFor(seg.item), el);
-                  setCardRef(keyFor(seg.resultItem), el);
-                }}
               >
                 {seg.children.map((child) => renderEvent(nestedChild(child)))}
               </SubagentGroup>
+              </LazyRow>
             ),
           )}
           {!items.length && (
@@ -361,6 +375,92 @@ const ConversationCard = forwardRef<HTMLDivElement, { item: TimelineItem; sessio
     );
   },
 );
+
+/* ------------------------------------------------------------------ */
+/* Lazy mount — long sessions have thousands of markdown bodies; parsing  */
+/* them all up front blocks the first paint for seconds.                  */
+/* ------------------------------------------------------------------ */
+
+type Reveal = () => void;
+const observers = new WeakMap<Element, { io: IntersectionObserver; reveals: Map<Element, Reveal> }>();
+
+function observeNear(el: Element, reveal: Reveal): () => void {
+  const root = el.closest('[data-chat-scroll]');
+  if (!root || typeof IntersectionObserver === 'undefined') {
+    reveal();
+    return () => {};
+  }
+  let entry = observers.get(root);
+  if (!entry) {
+    const reveals = new Map<Element, Reveal>();
+    const io = new IntersectionObserver(
+      (records) => {
+        for (const r of records) {
+          if (!r.isIntersecting) continue;
+          reveals.get(r.target)?.();
+          reveals.delete(r.target);
+          io.unobserve(r.target);
+        }
+      },
+      { root, rootMargin: '1500px 0px' },
+    );
+    entry = { io, reveals };
+    observers.set(root, entry);
+  }
+  const { io, reveals } = entry;
+  reveals.set(el, reveal);
+  io.observe(el);
+  return () => {
+    reveals.delete(el);
+    io.unobserve(el);
+  };
+}
+
+const ACTION_ROW_HEIGHT = 38;
+
+function estimateRowHeight(item: TimelineItem): number {
+  if (!isConversationCategory(item.category)) return ACTION_ROW_HEIGHT;
+  const detail = item.detail ?? '';
+  const lines = detail.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / 90)), 0);
+  return 56 + Math.min(lines * 22, 640);
+}
+
+/** Renders a height placeholder until the row nears the viewport, then mounts it for good. */
+function LazyRow({
+  estimate,
+  refKeys,
+  setCardRef,
+  children,
+}: {
+  estimate: number;
+  refKeys: string[];
+  setCardRef: (key: string, el: HTMLDivElement | null) => void;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [shown, setShown] = useState(false);
+  const keysId = refKeys.join('|');
+
+  useEffect(() => {
+    const el = ref.current;
+    const keys = keysId.split('|');
+    for (const k of keys) setCardRef(k, el);
+    return () => {
+      for (const k of keys) setCardRef(k, null);
+    };
+  }, [keysId, setCardRef]);
+
+  useEffect(() => {
+    if (shown || !ref.current) return;
+    return observeNear(ref.current, () => setShown(true));
+  }, [shown]);
+
+  return (
+    <div ref={ref} className="scroll-mt-4" style={shown ? undefined : { height: estimate }}>
+      {shown ? children : null}
+    </div>
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /* Action cards — collapsed by default, expand on click                */

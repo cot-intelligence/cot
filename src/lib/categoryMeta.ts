@@ -60,21 +60,18 @@ export function formatRelative(value: string | number | null | undefined): strin
   if (min < 60) return `${min}m ago`;
   const hr = Math.floor(min / 60);
   if (hr < 24) return `${hr}h ago`;
-  return d.toLocaleDateString([], { timeZone: userTimeZone() });
+  return formatter('date', {}).format(d);
 }
 
 export function formatTime(value: string | number | null | undefined): string {
-  const iso = toTimestampString(value);
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '—';
-  return d.toLocaleTimeString([], {
+  const d = toDate(value);
+  if (!d) return '—';
+  return formatter('time', {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-    timeZone: userTimeZone(),
     timeZoneName: 'short',
-  });
+  }).format(d);
 }
 
 /**
@@ -83,42 +80,62 @@ export function formatTime(value: string | number | null | undefined): string {
  * for the full value.
  */
 export function formatClock(value: string | number | null | undefined): string {
-  const iso = toTimestampString(value);
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '—';
-  return d.toLocaleString([], {
+  const d = toDate(value);
+  if (!d) return '—';
+  return formatter('clock', {
     month: 'short',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
-    timeZone: userTimeZone(),
-  });
+  }).format(d);
 }
 
 export function formatDateTime(value: string | number | null | undefined): string {
-  const iso = toTimestampString(value);
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '—';
-  return d.toLocaleString([], {
+  const d = toDate(value);
+  if (!d) return '—';
+  return formatter('datetime', {
     year: 'numeric',
     month: 'short',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-    timeZone: userTimeZone(),
     timeZoneName: 'short',
-  });
+  }).format(d);
 }
 
-export function userTimeZone(): string | undefined {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
-  } catch {
-    return undefined;
+function toDate(value: string | number | null | undefined): Date | null {
+  const iso = toTimestampString(value);
+  if (!iso) return null;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+// Building an Intl.DateTimeFormat is expensive (toLocaleString builds one per
+// call); long session timelines format thousands of timestamps per render.
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
+function formatter(name: string, options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  const timeZone = userTimeZone();
+  const key = `${name}|${timeZone ?? ''}`;
+  let f = formatters.get(key);
+  if (!f) {
+    f = new Intl.DateTimeFormat([], { ...options, timeZone });
+    formatters.set(key, f);
   }
+  return f;
+}
+
+let cachedTimeZone: string | undefined | null = null;
+
+export function userTimeZone(): string | undefined {
+  if (cachedTimeZone !== null) return cachedTimeZone;
+  try {
+    cachedTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    cachedTimeZone = undefined;
+  }
+  return cachedTimeZone;
 }
 
 export function formatDuration(ms: number | null | undefined, seconds?: number | null): string {
