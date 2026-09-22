@@ -849,3 +849,38 @@ def test_session_detail_inlines_approval_review_as_review_run():
     assert runs[0]["child_session_id"] == review
     assert runs[0]["label"] == "Approval review"
     assert review_events[0]["run_id"] == runs[0]["id"]
+
+
+def test_session_detail_defers_large_action_detail_to_lookup():
+    # Tool bodies (file writes, MCP payloads) only render when a row is expanded,
+    # so the session payload ships them empty and the dashboard lazy-loads them.
+    sid = "51515151-5151-5151-5151-515151515151"
+    _session(sid)
+    body = json.dumps({"input": {"path": "a.py", "content": "x" * 800}})
+    write_id = _event(sid, seconds=0, category="file_edit", tool="Write", target="a.py", detail=body)
+
+    detail = db.get_session_detail(sid)
+    assert detail is not None
+    write = next(e for e in detail["events"] if e["id"] == write_id)
+    assert write["detail"] == ""
+    assert write["detail_truncated"] is True
+    assert write["detail_lookup"] == {"session_id": sid, "event_id": write_id}
+    full = db.get_event_detail(sid, write_id)
+    assert full is not None and full["detail"] == body
+
+
+def test_session_detail_keeps_small_action_and_conversation_detail_inline():
+    sid = "52525252-5252-5252-5252-525252525252"
+    _session(sid)
+    small = json.dumps({"input": {"command": "ls"}})
+    shell_id = _event(sid, seconds=0, category="shell", tool="Bash", target="ls", detail=small)
+    reply = "r" * 3000
+    reply_id = _event(sid, seconds=1, category="response", detail=reply)
+
+    detail = db.get_session_detail(sid)
+    assert detail is not None
+    by_id = {e["id"]: e for e in detail["events"]}
+    assert by_id[shell_id]["detail"] == small
+    assert not by_id[shell_id].get("detail_truncated")
+    assert by_id[reply_id]["detail"] == reply
+    assert not by_id[reply_id].get("detail_truncated")

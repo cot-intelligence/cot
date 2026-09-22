@@ -15,6 +15,13 @@ from . import db, store, timeutil
 from .normalize import APPROVAL_REVIEW_PREFIX
 
 DETAIL_PREVIEW_CHARS = 4000
+# Categories whose detail renders inline in the transcript without expanding a
+# row. Everything else (tool calls: file writes, MCP payloads, shell output) is
+# only shown when a row is opened, so bodies over ACTION_DETAIL_INLINE_CHARS ship
+# empty and the dashboard lazy-loads them via the detail_lookup endpoint. On big
+# sessions those bodies are most of the payload.
+INLINE_DETAIL_CATEGORIES = frozenset({"prompt", "response", "thought", "plan", "question"})
+ACTION_DETAIL_INLINE_CHARS = 500
 
 # Only structured questions count: the agent explicitly asking the user via
 # Claude's AskUserQuestion, Cursor's AskQuestion, or Codex's request_user_input.
@@ -496,13 +503,21 @@ def _merge_linked_session_events(
 
 def _trim_detail_inplace(item: dict[str, Any], session_id: str) -> None:
     detail = item.get("detail")
-    if isinstance(detail, str) and len(detail) > DETAIL_PREVIEW_CHARS:
+    if not isinstance(detail, str):
+        return
+    if item.get("category") in INLINE_DETAIL_CATEGORIES:
+        if len(detail) <= DETAIL_PREVIEW_CHARS:
+            return
         item["detail"] = detail[:DETAIL_PREVIEW_CHARS]
-        item["detail_truncated"] = True
-        item["detail_lookup"] = {
-            "session_id": item.get("owner_session_id") or session_id,
-            "event_id": item["id"],
-        }
+    else:
+        if len(detail) <= ACTION_DETAIL_INLINE_CHARS:
+            return
+        item["detail"] = ""
+    item["detail_truncated"] = True
+    item["detail_lookup"] = {
+        "session_id": item.get("owner_session_id") or session_id,
+        "event_id": item["id"],
+    }
 
 
 def _synthesize_child_subagent_spans(
