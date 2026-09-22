@@ -1,6 +1,7 @@
 .claude
 .DS_Store
 node_modules/
+.venv/
 dist/
 .env
 *.zip
