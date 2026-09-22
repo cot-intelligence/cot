@@ -884,3 +884,18 @@ def test_session_detail_keeps_small_action_and_conversation_detail_inline():
     assert not by_id[shell_id].get("detail_truncated")
     assert by_id[reply_id]["detail"] == reply
     assert not by_id[reply_id].get("detail_truncated")
+
+
+def test_session_components_count_each_tool_call_once():
+    # Claude/Codex store a PreToolUse row before every tool's PostToolUse row;
+    # the component tallies must count the call, not both halves.
+    sid = "53535353-5353-5353-5353-535353535353"
+    _session(sid)
+    for i, (category, target) in enumerate([("shell", "ls"), ("file_edit", "a.py"), ("mcp", "browser")]):
+        _event(sid, seconds=i * 2, category=category, phase="start", hook="PreToolUse", target=target)
+        _event(sid, seconds=i * 2 + 1, category=category, phase="end", hook="PostToolUse", target=target)
+
+    components = db.session_components(sid)
+    assert components["shell_count"] == 1
+    assert components["files_edited"] == [{"path": "a.py", "count": 1}]
+    assert components["mcp_plugins"] == [{"target": "browser", "count": 1}]

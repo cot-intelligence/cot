@@ -3115,6 +3115,13 @@ def events_list(session_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def _tool_call_count(phases: dict[str, int]) -> int:
+    """Calls behind one tool target's rows. Claude/Codex/Cursor store a start
+    and an end row per call, but either half can be missing (interrupted calls
+    have no end; Cowork records only ends), so pair them rather than summing."""
+    return max(phases.get("start", 0), phases.get("end", 0)) + phases.get("instant", 0)
+
+
 def session_components(session_id: str) -> dict[str, Any]:
     with store.read() as conn:
         rows = conn.execute(
@@ -3122,43 +3129,63 @@ def session_components(session_id: str) -> dict[str, Any]:
             (session_id,),
         ).fetchall()
 
-    files_edited: dict[str, int] = {}
-    files_read: dict[str, int] = {}
-    mcp_calls: dict[str, int] = {}
-    web_calls: dict[str, int] = {}
-    skills: dict[str, int] = {}
+    # (bucket, target) -> phase -> rows; resolved to call counts below.
+    tool_phases: dict[tuple[str, str], dict[str, int]] = {}
     # Keyed by stable subagent id; value holds display label + event count.
     subagents: dict[str, dict[str, Any]] = {}
-    shell_count = 0
     prompts = 0
     responses = 0
 
     for r in rows:
         cat = r["category"] or "other"
         target = r["target"] or ""
+        bucket: str | None = None
         if cat == "file_edit" and target:
-            files_edited[target] = files_edited.get(target, 0) + 1
-        elif cat in ("file_read", "context_read") and target:
-            bucket = skills if cat == "context_read" else files_read
-            bucket[target] = bucket.get(target, 0) + 1
+            bucket = "files_edited"
+        elif cat == "file_read" and target:
+            bucket = "files_read"
+        elif cat in ("context_read", "memory") and target:
+            bucket = "skills"
         elif cat == "mcp" and target:
-            mcp_calls[target] = mcp_calls.get(target, 0) + 1
-        elif cat == "web" and target and (r["phase"] or "") in ("end", "instant"):
-            web_calls[target] = web_calls.get(target, 0) + 1
-        elif cat == "memory" and target:
-            skills[target] = skills.get(target, 0) + 1
+            bucket = "mcp"
+        elif cat == "web" and target:
+            bucket = "web"
+        elif cat == "shell":
+            bucket = "shell"
         elif cat == "subagent" and target:
             label = _subagent_display_label(r["title"], target)
             entry = subagents.setdefault(target, {"target": label, "count": 0})
             if label != target:
                 entry["target"] = label
             entry["count"] += 1
-        elif cat == "shell":
-            shell_count += 1
         elif cat == "prompt":
             prompts += 1
         elif cat == "response":
             responses += 1
+        if bucket is not None:
+            phases = tool_phases.setdefault((bucket, target), {})
+            phase = r["phase"] or "instant"
+            phases[phase] = phases.get(phase, 0) + 1
+
+    files_edited: dict[str, int] = {}
+    files_read: dict[str, int] = {}
+    mcp_calls: dict[str, int] = {}
+    web_calls: dict[str, int] = {}
+    skills: dict[str, int] = {}
+    shell_count = 0
+    buckets = {
+        "files_edited": files_edited,
+        "files_read": files_read,
+        "skills": skills,
+        "mcp": mcp_calls,
+        "web": web_calls,
+    }
+    for (bucket, target), phases in tool_phases.items():
+        n = _tool_call_count(phases)
+        if bucket == "shell":
+            shell_count += n
+        elif n:
+            buckets[bucket][target] = buckets[bucket].get(target, 0) + n
 
     return {
         "files_edited": [{"path": k, "count": v} for k, v in sorted(files_edited.items())],
