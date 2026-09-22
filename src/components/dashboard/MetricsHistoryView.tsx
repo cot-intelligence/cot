@@ -5,6 +5,7 @@ import { formatRelative, formatTime } from '../../lib/categoryMeta';
 import { FadeIn } from '../ui/FadeIn';
 import { highlight } from '../ui/Highlight';
 import { Icon } from '../ui/icons';
+import { PageHeader } from '../ui/PageHeader';
 import { Select } from '../ui/Select';
 import { SourceBadge } from '../ui/SourceBadge';
 import { TableRowsSkeleton } from '../ui/Skeleton';
@@ -197,31 +198,28 @@ export function MetricsHistoryView({ onSelect, onBack, initialTab = 'shell' }: M
   return (
     <div className="scroll-thin flex-1 overflow-y-auto">
       <div className="mx-auto max-w-6xl space-y-6 px-6 py-8 sm:px-8">
-        <FadeIn className="space-y-4">
-          <button
-            type="button"
-            onClick={onBack}
-            className="flex items-center gap-1.5 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/45 transition-colors hover:text-vermilion">
-            <Icon name="chevron-left" className="h-3 w-3" />
-            Metrics
-          </button>
-
-          <div className="flex flex-wrap items-end justify-between gap-4">
-            <div className="space-y-1.5">
-              <h1 className="text-3xl font-extrabold uppercase tracking-tight text-fg">
-                Activity{' '}
-                <span className="font-serif lowercase italic text-vermilion">history</span>
-              </h1>
-              <p className="font-mono text-sm text-fg/50">
-                Click a row to open its event in the session timeline.
-              </p>
-            </div>
-            {!loading && !error && grouped.length > 0 && (
-              <p className="font-mono text-[0.62rem] tabular-nums text-fg/40">
-                {grouped.length} unique · {totalRuns} runs
-              </p>
-            )}
-          </div>
+        <FadeIn>
+          <PageHeader
+            above={
+              <button
+                type="button"
+                onClick={onBack}
+                className="flex items-center gap-1.5 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/45 transition-colors hover:text-fg">
+                <Icon name="chevron-left" className="h-3 w-3" />
+                Overview
+              </button>
+            }
+            eyebrow="Shell + web"
+            title="Activity history"
+            description="Every command and URL your agents ran. Click a row to open its event in the session timeline."
+            actions={
+              !loading && !error && grouped.length > 0 ? (
+                <p className="font-mono text-[0.62rem] tabular-nums text-fg/40">
+                  {grouped.length} unique · {totalRuns} runs
+                </p>
+              ) : undefined
+            }
+          />
         </FadeIn>
 
         <FadeIn delay={0.03}>

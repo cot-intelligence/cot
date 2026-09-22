@@ -33,6 +33,8 @@ export type IconName =
   | 'list'
   | 'archive'
   | 'unarchive'
+  | 'bookmark'
+  | 'bookmark-filled'
   | 'image'
   | 'paperclip'
   | 'share'
@@ -205,6 +207,8 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M12 18v-6M9 15l3-3 3 3" />
     </>
   ),
+  bookmark: <path d="M6 3h12v18l-6-4.5L6 21z" />,
+  'bookmark-filled': <path d="M6 3h12v18l-6-4.5L6 21z" fill="currentColor" />,
   share: (
     <>
       <circle cx="18" cy="5" r="3" />

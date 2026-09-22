@@ -10,7 +10,7 @@ export function ThemeToggle() {
       onClick={toggle}
       aria-label={`Switch to ${isDark ? 'light' : 'dark'} mode`}
       title={`Switch to ${isDark ? 'light' : 'dark'} mode`}
-      className="flex h-8 w-8 items-center justify-center border border-fg/20 text-fg/60 transition-colors hover:border-fg/50 hover:text-fg focus-visible:outline-none focus-visible:border-vermilion">
+      className="focus-ring flex h-8 w-8 items-center justify-center rounded-[5px] border border-line/10 text-fg/55 transition-colors hover:border-line/25 hover:text-fg">
       {isDark ? <SunIcon /> : <MoonIcon />}
     </button>
   );

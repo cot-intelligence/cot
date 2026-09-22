@@ -15,7 +15,7 @@ export function AgentCard({ agent, selected, onSelect }: AgentCardProps) {
       aria-pressed={selected}
       className={`group relative flex h-full flex-col gap-5 border p-6 text-left transition-all duration-200 focus-visible:outline-none ${
         selected
-          ? 'border-vermilion bg-vermilion/[0.06] shadow-brutal-vermilion -translate-y-0.5'
+          ? 'border-vermilion bg-vermilion/[0.06] shadow-[0_0_0_1px_rgba(255,69,0,0.35),0_16px_40px_-16px_rgba(255,69,0,0.45)] -translate-y-0.5'
           : 'border-fg/20 bg-surface hover:-translate-y-0.5 hover:border-fg/40 hover:shadow-soft-md'
       }`}>
       <div className="flex items-start justify-between">

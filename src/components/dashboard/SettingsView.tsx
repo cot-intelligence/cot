@@ -27,6 +27,7 @@ import { sourceLabel } from '../../lib/sourceLabels';
 import { useTheme } from '../../lib/theme';
 import { FadeIn } from '../ui/FadeIn';
 import { AgentMark } from '../ui/AgentMark';
+import { PageHeader } from '../ui/PageHeader';
 import { ExportModal } from './ExportModal';
 
 interface SettingsViewProps {
@@ -227,13 +228,12 @@ export function SettingsView({
   return (
     <div className="scroll-thin flex-1 overflow-y-auto">
       <div className="mx-auto max-w-3xl space-y-10 px-6 py-8 sm:px-8">
-        <FadeIn className="space-y-2">
-          <h1 className="text-3xl font-extrabold uppercase tracking-tight text-fg">
-            Settings
-          </h1>
-          <p className="font-mono text-xs text-fg/50">
-            Collector and preferences. Your traces stay on your machine.
-          </p>
+        <FadeIn>
+          <PageHeader
+            eyebrow="Configuration"
+            title="Settings"
+            description="Collector, hooks and preferences. Your traces stay on your machine."
+          />
         </FadeIn>
 
         <FadeIn delay={0.03}>

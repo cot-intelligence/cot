@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     ended_at    TEXT,
     status      TEXT NOT NULL DEFAULT 'active',
     archived    INTEGER NOT NULL DEFAULT 0,
+    bookmarked  INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL
 );
 
@@ -308,6 +309,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("ended_at", "TEXT"),
         ("status", "TEXT NOT NULL DEFAULT 'active'"),
         ("archived", "INTEGER NOT NULL DEFAULT 0"),
+        ("bookmarked", "INTEGER NOT NULL DEFAULT 0"),
         ("created_at", "TEXT NOT NULL DEFAULT ''"),
         # A subagent session launched by a parent agent. Derived deterministically
         # from the on-disk transcript nesting (.../<parent>/subagents/<child>.jsonl)
@@ -1394,6 +1396,267 @@ def cleanup_retention(*, dry_run: bool = True) -> dict[str, Any]:
     return result
 
 
+def get_turn_anchors(
+    session_id: str, *, before: str | None = None
+) -> dict[str, Any]:
+    """Return tool-event timestamps for the latest turn of *session_id*.
+
+    The bridge uses this to interpolate transcript-derived response timestamps
+    so they interleave with hook-delivered tool events instead of clustering at
+    the end of the turn.
+
+    Returns ``{prompt_ts, anchors: [{ts, category, target}]}`` where *anchors*
+    are all non-response/non-thought/non-lifecycle events between the latest
+    prompt and *before* (or now), in chronological order.
+    """
+    with store.read() as conn:
+        # Find the latest prompt before `before`
+        if before:
+            row = conn.execute(
+                "SELECT ts FROM events"
+                " WHERE session_id = ? AND category = 'prompt' AND ts <= ?"
+                " ORDER BY ts DESC LIMIT 1",
+                (session_id, before),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT ts FROM events"
+                " WHERE session_id = ? AND category = 'prompt'"
+                " ORDER BY ts DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        prompt_ts = row["ts"] if row else None
+        if not prompt_ts:
+            return {"prompt_ts": None, "anchors": []}
+
+        upper = before or "9999-12-31T23:59:59Z"
+        rows = conn.execute(
+            "SELECT ts, category, target FROM events"
+            " WHERE session_id = ? AND ts > ? AND ts <= ?"
+            "   AND category NOT IN ('response', 'thought', 'lifecycle', 'prompt', 'plan')"
+            " ORDER BY ts ASC, id ASC",
+            (session_id, prompt_ts, upper),
+        ).fetchall()
+        anchors = [{"ts": r["ts"], "category": r["category"], "target": r["target"]} for r in rows]
+    return {"prompt_ts": prompt_ts, "anchors": anchors}
+
+
+def dedup_cursor_thoughts(*, dry_run: bool = True) -> dict[str, Any]:
+    """Remove duplicate Cursor thought events.
+
+    Cursor double-fires afterAgentThought (once with model:"default", once with
+    the real model). Both arrive within ~50ms and carry the same text, producing
+    visually identical timeline entries.  This uses a LAG-based approach: a
+    thought is a duplicate if the preceding thought in the same session has
+    identical text and is within 2 seconds.
+
+    When choosing which copy to delete, we prefer to *keep* the one that has a
+    real model name (non-NULL).  If both or neither have a model, the later
+    event (higher id) is dropped.
+    """
+    _FIND_DUPES = """
+        SELECT CASE
+            -- second has no model, first does → delete second (id)
+            WHEN model IS NULL AND prev_model IS NOT NULL THEN id
+            -- first has no model, second does → delete first (prev_id)
+            WHEN model IS NOT NULL AND prev_model IS NULL THEN prev_id
+            -- both same → delete later (id)
+            ELSE id
+        END AS to_delete
+        FROM (
+            SELECT id,
+                detail,
+                model,
+                LAG(detail) OVER w AS prev_detail,
+                LAG(model) OVER w AS prev_model,
+                ts,
+                LAG(ts) OVER w AS prev_ts,
+                LAG(id) OVER w AS prev_id
+            FROM events
+            WHERE source = 'cursor' AND category = 'thought'
+            WINDOW w AS (PARTITION BY session_id ORDER BY ts ASC, id ASC)
+        )
+        WHERE detail = prev_detail
+          AND prev_ts IS NOT NULL
+          AND julianday(ts) - julianday(prev_ts) < (2.0 / 86400.0)
+    """
+    with store.write() as conn:
+        if dry_run:
+            rows = conn.execute(
+                f"SELECT COUNT(*) as cnt FROM ({_FIND_DUPES})"
+            ).fetchone()
+            count = rows["cnt"] if rows else 0
+        else:
+            conn.execute(f"DELETE FROM events WHERE id IN ({_FIND_DUPES})")
+            count = conn.execute("SELECT changes()").fetchone()[0]
+    result = {
+        "dry_run": dry_run,
+        "deleted_events": count if not dry_run else 0,
+        "eligible_events": count if dry_run else 0,
+    }
+    record_audit_event(
+        "dedup.cursor_thoughts",
+        target="dedup",
+        status="dry_run" if dry_run else "ok",
+        detail=result,
+    )
+    return result
+
+
+def realign_cursor_responses(*, dry_run: bool = True) -> dict[str, Any]:
+    """Redistribute clustered Cursor response timestamps across their turns.
+
+    Cursor transcript-derived responses were historically timestamped at the
+    stop/afterAgentResponse hook time, clustering them at the end of each turn.
+    This retroactively redistributes them proportionally across [prompt_ts,
+    cluster_ts] based on their sequential position within the cluster.
+    """
+    with store.write() as conn:
+        # Find groups of responses that share the same second (clustered).
+        # Group by (session_id, ts_second) where count > 1.
+        clusters = conn.execute("""
+            SELECT session_id, substr(ts, 1, 19) as ts_sec, MIN(ts) as min_ts,
+                   MAX(ts) as max_ts, COUNT(*) as cnt, MIN(id) as first_id
+            FROM events
+            WHERE source = 'cursor' AND category = 'response'
+            GROUP BY session_id, substr(ts, 1, 19)
+            HAVING COUNT(*) > 1
+        """).fetchall()
+
+        total_updated = 0
+        for cluster in clusters:
+            sid = cluster["session_id"]
+            cluster_ts = cluster["max_ts"]
+            cnt = cluster["cnt"]
+
+            # Find the prompt that precedes this cluster.
+            prompt_row = conn.execute(
+                "SELECT ts FROM events WHERE session_id = ? AND category = 'prompt'"
+                " AND ts < ? ORDER BY ts DESC LIMIT 1",
+                (sid, cluster_ts),
+            ).fetchone()
+            if not prompt_row:
+                continue
+            prompt_ts = prompt_row["ts"]
+
+            if dry_run:
+                total_updated += cnt
+                continue
+
+            # Get the clustered response ids in order.
+            rows = conn.execute(
+                "SELECT id FROM events"
+                " WHERE session_id = ? AND category = 'response'"
+                "   AND substr(ts, 1, 19) = ?"
+                " ORDER BY id ASC",
+                (sid, cluster["ts_sec"]),
+            ).fetchall()
+
+            # Redistribute each response proportionally.
+            try:
+                pt = datetime.fromisoformat(
+                    prompt_ts.replace("Z", "+00:00")
+                )
+                ct = datetime.fromisoformat(
+                    cluster_ts.replace("Z", "+00:00")
+                )
+            except (ValueError, TypeError):
+                continue
+            span = ct - pt
+
+            for idx, row in enumerate(rows):
+                # Spread N responses evenly across [prompt_ts, cluster_ts] at
+                # fractions 1/(N+1), 2/(N+1), ..., N/(N+1).  This interleaves
+                # them with the hook-delivered tool events that already have
+                # real timestamps throughout the range.
+                frac = (idx + 1) / (cnt + 1)
+                new_dt = pt + span * frac
+                new_ts = new_dt.isoformat(timespec="milliseconds").replace(
+                    "+00:00", "Z"
+                )
+                conn.execute(
+                    "UPDATE events SET ts = ? WHERE id = ?",
+                    (new_ts, row["id"]),
+                )
+                total_updated += 1
+
+    result = {
+        "dry_run": dry_run,
+        "clusters": len(clusters),
+        "updated_events": total_updated if not dry_run else 0,
+        "eligible_events": total_updated if dry_run else 0,
+    }
+    record_audit_event(
+        "realign.cursor_responses",
+        target="realign",
+        status="dry_run" if dry_run else "ok",
+        detail=result,
+    )
+    return result
+
+
+def backfill_cursor_thought_models(*, dry_run: bool = True) -> dict[str, Any]:
+    """Fill in NULL model on Cursor thoughts from sibling events.
+
+    The first dedup pass deleted the model-carrying copy of each double-fired
+    thought, leaving the model:NULL one.  This recovers the model by copying it
+    from the nearest non-NULL-model event in the same session (any category).
+    """
+    _BACKFILL = """
+        UPDATE events
+        SET model = (
+            SELECT e2.model
+            FROM events e2
+            WHERE e2.session_id = events.session_id
+              AND e2.source = 'cursor'
+              AND e2.model IS NOT NULL
+            ORDER BY ABS(julianday(e2.ts) - julianday(events.ts))
+            LIMIT 1
+        )
+        WHERE source = 'cursor'
+          AND category = 'thought'
+          AND model IS NULL
+          AND EXISTS (
+            SELECT 1 FROM events e2
+            WHERE e2.session_id = events.session_id
+              AND e2.source = 'cursor'
+              AND e2.model IS NOT NULL
+          )
+    """
+    _COUNT = """
+        SELECT COUNT(*) as cnt
+        FROM events
+        WHERE source = 'cursor'
+          AND category = 'thought'
+          AND model IS NULL
+          AND EXISTS (
+            SELECT 1 FROM events e2
+            WHERE e2.session_id = events.session_id
+              AND e2.source = 'cursor'
+              AND e2.model IS NOT NULL
+          )
+    """
+    with store.write() as conn:
+        if dry_run:
+            rows = conn.execute(_COUNT).fetchone()
+            count = rows["cnt"] if rows else 0
+        else:
+            conn.execute(_BACKFILL)
+            count = conn.execute("SELECT changes()").fetchone()[0]
+    result = {
+        "dry_run": dry_run,
+        "updated_events": count if not dry_run else 0,
+        "eligible_events": count if dry_run else 0,
+    }
+    record_audit_event(
+        "backfill.cursor_thought_models",
+        target="backfill",
+        status="dry_run" if dry_run else "ok",
+        detail=result,
+    )
+    return result
+
+
 def get_install_id() -> str:
     """A stable, anonymous identifier for this collector install.
 
@@ -1929,6 +2192,7 @@ def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any
         "cwd": row["cwd"],
         "models": models,
         "archived": bool(row["archived"]),
+        "bookmarked": bool(row["bookmarked"]),
         "status": timeutil.live_status(last_ts),
         "started_at": timeutil.format_ts(row["started_at"]) or str(row["started_at"] or ""),
         "ended_at": timeutil.format_ts(row["ended_at"]),
@@ -1994,6 +2258,7 @@ def _batched_session_summaries(
                 "cwd": row["cwd"],
                 "models": [mr["model"] for mr in model_rows],
                 "archived": bool(row["archived"]),
+                "bookmarked": bool(row["bookmarked"]),
                 "status": timeutil.live_status(last_ts),
                 "started_at": timeutil.format_ts(row["started_at"]) or str(row["started_at"] or ""),
                 "ended_at": timeutil.format_ts(row["ended_at"]),
@@ -2058,10 +2323,30 @@ def _metrics_time_buckets(
     return by_day, by_hour
 
 
-def metrics(tz: str | None = None) -> dict[str, Any]:
+def _active_days_since(conn: sqlite3.Connection, since: str | None) -> int | None:
+    since_dt = timeutil.parse_ts(since)
+    if since_dt is None:
+        return None
+    days: set[str] = set()
+    for row in conn.execute("SELECT ts FROM events WHERE ts IS NOT NULL"):
+        event_dt = timeutil.parse_ts(row["ts"])
+        if event_dt is not None and event_dt >= since_dt:
+            days.add(event_dt.astimezone(timezone.utc).strftime("%Y-%m-%d"))
+    return len(days)
+
+
+def metrics(
+    tz: str | None = None,
+    *,
+    active_since: str | None = None,
+) -> dict[str, Any]:
     """Cross-session aggregates for the metrics dashboard."""
     zone = _resolve_tz(tz)
     with store.read() as conn:
+        # Every total and breakdown must describe the same database state.
+        # Without an explicit read transaction, concurrent ingest can commit
+        # between SELECTs and make breakdown sums exceed the headline total.
+        conn.execute("BEGIN")
         one = lambda sql, *p: conn.execute(sql, p).fetchone()  # noqa: E731
         rows = lambda sql, *p: conn.execute(sql, p).fetchall()  # noqa: E731
 
@@ -2088,6 +2373,7 @@ def metrics(tz: str | None = None) -> dict[str, Any]:
         tokens = _tokens_dict(tok)
 
         by_day, by_hour = _metrics_time_buckets(conn, zone)
+        active_days_since = _active_days_since(conn, active_since)
         busiest_day = max(by_day, key=lambda x: x["events"]) if by_day else None
         peak_hour = max(by_hour, key=lambda x: x["events"])["hour"] if by_hour else None
 
@@ -2269,6 +2555,7 @@ def metrics(tz: str | None = None) -> dict[str, Any]:
                 "unpriced_models": unpriced_models,
             },
             "by_day": by_day,
+            "active_days_since": active_days_since,
             "by_hour": by_hour,
             "by_category": by_category,
             "by_tool": by_tool,
@@ -2341,6 +2628,15 @@ def set_archived(session_id: str, archived: bool) -> bool:
         cur = conn.execute(
             "UPDATE sessions SET archived = ? WHERE id = ?",
             (1 if archived else 0, session_id),
+        )
+        return cur.rowcount > 0
+
+
+def set_bookmarked(session_id: str, bookmarked: bool) -> bool:
+    with store.write() as conn:
+        cur = conn.execute(
+            "UPDATE sessions SET bookmarked = ? WHERE id = ?",
+            (1 if bookmarked else 0, session_id),
         )
         return cur.rowcount > 0
 
@@ -2427,7 +2723,7 @@ def export_sessions(
     with store.read() as conn:
         rows = conn.execute(
             f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
-            f" s.status, s.archived, s.created_at,"
+            f" s.status, s.archived, s.bookmarked, s.created_at,"
             f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
             f" e.i, e.o, e.cr, e.cw,"
             f" (SELECT fp.detail FROM events fp"
@@ -2580,9 +2876,12 @@ def list_sessions(
     source: str | None = None,
     q: str | None = None,
     archived: bool = False,
+    bookmarked: bool = False,
 ) -> list[dict[str, Any]]:
     clauses: list[str] = ["s.archived = ?"]
     params: list[Any] = [1 if archived else 0]
+    if bookmarked:
+        clauses.append("s.bookmarked = 1")
     # Subagent sessions embed under their parent, so they don't list standalone.
     clauses.append("s.parent_session_id IS NULL")
     if source:
@@ -2596,7 +2895,7 @@ def list_sessions(
     with store.read() as conn:
         rows = conn.execute(
             f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
-            f" s.status, s.archived, s.created_at,"
+            f" s.status, s.archived, s.bookmarked, s.created_at,"
             f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
             f" e.i, e.o, e.cr, e.cw,"
             f" (SELECT fp.detail FROM events fp"

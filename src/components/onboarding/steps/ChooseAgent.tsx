@@ -46,7 +46,7 @@ export function ChooseAgent({ selected, onToggle, onContinue }: ChooseAgentProps
           type="button"
           disabled={selected.length === 0}
           onClick={onContinue}
-          className="group inline-flex items-center gap-3 border border-fg bg-fg px-7 py-3.5 font-mono text-xs font-bold uppercase tracking-widest text-bg shadow-brutal transition-opacity enabled:hover:opacity-90 disabled:cursor-not-allowed disabled:border-fg/20 disabled:bg-transparent disabled:text-fg/30 disabled:shadow-none">
+          className="group inline-flex items-center gap-3 border border-fg bg-fg px-7 py-3.5 font-mono text-xs font-bold uppercase tracking-widest text-bg transition-opacity enabled:hover:opacity-90 disabled:cursor-not-allowed disabled:border-fg/20 disabled:bg-transparent disabled:text-fg/30">
           Continue
           <span className="transition-transform group-enabled:group-hover:translate-x-1">
             {'→'}

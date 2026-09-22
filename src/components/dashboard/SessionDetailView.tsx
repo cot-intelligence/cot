@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { getSessionDetail } from '../../lib/api';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { getSessionDetail, setSessionBookmarked, type SessionDetail } from '../../lib/api';
 import { setDocumentTitle } from '../../lib/documentTitle';
 import { SessionDetailSkeleton } from '../ui/Skeleton';
 import { SessionMeta } from './session/SessionMeta';
@@ -14,6 +14,7 @@ interface SessionDetailViewProps {
 
 export function SessionDetailView({ sessionId, focusEventId }: SessionDetailViewProps) {
   const [activeTab, setActiveTab] = useState('timeline');
+  const queryClient = useQueryClient();
 
   // Cached per session id, so revisiting a session already viewed renders
   // instantly instead of dropping back to the skeleton. A previously-unseen
@@ -44,12 +45,29 @@ export function SessionDetailView({ sessionId, focusEventId }: SessionDetailView
     return <SessionDetailSkeleton />;
   }
 
+  const toggleBookmark = async () => {
+    const key = ['sessionDetail', sessionId];
+    const next = !detail.summary.bookmarked;
+    queryClient.setQueryData<SessionDetail>(key, (prev) =>
+      prev ? { ...prev, summary: { ...prev.summary, bookmarked: next } } : prev,
+    );
+    try {
+      await setSessionBookmarked(sessionId, next);
+    } finally {
+      queryClient.invalidateQueries({ queryKey: key });
+    }
+  };
+
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {/* Compact sticky header: session meta */}
-      <div className="shrink-0 border-b border-line/10 px-6 py-4 sm:px-8">
+      <div className="shrink-0 px-6 pb-4 pt-5 sm:px-8">
         <div className="mx-auto max-w-7xl">
-          <SessionMeta summary={detail.summary} links={detail.links} />
+          <SessionMeta
+            summary={detail.summary}
+            links={detail.links}
+            onToggleBookmark={toggleBookmark}
+          />
         </div>
       </div>
 

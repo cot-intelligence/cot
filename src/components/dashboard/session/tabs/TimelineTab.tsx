@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { TimelineItem } from '../../../../lib/api';
 import { formatClock, formatDateTime, getCategoryMeta } from '../../../../lib/categoryMeta';
 import {
@@ -17,9 +17,11 @@ interface TimelineTabProps {
   runs: SubagentRun[];
   focusEventId?: number;
   sessionId: string;
+  /** Tab switcher rendered at the start of the toolbar row. */
+  tabs?: ReactNode;
 }
 
-export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTabProps) {
+export function TimelineTab({ items, runs, focusEventId, sessionId, tabs }: TimelineTabProps) {
   // Hidden categories / models — toggle to hide, empty set = show all
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [hiddenModels, setHiddenModels] = useState<Set<string>>(new Set());
@@ -145,9 +147,10 @@ export function TimelineTab({ items, runs, focusEventId, sessionId }: TimelineTa
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Filter bar */}
-      <div className="shrink-0 border-b border-line/10 px-6 py-2 sm:px-8">
-        <div className="mx-auto flex max-w-7xl items-center gap-2">
-          <span className="font-mono text-[0.58rem] tabular-nums text-fg/35">
+      <div className="shrink-0 border-y border-line/10 px-6 py-2.5 sm:px-8">
+        <div className="mx-auto flex max-w-7xl items-center gap-3">
+          {tabs}
+          <span className="font-mono text-[0.6rem] tabular-nums text-fg/35">
             {sorted.length}/{items.length} events
           </span>
           <div className="ml-auto flex min-w-0 items-center gap-1.5">

@@ -112,7 +112,7 @@ export function AiInsightsSection({
         onClick={run}
         disabled={running || !configured || envDisabled}
         title={disabledHint ?? 'Send masked aggregates to your provider for analysis'}
-        className="flex shrink-0 items-center gap-2 border border-fg/25 px-3 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/75 shadow-brutal-sm transition-colors enabled:hover:border-vermilion enabled:hover:text-vermilion disabled:cursor-not-allowed disabled:opacity-50 focus-visible:border-vermilion focus-visible:outline-none">
+        className="flex shrink-0 items-center gap-2 border border-fg/25 px-3 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/75 transition-colors enabled:hover:border-vermilion enabled:hover:text-vermilion disabled:cursor-not-allowed disabled:opacity-50 focus-visible:border-vermilion focus-visible:outline-none">
         <Icon name="brain" className="h-3.5 w-3.5" />
         {running ? 'Analyzing… (can take a minute)' : 'Run analysis'}
       </button>

@@ -23,6 +23,7 @@ QUESTION_TOOLS = {"AskUserQuestion", "AskQuestion", "request_user_input"}
 QUESTION_END_HOOKS = {"PostToolUse", "postToolUse"}
 InlineKind = Literal["approval_review", "reviewed_session", "subagent"]
 SUBAGENT_STOP_HOOKS = {"SubagentStop", "subagentStop"}
+SUBAGENT_START_HOOKS = {"subagentStart", "SubagentStart"}
 INTERNAL_ITEM_KEYS = {"_child_session_id", "_run_kind"}
 RUN_CONTENT_CATEGORIES = {
     # Frontend sessionView.ACTION_CATEGORIES is the narrower display-lane
@@ -265,6 +266,22 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
             continue
 
         if phase == "start":
+            # Cursor fires both preToolUse for the Task/Agent tool AND a
+            # subagentStart hook for the same subagent.  When a subagentStart
+            # arrives and there is already an open span with the same key
+            # (from the earlier preToolUse), merge the metadata instead of
+            # opening a duplicate span.
+            hook = event.get("hook") or ""
+            if (
+                category == "subagent"
+                and hook in SUBAGENT_START_HOOKS
+                and spans.get(key)
+            ):
+                existing = spans[key][-1]
+                existing["detail"] = _merge_detail(existing.get("detail"), event.get("detail"))
+                existing["model"] = event.get("model") or existing.get("model")
+                continue
+
             spans.setdefault(key, []).append(
                 {**event, "start_ts": event["ts"], "end_ts": None, "ongoing": True}
             )
@@ -297,6 +314,47 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
                 pending_subagent_spans.append(merged)
             continue
 
+        # Fallback: when target changed between pre/post (e.g. a hook in the
+        # chain rewrote the command), match on category + tool instead.  FIFO
+        # within the same tool type keeps parallel invocations reasonable.
+        if phase == "end" and not spans.get(key):
+            end_tool = event.get("tool") or ""
+            cat_prefix = f"{category}::"
+            matched_key: str | None = None
+            for open_key, open_stack in spans.items():
+                if (
+                    open_key.startswith(cat_prefix)
+                    and open_stack
+                    and (open_stack[0].get("tool") or "") == end_tool
+                    and end_tool
+                ):
+                    matched_key = open_key
+                    break
+            if matched_key is not None:
+                start = spans[matched_key].pop(0)
+                if not spans[matched_key]:
+                    spans.pop(matched_key, None)
+                if category == "subagent" and matched_key in open_subagent_keys:
+                    open_subagent_keys.remove(matched_key)
+                duration = event.get("duration_ms") or start.get("duration_ms")
+                if duration is None:
+                    duration = int(
+                        (timeutil.duration_seconds(start["start_ts"], event["ts"]) or 0) * 1000
+                    )
+                merged = {
+                    **start,
+                    "end_ts": event["ts"],
+                    "ongoing": False,
+                    "duration_ms": duration,
+                    "detail": _merge_detail(start.get("detail"), event.get("detail")),
+                    "attachments": _merge_attachments(start.get("attachments"), event.get("attachments")),
+                    "status": event.get("status") or start.get("status"),
+                }
+                items.append(merged)
+                if category == "subagent" and not _is_subagent_stop(event):
+                    pending_subagent_spans.append(merged)
+                continue
+
         if category == "subagent" and phase == "end":
             if open_subagent_keys:
                 open_key = open_subagent_keys.pop(0)
@@ -328,9 +386,34 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
 
         items.append({**event, "start_ts": event["ts"], "end_ts": event["ts"], "ongoing": False})
 
+    # Auto-close ongoing subagent spans when the session has a lifecycle end
+    # event.  The last event's timestamp serves as the close boundary — any
+    # subagent that was still open when the session ended is capped there
+    # rather than left as "ongoing".
+    session_end_ts: str | None = None
+    for event in reversed(events):
+        if event.get("category") == "lifecycle" and (event.get("hook") or "") in (
+            "stop", "Stop", "sessionEnd", "SessionEnd",
+        ):
+            session_end_ts = event.get("ts")
+            break
+
     for pending_group in spans.values():
         for pending in pending_group:
-            items.append({**pending, "end_ts": None})
+            if (
+                session_end_ts
+                and pending.get("category") == "subagent"
+                and pending.get("ongoing")
+            ):
+                end_ts = session_end_ts
+                pending["end_ts"] = end_ts
+                pending["ongoing"] = False
+                pending["duration_ms"] = int(
+                    (timeutil.duration_seconds(pending["start_ts"], end_ts) or 0) * 1000
+                )
+            else:
+                pending.setdefault("end_ts", None)
+            items.append(pending)
 
     items.sort(key=lambda item: item.get("start_ts") or item.get("ts") or "")
     return items

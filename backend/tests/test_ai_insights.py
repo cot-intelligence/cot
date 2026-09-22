@@ -475,6 +475,57 @@ def test_settings_update_validates_and_audits_without_key():
     assert main.get_settings()["ai_configured"] is False
 
 
+def test_settings_persist_dashboard_layout():
+    _fresh_db()
+
+    class _FakeRequest:
+        def __init__(self, body: dict):
+            self._body = body
+
+        async def json(self):
+            return self._body
+
+        async def body(self):
+            return json.dumps(self._body).encode("utf-8")
+
+    import asyncio
+
+    # Defaults: nav expanded, session sidebar open.
+    settings = main.get_settings()
+    assert settings["ui_nav_collapsed"] is False
+    assert settings["ui_sidebar_open"] is True
+
+    result = asyncio.run(
+        main.update_settings(_FakeRequest({"ui_nav_collapsed": True, "ui_sidebar_open": False}))
+    )
+    assert result["ui_nav_collapsed"] is True
+    assert result["ui_sidebar_open"] is False
+
+    # Updating one key leaves the other alone.
+    result = asyncio.run(main.update_settings(_FakeRequest({"ui_nav_collapsed": False})))
+    assert result["ui_nav_collapsed"] is False
+    assert result["ui_sidebar_open"] is False
+
+    # Onboarding: off by default; unknown agents dropped, order normalized.
+    assert result["ui_onboarded"] is False
+    assert result["ui_onboarding_agents"] == []
+    result = asyncio.run(
+        main.update_settings(
+            _FakeRequest({"ui_onboarded": True, "ui_onboarding_agents": ["codex", "bogus", "claude"]})
+        )
+    )
+    assert result["ui_onboarded"] is True
+    assert result["ui_onboarding_agents"] == ["claude", "codex"]
+
+    from fastapi import HTTPException
+
+    try:
+        asyncio.run(main.update_settings(_FakeRequest({"ui_onboarding_agents": "claude"})))
+        assert False, "expected 400"
+    except HTTPException as exc:
+        assert exc.status_code == 400
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

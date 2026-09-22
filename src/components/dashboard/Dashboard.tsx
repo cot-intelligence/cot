@@ -1,9 +1,11 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { getSettings, updateSettings } from '../../lib/api';
 import { setDocumentTitle } from '../../lib/documentTitle';
-import { readSidebarOpen, writeSidebarOpen } from '../../lib/settings';
+import { usePeek } from '../../lib/usePeek';
+import { readNavCollapsed, readSidebarOpen, writeNavCollapsed, writeSidebarOpen } from '../../lib/settings';
 import { ThemeToggle } from '../ui/ThemeToggle';
-import { Icon } from '../ui/icons';
 import { MetricsSkeleton } from '../ui/Skeleton';
+import { AppSidebar, type NavKey } from './AppSidebar';
 import { CommandPalette, type PaletteCommand, type PaletteScope } from './CommandPalette';
 import { DashboardHome } from './DashboardHome';
 import { SessionDetailView } from './SessionDetailView';
@@ -65,14 +67,50 @@ export function Dashboard({ onSetup }: DashboardProps) {
   });
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [navCollapsed, setNavCollapsed] = useState(readNavCollapsed);
+  // Set once the user toggles a sidebar, so a slow settings fetch never
+  // overwrites a choice made after the page opened.
+  const layoutTouched = useRef(false);
 
-  const toggleSidebar = useCallback(() => {
-    setSidebarOpen((open) => {
-      const next = !open;
-      writeSidebarOpen(next);
-      return next;
-    });
+  // localStorage gives an instant first paint; the collector's copy is the
+  // source of truth because browser storage is per-origin (127.0.0.1 vs
+  // localhost vs the dev server).
+  useEffect(() => {
+    getSettings()
+      .then((s) => {
+        // Older collectors don't return these fields; keep the local copy then.
+        if (layoutTouched.current) return;
+        if (typeof s.ui_nav_collapsed === 'boolean') {
+          setNavCollapsed(s.ui_nav_collapsed);
+          writeNavCollapsed(s.ui_nav_collapsed);
+        }
+        if (typeof s.ui_sidebar_open === 'boolean') {
+          setSidebarOpen(s.ui_sidebar_open);
+          writeSidebarOpen(s.ui_sidebar_open);
+        }
+      })
+      .catch(() => {
+        /* collector unreachable — keep the local copy */
+      });
   }, []);
+
+  const saveSidebarOpen = useCallback((open: boolean) => {
+    layoutTouched.current = true;
+    setSidebarOpen(open);
+    writeSidebarOpen(open);
+    updateSettings({ ui_sidebar_open: open }).catch(() => {});
+  }, []);
+
+  const toggleNav = useCallback(() => {
+    const next = !navCollapsed;
+    layoutTouched.current = true;
+    setNavCollapsed(next);
+    writeNavCollapsed(next);
+    updateSettings({ ui_nav_collapsed: next }).catch(() => {});
+  }, [navCollapsed]);
+
+  const toggleSidebar = useCallback(() => saveSidebarOpen(!sidebarOpen), [saveSidebarOpen, sidebarOpen]);
+  const { peek: sessionsPeek, handlers: sessionsPeekHandlers } = usePeek(!sidebarOpen);
 
   useEffect(() => {
     const onHash = () => {
@@ -182,106 +220,109 @@ export function Dashboard({ onSetup }: DashboardProps) {
     [selectedId],
   );
 
-  return (
-    <div className="relative flex h-screen flex-col">
-      <div className="pointer-events-none absolute inset-0 grid-bg" aria-hidden="true" />
-      <header className="relative z-10 flex items-center justify-between border-b border-line/10 px-6 py-4">
-        <div className="flex items-center gap-3">
-          <a href="#/sessions" className="font-serif text-2xl font-bold italic text-fg">
-            cot.
-          </a>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setPaletteOpen(true)}
-            aria-label="Search everything"
-            title="Search everything (⌘K)"
-            className="flex h-8 items-center gap-2 border border-fg/20 px-2.5 text-fg/60 transition-colors hover:border-fg/50 hover:text-fg focus-visible:border-vermilion focus-visible:outline-none">
-            <Icon name="search" className="h-3.5 w-3.5" />
-            <kbd className="hidden font-mono text-[0.55rem] uppercase tracking-widest text-fg/40 sm:inline">
-              ⌘K
-            </kbd>
-          </button>
-          <button
-            type="button"
-            onClick={goOverview}
-            aria-label="Overview"
-            aria-current={onOverview ? 'page' : undefined}
-            title="Overview — metrics + insights"
-            className={`flex h-8 w-8 items-center justify-center border border-cobalt bg-cobalt text-cream transition-all focus-visible:outline-none focus-visible:border-cobalt ${
-              onOverview ? '' : 'brightness-90 hover:brightness-100'
-            }`}>
-            <Icon name="chart" className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            onClick={goSettings}
-            aria-label="Settings"
-            aria-current={onSettings ? 'page' : undefined}
-            title="Settings"
-            className={`flex h-8 w-8 items-center justify-center border transition-colors focus-visible:outline-none focus-visible:border-vermilion ${
-              onSettings
-                ? 'border-fg/50 text-fg'
-                : 'border-fg/20 text-fg/60 hover:border-fg/50 hover:text-fg'
-            }`}>
-            <Icon name="settings" className="h-4 w-4" />
-          </button>
-          <ThemeToggle />
-        </div>
-      </header>
+  const activeNav: NavKey = onSettings
+    ? 'settings'
+    : onOverview
+      ? 'overview'
+      : onMetricsHistory
+        ? 'history'
+        : 'sessions';
 
-      <div className="relative z-10 flex min-h-0 flex-1 overflow-hidden">
-        {onSettings ? (
-          <main className="flex min-w-0 flex-1 flex-col bg-bg/80">
-            <SettingsView
-              sidebarOpen={sidebarOpen}
-              onSidebarOpenChange={(open) => {
-                setSidebarOpen(open);
-                writeSidebarOpen(open);
-              }}
-              onRunOnboarding={onSetup}
-            />
-          </main>
-        ) : onMetricsHistory ? (
-          <main className="flex min-w-0 flex-1 flex-col bg-bg/80">
-            <Suspense fallback={<MetricsSkeleton />}>
-              <MetricsHistoryView
-                onSelect={selectSession}
-                onBack={goOverview}
-                initialTab={route.view === 'metrics-history' ? route.tab : undefined}
-              />
-            </Suspense>
-          </main>
-        ) : onOverview ? (
-          <main className="flex min-w-0 flex-1 flex-col bg-bg/80">
-            <Suspense fallback={<MetricsSkeleton />}>
-              <OverviewView onSelect={selectSession} onHistory={goMetricsHistory} />
-            </Suspense>
-          </main>
-        ) : selectedId ? (
-          <>
-            <div
-              className={`hidden shrink-0 overflow-hidden transition-[width] duration-200 ease-out md:block ${
-                sidebarOpen ? 'w-80' : 'w-10'
-              }`}>
-              <SessionList
-                selectedId={selectedId}
-                onSelect={selectSession}
-                collapsed={!sidebarOpen}
-                onToggle={toggleSidebar}
-              />
-            </div>
-            <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-bg/80">
-              <SessionDetailView
-                sessionId={selectedId}
-                focusEventId={route.view === 'session' ? route.focusEventId : undefined}
+  const crumbs: { label: string; href?: string }[] = selectedId
+    ? [{ label: 'Sessions', href: '#/sessions' }, { label: shortSession(selectedId) }]
+    : onMetricsHistory
+      ? [{ label: 'Overview', href: '#/overview' }, { label: 'Activity history' }]
+      : [{ label: onSettings ? 'Settings' : onOverview ? 'Overview' : 'Sessions' }];
+
+  return (
+    <div className="relative flex h-screen">
+      <AppSidebar
+        active={activeNav}
+        collapsed={navCollapsed}
+        onToggleCollapsed={toggleNav}
+        onSearch={() => setPaletteOpen(true)}
+      />
+      <div className="relative flex min-w-0 flex-1 flex-col">
+        <div className="pointer-events-none absolute inset-0 grid-bg" aria-hidden="true" />
+        <header className="relative z-10 flex h-14 shrink-0 items-center justify-between gap-4 border-b border-line/10 bg-bg/70 px-6 backdrop-blur-sm">
+          <nav aria-label="Breadcrumb" className="min-w-0">
+            <ol className="flex min-w-0 items-center gap-2.5 font-mono text-[0.68rem] font-bold uppercase tracking-[0.16em]">
+              {crumbs.map((c, i) => (
+                <li key={c.label} className="flex min-w-0 items-center gap-2">
+                  {i > 0 && <span className="text-fg/20" aria-hidden="true">/</span>}
+                  {c.href ? (
+                    <a href={c.href} className="focus-ring shrink-0 rounded-sm text-fg/45 transition-colors hover:text-fg">
+                      {c.label}
+                    </a>
+                  ) : (
+                    <span aria-current="page" className="truncate font-medium text-fg">
+                      {c.label}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </nav>
+          <ThemeToggle />
+        </header>
+
+        <div className="relative z-10 flex min-h-0 flex-1 overflow-hidden">
+          {onSettings ? (
+            <main className="flex min-w-0 flex-1 flex-col">
+              <SettingsView
+                sidebarOpen={sidebarOpen}
+                onSidebarOpenChange={saveSidebarOpen}
+                onRunOnboarding={onSetup}
               />
             </main>
-          </>
-        ) : (
-          <DashboardHome onSelect={selectSession} />
-        )}
+          ) : onMetricsHistory ? (
+            <main className="flex min-w-0 flex-1 flex-col">
+              <Suspense fallback={<MetricsSkeleton />}>
+                <MetricsHistoryView
+                  onSelect={selectSession}
+                  onBack={goOverview}
+                  initialTab={route.view === 'metrics-history' ? route.tab : undefined}
+                />
+              </Suspense>
+            </main>
+          ) : onOverview ? (
+            <main className="flex min-w-0 flex-1 flex-col">
+              <Suspense fallback={<MetricsSkeleton />}>
+                <OverviewView onSelect={selectSession} onHistory={goMetricsHistory} />
+              </Suspense>
+            </main>
+          ) : selectedId ? (
+            <>
+              {/* The slot keeps the pinned width; a hover peek overlays the timeline. */}
+              <div
+                {...sessionsPeekHandlers}
+                className={`rail-motion relative z-20 hidden shrink-0 md:block ${
+                  sidebarOpen ? 'w-80' : 'w-10'
+                }`}>
+                <div
+                  className={`rail-motion absolute inset-y-0 left-0 overflow-hidden ${
+                    sidebarOpen || sessionsPeek ? 'w-80' : 'w-10'
+                  } ${sessionsPeek ? 'shadow-soft-lg' : 'shadow-none'}`}>
+                  <SessionList
+                    selectedId={selectedId}
+                    onSelect={selectSession}
+                    collapsed={!sidebarOpen && !sessionsPeek}
+                    peeking={sessionsPeek}
+                    onToggle={toggleSidebar}
+                  />
+                </div>
+              </div>
+              <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+                <SessionDetailView
+                  sessionId={selectedId}
+                  focusEventId={route.view === 'session' ? route.focusEventId : undefined}
+                />
+              </main>
+            </>
+          ) : (
+            <DashboardHome onSelect={selectSession} />
+          )}
+        </div>
       </div>
 
       <CommandPalette

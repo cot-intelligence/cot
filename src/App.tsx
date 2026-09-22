@@ -3,36 +3,48 @@ import { animate, motion, useMotionTemplate, useMotionValue } from 'framer-motio
 import { Dashboard } from './components/dashboard/Dashboard';
 import { Onboarding } from './components/onboarding/Onboarding';
 import { UpdateBanner } from './components/ui/UpdateBanner';
+import { getSettings, updateSettings } from './lib/api';
 import { setDocumentTitle } from './lib/documentTitle';
 import { identifyInstall } from './lib/analytics';
 import type { AgentId } from './lib/agents';
+import { readOnboarded, readSavedAgents, writeOnboarded } from './lib/settings';
 
 type Origin = { x: number; y: number };
 
-const ONBOARDED_KEY = 'cot.onboarded';
-
-function readOnboarded(): boolean {
-  try {
-    return localStorage.getItem(ONBOARDED_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
-
 function markOnboarded(agents: AgentId[]) {
-  try {
-    localStorage.setItem(ONBOARDED_KEY, '1');
-    localStorage.setItem('cot.onboarding.agents', JSON.stringify(agents));
-  } catch {
-    /* ignore */
-  }
+  writeOnboarded(agents);
+  updateSettings({ ui_onboarded: true, ui_onboarding_agents: agents }).catch(() => {});
 }
 
 export function App() {
-  const [view, setView] = useState<'onboarding' | 'dashboard'>(
-    readOnboarded() ? 'dashboard' : 'onboarding',
+  // With no local flag, ask the collector before showing setup: browser
+  // storage is per-origin, so 127.0.0.1 vs localhost would otherwise re-run
+  // onboarding for an install that already finished it.
+  const [view, setView] = useState<'checking' | 'onboarding' | 'dashboard'>(
+    readOnboarded() ? 'dashboard' : 'checking',
   );
   const [transition, setTransition] = useState<Origin | null>(null);
+
+  useEffect(() => {
+    const settle = (next: 'onboarding' | 'dashboard') =>
+      setView((v) => (v === 'checking' ? next : v));
+    getSettings()
+      .then((s) => {
+        // Older collectors don't know the flag; fall back to the local copy.
+        if (typeof s.ui_onboarded !== 'boolean') return settle('onboarding');
+        if (s.ui_onboarded) {
+          writeOnboarded(s.ui_onboarding_agents ?? readSavedAgents());
+          return settle('dashboard');
+        }
+        // Onboarded before the collector tracked it: record it there once.
+        if (readOnboarded()) {
+          updateSettings({ ui_onboarded: true, ui_onboarding_agents: readSavedAgents() }).catch(() => {});
+          return;
+        }
+        settle('onboarding');
+      })
+      .catch(() => settle('onboarding'));
+  }, []);
 
   useEffect(() => {
     if (!window.location.hash) {
@@ -60,7 +72,7 @@ export function App() {
 
   return (
     <>
-      {view === 'onboarding' ? (
+      {view === 'checking' ? null : view === 'onboarding' ? (
         <Onboarding onComplete={handleComplete} />
       ) : (
         <>
