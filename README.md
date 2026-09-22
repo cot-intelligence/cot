@@ -14,7 +14,7 @@ No cloud. No accounts. Your traces stay on your machine.
 [![License](https://img.shields.io/badge/license-AGPL--3.0-2B5CE6?style=flat-square&labelColor=0b0e11)](LICENSE)
 [![Container](https://img.shields.io/badge/ghcr.io-cot--intelligence%2Fcot-7DB87A?style=flat-square&labelColor=0b0e11&logo=docker&logoColor=f4f0ea)](https://github.com/cot-intelligence/cot/pkgs/container/cot)
 
-[**Website**](https://cot.run) · [**Quickstart**](#quickstart) · [**Features**](#what-you-get) · [**How it works**](#how-it-works) · [**Development**](#development)
+[**Website**](https://cot.run) · [**Quickstart**](#quickstart) · [**Features**](https://cot.run/docs/features) · [**How it works?**](https://cot.run/docs/why-cot) · [**Development**](#development)
 
 </div>
 
@@ -52,44 +52,6 @@ The default port is **31337**. If it is busy, the installer picks the next free 
 | `cot up` | Start or resume the collector |
 | `cot down` | Stop the collector, keeping your hooks and local data |
 | `cot purge` | Remove the collector, unwire cot hooks, and delete `~/.cot` after asking |
-
-## What you get
-
-<table>
-<tr>
-<td width="33%" valign="top">
-
-### Full-stack tracing
-
-Every prompt, thought, tool call, file edit, and shell command on one timeline per session. Instrument your own code with custom spans in Python or TypeScript.
-
-</td>
-<td width="33%" valign="top">
-
-### Continuous evaluation
-
-Async evaluators run on every trace and flag retry loops, risky commands, sensitive files, and spend spikes. Each finding comes with a recommended fix.
-
-</td>
-<td width="33%" valign="top">
-
-### Latency and cost
-
-Track token usage, cache hits, and estimated cost by session, model, and project. Span waterfalls show where the time went.
-
-</td>
-</tr>
-</table>
-
-## Philosophy
-
-<table>
-<tr>
-<td align="center" width="33%"><h3>Self-host only</h3><sub>Runs on your machines.<br>Your data stays yours.</sub></td>
-<td align="center" width="33%"><h3>Free forever</h3><sub>No license fees.<br>No metered billing.</sub></td>
-<td align="center" width="33%"><h3>AGPL-3.0</h3><sub>Read every line<br>that runs on your box.</sub></td>
-</tr>
-</table>
 
 ## How it works
 
