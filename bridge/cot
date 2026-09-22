@@ -171,13 +171,18 @@ def _send_once(url: str, payload: dict, timeout: float) -> bool:
         return False
 
 
-def _spool_append(url: str, payload: dict) -> None:
-    """Queue an undelivered ingest event, trimming the oldest to stay under the
-    byte cap."""
+def _url_request_target(url: str) -> str:
     parsed = urllib.parse.urlsplit(url)
     path = parsed.path
     if parsed.query:
         path = f"{path}?{parsed.query}"
+    return path
+
+
+def _spool_append(url: str, payload: dict) -> None:
+    """Queue an undelivered ingest event, trimming the oldest to stay under the
+    byte cap."""
+    path = _url_request_target(url)
     # Most hook payloads carry no timestamp, so the collector stamps arrival
     # time. Pin the capture time now or a replay lands at flush time, out of
     # order with transcript-timed events. Only spooled events get this: the live
@@ -214,10 +219,7 @@ def _spool_target(record: dict) -> str:
         legacy_url = record.get("url")
         if not isinstance(legacy_url, str) or not legacy_url:
             return ""
-        parsed = urllib.parse.urlsplit(legacy_url)
-        path = parsed.path
-        if parsed.query:
-            path = f"{path}?{parsed.query}"
+        path = _url_request_target(legacy_url)
     if not path.startswith("/v1/ingest/"):
         return ""
     return f"{COT_ENDPOINT.rstrip('/')}{path}"

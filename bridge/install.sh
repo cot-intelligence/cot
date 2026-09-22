@@ -83,18 +83,41 @@ details() {
   done
 }
 
+python_works() {
+  python_candidate="$1"
+  [ -n "${python_candidate}" ] || return 1
+  case "${python_candidate}" in
+    *[![:graph:]]*) return 1 ;;
+  esac
+  [ -x "${python_candidate}" ] || return 1
+  "${python_candidate}" \
+    -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' \
+    >/dev/null 2>&1
+}
+
 resolve_python() {
-  path_python=$(command -v python3 2>/dev/null || true)
-  for candidate in "${COT_PYTHON:-}" "${path_python}" \
+  if python_works "${COT_PYTHON:-}"; then
+    PYTHON_BIN="${COT_PYTHON}"
+    return 0
+  fi
+
+  original_ifs="${IFS}"
+  IFS=:
+  for python_dir in ${PATH}; do
+    [ -n "${python_dir}" ] || python_dir="."
+    python_candidate="${python_dir}/python3"
+    if python_works "${python_candidate}"; then
+      PYTHON_BIN="${python_candidate}"
+      break
+    fi
+  done
+  IFS="${original_ifs}"
+  [ -n "${PYTHON_BIN}" ] && return 0
+
+  for python_candidate in \
     /opt/homebrew/bin/python3 /usr/bin/python3 /usr/local/bin/python3; do
-    [ -n "${candidate}" ] || continue
-    case "${candidate}" in
-      *[![:graph:]]*) continue ;;
-    esac
-    [ -x "${candidate}" ] || continue
-    if "${candidate}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' \
-      >/dev/null 2>&1; then
-      PYTHON_BIN="${candidate}"
+    if python_works "${python_candidate}"; then
+      PYTHON_BIN="${python_candidate}"
       return 0
     fi
   done
