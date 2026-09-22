@@ -13,6 +13,8 @@ import json
 import os
 import sys
 import tempfile
+import time
+from datetime import timezone
 from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -105,6 +107,42 @@ def test_spooled_event_keeps_capture_time_not_replay_time():
         sink.up = True
         assert bridge._spool_flush() is True
         assert [p.get("timestamp") for p in sink.delivered] == captured
+    _with_temp_spool(body)
+
+
+def test_spooled_hook_keeps_hook_start_time_when_collector_hangs():
+    # A hanging collector costs each failed send a full timeout before the event
+    # is spooled, and a Codex hook can post several events first. The capture
+    # time must be when the hook fired, not when spooling finally happened.
+    import io
+    from datetime import datetime, timedelta
+
+    def body(state):
+        def slow_down(url, payload, timeout):
+            time.sleep(0.5)
+            return False
+
+        bridge._send_once = slow_down
+        orig = (sys.argv, sys.stdin, sys.stdout)
+        sys.argv = ["cot", "hook", "codex"]
+        sys.stdin = io.StringIO(json.dumps({
+            "session_id": "hang-test",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "true"},
+            "tool_use_id": "call-1",
+            "transcript_path": str(state / "missing.jsonl"),
+        }))
+        sys.stdout = io.StringIO()
+        fired = datetime.now(timezone.utc)
+        try:
+            bridge.main()
+        finally:
+            sys.argv, sys.stdin, sys.stdout = orig
+            bridge._HOOK_CAPTURED_AT = None
+        [rec] = _spool_lines()
+        captured = datetime.fromisoformat(rec["payload"]["timestamp"])
+        assert captured - fired < timedelta(seconds=0.25), captured - fired
     _with_temp_spool(body)
 
 
