@@ -8,7 +8,7 @@
 # Then open http://127.0.0.1:31337 and point your agent hooks at it.
 
 # --- Stage 1: build the dashboard ---
-FROM node:22-alpine AS web
+FROM node:26-alpine AS web
 WORKDIR /web
 COPY package.json package-lock.json ./
 RUN npm ci || npm install
