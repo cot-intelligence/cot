@@ -5,31 +5,37 @@
 @tailwind utilities;
 
 @layer base {
-  /* Light is the default theme. Dark inverts the same tokens. Vermilion and
-     cobalt accents are constant; olive brightens in dark mode so success
-     states stay readable on near-black surfaces.
+  /* Dark is the default theme, matching the marketing site. Light inverts the
+     same tokens. Vermilion and cobalt accents are constant; olive brightens in
+     dark mode so success states stay readable on near-black surfaces.
      Surfaces get LIGHTER as they rise (bg < panel < surface) so panels
      separate by elevation instead of hard borders. */
   :root,
-  [data-theme='light'] {
-    --bg: 245 242 236; /* warm cream, softened from pure */
-    --fg: 26 26 26; /* near-ink, eases glare vs pure #111 */
-    --surface: 251 250 247; /* raised cards (off-white, not pure white) */
-    --panel: 236 232 225; /* code & inputs (cream-dark) */
-    --line: 17 17 17; /* single border token (used at low opacity) */
-    --brutal: 26 26 26; /* hard offset shadow color */
-    --grid: 17 17 17; /* texture lines (low opacity) */
-    --olive: 58 77 57; /* #3A4D39 — muted forest green */
-  }
   [data-theme='dark'] {
-    --bg: 22 23 25; /* lifted near-black, faintly cool */
-    --fg: 237 234 227; /* softened off-white, not full cream */
-    --surface: 32 34 37; /* raised cards (lighter than bg) */
-    --panel: 28 29 32; /* code & inputs */
+    --bg: 11 14 17; /* #0b0e11 — site section black */
+    --fg: 244 240 234; /* cream */
+    --surface: 20 25 31; /* #14191f raised cards */
+    --panel: 16 20 25; /* #101419 code, inputs, rails */
     --line: 244 240 234; /* single border token (used at low opacity) */
-    --brutal: 237 234 227;
-    --grid: 244 240 234;
+    --brutal: 244 240 234;
+    --grid: 174 255 202; /* site "instrument" grid tint */
+    --grid-alpha: 0.035;
     --olive: 125 184 122; /* #7DB87A — brighter sage for success on dark */
+    --shadow: 0 0 0;
+    color-scheme: dark;
+  }
+  [data-theme='light'] {
+    --bg: 246 244 239; /* warm cream, softened */
+    --fg: 22 24 27; /* near-ink */
+    --surface: 255 255 253; /* raised cards */
+    --panel: 238 235 229; /* code & inputs */
+    --line: 17 17 17;
+    --brutal: 22 24 27;
+    --grid: 17 17 17;
+    --grid-alpha: 0.03;
+    --olive: 58 77 57; /* #3A4D39 — muted forest green */
+    --shadow: 30 24 16;
+    color-scheme: light;
   }
 
   html {
@@ -45,11 +51,13 @@
 }
 
 @layer utilities {
+  /* Faint instrument grid, fading out toward the bottom like the site hero. */
   .grid-bg {
     background-image:
-      linear-gradient(rgb(var(--grid) / 0.025) 1px, transparent 1px),
-      linear-gradient(90deg, rgb(var(--grid) / 0.025) 1px, transparent 1px);
-    background-size: 96px 96px;
+      linear-gradient(rgb(var(--grid) / var(--grid-alpha)) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(var(--grid) / var(--grid-alpha)) 1px, transparent 1px);
+    background-size: 32px 32px;
+    mask-image: linear-gradient(to bottom, black, transparent 70%);
   }
   .glow-vermilion {
     background: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(255, 69, 0, 0.08), transparent 70%);
@@ -57,6 +65,81 @@
   .brutal-border {
     @apply border-3;
     border-color: rgb(var(--fg));
+  }
+  /* Small tracked mono label — the site's section eyebrow. */
+  .eyebrow {
+    @apply font-mono text-[0.625rem] font-bold uppercase tracking-[0.2em] text-fg/45;
+  }
+  /* Raised card: a hairline border plus soft depth instead of hard shadows. */
+  .card {
+    @apply border border-line/10 bg-surface;
+    box-shadow: 0 1px 0 rgb(var(--line) / 0.03) inset, 0 12px 32px -16px rgb(var(--shadow) / 0.35);
+  }
+  .glass {
+    background: rgb(var(--surface) / 0.72);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgb(var(--line) / 0.1);
+  }
+  /* Tinted ring chip, as used for event kinds in the site trace viewer. */
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-[3px] px-1.5 py-0.5 font-mono text-[0.58rem] font-bold uppercase tracking-[0.12em] ring-1 ring-inset;
+  }
+  /* Segmented control: a recessed track with the active item raised. */
+  .seg {
+    @apply inline-flex items-center gap-0.5 rounded-[5px] border border-line/10 bg-panel p-0.5;
+  }
+  .seg-item {
+    @apply rounded-[3px] px-2.5 py-1 font-mono text-[0.62rem] font-bold uppercase tracking-[0.12em] text-fg/50 transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-vermilion/60;
+  }
+  .seg-item[aria-pressed='true'] {
+    @apply bg-surface text-fg shadow-soft;
+  }
+  /* Quiet secondary button. */
+  .btn {
+    @apply inline-flex shrink-0 items-center gap-2 rounded-[5px] border border-line/15 bg-surface/60 px-3 py-1.5 font-mono text-[0.62rem] font-bold uppercase tracking-[0.12em] text-fg/75 transition-colors hover:border-line/30 hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion/50 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply inline-flex shrink-0 items-center gap-2 rounded-[5px] bg-vermilion px-3.5 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-[0.12em] text-cream transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion/50 focus-visible:ring-offset-2 focus-visible:ring-offset-bg;
+  }
+  /* Sidebar motion. Width eases on a soft decelerating curve; labels never
+     toggle display (which made them pop), they fade and drift in just after
+     the panel starts opening and leave quickly before it closes. Icons keep
+     one fixed position in both states, so nothing jumps sideways. */
+  .rail-motion {
+    transition-property: width, box-shadow, background-color;
+    transition-duration: 320ms;
+    transition-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+  }
+  .rail-label {
+    white-space: nowrap;
+    opacity: 0;
+    transform: translateX(-6px);
+    transition: opacity 110ms ease-out, transform 160ms ease-out;
+  }
+  @media (min-width: 768px) {
+    [data-expanded='true'] .rail-label {
+      opacity: 1;
+      transform: none;
+      transition:
+        opacity 220ms ease-out 80ms,
+        transform 300ms cubic-bezier(0.32, 0.72, 0, 1) 60ms;
+    }
+  }
+  /* Crossfade between a collapsed strip and its full panel. */
+  .rail-swap {
+    transition: opacity 180ms ease-out;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .rail-motion,
+    .rail-label,
+    [data-expanded='true'] .rail-label,
+    .rail-swap {
+      transition: none;
+    }
+  }
+  .focus-ring {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion/60 focus-visible:ring-offset-0;
   }
   .scroll-thin::-webkit-scrollbar {
     height: 6px;
@@ -71,11 +154,11 @@
   .agent-mark-cursor {
     display: none;
   }
-  [data-theme='light'] .agent-mark-cursor-light,
-  :root:not([data-theme='dark']) .agent-mark-cursor-light {
+  [data-theme='light'] .agent-mark-cursor-light {
     display: block;
   }
-  [data-theme='dark'] .agent-mark-cursor-dark {
+  [data-theme='dark'] .agent-mark-cursor-dark,
+  :root:not([data-theme='light']) .agent-mark-cursor-dark {
     display: block;
   }
   .cot-prose {

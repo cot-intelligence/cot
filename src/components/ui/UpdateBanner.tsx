@@ -65,7 +65,7 @@ export function UpdateBanner() {
           <motion.div
             whileHover={{ x: -2, y: -2 }}
             transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-            className="flex items-start gap-3 border-2 border-ink bg-vermilion px-4 py-3 text-cream shadow-brutal">
+            className="flex items-start gap-3 border border-vermilion/60 bg-vermilion px-4 py-3 text-cream shadow-soft-lg">
             <Icon name="bell" className="mt-0.5 h-4 w-4 shrink-0" />
             <div className="min-w-0 flex-1">
               <p className="font-mono text-xs font-bold uppercase tracking-wide">

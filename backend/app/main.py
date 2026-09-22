@@ -477,7 +477,26 @@ def get_settings() -> dict[str, Any]:
         "ai_key_masked": insights.mask_secret(cfg.api_key) if cfg else None,
         "ai_key_source": cfg.key_source if cfg else None,
         "ai_env_disabled": ai_insights.env_disabled(),
+        # Dashboard layout, kept here rather than in browser storage so it
+        # survives opening the dashboard on a different origin or app shell.
+        "ui_nav_collapsed": db.get_setting("ui_nav_collapsed") == "1",
+        "ui_sidebar_open": db.get_setting("ui_sidebar_open", "1") != "0",
+        "ui_onboarded": db.get_setting("ui_onboarded") == "1",
+        "ui_onboarding_agents": _stored_onboarding_agents(),
     }
+
+
+_ONBOARDING_AGENTS = ("claude", "cursor", "codex")
+
+
+def _stored_onboarding_agents() -> list[str]:
+    try:
+        value = json.loads(db.get_setting("ui_onboarding_agents") or "[]")
+    except ValueError:
+        return []
+    if not isinstance(value, list):
+        return []
+    return [a for a in value if a in _ONBOARDING_AGENTS]
 
 
 def _validate_ai_endpoint(value: str) -> str:
@@ -508,6 +527,15 @@ async def update_settings(request: Request) -> dict[str, Any]:
         # choice takes effect without waiting for the daily cycle.
         if enabled and not _telemetry_env_disabled():
             threading.Thread(target=_send_telemetry, args=(True,), daemon=True).start()
+    for key in ("ui_nav_collapsed", "ui_sidebar_open", "ui_onboarded"):
+        if key in body:
+            db.set_setting(key, "1" if bool(body[key]) else "0")
+    if "ui_onboarding_agents" in body:
+        agents = body["ui_onboarding_agents"]
+        if not isinstance(agents, list):
+            raise HTTPException(status_code=400, detail="ui_onboarding_agents must be a list")
+        kept = [a for a in _ONBOARDING_AGENTS if a in agents]
+        db.set_setting("ui_onboarding_agents", json.dumps(kept))
     ai_changed = False
     if "ai_provider" in body:
         provider = str(body["ai_provider"] or "").strip().lower()

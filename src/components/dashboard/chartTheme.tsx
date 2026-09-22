@@ -27,7 +27,7 @@ const MONO = 'JetBrains Mono, monospace';
 function BrutalTooltip({ active, payload, label, unit = 'events' }: any) {
   if (!active || !payload?.length) return null;
   return (
-    <div className="border border-fg bg-surface px-2.5 py-1.5 font-mono text-[0.6rem] shadow-brutal-sm">
+    <div className="border border-line/15 bg-surface px-2.5 py-1.5 font-mono text-[0.6rem] shadow-soft-md">
       {label != null && label !== '' && (
         <p className="mb-0.5 font-bold uppercase tracking-widest text-fg/60">{label}</p>
       )}

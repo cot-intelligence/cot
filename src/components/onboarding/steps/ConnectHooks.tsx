@@ -187,7 +187,7 @@ export function ConnectHooks({ agents: agentIds, onBack, onContinue, autoSkip }:
         <button
           type="button"
           onClick={onContinue}
-          className={`group relative inline-flex items-center gap-3 overflow-hidden px-7 py-3.5 font-mono text-xs font-bold uppercase tracking-widest shadow-brutal ${
+          className={`group relative inline-flex items-center gap-3 overflow-hidden px-7 py-3.5 font-mono text-xs font-bold uppercase tracking-widest ${
             advancing
               ? 'bg-ink text-cream'
               : 'border border-fg bg-fg text-bg transition-opacity hover:opacity-90'

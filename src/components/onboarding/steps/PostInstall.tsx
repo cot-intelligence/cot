@@ -188,7 +188,7 @@ export function PostInstall({ agents, onFinish }: PostInstallProps) {
               y: e.clientY || rect.top + rect.height / 2,
             });
           }}
-          className="group inline-flex items-center gap-3 border border-vermilion bg-vermilion px-7 py-3.5 font-mono text-xs font-bold uppercase tracking-widest text-cream shadow-brutal transition-opacity hover:opacity-90">
+          className="group inline-flex items-center gap-3 border border-vermilion bg-vermilion px-7 py-3.5 font-mono text-xs font-bold uppercase tracking-widest text-cream transition-opacity hover:opacity-90">
           Continue to dashboard
           <span className="transition-transform group-hover:translate-x-1">→</span>
         </button>

@@ -7,7 +7,7 @@ const STORAGE_KEY = 'cot.theme';
 function readTheme(): Theme {
   const attr = document.documentElement.getAttribute('data-theme');
   if (attr === 'dark' || attr === 'light') return attr;
-  return 'light';
+  return 'dark';
 }
 
 /** Apply the theme to the document immediately and persist it. */

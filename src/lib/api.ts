@@ -264,6 +264,12 @@ export interface Settings {
   ai_key_source: 'env' | 'db' | null;
   /** Hard-disabled for this deployment via COT_DISABLE_LLM. */
   ai_env_disabled: boolean;
+  /** Dashboard layout, stored by the collector so it survives any origin. */
+  ui_nav_collapsed: boolean;
+  ui_sidebar_open: boolean;
+  /** Onboarding finished on this install, and the agents picked there. */
+  ui_onboarded: boolean;
+  ui_onboarding_agents: ('claude' | 'cursor' | 'codex')[];
 }
 
 export async function getSettings(): Promise<Settings> {

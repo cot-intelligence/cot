@@ -20,6 +20,7 @@ import { sourceLabel } from '../../lib/sourceLabels';
 import { usePolling } from '../../lib/usePolling';
 import { FadeIn } from '../ui/FadeIn';
 import { Icon, type IconName } from '../ui/icons';
+import { PageHeader } from '../ui/PageHeader';
 import { MetricsSkeleton } from '../ui/Skeleton';
 import { AiInsightsSection } from './AiInsightsSection';
 import { CHART_COLORS, type Datum } from './chartConstants';
@@ -223,61 +224,51 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
   return (
     <div className="scroll-thin flex-1 overflow-y-auto">
       <div className="mx-auto max-w-5xl space-y-7 px-6 py-8 sm:px-8">
-        <FadeIn className="flex flex-wrap items-start justify-between gap-4">
-          <div className="space-y-2">
-            <h1 className="text-3xl font-extrabold uppercase tracking-tight text-fg">
-              Overview{' '}
-              <span className="font-serif lowercase italic text-vermilion">metrics + insights</span>
-            </h1>
-            <p className="font-mono text-xs text-fg/50">
-              Everything across your traced sessions — numbers, findings, and what to do about them.
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-1" title="Findings window (metrics are all-time)">
-              {WINDOWS.map((w) => (
+        <FadeIn>
+          <PageHeader
+            eyebrow="Metrics + insights"
+            title="Overview"
+            description="Everything across your traced sessions: the numbers, the findings, and what to do about them."
+            actions={
+              <>
+                <div className="seg" title="Findings window (metrics are all-time)">
+                  {WINDOWS.map((w) => (
+                    <button
+                      key={w.label}
+                      type="button"
+                      onClick={() => setDays(w.days)}
+                      aria-pressed={days === w.days}
+                      className="seg-item">
+                      {w.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="seg">
+                  {STATUS_VIEWS.map((s) => {
+                    const n = byStatus(s.key).length;
+                    return (
+                      <button
+                        key={s.key}
+                        type="button"
+                        onClick={() => setView(s.key)}
+                        aria-pressed={view === s.key}
+                        className="seg-item">
+                        {s.label} <span className="tabular-nums opacity-60">{n}</span>
+                      </button>
+                    );
+                  })}
+                </div>
                 <button
-                  key={w.label}
                   type="button"
-                  onClick={() => setDays(w.days)}
-                  aria-pressed={days === w.days}
-                  className={`border px-2.5 py-1.5 font-mono text-[0.6rem] font-bold uppercase tracking-widest transition-colors focus-visible:outline-none ${
-                    days === w.days
-                      ? 'border-vermilion bg-vermilion text-cream'
-                      : 'border-fg/20 text-fg/55 hover:border-fg/50 hover:text-fg'
-                  }`}>
-                  {w.label}
+                  onClick={() => setShareOpen(true)}
+                  title="Share a metrics card"
+                  className="btn">
+                  <Icon name="share" className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Share</span>
                 </button>
-              ))}
-            </div>
-            <div className="flex items-center gap-1">
-              {STATUS_VIEWS.map((s) => {
-                const n = byStatus(s.key).length;
-                return (
-                  <button
-                    key={s.key}
-                    type="button"
-                    onClick={() => setView(s.key)}
-                    aria-pressed={view === s.key}
-                    className={`border px-2.5 py-1.5 font-mono text-[0.6rem] font-bold uppercase tracking-widest transition-colors focus-visible:outline-none ${
-                      view === s.key
-                        ? 'border-fg/60 bg-fg/10 text-fg'
-                        : 'border-fg/20 text-fg/55 hover:border-fg/50 hover:text-fg'
-                    }`}>
-                    {s.label} <span className="tabular-nums text-fg/45">{n}</span>
-                  </button>
-                );
-              })}
-            </div>
-            <button
-              type="button"
-              onClick={() => setShareOpen(true)}
-              title="Share a metrics card"
-              className="flex shrink-0 items-center gap-2 border border-fg/25 px-3 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/75 shadow-brutal-sm transition-colors hover:border-vermilion hover:text-vermilion focus-visible:border-vermilion focus-visible:outline-none">
-              <Icon name="share" className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Share</span>
-            </button>
-          </div>
+              </>
+            }
+          />
         </FadeIn>
 
         {/* Headline stat strip */}

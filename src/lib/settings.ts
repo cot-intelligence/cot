@@ -1,4 +1,5 @@
 const SIDEBAR_KEY = 'cot.sidebar.open';
+const NAV_COLLAPSED_KEY = 'cot.nav.collapsed';
 const ONBOARDED_KEY = 'cot.onboarded';
 const AGENTS_KEY = 'cot.onboarding.agents';
 const LEGACY_AGENT_KEY = 'cot.onboarding.agent';
@@ -14,6 +15,23 @@ export function readSidebarOpen(): boolean {
 export function writeSidebarOpen(open: boolean): void {
   try {
     localStorage.setItem(SIDEBAR_KEY, open ? '1' : '0');
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Whether the app navigation rail is collapsed to icons. Default: expanded. */
+export function readNavCollapsed(): boolean {
+  try {
+    return localStorage.getItem(NAV_COLLAPSED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function writeNavCollapsed(collapsed: boolean): void {
+  try {
+    localStorage.setItem(NAV_COLLAPSED_KEY, collapsed ? '1' : '0');
   } catch {
     /* ignore */
   }
@@ -39,9 +57,19 @@ export function readSavedAgents(): ('claude' | 'cursor' | 'codex')[] {
   return [];
 }
 
-export function clearOnboarding(): void {
+export function readOnboarded(): boolean {
   try {
-    localStorage.removeItem(ONBOARDED_KEY);
+    return localStorage.getItem(ONBOARDED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+/** Local copy of the onboarding result; the collector holds the durable one. */
+export function writeOnboarded(agents: ('claude' | 'cursor' | 'codex')[]): void {
+  try {
+    localStorage.setItem(ONBOARDED_KEY, '1');
+    localStorage.setItem(AGENTS_KEY, JSON.stringify(agents));
   } catch {
     /* ignore */
   }
