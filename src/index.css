@@ -5,8 +5,8 @@
 @tailwind utilities;
 
 @layer base {
-  /* Dark is the default theme, matching the marketing site. Light inverts the
-     same tokens. Vermilion and cobalt accents are constant; olive brightens in
+  /* Theme follows the OS unless the user picks one (index.html sets
+     data-theme before paint). Dark tokens are the base; light inverts them. Vermilion and cobalt accents are constant; olive brightens in
      dark mode so success states stay readable on near-black surfaces.
      Surfaces get LIGHTER as they rise (bg < panel < surface) so panels
      separate by elevation instead of hard borders. */

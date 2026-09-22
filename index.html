@@ -10,14 +10,17 @@
     <meta name="theme-color" content="#0b0e11" />
     <script defer src="/stats/script.js" data-website-id="f2dbacec-6230-416b-9682-53eedf073984" data-host-url="/stats"></script>
     <script>
-      // Apply the saved theme before paint to avoid a flash. Default: dark.
+      // Apply the theme before paint to avoid a flash: a saved light/dark
+      // choice wins, otherwise follow the OS setting.
       (function () {
+        var t;
         try {
-          var t = localStorage.getItem('cot.theme') || 'dark';
-          document.documentElement.setAttribute('data-theme', t);
-        } catch (e) {
-          document.documentElement.setAttribute('data-theme', 'dark');
+          t = localStorage.getItem('cot.theme');
+        } catch (e) {}
+        if (t !== 'light' && t !== 'dark') {
+          t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
         }
+        document.documentElement.setAttribute('data-theme', t);
       })();
     </script>
   </head>

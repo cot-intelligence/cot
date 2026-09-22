@@ -45,7 +45,7 @@ export function SettingsView({
   onSidebarOpenChange,
   onRunOnboarding,
 }: SettingsViewProps) {
-  const { theme, setTheme } = useTheme();
+  const { preference, setPreference } = useTheme();
   const { data: health, error: healthError } = usePolling<Health>(['health'], () => getHealth(), 10000);
   const { data: hookStatus, error: hookStatusError } = usePolling<HookStatus>(['hookStatus'], () => getHookStatus(), 10000);
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
@@ -321,18 +321,15 @@ export function SettingsView({
         <FadeIn delay={0.13}>
           <Section title="Preferences" description="Dashboard display options.">
             <div className="space-y-4">
-              <PreferenceRow label="Theme" hint="Light or dark interface.">
+              <PreferenceRow label="Theme" hint="Light, dark, or match your system setting.">
                 <div className="flex gap-1 rounded-md bg-panel p-1">
-                  {(['light', 'dark'] as const).map((t) => (
-                    <button
+                  {(['system', 'light', 'dark'] as const).map((t) => (
+                    <ToggleChip
                       key={t}
-                      type="button"
-                      onClick={() => setTheme(t)}
-                      className={`rounded px-3 py-1.5 font-mono text-[0.65rem] font-bold uppercase tracking-widest transition-colors ${
-                        theme === t ? 'bg-surface text-fg shadow-soft' : 'text-fg/45 hover:text-fg'
-                      }`}>
-                      {t}
-                    </button>
+                      label={t}
+                      active={preference === t}
+                      onClick={() => setPreference(t)}
+                    />
                   ))}
                 </div>
               </PreferenceRow>
