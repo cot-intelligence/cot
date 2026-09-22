@@ -35,7 +35,7 @@ HOOK_BACKUPS_PATH = STATE_DIR / "hook_backups.json"
 IMPORT_PARSER_VERSION_PATH = STATE_DIR / "import_parser_version"
 
 # When the collector is unreachable, ingest events are appended here as JSONL
-# ({"url", "payload"} per line) and replayed on the next successful contact, so
+# ({"path", "payload"} per line) and replayed on the next successful contact, so
 # a stopped or restarting collector never silently drops a session's events.
 SPOOL_PATH = STATE_DIR / "spool.jsonl"
 SPOOL_LOCK_PATH = STATE_DIR / "spool.lock"
@@ -174,7 +174,11 @@ def _send_once(url: str, payload: dict, timeout: float) -> bool:
 def _spool_append(url: str, payload: dict) -> None:
     """Queue an undelivered ingest event, trimming the oldest to stay under the
     byte cap."""
-    record = json.dumps({"url": url, "payload": payload}, ensure_ascii=False, default=str)
+    parsed = urllib.parse.urlsplit(url)
+    path = parsed.path
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    record = json.dumps({"path": path, "payload": payload}, ensure_ascii=False, default=str)
     line = record + "\n"
     with _SpoolLock():
         try:
@@ -195,6 +199,22 @@ def _spool_append(url: str, payload: dict) -> None:
                 fh.write(line)
         except OSError as exc:
             print(f"cot: failed to spool event: {exc}", file=sys.stderr)
+
+
+def _spool_target(record: dict) -> str:
+    """Resolve new and legacy spool records against the current collector."""
+    path = record.get("path")
+    if not isinstance(path, str) or not path:
+        legacy_url = record.get("url")
+        if not isinstance(legacy_url, str) or not legacy_url:
+            return ""
+        parsed = urllib.parse.urlsplit(legacy_url)
+        path = parsed.path
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+    if not path.startswith("/v1/ingest/"):
+        return ""
+    return f"{COT_ENDPOINT.rstrip('/')}{path}"
 
 
 def _spool_flush(timeout: float = 3.0) -> bool:
@@ -222,7 +242,10 @@ def _spool_flush(timeout: float = 3.0) -> bool:
                 rec = json.loads(lines[i])
             except json.JSONDecodeError:
                 continue  # skip a corrupt line rather than wedge the queue
-            if not _send_once(rec.get("url", ""), rec.get("payload", {}), timeout):
+            target = _spool_target(rec)
+            if not target:
+                continue
+            if not _send_once(target, rec.get("payload", {}), timeout):
                 reachable = False
                 break
         else:

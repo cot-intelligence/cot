@@ -39,11 +39,13 @@ class _Sink:
 
     def __init__(self, up: bool = True) -> None:
         self.up = up
+        self.urls: list[str] = []
         self.delivered: list[dict] = []
 
     def send(self, url: str, payload: dict, timeout: float) -> bool:
         if not self.up:
             return False
+        self.urls.append(url)
         self.delivered.append(payload)
         return True
 
@@ -81,8 +83,32 @@ def test_post_spools_when_collector_down():
         queued = _spool_lines()
         assert len(queued) == 1
         assert queued[0]["payload"]["event_id"] == "e1"
-        assert queued[0]["url"] == INGEST
+        assert queued[0]["path"] == "/v1/ingest/claude"
+        assert "url" not in queued[0]
         assert sink.delivered == []
+    _with_temp_spool(body)
+
+
+def test_flush_retargets_legacy_url_to_current_endpoint():
+    def body(_state):
+        sink = _Sink(up=True)
+        bridge._send_once = sink.send
+        original_endpoint = bridge.COT_ENDPOINT
+        bridge.COT_ENDPOINT = "http://127.0.0.1:31337"
+        try:
+            bridge.SPOOL_PATH.write_text(json.dumps({
+                "url": "http://127.0.0.1:31338/v1/ingest/codex?source=hook",
+                "payload": {"event_id": "legacy"},
+            }) + "\n")
+            assert bridge._spool_flush() is True
+        finally:
+            bridge.COT_ENDPOINT = original_endpoint
+
+        assert sink.urls == [
+            "http://127.0.0.1:31337/v1/ingest/codex?source=hook"
+        ]
+        assert [p["event_id"] for p in sink.delivered] == ["legacy"]
+        assert not bridge.SPOOL_PATH.exists()
     _with_temp_spool(body)
 
 
