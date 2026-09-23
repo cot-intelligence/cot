@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/remote-schema.json",
+  "identifier": "dashboard",
+  "description": "The dashboard served by the local collector may only drag the window by its header.",
+  "windows": ["main"],
+  "remote": { "urls": ["http://127.0.0.1:*"] },
+  "permissions": ["core:window:allow-start-dragging"]
+}

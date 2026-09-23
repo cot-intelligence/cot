@@ -239,3 +239,25 @@ mac action="build":
       clean) rm -rf macos/build && printf '%s\n' "removed macos/build" ;;
       *) printf '%s\n' "unknown action: {{action}} (build|app|run|clean)" >&2; exit 2 ;;
     esac
+
+# Desktop app (Tauri): cot.app that runs the frozen collector, self-updates.
+#   just desktop dev      run the shell in dev mode (stages the collector once)
+#   just desktop build    build cot.app
+#   just desktop dmg      build cot.app and the DMG
+#   just desktop verify   check the built app's collector answers /health
+#   just desktop test     Rust unit tests
+#   just desktop clean    drop build output and staged resources
+desktop action="build":
+    #!/usr/bin/env sh
+    set -eu
+    cd desktop
+    [ -d node_modules ] || npm ci
+    case "{{action}}" in
+      dev)    npx tauri dev ;;
+      build)  scripts/build.sh ;;
+      dmg)    scripts/build.sh --dmg ;;
+      verify) scripts/verify-bundle.sh ;;
+      test)   cargo test --manifest-path src-tauri/Cargo.toml ;;
+      clean)  rm -rf build src-tauri/target src-tauri/resources && printf '%s\n' "removed desktop build output" ;;
+      *) printf '%s\n' "unknown action: {{action}} (dev|build|dmg|verify|test|clean)" >&2; exit 2 ;;
+    esac

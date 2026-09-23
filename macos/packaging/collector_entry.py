@@ -37,7 +37,17 @@ def main() -> int:
 
     host = os.environ.get("COT_HOST", "127.0.0.1")
     port = int(os.environ.get("COT_PORT", "31337"))
-    uvicorn.run(app, host=host, port=port, log_level="info", access_log=False)
+    # The app's webview holds a keep-alive connection open, which would stall
+    # shutdown until the app's SIGKILL fallback. Cap the wait so SIGTERM ends
+    # with a clean lifespan shutdown.
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        access_log=False,
+        timeout_graceful_shutdown=2,
+    )
     return 0
 
 

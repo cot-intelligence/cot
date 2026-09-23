@@ -17,3 +17,10 @@ _DESIGN_LANGUAGE.md
 
 # macOS app build output
 macos/build/
+
+# Tauri desktop app build output
+desktop/build/
+desktop/node_modules/
+desktop/src-tauri/target/
+desktop/src-tauri/resources/
+desktop/src-tauri/gen/
