@@ -358,10 +358,8 @@ function BoardSessionRow({
           aria-label={s.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
           aria-pressed={s.bookmarked}
           title={s.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
-          className={`rounded p-1 transition hover:bg-panel focus-visible:opacity-100 focus-visible:outline-none ${
-            s.bookmarked
-              ? 'text-vermilion'
-              : 'text-fg/35 opacity-0 hover:text-fg group-hover:opacity-100'
+          className={`rounded p-1 transition hover:bg-panel focus-visible:outline-none ${
+            s.bookmarked ? 'text-vermilion' : 'text-fg/35 hover:text-fg'
           }`}>
           <Icon name={s.bookmarked ? 'bookmark-filled' : 'bookmark'} className="h-3.5 w-3.5" />
         </button>
@@ -373,7 +371,7 @@ function BoardSessionRow({
           onKeyDown={(e) => e.stopPropagation()}
           aria-label="Export session as JSON"
           title="Export as JSON"
-          className="rounded p-1 text-fg/35 opacity-0 transition hover:bg-panel hover:text-fg focus-visible:opacity-100 focus-visible:outline-none group-hover:opacity-100">
+          className="rounded p-1 text-fg/35 transition hover:bg-panel hover:text-fg focus-visible:outline-none">
           <Icon name="download" className="h-3.5 w-3.5" />
         </a>
 
@@ -385,7 +383,7 @@ function BoardSessionRow({
           }}
           aria-label={showArchived ? 'Unarchive session' : 'Archive session'}
           title={showArchived ? 'Unarchive session' : 'Archive session'}
-          className="rounded p-1 text-fg/35 opacity-0 transition hover:bg-panel hover:text-fg focus-visible:opacity-100 focus-visible:outline-none group-hover:opacity-100">
+          className="rounded p-1 text-fg/35 transition hover:bg-panel hover:text-fg focus-visible:outline-none">
           <Icon name={showArchived ? 'unarchive' : 'archive'} className="h-3.5 w-3.5" />
         </button>
       </div>
