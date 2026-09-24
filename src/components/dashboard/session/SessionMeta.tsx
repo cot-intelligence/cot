@@ -1,4 +1,9 @@
-import type { SessionLink, SessionLinks, SessionSummary } from '../../../lib/api';
+import {
+  sessionExportUrl,
+  type SessionLink,
+  type SessionLinks,
+  type SessionSummary,
+} from '../../../lib/api';
 import { formatDuration, formatRelative } from '../../../lib/categoryMeta';
 import { formatCost } from '../../../lib/format';
 import { AgentMark } from '../../ui/AgentMark';
@@ -60,21 +65,32 @@ export function SessionMeta({ summary, links, onToggleBookmark }: SessionMetaPro
           title={summary.title || summary.id}>
           {summary.title || summary.id}
         </h1>
-        {onToggleBookmark && (
-          <button
-            type="button"
-            onClick={onToggleBookmark}
-            aria-pressed={summary.bookmarked}
-            aria-label={summary.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
-            title={summary.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
-            className={`btn mt-0.5 ${summary.bookmarked ? '!border-vermilion/40 !text-vermilion hover:!border-vermilion/70' : ''}`}>
-            <Icon
-              name={summary.bookmarked ? 'bookmark-filled' : 'bookmark'}
-              className="h-3.5 w-3.5"
-            />
-            <span className="hidden sm:inline">{summary.bookmarked ? 'Bookmarked' : 'Bookmark'}</span>
-          </button>
-        )}
+        <div className="flex shrink-0 items-center gap-2">
+          <a
+            href={sessionExportUrl(summary.id)}
+            download
+            aria-label="Export session as JSON"
+            title="Export as JSON"
+            className="btn mt-0.5">
+            <Icon name="download" className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Export</span>
+          </a>
+          {onToggleBookmark && (
+            <button
+              type="button"
+              onClick={onToggleBookmark}
+              aria-pressed={summary.bookmarked}
+              aria-label={summary.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
+              title={summary.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
+              className={`btn mt-0.5 ${summary.bookmarked ? '!border-vermilion/40 !text-vermilion hover:!border-vermilion/70' : ''}`}>
+              <Icon
+                name={summary.bookmarked ? 'bookmark-filled' : 'bookmark'}
+                className="h-3.5 w-3.5"
+              />
+              <span className="hidden sm:inline">{summary.bookmarked ? 'Bookmarked' : 'Bookmark'}</span>
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[0.68rem] text-fg/45">
