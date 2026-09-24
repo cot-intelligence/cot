@@ -128,9 +128,8 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
       else cardRefs.current.delete(key);
     }, []);
 
-    // Top-level rows register their scroll ref on the LazyRow wrapper instead,
-    // and sit on the lane, whose spine node replaces the card's own marker.
-    const renderEvent = (item: TimelineItem, withRef = true, onLane = false) => {
+    // Top-level rows register their scroll ref on the LazyRow wrapper instead.
+    const renderEvent = (item: TimelineItem, withRef = true) => {
       const itemKey = keyFor(item);
       const itemSessionId = eventSessionId(item, sessionId);
       const cardRef = withRef ? (el: HTMLDivElement | null) => setCardRef(itemKey, el) : undefined;
@@ -153,7 +152,6 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
           item={item}
           sessionId={itemSessionId}
           eventKey={itemKey}
-          onLane={onLane}
           ref={cardRef}
         />
       ) : (
@@ -164,7 +162,6 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
           eventKey={itemKey}
           forceOpen={forceExpanded.has(itemKey)}
           expansionRequest={expansionRequest}
-          onLane={onLane}
           ref={cardRef}
         />
       );
@@ -181,17 +178,16 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
     return (
       <div ref={containerRef} data-chat-scroll className="scroll-thin h-full overflow-y-auto" onClick={handleClick}>
         <div className="mx-auto max-w-4xl space-y-1 px-4 py-4 pb-48 sm:px-6">
-          {segments.map((seg, i) =>
+          {segments.map((seg) =>
             seg.type === 'event' ? (
               <LazyRow
                 key={keyFor(seg.item)}
                 estimate={estimateRowHeight(seg.item)}
                 refKeys={[keyFor(seg.item)]}
                 setCardRef={setCardRef}
-                className={isUserMessage(seg.item) ? 'pb-2 pt-6' : laneClass(segments, i)}
+                className={isUserMessage(seg.item) ? 'pb-2 pt-6' : ''}
               >
-                {!isUserMessage(seg.item) && <LaneNode item={seg.item} />}
-                {renderEvent(seg.item, false, !isUserMessage(seg.item))}
+                {renderEvent(seg.item, false)}
               </LazyRow>
             ) : (
               <LazyRow
@@ -199,9 +195,7 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
                 estimate={ACTION_ROW_HEIGHT}
                 refKeys={[keyFor(seg.run.item), keyFor(seg.item), keyFor(seg.resultItem)]}
                 setCardRef={setCardRef}
-                className={laneClass(segments, i)}
               >
-              <StepDot className="top-[15px]" dot="bg-cobalt" />
               <SubagentGroup
                 run={seg.run}
                 resultItem={seg.resultItem}
@@ -263,6 +257,7 @@ const SubagentGroup = forwardRef<HTMLDivElement, {
           <span className={`shrink-0 text-[0.55rem] text-cobalt/50 transition-transform ${open ? 'rotate-90' : ''}`}>
             ▸
           </span>
+          <span className="h-2 w-2 shrink-0 rounded-full bg-cobalt" />
           <span className="font-mono text-[0.58rem] font-bold uppercase tracking-widest text-cobalt">
             {run.kind === 'review' ? 'Review' : 'Subagent'}
           </span>
@@ -340,28 +335,6 @@ function isUserMessage(item: TimelineItem): boolean {
   return item.category === 'prompt' || item.category === 'question';
 }
 
-function onLane(seg: Segment | undefined): boolean {
-  return seg != null && (seg.type === 'subagent' || !isUserMessage(seg.item));
-}
-
-/** Rows between two user messages share one spine; mark where it starts and ends. */
-function laneClass(segments: Segment[], i: number): string {
-  let cls = 'lane';
-  if (!onLane(segments[i - 1])) cls += ' lane-start';
-  if (!onLane(segments[i + 1])) cls += ' lane-end';
-  return cls;
-}
-
-/** A step's dot on the spine, backed by the page colour so the translucent
- *  category colours don't show the line through them. */
-function StepDot({ className, dot }: { className: string; dot: string }) {
-  return (
-    <span className={`lane-node inline-flex h-[9px] w-[9px] items-center justify-center rounded-full bg-bg ${className}`}>
-      <span className={`h-[7px] w-[7px] rounded-full ${dot}`} />
-    </span>
-  );
-}
-
 function agentName(item: TimelineItem): string {
   return AGENTS.find((a) => a.id === item.source)?.name ?? 'Agent';
 }
@@ -374,36 +347,12 @@ function SparkIcon({ className = '' }: { className?: string }) {
   );
 }
 
-function AgentAvatar({ item, size = 'md' }: { item: TimelineItem; size?: 'sm' | 'md' }) {
-  const box = size === 'md' ? 'h-7 w-7 rounded-lg' : 'h-5 w-5 rounded-md';
-  const mark = size === 'md' ? 'h-3.5 w-3.5' : 'h-3 w-3';
+function AgentAvatar({ item }: { item: TimelineItem }) {
   return (
-    <span className={`inline-flex shrink-0 items-center justify-center bg-surface text-fg shadow-soft ring-1 ring-line/15 ${box}`}>
-      <AgentMark id={item.source} className={mark} />
+    <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-bg text-fg ring-1 ring-line/15">
+      <AgentMark id={item.source} className="h-3.5 w-3.5" />
     </span>
   );
-}
-
-/** The marker a row pins to the spine: the agent's mark on its replies, a spark
- *  on its thinking, a dot in the category's colour on every tool step. */
-function LaneNode({ item }: { item: TimelineItem }) {
-  if (item.category === 'thought') {
-    return (
-      <span className="lane-node top-[9px] inline-flex h-5 w-5 items-center justify-center rounded-full bg-bg text-fg/40 ring-1 ring-line/15">
-        <SparkIcon className="h-2.5 w-2.5" />
-      </span>
-    );
-  }
-  if (isConversationCategory(item.category)) {
-    return (
-      <span className="lane-node top-[10px] rounded-lg ring-2 ring-bg">
-        <AgentAvatar item={item} />
-      </span>
-    );
-  }
-  const meta = getCategoryMeta(item.category);
-  const failed = item.status === 'error' || item.status === 'blocked';
-  return <StepDot className="top-[15px]" dot={failed ? 'bg-vermilion' : meta.dot} />;
 }
 
 function CardMeta({ item }: { item: TimelineItem }) {
@@ -436,8 +385,8 @@ function CardMeta({ item }: { item: TimelineItem }) {
  */
 const ConversationCard = forwardRef<
   HTMLDivElement,
-  { item: TimelineItem; sessionId: string; eventKey: string; onLane?: boolean }
->(function ConversationCard({ item, sessionId, eventKey: itemEventKey, onLane = false }, ref) {
+  { item: TimelineItem; sessionId: string; eventKey: string }
+>(function ConversationCard({ item, sessionId, eventKey: itemEventKey }, ref) {
   const provenance = item.provenance ? PROVENANCE_META[item.provenance] : null;
 
   if (isUserMessage(item)) {
@@ -466,7 +415,7 @@ const ConversationCard = forwardRef<
       className={`card-agent scroll-mt-4 rounded-2xl rounded-tl-md px-5 py-4 ${provenance?.accent ?? ''}`}
     >
       <div className="mb-2.5 flex items-center gap-2">
-        {!onLane && <AgentAvatar item={item} size="sm" />}
+        <AgentAvatar item={item} />
         <span className="font-sans text-[0.78rem] font-semibold text-fg">{agentName(item)}</span>
         {item.model && <span className="font-mono text-[0.55rem] text-fg/35">{item.model}</span>}
         <CardMeta item={item} />
@@ -506,6 +455,7 @@ const ThoughtCard = forwardRef<HTMLDivElement, {
         className="group flex w-full items-center gap-2 text-left"
         aria-expanded={open}
       >
+        <SparkIcon className="h-3 w-3 text-fg/40" />
         <span className="font-serif text-[0.95rem] italic text-fg/60 transition-colors group-hover:text-fg/85">
           Thinking
         </span>
@@ -624,9 +574,8 @@ const ActionCard = forwardRef<HTMLDivElement, {
   eventKey: string;
   forceOpen?: boolean;
   expansionRequest: ExpansionRequest;
-  onLane?: boolean;
 }>(
-  function ActionCard({ item, sessionId, eventKey: itemEventKey, forceOpen, expansionRequest, onLane = false }, ref) {
+  function ActionCard({ item, sessionId, eventKey: itemEventKey, forceOpen, expansionRequest }, ref) {
     const [expanded, setExpanded] = useState(false);
     const open = expanded || forceOpen;
     const meta = getCategoryMeta(item.category);
@@ -651,7 +600,7 @@ const ActionCard = forwardRef<HTMLDivElement, {
           onClick={() => setExpanded((v) => !v)}
           className="flex w-full items-center gap-2 px-3.5 py-2 text-left"
         >
-          {!onLane && <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${meta.dot}`} />}
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${meta.dot}`} />
           <span className={`shrink-0 font-mono text-[0.55rem] font-bold uppercase tracking-widest ${meta.color}`}>
             {meta.label}
           </span>

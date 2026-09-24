@@ -81,37 +81,8 @@
     -webkit-backdrop-filter: blur(16px);
     border: 1px solid rgb(var(--line) / 0.1);
   }
-  /* Session timeline. Everything the agent does hangs off one vertical spine
-     (the chain of thought); the user's messages sit outside it, on the right. */
-  .lane {
-    position: relative;
-    padding-left: 2.75rem;
-  }
-  .lane::before {
-    content: '';
-    position: absolute;
-    left: 1rem;
-    top: -0.25rem;
-    bottom: 0;
-    width: 1px;
-    background: rgb(var(--line) / 0.2);
-  }
-  /* The spine runs from the first step of an agent turn to its last, node to node. */
-  .lane-start::before {
-    top: 1.25rem;
-  }
-  .lane-end::before {
-    bottom: auto;
-    height: 1.5rem;
-  }
-  .lane-start.lane-end::before {
-    display: none;
-  }
-  .lane-node {
-    position: absolute;
-    left: 1rem;
-    transform: translateX(-50%);
-  }
+  /* Session timeline: the user's messages are cobalt bubbles, the agent's
+     replies raised cards with a brand hairline. */
   .bubble-user {
     background: linear-gradient(135deg, rgb(43 92 230 / 0.2), rgb(43 92 230 / 0.07));
     box-shadow:
