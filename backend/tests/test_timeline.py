@@ -139,3 +139,21 @@ def test_retargeted_span_records_its_end_event_id():
               target="rtk ls", title="Shell command", secs=1)
     (item,) = [it for it in db.timeline(sid) if it["category"] == "shell"]
     assert item["end_id"] == end
+
+
+def test_lazy_detail_of_a_retargeted_call_includes_its_output():
+    # A PreToolUse hook (e.g. rtk) rewrote the command, so start and end targets
+    # differ. The timeline pairs them by tool; the lazy detail must too, or the
+    # session page shows the command without its output.
+    sid = _fresh()
+    with store.write() as conn:
+        common = dict(session_id=sid, source="claude", tool="Bash", category="shell",
+                      title="Shell command", created_at=timeutil.now())
+        start = store.insert_event(conn, **common, hook="PreToolUse", phase="start",
+                                   ts=_NOW.isoformat(), target="ls",
+                                   detail='{"command": "ls"}')
+        store.insert_event(conn, **common, hook="PostToolUse", phase="end",
+                           ts=(_NOW + timedelta(seconds=1)).isoformat(), target="rtk ls",
+                           detail='{"command": "rtk ls", "response": "README.md"}')
+    detail = db.get_event_detail(sid, start)["detail"]
+    assert "README.md" in detail

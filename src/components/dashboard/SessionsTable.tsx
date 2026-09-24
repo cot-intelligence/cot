@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { activateOnKey } from '../../lib/a11y';
 import {
   getSessions,
+  sessionExportUrl,
   setSessionArchived,
   setSessionBookmarked,
   type SessionSummary,
@@ -364,6 +365,17 @@ function BoardSessionRow({
           }`}>
           <Icon name={s.bookmarked ? 'bookmark-filled' : 'bookmark'} className="h-3.5 w-3.5" />
         </button>
+
+        <a
+          href={sessionExportUrl(s.id)}
+          download
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+          aria-label="Export session as JSON"
+          title="Export as JSON"
+          className="rounded p-1 text-fg/35 opacity-0 transition hover:bg-panel hover:text-fg focus-visible:opacity-100 focus-visible:outline-none group-hover:opacity-100">
+          <Icon name="download" className="h-3.5 w-3.5" />
+        </a>
 
         <button
           type="button"
