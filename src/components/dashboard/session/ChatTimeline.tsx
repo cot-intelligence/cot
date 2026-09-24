@@ -17,6 +17,7 @@ import { MarkdownContent } from '../../ui/MarkdownContent';
 import { AttachmentTags } from './AttachmentTags';
 import { AgentMark } from '../../ui/AgentMark';
 import { AGENTS } from '../../../lib/agents';
+import { displayValue, prettyJson } from '../../../lib/json';
 
 export interface ChatTimelineHandle {
   scrollToAndExpand: (key: string) => void;
@@ -686,14 +687,18 @@ function CardBody({ item, sessionId }: { item: TimelineItem; sessionId: string }
 
   const d = parseDetail(resolvedItem);
   const message = conversationMessage(resolvedItem, d);
-  if (message) return <MarkdownContent content={message} />;
+  if (message) {
+    // A reply that is entirely JSON (structured output) reads as a code block.
+    const json = prettyJson(message);
+    return json ? <JsonBlock>{json}</JsonBlock> : <MarkdownContent content={message} />;
+  }
 
   if (d.edits && d.edits.length) {
     return (
       <div className="space-y-3">
         {d.edits.map((e, i) => <DiffBlock key={i} edit={e} index={i} total={d.edits!.length} />)}
         {d.output != null && d.output !== '' && (
-          <CodePane label="Result">{typeof d.output === 'string' ? d.output : JSON.stringify(d.output, null, 2)}</CodePane>
+          <CodePane label="Result">{displayValue(d.output)}</CodePane>
         )}
       </div>
     );
@@ -706,7 +711,7 @@ function CardBody({ item, sessionId }: { item: TimelineItem; sessionId: string }
           <span className="select-none text-vermilion">$ </span>{d.command}
         </pre>
         {d.output != null && d.output !== '' && (
-          <CodePane label="Output">{typeof d.output === 'string' ? d.output : JSON.stringify(d.output, null, 2)}</CodePane>
+          <CodePane label="Output">{displayValue(d.output)}</CodePane>
         )}
       </div>
     );
@@ -714,8 +719,8 @@ function CardBody({ item, sessionId }: { item: TimelineItem; sessionId: string }
   if (d.input != null || d.output != null) {
     return (
       <div className="flex flex-col gap-2 lg:flex-row">
-        {d.input != null && <CodePane label="Input">{typeof d.input === 'string' ? d.input : JSON.stringify(d.input, null, 2)}</CodePane>}
-        {d.output != null && <CodePane label="Output">{typeof d.output === 'string' ? d.output : JSON.stringify(d.output, null, 2)}</CodePane>}
+        {d.input != null && <CodePane label="Input">{displayValue(d.input)}</CodePane>}
+        {d.output != null && <CodePane label="Output">{displayValue(d.output)}</CodePane>}
       </div>
     );
   }
@@ -730,6 +735,14 @@ function CardBody({ item, sessionId }: { item: TimelineItem; sessionId: string }
 }
 
 /* ------------------------------------------------------------------ */
+
+function JsonBlock({ children }: { children: string }) {
+  return (
+    <pre className="scroll-thin max-h-[28rem] overflow-auto whitespace-pre-wrap break-words rounded-md bg-panel p-3 font-mono text-[0.8rem] leading-relaxed text-fg/90">
+      {children}
+    </pre>
+  );
+}
 
 function CodePane({ label, children }: { label: string; children: string }) {
   return (
