@@ -21,7 +21,7 @@ import { displayValue, prettyJson } from '../../../lib/json';
 import { revealSearchHits } from '../../../lib/searchHighlight';
 
 export interface ChatTimelineHandle {
-  /** With `query`, also pulse the card and highlight the query inside it. */
+  /** With `query`, also pulse the card and scroll the query's first match into view. */
   scrollToAndExpand: (key: string, query?: string) => void;
 }
 

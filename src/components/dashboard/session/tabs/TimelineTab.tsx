@@ -23,7 +23,7 @@ interface TimelineTabProps {
   items: TimelineItem[];
   runs: SubagentRun[];
   focusEventId?: number;
-  /** Search text that led here; highlighted inside the focused event. */
+  /** Search text that led here; its first match in the focused event is scrolled into view. */
   focusQuery?: string;
   sessionId: string;
   /** Tab switcher rendered at the start of the toolbar row. */

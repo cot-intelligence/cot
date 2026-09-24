@@ -1,11 +1,9 @@
 /**
- * Highlights search words inside a timeline card after jumping to it from ⌘K.
- *
- * Painting goes through the CSS Custom Highlight API, so React-owned DOM is
- * never mutated; `::highlight(search-hit)` in index.css styles the ranges.
+ * After jumping to a timeline card from ⌘K, pulse it and scroll the first
+ * match of the search words into view. Matches are located as DOM ranges, so
+ * React-owned DOM is never mutated.
  */
 
-const HIGHLIGHT_NAME = 'search-hit';
 const EDGE_PUNCTUATION = /^[!-/:-@[-`{-~]+|[!-/:-@[-`{-~]+$/g;
 
 /** Word cores of a query, matching the backend's `_search_terms`. */
@@ -43,14 +41,8 @@ export function findTermSpans(text: string, terms: string[]): [number, number][]
   return merged;
 }
 
-function highlightRegistry(): HighlightRegistry | null {
-  return typeof CSS !== 'undefined' && 'highlights' in CSS && typeof Highlight !== 'undefined'
-    ? CSS.highlights
-    : null;
-}
-
-/** Paint every term under `root`; returns the ranges in document order. */
-export function paintSearchHits(root: HTMLElement, terms: string[]): Range[] {
+/** Ranges of every term under `root`, in document order. */
+function findSearchHits(root: HTMLElement, terms: string[]): Range[] {
   const ranges: Range[] = [];
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
@@ -61,18 +53,16 @@ export function paintSearchHits(root: HTMLElement, terms: string[]): Range[] {
       ranges.push(range);
     }
   }
-  highlightRegistry()?.set(HIGHLIGHT_NAME, new Highlight(...ranges));
   return ranges;
 }
 
 export function clearSearchHits(): void {
   stopReveal();
-  highlightRegistry()?.delete(HIGHLIGHT_NAME);
 }
 
 // Card scrolling re-aligns for ~400ms while nearby rows mount; scroll to the
 // first hit after that. Content mounts lazily and tool detail loads on expand,
-// so keep repainting as the card changes for a while.
+// so keep looking as the card changes for a while.
 const HIT_SCROLL_DELAY_MS = 450;
 const WATCH_MS = 3000;
 const PULSE_MS = 2400;
@@ -106,7 +96,7 @@ function scrollRangeIntoView(range: Range): void {
   }
 }
 
-/** Pulse the jumped-to card, highlight `query` inside it and bring the first hit into view. */
+/** Pulse the jumped-to card and bring the first match of `query` inside it into view. */
 export function revealSearchHits(card: HTMLElement, query: string): void {
   stopReveal();
   const terms = searchTerms(query);
@@ -116,22 +106,21 @@ export function revealSearchHits(card: HTMLElement, query: string): void {
 
   const start = Date.now();
   let scrolled = false;
-  const paint = () => {
-    if (!terms.length) return;
-    const ranges = paintSearchHits(card, terms);
-    if (scrolled || !ranges.length || Date.now() - start < HIT_SCROLL_DELAY_MS) return;
+  const seek = () => {
+    if (scrolled || !terms.length || Date.now() - start < HIT_SCROLL_DELAY_MS) return;
+    const ranges = findSearchHits(card, terms);
+    if (!ranges.length) return;
     scrolled = true;
     scrollRangeIntoView(ranges.find((r) => !clippedSideways(r, card)) ?? ranges[0]!);
   };
 
-  const observer = new MutationObserver(paint);
+  const observer = new MutationObserver(seek);
   observer.observe(card, { childList: true, subtree: true, characterData: true });
   const timers = [
-    window.setTimeout(paint, HIT_SCROLL_DELAY_MS),
+    window.setTimeout(seek, HIT_SCROLL_DELAY_MS),
     window.setTimeout(() => observer.disconnect(), WATCH_MS),
     window.setTimeout(() => card.removeAttribute('data-search-target'), PULSE_MS),
   ];
-  paint();
 
   stopReveal = () => {
     observer.disconnect();
