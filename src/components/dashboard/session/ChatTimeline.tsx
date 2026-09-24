@@ -101,8 +101,6 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
       return result;
     }, [items, runs, keyFor]);
 
-    const continued = useMemo(() => continuedReplies(segments, keyFor), [segments, keyFor]);
-
     useImperativeHandle(ref, () => ({
       scrollToAndExpand(key: string) {
         setForceExpanded((prev) => {
@@ -154,7 +152,6 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
           item={item}
           sessionId={itemSessionId}
           eventKey={itemKey}
-          continued={continued.has(itemKey)}
           ref={cardRef}
         />
       ) : (
@@ -383,34 +380,13 @@ function CardMeta({ item }: { item: TimelineItem }) {
 }
 
 /**
- * Replies that directly follow another reply from the same agent and model:
- * like a messaging app, a run of adjacent messages carries the sender's name
- * once. Anything in between (a tool call, a thought) starts a new run.
- */
-function continuedReplies(segments: Segment[], keyFor: (item: TimelineItem) => string): Set<string> {
-  const continued = new Set<string>();
-  let speaker: string | null = null;
-  for (const seg of segments) {
-    const item = seg.type === 'event' ? seg.item : null;
-    if (!item || isUserMessage(item) || !isConversationCategory(item.category) || item.category === 'thought') {
-      speaker = null;
-      continue;
-    }
-    const who = `${item.source}:${item.model ?? ''}`;
-    if (who === speaker) continued.add(keyFor(item));
-    speaker = who;
-  }
-  return continued;
-}
-
-/**
  * The user's messages are cobalt bubbles on the right; the agent's replies are
- * raised cards, the first of each turn headed by the agent's own mark.
+ * raised cards, each headed by the agent's own mark.
  */
 const ConversationCard = forwardRef<
   HTMLDivElement,
-  { item: TimelineItem; sessionId: string; eventKey: string; continued?: boolean }
->(function ConversationCard({ item, sessionId, eventKey: itemEventKey, continued = false }, ref) {
+  { item: TimelineItem; sessionId: string; eventKey: string }
+>(function ConversationCard({ item, sessionId, eventKey: itemEventKey }, ref) {
   const provenance = item.provenance ? PROVENANCE_META[item.provenance] : null;
 
   if (isUserMessage(item)) {
@@ -431,28 +407,18 @@ const ConversationCard = forwardRef<
     );
   }
 
-  const flagged = provenance != null || item.status === 'interrupted';
   return (
     <div
       ref={ref}
       data-event-key={itemEventKey}
-      title={continued ? formatDateTime(item.start_ts || item.ts) : undefined}
-      className={`card-agent scroll-mt-4 rounded-2xl px-5 py-4 ${continued ? '' : 'rounded-tl-md'} ${provenance?.accent ?? ''}`}
+      className={`card-agent scroll-mt-4 rounded-2xl rounded-tl-md px-5 py-4 ${provenance?.accent ?? ''}`}
     >
-      {!continued ? (
-        <div className="mb-2.5 flex items-center gap-2">
-          <AgentAvatar item={item} />
-          <span className="font-sans text-[0.78rem] font-semibold text-fg">{agentName(item)}</span>
-          {item.model && <span className="font-mono text-[0.55rem] text-fg/35">{item.model}</span>}
-          <CardMeta item={item} />
-        </div>
-      ) : (
-        flagged && (
-          <div className="mb-2 flex items-center gap-2">
-            <CardMeta item={item} />
-          </div>
-        )
-      )}
+      <div className="mb-2.5 flex items-center gap-2">
+        <AgentAvatar item={item} />
+        <span className="font-sans text-[0.78rem] font-semibold text-fg">{agentName(item)}</span>
+        {item.model && <span className="font-mono text-[0.55rem] text-fg/35">{item.model}</span>}
+        <CardMeta item={item} />
+      </div>
       {item.attachments && item.attachments.length > 0 && (
         <div className="mb-2">
           <AttachmentTags attachments={item.attachments} />
