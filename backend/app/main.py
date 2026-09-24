@@ -190,7 +190,10 @@ _BRIDGE_DIR = _bridge_dir()
 
 @app.on_event("startup")
 async def _startup() -> None:
-    db.init_db()
+    db.init_db(build_search_index=False)
+    # A first-time search index build can take longer than the desktop app waits
+    # for /health; search scans until it lands.
+    threading.Thread(target=db.ensure_search_index, name="search-index", daemon=True).start()
     # Opt-in telemetry runs in the background so it never blocks request handling
     # and degrades silently when offline/air-gapped.
     asyncio.create_task(_telemetry_loop())
