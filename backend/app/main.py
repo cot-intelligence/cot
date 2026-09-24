@@ -1171,11 +1171,11 @@ def get_session_insights(session_id: str) -> dict[str, Any]:
 
 
 @app.get("/v1/search")
-def search(q: str = "", limit: int = 40) -> dict[str, Any]:
+def search(q: str = "", limit: int = 40, session_id: str | None = None) -> dict[str, Any]:
     q = q.strip()
     if len(q) < 2:
         return {"results": []}
-    return {"results": db.search(q, max(1, min(limit, 100)))}
+    return {"results": db.search(q, max(1, min(limit, 100)), session_id=session_id or None)}
 
 
 class ExportRequest(BaseModel):

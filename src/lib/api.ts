@@ -695,8 +695,13 @@ export interface SearchResult {
   snippet: string;
 }
 
-export async function search(q: string, limit = 40): Promise<SearchResult[]> {
+export async function search(
+  q: string,
+  limit = 40,
+  sessionId?: string,
+): Promise<SearchResult[]> {
   const params = new URLSearchParams({ q, limit: String(limit) });
+  if (sessionId) params.set('session_id', sessionId);
   const data = await json<{ results: SearchResult[] }>(
     await fetch(`/v1/search?${params.toString()}`),
   );
