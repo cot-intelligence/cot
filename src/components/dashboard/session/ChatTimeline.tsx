@@ -447,12 +447,21 @@ const ThoughtCard = forwardRef<HTMLDivElement, {
     setExpanded(expansionRequest.open);
   }, [expansionRequest]);
 
+  // Collapsed, the whole block opens it; once open, only the header closes it,
+  // so selecting text in the body doesn't collapse it.
   return (
-    <div ref={ref} data-event-key={itemEventKey} className="scroll-mt-4 rounded-xl px-3 py-2">
+    <div
+      ref={ref}
+      data-event-key={itemEventKey}
+      onClick={open ? undefined : () => setExpanded(true)}
+      className={`group scroll-mt-4 rounded-xl px-3 py-2 transition-colors ${
+        open ? '' : 'cursor-pointer hover:bg-fg/[0.03]'
+      }`}
+    >
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="group flex w-full items-center gap-2 text-left"
+        className="flex w-full items-center gap-2 text-left"
         aria-expanded={open}
       >
         <SparkIcon className="h-3 w-3 text-fg/40" />
