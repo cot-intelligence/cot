@@ -82,7 +82,7 @@
     border: 1px solid rgb(var(--line) / 0.1);
   }
   /* Session timeline: the user's messages are cobalt bubbles, the agent's
-     replies raised cards with a brand hairline. */
+     replies plain raised cards. */
   .bubble-user {
     background: linear-gradient(135deg, rgb(43 92 230 / 0.2), rgb(43 92 230 / 0.07));
     box-shadow:
@@ -90,29 +90,10 @@
       0 8px 24px -18px rgb(43 92 230 / 0.45);
   }
   .card-agent {
-    position: relative;
-    background:
-      radial-gradient(90% 70% at 0% 0%, rgb(255 69 0 / 0.045), transparent 60%),
-      rgb(var(--surface));
+    @apply bg-surface;
     box-shadow:
-      inset 0 0 0 1px rgb(var(--line) / 0.08),
+      inset 0 0 0 1px rgb(var(--line) / 0.09),
       0 16px 40px -28px rgb(var(--shadow) / 0.7);
-  }
-  /* The brand accents as a border that wraps the top-left corner and fades out,
-     following the card's radius rather than cutting across it. */
-  .card-agent::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    padding: 1px;
-    border-radius: inherit;
-    background: linear-gradient(150deg, rgb(255 69 0 / 0.55), rgb(43 92 230 / 0.3) 22%, transparent 45%);
-    -webkit-mask:
-      linear-gradient(#000 0 0) content-box,
-      linear-gradient(#000 0 0);
-    -webkit-mask-composite: xor;
-    mask-composite: exclude;
-    pointer-events: none;
   }
   .fade-bottom {
     mask-image: linear-gradient(to bottom, black 45%, transparent);
