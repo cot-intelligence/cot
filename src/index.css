@@ -225,12 +225,7 @@
   }
 }
 
-/* Jumping to a search result: the target card pulses once, and the search
-   words inside it are painted by searchHighlight.ts via the Highlight API. */
-::highlight(search-hit) {
-  background-color: rgb(255 69 0 / 0.3);
-  color: inherit;
-}
+/* Jumping to a search result: the target card pulses once (searchHighlight.ts). */
 [data-search-target] {
   border-radius: 0.5rem;
   animation: search-target 2.4s ease-out;
