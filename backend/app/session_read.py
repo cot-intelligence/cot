@@ -838,14 +838,17 @@ def build_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:
                     (session_id,),
                 ).fetchall()
             else:
+                # The whole category, not just this target: a hook can rewrite
+                # the command between start and end (rtk), and the timeline
+                # then pairs the halves by tool. Pairing never crosses
+                # categories, so this reproduces the timeline's spans.
                 rows = conn.execute(
                     "SELECT * FROM events"
                     " WHERE session_id=?"
                     " AND COALESCE(NULLIF(category, ''), 'other')=?"
-                    " AND COALESCE(target, '')=?"
                     " AND phase IN ('start', 'end')"
                     " ORDER BY ts ASC, id ASC",
-                    (session_id, category, event.get("target") or ""),
+                    (session_id, category),
                 ).fetchall()
             timeline_items = _build_timeline_items_from_events(
                 [store.event_row(r) for r in rows]
