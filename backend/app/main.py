@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -1253,6 +1254,21 @@ def get_event_detail(session_id: str, event_id: int) -> dict[str, Any]:
     if detail is None:
         raise HTTPException(status_code=404, detail="Event not found")
     return detail
+
+
+@app.get("/v1/sessions/{session_id}/export")
+def export_session(session_id: str) -> Response:
+    """The whole session as a downloadable JSON file."""
+    data = db.export_session(session_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    day = datetime.now().strftime("%Y%m%d")
+    filename = f"cot-session-{session_id[:8]}-{day}.json"
+    return Response(
+        content=json.dumps(data, indent=2, ensure_ascii=False, default=str),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/v1/sessions/{session_id}")

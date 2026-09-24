@@ -3317,6 +3317,45 @@ def get_session_detail(session_id: str) -> dict[str, Any] | None:
     return build_session_detail(session_id)
 
 
+def export_session(session_id: str) -> dict[str, Any] | None:
+    """Everything stored for one session: the detail read model with bodies
+    untrimmed, every raw hook row (payload included) and its insights."""
+    from . import insights
+    from .session_read import build_session_detail
+
+    detail = build_session_detail(session_id, full_detail=True)
+    if detail is None:
+        return None
+    # Deprecated parent-only list whose bodies are blanked; `events` has them.
+    detail.pop("timeline", None)
+    with store.read() as conn:
+        rows = conn.execute(
+            "SELECT * FROM events WHERE session_id = ? ORDER BY ts ASC, id ASC",
+            (session_id,),
+        ).fetchall()
+    return {
+        "format": "cot.session-export",
+        "format_version": 1,
+        "exported_at": timeutil.now(),
+        "cot_version": __version__,
+        **detail,
+        "insights": insights.compute_insights(session_id=session_id),
+        "raw_events": [_raw_event(r) for r in rows],
+    }
+
+
+def _raw_event(row: sqlite3.Row) -> dict[str, Any]:
+    out = dict(row)
+    out["ts"] = timeutil.format_ts(row["ts"])
+    for key in ("payload", "attachments"):
+        if out.get(key):
+            try:
+                out[key] = json.loads(out[key])
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return out
+
+
 def get_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:
     """Full detail + attachments for a single event (lazy-loaded by the UI when
     a truncated event is selected)."""

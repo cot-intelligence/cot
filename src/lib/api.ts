@@ -684,6 +684,11 @@ export async function setSessionBookmarked(id: string, bookmarked: boolean): Pro
   await json(await fetch(`/v1/sessions/${id}/${action}`, { method: 'POST' }));
 }
 
+/** Downloads the whole session (untrimmed events, raw hook rows) as JSON. */
+export function sessionExportUrl(id: string): string {
+  return `/v1/sessions/${encodeURIComponent(id)}/export`;
+}
+
 export interface SearchResult {
   session_id: string;
   event_id: number;

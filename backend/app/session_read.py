@@ -765,8 +765,11 @@ def _apply_event_annotations(
         _trim_detail_inplace(item, session_id)
 
 
-def build_session_detail(session_id: str) -> dict[str, Any] | None:
-    """Return the display-ready session detail read model."""
+def build_session_detail(session_id: str, *, full_detail: bool = False) -> dict[str, Any] | None:
+    """Return the display-ready session detail read model.
+
+    Long bodies are trimmed to previews the UI lazy-loads; ``full_detail``
+    keeps them whole (session export)."""
     with store.read() as conn:
         row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if row is None:
@@ -785,12 +788,12 @@ def build_session_detail(session_id: str) -> dict[str, Any] | None:
 
         for item in events:
             item["owner_session_id"] = session_id
-            _apply_event_annotations(item, annotations, session_id=session_id, trim_detail=True)
+            _apply_event_annotations(item, annotations, session_id=session_id, trim_detail=not full_detail)
         events, linked_clarifications = _merge_linked_session_events(conn, events, links)
         clarifications.extend(linked_clarifications)
         clarifications.sort(key=lambda c: (c.get("question_ts") or "", c.get("question_event_id") or 0))
         for item in events:
-            if item.get("provenance"):
+            if item.get("provenance") and not full_detail:
                 _trim_detail_inplace(item, item.get("owner_session_id") or session_id)
 
         _synthesize_child_subagent_spans(events, timeline_items, links, session_id)
