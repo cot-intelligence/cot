@@ -315,27 +315,47 @@ function SubagentResultCard({ item, sessionId }: { item: TimelineItem; sessionId
 /* Conversation cards — always expanded, chat-bubble style             */
 /* ------------------------------------------------------------------ */
 
+const ROLE_STYLE = {
+  user: {
+    card: 'border-l-2 border-cobalt bg-cobalt/[0.07]',
+    dot: 'bg-cobalt',
+    label: 'text-cobalt',
+    body: '',
+  },
+  thinking: {
+    card: 'border-l-2 border-dashed border-fg/20',
+    dot: 'bg-fg/35',
+    label: 'text-fg/45',
+    body: 'text-fg/55 italic',
+  },
+  agent: {
+    card: 'border-l-2 border-fg/40 bg-surface',
+    dot: 'bg-fg/80',
+    label: 'text-fg/85',
+    body: '',
+  },
+} as const;
+
 const ConversationCard = forwardRef<HTMLDivElement, { item: TimelineItem; sessionId: string; eventKey: string }>(
   function ConversationCard({ item, sessionId, eventKey: itemEventKey }, ref) {
-    const meta = getCategoryMeta(item.category);
     const isPrompt = item.category === 'prompt' || item.category === 'question';
+    const isThought = item.category === 'thought';
     const provenance = item.provenance ? PROVENANCE_META[item.provenance] : null;
+    // Three roles, told apart by tint + edge style as well as hue: user is cobalt,
+    // thinking is dimmed with a dashed edge, the agent's answer is neutral full-contrast.
+    const role = isPrompt ? ROLE_STYLE.user : isThought ? ROLE_STYLE.thinking : ROLE_STYLE.agent;
 
     return (
       <div
         ref={ref}
         data-event-key={itemEventKey}
-        className={`scroll-mt-4 rounded-lg px-4 py-3 ${provenance?.accent ?? ''} ${
-          isPrompt
-            ? 'border border-fg/10 bg-surface'
-            : 'bg-transparent'
-        }`}
+        className={`scroll-mt-4 rounded-lg px-4 py-3 ${role.card} ${provenance?.accent ?? ''}`}
       >
         {/* Sender line */}
         <div className="mb-2 flex items-center gap-2">
-          <span className={`h-2 w-2 rounded-full ${meta.dot}`} />
-          <span className={`font-mono text-[0.58rem] font-bold uppercase tracking-widest ${meta.color}`}>
-            {isPrompt ? 'User' : item.category === 'thought' ? 'Thinking' : 'Agent'}
+          <span className={`h-2 w-2 rounded-full ${role.dot}`} />
+          <span className={`font-mono text-[0.58rem] font-bold uppercase tracking-widest ${role.label}`}>
+            {isPrompt ? 'User' : isThought ? 'Thinking' : 'Agent'}
           </span>
           {provenance && (
             <span className={`rounded px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest ${provenance.pillClass}`}>
@@ -368,7 +388,7 @@ const ConversationCard = forwardRef<HTMLDivElement, { item: TimelineItem; sessio
         )}
 
         {/* Body — always shown */}
-        <div className={item.category === 'thought' ? 'text-fg/60' : ''}>
+        <div className={role.body}>
           <CardBody item={item} sessionId={sessionId} />
         </div>
       </div>
