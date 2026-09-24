@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { search, type SearchResult } from '../../lib/api';
+import { search, type SearchResult, type Store } from '../../lib/api';
 import { formatRelative, getCategoryMeta } from '../../lib/categoryMeta';
 import { formatModel } from '../../lib/modelMeta';
 import { highlight } from '../ui/Highlight';
@@ -21,12 +21,14 @@ export interface PaletteCommand {
 export interface PaletteScope {
   sessionId: string;
   label: string;
+  /** `replay` when the session is a Session Replay import. */
+  store?: Store;
 }
 
 interface CommandPaletteProps {
   open: boolean;
   onClose: () => void;
-  onSelect: (sessionId: string, eventId?: number, query?: string) => void;
+  onSelect: (sessionId: string, eventId?: number, query?: string, store?: Store) => void;
   /** Navigation/actions relevant to the current location. */
   commands: PaletteCommand[];
   /** Current session scope, or null when not on a session. */
@@ -65,6 +67,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
   // Debounced search, narrowed server-side when scoped so older sessions aren't
   // crowded out by newer matches elsewhere.
   const scopeId = activeScope?.sessionId;
+  const scopeStore = activeScope?.store ?? 'main';
   useEffect(() => {
     if (!open) return;
     if (term.length < 2) {
@@ -76,7 +79,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
     let live = true;
     const t = window.setTimeout(async () => {
       try {
-        const r = await search(term, 60, scopeId);
+        const r = await search(term, 60, scopeId, scopeStore);
         if (live) setResults(r);
       } catch {
         if (live) setResults([]);
@@ -88,7 +91,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
       live = false;
       window.clearTimeout(t);
     };
-  }, [term, open, scopeId]);
+  }, [term, open, scopeId, scopeStore]);
 
   // Commands matching the query (all of them when the box is empty).
   const cmdMatches = useMemo(() => {
@@ -115,7 +118,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
 
   const choose = (item: PaletteItem) => {
     if (item.kind === 'command') item.command.run();
-    else onSelect(item.result.session_id, item.result.event_id, term);
+    else onSelect(item.result.session_id, item.result.event_id, term, scopeStore);
     onClose();
   };
 

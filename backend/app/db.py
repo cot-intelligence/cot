@@ -11,6 +11,8 @@ import json
 import re
 import sqlite3
 import string
+import threading
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -323,6 +325,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # so the child's work embeds under the parent instead of orphaning.
         ("parent_session_id", "TEXT"),
         ("subagent_label", "TEXT"),
+        # Session Replay copies: the id the session had where it was exported.
+        ("imported_from", "TEXT"),
+        ("imported_at", "TEXT"),
+        # Every session from one imported file points at that file's root
+        # session, so Session Replay lists (and deletes) one row per import.
+        ("import_root_id", "TEXT"),
     ):
         _add_column_if_missing(conn, "sessions", name, col_def, session_cols)
     if "parent_session_id" in session_cols:
@@ -2269,6 +2277,17 @@ def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any
         "tokens": _tokens_dict(tok),
         "cost_usd": round(cost_usd, 6),
         "has_cost": has_cost,
+        **_import_fields(row),
+    }
+
+
+def _import_fields(row: sqlite3.Row) -> dict[str, Any]:
+    """Provenance of a Session Replay copy; nothing for a traced session."""
+    if "imported_from" not in row.keys() or not row["imported_from"]:
+        return {}
+    return {
+        "imported_from": row["imported_from"],
+        "imported_at": timeutil.format_ts(row["imported_at"]),
     }
 
 
@@ -2335,6 +2354,7 @@ def _batched_session_summaries(
                 "tokens": _tokens_from_parts(row["i"], row["o"], row["cr"], row["cw"]),
                 "cost_usd": round(cost_usd, 6),
                 "has_cost": has_cost,
+                **_import_fields(row),
             }
         )
     return summaries
@@ -2788,6 +2808,7 @@ def export_sessions(
         rows = conn.execute(
             f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
             f" s.status, s.archived, s.bookmarked, s.created_at,"
+            f" s.imported_from, s.imported_at,"
             f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
             f" e.i, e.o, e.cr, e.cw,"
             f" (SELECT fp.detail FROM events fp"
@@ -2948,6 +2969,8 @@ def list_sessions(
         clauses.append("s.bookmarked = 1")
     # Subagent sessions embed under their parent, so they don't list standalone.
     clauses.append("s.parent_session_id IS NULL")
+    # Likewise every non-root session of a Session Replay import.
+    clauses.append("(s.import_root_id IS NULL OR s.import_root_id = s.id)")
     if source:
         clauses.append("s.source = ?")
         params.append(source)
@@ -2960,6 +2983,7 @@ def list_sessions(
         rows = conn.execute(
             f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
             f" s.status, s.archived, s.bookmarked, s.created_at,"
+            f" s.imported_from, s.imported_at,"
             f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
             f" e.i, e.o, e.cr, e.cw,"
             f" (SELECT fp.detail FROM events fp"
@@ -3317,9 +3341,15 @@ def get_session_detail(session_id: str) -> dict[str, Any] | None:
     return build_session_detail(session_id)
 
 
+EXPORT_FORMAT = "cot.session-export"
+EXPORT_FORMAT_VERSION = 2
+
+
 def export_session(session_id: str) -> dict[str, Any] | None:
     """Everything stored for one session: the detail read model with bodies
-    untrimmed, every raw hook row (payload included) and its insights."""
+    untrimmed, every raw hook row (payload included), its insights, and the
+    same for each linked child session (subagents, approval reviews), so an
+    import can rebuild the whole family."""
     from . import insights
     from .session_read import build_session_detail
 
@@ -3329,19 +3359,182 @@ def export_session(session_id: str) -> dict[str, Any] | None:
     # Deprecated parent-only list whose bodies are blanked; `events` has them.
     detail.pop("timeline", None)
     with store.read() as conn:
-        rows = conn.execute(
-            "SELECT * FROM events WHERE session_id = ? ORDER BY ts ASC, id ASC",
-            (session_id,),
-        ).fetchall()
+        session_row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        raw_events = _raw_events(conn, session_id)
+        linked = _linked_session_rows(conn, session_id)
     return {
-        "format": "cot.session-export",
-        "format_version": 1,
+        "format": EXPORT_FORMAT,
+        "format_version": EXPORT_FORMAT_VERSION,
         "exported_at": timeutil.now(),
         "cot_version": __version__,
+        "session": dict(session_row),
         **detail,
         "insights": insights.compute_insights(session_id=session_id),
-        "raw_events": [_raw_event(r) for r in rows],
+        "raw_events": raw_events,
+        "linked_sessions": linked,
     }
+
+
+def _raw_events(conn: sqlite3.Connection, session_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT * FROM events WHERE session_id = ? ORDER BY ts ASC, id ASC",
+        (session_id,),
+    ).fetchall()
+    return [_raw_event(r) for r in rows]
+
+
+def _linked_session_rows(conn: sqlite3.Connection, session_id: str) -> list[dict[str, Any]]:
+    """Child sessions, recursively (a subagent can launch subagents)."""
+    out: list[dict[str, Any]] = []
+    seen = {session_id}
+    queue = [c["session_id"] for c in session_links(conn, session_id)["children"]]
+    while queue:
+        child_id = queue.pop(0)
+        if child_id in seen:
+            continue
+        seen.add(child_id)
+        row = conn.execute("SELECT * FROM sessions WHERE id = ?", (child_id,)).fetchone()
+        if row is None:
+            continue
+        out.append({"session": dict(row), "raw_events": _raw_events(conn, child_id)})
+        queue.extend(c["session_id"] for c in session_links(conn, child_id)["children"])
+    return out
+
+
+class ExportFileError(ValueError):
+    """An uploaded file that isn't a usable session export; the message says why."""
+
+
+def import_session_export(data: Any) -> dict[str, Any]:
+    """Store an exported session (and its linked children) as a new copy.
+
+    Rebuilt from the raw hook rows, so pairing, categories, insights and search
+    behave as for a traced session. Every session gets a fresh id, and the old
+    ids are rewritten wherever the rows mention them (an approval review names
+    its parent in its prompt), so links stay inside the copy. Meant to run
+    against the Session Replay store.
+    """
+    if not isinstance(data, dict) or data.get("format") != EXPORT_FORMAT:
+        raise ExportFileError(f'Not a cot session export (expected "format": "{EXPORT_FORMAT}").')
+    version = data.get("format_version")
+    if version not in (1, 2):
+        raise ExportFileError(
+            f"Unsupported export version {version!r}; this cot reads versions 1 and 2."
+        )
+    summary, raw = data.get("summary"), data.get("raw_events")
+    if not isinstance(summary, dict) or not summary.get("id") or not isinstance(raw, list):
+        raise ExportFileError("The export is missing its session summary or raw_events.")
+
+    root = data.get("session") if isinstance(data.get("session"), dict) else summary
+    family: list[tuple[dict[str, Any], list[Any]]] = [(root, raw)]
+    for linked in data.get("linked_sessions") or []:
+        if (
+            isinstance(linked, dict)
+            and isinstance(linked.get("session"), dict)
+            and linked["session"].get("id")
+            and isinstance(linked.get("raw_events"), list)
+        ):
+            family.append((linked["session"], linked["raw_events"]))
+
+    id_map = {str(row["id"]).lower(): str(uuid.uuid4()) for row, _ in family}
+    old_ids = re.compile("|".join(re.escape(k) for k in id_map), re.IGNORECASE)
+
+    def rewrite(value: Any) -> Any:
+        if value is None:
+            return None
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        return old_ids.sub(lambda m: id_map[m.group(0).lower()], text)
+
+    root_id = id_map[str(root["id"]).lower()]
+    now = timeutil.now()
+    events = 0
+    with store.write() as conn:
+        for row, rows in family:
+            old_id = str(row["id"])
+            source = row.get("source") or "unknown"
+            conn.execute(
+                "INSERT INTO sessions (id, source, cwd, started_at, ended_at, status,"
+                " created_at, parent_session_id, subagent_label,"
+                " imported_from, imported_at, import_root_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    id_map[old_id.lower()],
+                    source,
+                    row.get("cwd"),
+                    row.get("started_at") or now,
+                    row.get("ended_at"),
+                    row.get("status") or "completed",
+                    now,
+                    id_map.get(str(row.get("parent_session_id") or "").lower()),
+                    row.get("subagent_label"),
+                    old_id,
+                    now,
+                    root_id,
+                ),
+            )
+            for ev in rows:
+                if not isinstance(ev, dict):
+                    continue
+                store.insert_event(
+                    conn,
+                    session_id=id_map[old_id.lower()],
+                    source=ev.get("source") or source,
+                    hook=ev.get("hook") or "unknown",
+                    tool=ev.get("tool"),
+                    phase=ev.get("phase") or "instant",
+                    ts=ev.get("ts"),
+                    payload=rewrite(ev.get("payload")),
+                    category=ev.get("category"),
+                    title=rewrite(ev.get("title")),
+                    detail=rewrite(ev.get("detail")),
+                    target=rewrite(ev.get("target")),
+                    status=ev.get("status"),
+                    duration_ms=ev.get("duration_ms"),
+                    model=ev.get("model"),
+                    input_tokens=ev.get("input_tokens"),
+                    output_tokens=ev.get("output_tokens"),
+                    cache_read_tokens=ev.get("cache_read_tokens"),
+                    cache_write_tokens=ev.get("cache_write_tokens"),
+                    attachments=ev.get("attachments"),
+                    dedup_key=ev.get("dedup_key"),
+                    # Not "hook"/"import": transcript-import reconciliation keys
+                    # on those and must never touch a copied session.
+                    origin="file",
+                    created_at=now,
+                )
+                events += 1
+    return {"session_id": root_id, "sessions": len(family), "events": events}
+
+
+def delete_imported_session(session_id: str) -> bool:
+    """Delete a Session Replay import (the root and every session it brought).
+
+    Only import roots qualify; traced sessions are never deleted this way."""
+    with store.write() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sessions WHERE id = ? AND import_root_id = id", (session_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        conn.execute("DELETE FROM sessions WHERE import_root_id = ?", (session_id,))
+    return True
+
+
+_replay_ready: set[str] = set()
+_replay_lock = threading.Lock()
+
+
+def ensure_replay_store() -> None:
+    """Create or migrate the Session Replay DB once per process."""
+    replay = store.replay_path()
+    if str(replay) in _replay_ready:
+        return
+    with _replay_lock:
+        if str(replay) in _replay_ready:
+            return
+        with store.use(replay):
+            init_db()
+        _replay_ready.add(str(replay))
 
 
 def _raw_event(row: sqlite3.Row) -> dict[str, Any]:

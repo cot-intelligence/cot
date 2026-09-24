@@ -168,6 +168,21 @@ async def _enforce_local_origin(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def _select_store(request: Request, call_next):
+    """``?store=replay`` runs the request against the Session Replay DB, so the
+    session page, export and search work unchanged on imported sessions while
+    they stay out of the traced sessions and every aggregate."""
+    name = request.query_params.get("store")
+    if name is None:
+        return await call_next(request)
+    if name != "replay":
+        return JSONResponse({"detail": "store must be 'replay'"}, status_code=400)
+    await asyncio.to_thread(db.ensure_replay_store)
+    with store.use(store.replay_path()):
+        return await call_next(request)
+
+
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts())
 
 _cors_kwargs: dict[str, Any] = {"allow_methods": ["*"], "allow_headers": ["*"]}
@@ -1254,6 +1269,43 @@ def get_event_detail(session_id: str, event_id: int) -> dict[str, Any]:
     if detail is None:
         raise HTTPException(status_code=404, detail="Event not found")
     return detail
+
+
+# The largest real export seen was ~41MB; leave room without accepting anything.
+_REPLAY_IMPORT_MAX_BYTES = 200 * 1024 * 1024
+
+
+@app.post("/v1/replay/import")
+async def import_replay_session(request: Request) -> dict[str, Any]:
+    """Import a session export (the request body) into Session Replay."""
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > _REPLAY_IMPORT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="The file is larger than 200 MB.")
+    raw = await request.body()
+    if len(raw) > _REPLAY_IMPORT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="The file is larger than 200 MB.")
+    try:
+        data = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="The file isn't valid JSON.") from None
+    await asyncio.to_thread(db.ensure_replay_store)
+
+    def _import() -> dict[str, Any]:
+        with store.use(store.replay_path()):
+            return db.import_session_export(data)
+
+    try:
+        return await asyncio.to_thread(_import)
+    except db.ExportFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.delete("/v1/sessions/{session_id}")
+def delete_session(session_id: str) -> dict[str, Any]:
+    """Delete a Session Replay import. Traced sessions can't be deleted here."""
+    if not db.delete_imported_session(session_id):
+        raise HTTPException(status_code=404, detail="No imported session with this id")
+    return {"deleted": session_id}
 
 
 @app.get("/v1/sessions/{session_id}/export")

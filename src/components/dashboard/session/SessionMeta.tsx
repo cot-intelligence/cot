@@ -10,6 +10,7 @@ import { AgentMark } from '../../ui/AgentMark';
 import { Icon } from '../../ui/icons';
 import { SessionHash } from '../../ui/SessionHash';
 import { useCopy } from '../../ui/useCopy';
+import { sessionHref, useSessionStore } from '../../../lib/sessionStore';
 
 interface SessionMetaProps {
   summary: SessionSummary;
@@ -51,6 +52,7 @@ const PARENT_LABEL: Record<SessionLink['type'], string> = {
 };
 
 export function SessionMeta({ summary, links, onToggleBookmark }: SessionMetaProps) {
+  const store = useSessionStore();
   const isActive = summary.status === 'active';
   const parents = links?.parents ?? [];
   const subagentChildren = (links?.children ?? []).filter((l) => l.type === 'subagent');
@@ -67,7 +69,7 @@ export function SessionMeta({ summary, links, onToggleBookmark }: SessionMetaPro
         </h1>
         <div className="flex shrink-0 items-center gap-2">
           <a
-            href={sessionExportUrl(summary.id)}
+            href={sessionExportUrl(summary.id, store)}
             download
             aria-label="Export session as JSON"
             title="Export as JSON"
@@ -102,6 +104,16 @@ export function SessionMeta({ summary, links, onToggleBookmark }: SessionMetaPro
         <span className={`uppercase tracking-[0.14em] ${isActive ? 'text-cobalt' : ''}`}>{summary.status}</span>
         {sep}
         <SessionHash id={summary.id} />
+        {summary.imported_from && (
+          <>
+            {sep}
+            <span
+              className="rounded border border-cobalt/30 px-1 uppercase tracking-[0.14em] text-cobalt"
+              title={`Imported ${formatRelative(summary.imported_at)} from session ${summary.imported_from}`}>
+              Imported · {summary.imported_from.slice(0, 8)}
+            </span>
+          </>
+        )}
         {summary.cwd && (
           <>
             {sep}
@@ -153,9 +165,10 @@ export function SessionMeta({ summary, links, onToggleBookmark }: SessionMetaPro
 }
 
 function SessionLinkPill({ link, label }: { link: SessionLink; label?: string }) {
+  const store = useSessionStore();
   return (
     <a
-      href={`#/session/${encodeURIComponent(link.session_id)}`}
+      href={sessionHref(link.session_id, store)}
       title={link.title || link.session_id}
       className="inline-flex min-w-0 items-center gap-1 rounded border border-cobalt/25 bg-cobalt/[0.04] px-1.5 py-0.5 text-cobalt transition-colors hover:border-cobalt/45 hover:bg-cobalt/[0.08]"
     >
