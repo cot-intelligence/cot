@@ -1120,12 +1120,58 @@ _MIGRATIONS_VERSION = "9"
 _RAW_PAYLOAD_MAX_BYTES = 64 * 1024
 
 
+# Full-text index over what search matches. External content keeps one copy of
+# the text (in events); triggers keep the index in step with every write. The
+# triggers use only built-ins, so an older collector sharing the DB file still
+# writes through them.
+_SEARCH_INDEX_SQL = (
+    "CREATE VIRTUAL TABLE events_fts USING fts5("
+    " title, target, detail, content='events', content_rowid='id',"
+    " tokenize='unicode61 remove_diacritics 2')",
+    "CREATE TRIGGER IF NOT EXISTS events_fts_insert AFTER INSERT ON events BEGIN"
+    " INSERT INTO events_fts(rowid, title, target, detail)"
+    " VALUES (new.id, new.title, new.target, new.detail); END",
+    "CREATE TRIGGER IF NOT EXISTS events_fts_delete AFTER DELETE ON events BEGIN"
+    " INSERT INTO events_fts(events_fts, rowid, title, target, detail)"
+    " VALUES ('delete', old.id, old.title, old.target, old.detail); END",
+    "CREATE TRIGGER IF NOT EXISTS events_fts_update"
+    " AFTER UPDATE OF title, target, detail ON events BEGIN"
+    " INSERT INTO events_fts(events_fts, rowid, title, target, detail)"
+    " VALUES ('delete', old.id, old.title, old.target, old.detail);"
+    " INSERT INTO events_fts(rowid, title, target, detail)"
+    " VALUES (new.id, new.title, new.target, new.detail); END",
+)
+
+
+def _ensure_search_index(conn: sqlite3.Connection) -> None:
+    """Create the search index on first run and fill it from existing events.
+
+    SQLite builds without FTS5 skip it; search then falls back to a LIKE scan.
+    """
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events_fts'"
+    ).fetchone()
+    if exists:
+        return
+    # Triggers left behind without their table would fail every event write.
+    for trigger in ("events_fts_insert", "events_fts_delete", "events_fts_update"):
+        conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+    try:
+        conn.execute(_SEARCH_INDEX_SQL[0])
+    except sqlite3.OperationalError:
+        return
+    for statement in _SEARCH_INDEX_SQL[1:]:
+        conn.execute(statement)
+    conn.execute("INSERT INTO events_fts(events_fts) VALUES ('rebuild')")
+
+
 def init_db() -> None:
     with store.write() as conn:
         for statement in SCHEMA.split(";"):
             if statement.strip():
                 conn.execute(statement)
         _migrate(conn)
+        _ensure_search_index(conn)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source)"
         )
@@ -2971,25 +3017,52 @@ def _search_terms(query: str) -> list[str]:
     return terms
 
 
-def search(
-    query: str, limit: int = 40, session_id: str | None = None
-) -> list[dict[str, Any]]:
-    """Full-text-ish search across event titles, targets and detail bodies.
+def _fts_query(terms: list[str]) -> str:
+    """Each term as a quoted prefix phrase, so FTS syntax typed by the user
+    (quotes, ``OR``, ``NEAR``, ``*``) is matched as plain text."""
+    return " ".join('"' + t.replace('"', '""') + '"*' for t in terms)
 
-    Covers everything captured: prompts/responses (conversation), file paths,
-    shell commands, MCP calls, etc. — each event's text is stored in detail.
 
-    Matching is token-based (every whitespace-separated word must appear), not a
-    single contiguous substring. This way formatting that sits between words in
-    the stored text — markdown like ``**bold**``, links, punctuation — does not
-    prevent a match against the plain text the user sees and types.
+# A match this many days old counts half as much as an equal match from now.
+_SEARCH_RECENCY_HALF_DAYS = 14
 
-    ``session_id`` narrows the search to one session in SQL, so the limit applies
-    within that session rather than to the newest matches across all sessions.
-    """
-    terms = _search_terms(query)
-    if not terms:
-        return []
+_SEARCH_COLUMNS = (
+    "SELECT e.id, e.session_id, e.category, e.title, e.target, e.detail,"
+    " e.ts, e.source, e.model, s.cwd AS cwd"
+    " FROM events e LEFT JOIN sessions s ON s.id = e.session_id"
+)
+
+
+def _search_indexed(
+    conn: sqlite3.Connection, terms: list[str], limit: int, session_id: str | None
+) -> list[sqlite3.Row] | None:
+    """Ranked matches from the full-text index; None when it can't answer."""
+    scope = " AND e.session_id = ?" if session_id else ""
+    params: list[Any] = [_fts_query(terms)]
+    if session_id:
+        params.append(session_id)
+    params.append(limit)
+    # bm25 is negative (lower is better); dividing by an age factor pulls older
+    # matches toward zero. Title and target hits outweigh ones deep in a body.
+    try:
+        return conn.execute(
+            f"{_SEARCH_COLUMNS} JOIN events_fts f ON f.rowid = e.id"
+            f" WHERE events_fts MATCH ?{scope}"
+            " ORDER BY bm25(events_fts, 3.0, 2.0, 1.0) / (1.0 + MAX(0.0,"
+            " julianday('now') - COALESCE(julianday(e.ts), julianday('now')))"
+            f" / {_SEARCH_RECENCY_HALF_DAYS}.0), e.ts DESC"
+            " LIMIT ?",
+            params,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return None
+
+
+def _search_scan(
+    conn: sqlite3.Connection, terms: list[str], limit: int, session_id: str | None
+) -> list[sqlite3.Row]:
+    """Substring match over every row, newest first. Slow on a large DB, but it
+    also finds text inside words (``RangeInto`` in ``scrollRangeIntoView``)."""
     clauses: list[str] = []
     params: list[Any] = []
     for t in terms:
@@ -3003,15 +3076,34 @@ def search(
         clauses.append("e.session_id = ?")
         params.append(session_id)
     params.append(limit)
+    return conn.execute(
+        f"{_SEARCH_COLUMNS} WHERE {' AND '.join(clauses)} ORDER BY e.ts DESC LIMIT ?",
+        params,
+    ).fetchall()
+
+
+def search(
+    query: str, limit: int = 40, session_id: str | None = None
+) -> list[dict[str, Any]]:
+    """Search event titles, targets and detail bodies.
+
+    Covers everything captured: prompts/responses (conversation), file paths,
+    shell commands, MCP calls, etc. — each event's text is stored in detail.
+
+    Every whitespace-separated word must appear, matched as a word or the start
+    of one, ranked by relevance and recency. When that finds nothing, a slower
+    substring scan runs so text inside a word still turns up.
+
+    ``session_id`` narrows the search to one session in SQL, so the limit applies
+    within that session rather than to the newest matches across all sessions.
+    """
+    terms = _search_terms(query)
+    if not terms:
+        return []
     with store.read() as conn:
-        rows = conn.execute(
-            "SELECT e.id, e.session_id, e.category, e.title, e.target, e.detail,"
-            " e.ts, e.source, e.model, s.cwd AS cwd"
-            " FROM events e LEFT JOIN sessions s ON s.id = e.session_id"
-            f" WHERE {' AND '.join(clauses)}"
-            " ORDER BY e.ts DESC LIMIT ?",
-            params,
-        ).fetchall()
+        rows = _search_indexed(conn, terms, limit, session_id)
+        if not rows:
+            rows = _search_scan(conn, terms, limit, session_id)
     return [
         {
             "session_id": r["session_id"],
