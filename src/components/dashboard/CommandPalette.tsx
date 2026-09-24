@@ -26,7 +26,7 @@ export interface PaletteScope {
 interface CommandPaletteProps {
   open: boolean;
   onClose: () => void;
-  onSelect: (sessionId: string, eventId?: number) => void;
+  onSelect: (sessionId: string, eventId?: number, query?: string) => void;
   /** Navigation/actions relevant to the current location. */
   commands: PaletteCommand[];
   /** Current session scope, or null when not on a session. */
@@ -115,7 +115,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
 
   const choose = (item: PaletteItem) => {
     if (item.kind === 'command') item.command.run();
-    else onSelect(item.result.session_id, item.result.event_id);
+    else onSelect(item.result.session_id, item.result.event_id, term);
     onClose();
   };
 

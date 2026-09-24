@@ -18,9 +18,11 @@ import { AttachmentTags } from './AttachmentTags';
 import { AgentMark } from '../../ui/AgentMark';
 import { AGENTS } from '../../../lib/agents';
 import { displayValue, prettyJson } from '../../../lib/json';
+import { revealSearchHits } from '../../../lib/searchHighlight';
 
 export interface ChatTimelineHandle {
-  scrollToAndExpand: (key: string) => void;
+  /** With `query`, also pulse the card and highlight the query inside it. */
+  scrollToAndExpand: (key: string, query?: string) => void;
 }
 
 interface ChatTimelineProps {
@@ -103,7 +105,7 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
     }, [items, runs, keyFor]);
 
     useImperativeHandle(ref, () => ({
-      scrollToAndExpand(key: string) {
+      scrollToAndExpand(key: string, query?: string) {
         setForceExpanded((prev) => {
           const next = new Set(prev);
           next.add(key);
@@ -117,6 +119,7 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
         for (const ms of [80, 200, 400]) {
           window.setTimeout(() => el.scrollIntoView({ block: 'start' }), ms);
         }
+        if (query != null) revealSearchHits(el, query);
       },
     }), []);
 
