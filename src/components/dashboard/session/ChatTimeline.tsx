@@ -15,6 +15,8 @@ import {
 import { useFullEventDetail } from '../../../lib/useFullEventDetail';
 import { MarkdownContent } from '../../ui/MarkdownContent';
 import { AttachmentTags } from './AttachmentTags';
+import { AgentMark } from '../../ui/AgentMark';
+import { AGENTS } from '../../../lib/agents';
 
 export interface ChatTimelineHandle {
   scrollToAndExpand: (key: string) => void;
@@ -126,18 +128,33 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
       else cardRefs.current.delete(key);
     }, []);
 
-    // Top-level rows register their scroll ref on the LazyRow wrapper instead.
-    const renderEvent = (item: TimelineItem, withRef = true) => {
+    // Top-level rows register their scroll ref on the LazyRow wrapper instead,
+    // and sit on the lane, whose spine node replaces the card's own marker.
+    const renderEvent = (item: TimelineItem, withRef = true, onLane = false) => {
       const itemKey = keyFor(item);
       const itemSessionId = eventSessionId(item, sessionId);
-      const isConvo = isConversationCategory(item.category);
-      return isConvo ? (
+      const cardRef = withRef ? (el: HTMLDivElement | null) => setCardRef(itemKey, el) : undefined;
+      if (item.category === 'thought') {
+        return (
+          <ThoughtCard
+            key={itemKey}
+            item={item}
+            sessionId={itemSessionId}
+            eventKey={itemKey}
+            forceOpen={forceExpanded.has(itemKey)}
+            expansionRequest={expansionRequest}
+            ref={cardRef}
+          />
+        );
+      }
+      return isConversationCategory(item.category) ? (
         <ConversationCard
           key={itemKey}
           item={item}
           sessionId={itemSessionId}
           eventKey={itemKey}
-          ref={withRef ? (el) => setCardRef(itemKey, el) : undefined}
+          onLane={onLane}
+          ref={cardRef}
         />
       ) : (
         <ActionCard
@@ -147,7 +164,8 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
           eventKey={itemKey}
           forceOpen={forceExpanded.has(itemKey)}
           expansionRequest={expansionRequest}
-          ref={withRef ? (el) => setCardRef(itemKey, el) : undefined}
+          onLane={onLane}
+          ref={cardRef}
         />
       );
     };
@@ -170,8 +188,10 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
                 estimate={estimateRowHeight(seg.item)}
                 refKeys={[keyFor(seg.item)]}
                 setCardRef={setCardRef}
+                className={isUserMessage(seg.item) ? 'pb-2 pt-6' : 'lane'}
               >
-                {renderEvent(seg.item, false)}
+                {!isUserMessage(seg.item) && <LaneNode item={seg.item} />}
+                {renderEvent(seg.item, false, !isUserMessage(seg.item))}
               </LazyRow>
             ) : (
               <LazyRow
@@ -179,7 +199,9 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
                 estimate={ACTION_ROW_HEIGHT}
                 refKeys={[keyFor(seg.run.item), keyFor(seg.item), keyFor(seg.resultItem)]}
                 setCardRef={setCardRef}
+                className="lane"
               >
+              <span className="lane-node top-[15px] h-2 w-2 rounded-full bg-cobalt ring-4 ring-bg" />
               <SubagentGroup
                 run={seg.run}
                 resultItem={seg.resultItem}
@@ -241,7 +263,6 @@ const SubagentGroup = forwardRef<HTMLDivElement, {
           <span className={`shrink-0 text-[0.55rem] text-cobalt/50 transition-transform ${open ? 'rotate-90' : ''}`}>
             ▸
           </span>
-          <span className="h-2 w-2 shrink-0 rounded-full bg-cobalt" />
           <span className="font-mono text-[0.58rem] font-bold uppercase tracking-widest text-cobalt">
             {run.kind === 'review' ? 'Review' : 'Subagent'}
           </span>
@@ -315,86 +336,174 @@ function SubagentResultCard({ item, sessionId }: { item: TimelineItem; sessionId
 /* Conversation cards — always expanded, chat-bubble style             */
 /* ------------------------------------------------------------------ */
 
-const ROLE_STYLE = {
-  user: {
-    card: 'border-l-2 border-cobalt bg-cobalt/[0.07]',
-    dot: 'bg-cobalt',
-    label: 'text-cobalt',
-    body: '',
-  },
-  thinking: {
-    card: 'border-l-2 border-dashed border-fg/20',
-    dot: 'bg-fg/35',
-    label: 'text-fg/45',
-    body: 'text-fg/55 italic',
-  },
-  agent: {
-    card: 'border-l-2 border-fg/40 bg-surface',
-    dot: 'bg-fg/80',
-    label: 'text-fg/85',
-    body: '',
-  },
-} as const;
+function isUserMessage(item: TimelineItem): boolean {
+  return item.category === 'prompt' || item.category === 'question';
+}
 
-const ConversationCard = forwardRef<HTMLDivElement, { item: TimelineItem; sessionId: string; eventKey: string }>(
-  function ConversationCard({ item, sessionId, eventKey: itemEventKey }, ref) {
-    const isPrompt = item.category === 'prompt' || item.category === 'question';
-    const isThought = item.category === 'thought';
-    const provenance = item.provenance ? PROVENANCE_META[item.provenance] : null;
-    // Three roles, told apart by tint + edge style as well as hue: user is cobalt,
-    // thinking is dimmed with a dashed edge, the agent's answer is neutral full-contrast.
-    const role = isPrompt ? ROLE_STYLE.user : isThought ? ROLE_STYLE.thinking : ROLE_STYLE.agent;
+function agentName(item: TimelineItem): string {
+  return AGENTS.find((a) => a.id === item.source)?.name ?? 'Agent';
+}
 
+function SparkIcon({ className = '' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="currentColor" className={className} aria-hidden="true">
+      <path d="M8 0.5c.4 3.6 1.9 5.6 7.5 7.5-5.6 1.9-7.1 3.9-7.5 7.5-.4-3.6-1.9-5.6-7.5-7.5C6.1 6.1 7.6 4.1 8 .5Z" />
+    </svg>
+  );
+}
+
+function AgentAvatar({ item, size = 'md' }: { item: TimelineItem; size?: 'sm' | 'md' }) {
+  const box = size === 'md' ? 'h-7 w-7 rounded-lg' : 'h-5 w-5 rounded-md';
+  const mark = size === 'md' ? 'h-3.5 w-3.5' : 'h-3 w-3';
+  return (
+    <span className={`inline-flex shrink-0 items-center justify-center bg-surface text-fg shadow-soft ring-1 ring-line/15 ${box}`}>
+      <AgentMark id={item.source} className={mark} />
+    </span>
+  );
+}
+
+/** The marker a row pins to the spine: the agent's mark on its replies, a spark
+ *  on its thinking, a dot in the category's colour on every tool step. */
+function LaneNode({ item }: { item: TimelineItem }) {
+  if (item.category === 'thought') {
     return (
-      <div
-        ref={ref}
-        data-event-key={itemEventKey}
-        className={`scroll-mt-4 rounded-lg px-4 py-3 ${role.card} ${provenance?.accent ?? ''}`}
-      >
-        {/* Sender line */}
-        <div className="mb-2 flex items-center gap-2">
-          <span className={`h-2 w-2 rounded-full ${role.dot}`} />
-          <span className={`font-mono text-[0.58rem] font-bold uppercase tracking-widest ${role.label}`}>
-            {isPrompt ? 'User' : isThought ? 'Thinking' : 'Agent'}
-          </span>
-          {provenance && (
-            <span className={`rounded px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest ${provenance.pillClass}`}>
-              {provenance.label}
-            </span>
-          )}
-          <span
-            className="font-mono text-[0.5rem] tabular-nums text-fg/30"
-            title={formatDateTime(item.start_ts || item.ts)}
-          >
-            {formatClock(item.start_ts || item.ts)}
-          </span>
-          {item.duration_ms != null && item.duration_ms > 0 && (
-            <span className="font-mono text-[0.5rem] tabular-nums text-fg/25">
-              {formatDuration(item.duration_ms)}
-            </span>
-          )}
-          {item.status === 'interrupted' && (
-            <span className="rounded border border-vermilion/50 px-1 py-0.5 font-mono text-[0.5rem] font-bold uppercase text-vermilion">
-              Stopped
-            </span>
-          )}
-        </div>
+      <span className="lane-node top-[9px] inline-flex h-5 w-5 items-center justify-center rounded-full bg-bg text-fg/40 ring-1 ring-line/15">
+        <SparkIcon className="h-2.5 w-2.5" />
+      </span>
+    );
+  }
+  if (isConversationCategory(item.category)) {
+    return (
+      <span className="lane-node top-[10px] rounded-lg ring-4 ring-bg">
+        <AgentAvatar item={item} />
+      </span>
+    );
+  }
+  const meta = getCategoryMeta(item.category);
+  const failed = item.status === 'error' || item.status === 'blocked';
+  return (
+    <span className={`lane-node top-[16px] h-[7px] w-[7px] rounded-full ring-4 ring-bg ${failed ? 'bg-vermilion' : meta.dot}`} />
+  );
+}
 
-        {/* Attachments */}
-        {item.attachments && item.attachments.length > 0 && (
-          <div className="mb-2">
-            <AttachmentTags attachments={item.attachments} />
+function CardMeta({ item }: { item: TimelineItem }) {
+  const provenance = item.provenance ? PROVENANCE_META[item.provenance] : null;
+  return (
+    <>
+      {provenance && (
+        <span className={`rounded px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest ${provenance.pillClass}`}>
+          {provenance.label}
+        </span>
+      )}
+      <span className="font-mono text-[0.55rem] tabular-nums text-fg/35" title={formatDateTime(item.start_ts || item.ts)}>
+        {formatClock(item.start_ts || item.ts)}
+      </span>
+      {item.duration_ms != null && item.duration_ms > 0 && (
+        <span className="font-mono text-[0.55rem] tabular-nums text-fg/30">{formatDuration(item.duration_ms)}</span>
+      )}
+      {item.status === 'interrupted' && (
+        <span className="rounded border border-vermilion/50 px-1 py-0.5 font-mono text-[0.5rem] font-bold uppercase text-vermilion">
+          Stopped
+        </span>
+      )}
+    </>
+  );
+}
+
+/**
+ * The user's messages are cobalt bubbles on the right, outside the spine; the
+ * agent's replies are raised cards on it, headed by the agent's own mark.
+ */
+const ConversationCard = forwardRef<
+  HTMLDivElement,
+  { item: TimelineItem; sessionId: string; eventKey: string; onLane?: boolean }
+>(function ConversationCard({ item, sessionId, eventKey: itemEventKey, onLane = false }, ref) {
+  const provenance = item.provenance ? PROVENANCE_META[item.provenance] : null;
+
+  if (isUserMessage(item)) {
+    return (
+      <div ref={ref} data-event-key={itemEventKey} className="flex scroll-mt-4 justify-end">
+        <div className={`bubble-user min-w-0 max-w-[85%] rounded-2xl rounded-br-md px-4 py-3 ${provenance?.accent ?? ''}`}>
+          <div className="mb-1.5 flex items-center justify-end gap-2">
+            <CardMeta item={item} />
+            <span className="font-sans text-[0.7rem] font-semibold text-cobalt">You</span>
           </div>
-        )}
-
-        {/* Body — always shown */}
-        <div className={role.body}>
+          {item.attachments && item.attachments.length > 0 && (
+            <div className="mb-2">
+              <AttachmentTags attachments={item.attachments} />
+            </div>
+          )}
           <CardBody item={item} sessionId={sessionId} />
         </div>
       </div>
     );
-  },
-);
+  }
+
+  return (
+    <div
+      ref={ref}
+      data-event-key={itemEventKey}
+      className={`card-agent scroll-mt-4 rounded-2xl rounded-tl-md px-5 py-4 ${provenance?.accent ?? ''}`}
+    >
+      <div className="mb-2.5 flex items-center gap-2">
+        {!onLane && <AgentAvatar item={item} size="sm" />}
+        <span className="font-sans text-[0.78rem] font-semibold text-fg">{agentName(item)}</span>
+        {item.model && <span className="font-mono text-[0.55rem] text-fg/35">{item.model}</span>}
+        <CardMeta item={item} />
+      </div>
+      {item.attachments && item.attachments.length > 0 && (
+        <div className="mb-2">
+          <AttachmentTags attachments={item.attachments} />
+        </div>
+      )}
+      <CardBody item={item} sessionId={sessionId} />
+    </div>
+  );
+});
+
+/** Thinking is the agent's working, not its answer: collapsed to a faded
+ *  two-line preview until opened. */
+const ThoughtCard = forwardRef<HTMLDivElement, {
+  item: TimelineItem;
+  sessionId: string;
+  eventKey: string;
+  forceOpen?: boolean;
+  expansionRequest: ExpansionRequest;
+}>(function ThoughtCard({ item, sessionId, eventKey: itemEventKey, forceOpen, expansionRequest }, ref) {
+  const [expanded, setExpanded] = useState(false);
+  const open = expanded || forceOpen;
+  const preview = (item.detail ?? '').replace(/\s+/g, ' ').trim();
+
+  useEffect(() => {
+    setExpanded(expansionRequest.open);
+  }, [expansionRequest]);
+
+  return (
+    <div ref={ref} data-event-key={itemEventKey} className="scroll-mt-4 rounded-xl px-3 py-2">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="group flex w-full items-center gap-2 text-left"
+        aria-expanded={open}
+      >
+        <span className="font-serif text-[0.95rem] italic text-fg/60 transition-colors group-hover:text-fg/85">
+          Thinking
+        </span>
+        <CardMeta item={item} />
+        <span className={`ml-auto text-[0.55rem] text-fg/30 transition-transform ${open ? 'rotate-90' : ''}`}>▸</span>
+      </button>
+      {open ? (
+        <div className="mt-2 border-l border-dashed border-line/20 pl-3 text-fg/60">
+          <CardBody item={item} sessionId={sessionId} />
+        </div>
+      ) : (
+        preview && (
+          <p className="fade-bottom mt-1 line-clamp-2 text-[0.82rem] leading-relaxed text-fg/45">{preview}</p>
+        )
+      )}
+    </div>
+  );
+});
 
 /* ------------------------------------------------------------------ */
 /* Lazy mount — long sessions have thousands of markdown bodies; parsing  */
@@ -440,6 +549,7 @@ const ACTION_ROW_HEIGHT = 38;
 
 function estimateRowHeight(item: TimelineItem): number {
   if (!isConversationCategory(item.category)) return ACTION_ROW_HEIGHT;
+  if (item.category === 'thought') return 72;
   const detail = item.detail ?? '';
   const lines = detail.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / 90)), 0);
   return 56 + Math.min(lines * 22, 640);
@@ -450,11 +560,13 @@ function LazyRow({
   estimate,
   refKeys,
   setCardRef,
+  className = '',
   children,
 }: {
   estimate: number;
   refKeys: string[];
   setCardRef: (key: string, el: HTMLDivElement | null) => void;
+  className?: string;
   children: React.ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -476,7 +588,7 @@ function LazyRow({
   }, [shown]);
 
   return (
-    <div ref={ref} className="scroll-mt-4" style={shown ? undefined : { height: estimate }}>
+    <div ref={ref} className={`scroll-mt-4 ${className}`} style={shown ? undefined : { height: estimate }}>
       {shown ? children : null}
     </div>
   );
@@ -492,8 +604,9 @@ const ActionCard = forwardRef<HTMLDivElement, {
   eventKey: string;
   forceOpen?: boolean;
   expansionRequest: ExpansionRequest;
+  onLane?: boolean;
 }>(
-  function ActionCard({ item, sessionId, eventKey: itemEventKey, forceOpen, expansionRequest }, ref) {
+  function ActionCard({ item, sessionId, eventKey: itemEventKey, forceOpen, expansionRequest, onLane = false }, ref) {
     const [expanded, setExpanded] = useState(false);
     const open = expanded || forceOpen;
     const meta = getCategoryMeta(item.category);
@@ -509,14 +622,16 @@ const ActionCard = forwardRef<HTMLDivElement, {
       <div
         ref={ref}
         data-event-key={itemEventKey}
-        className={`group scroll-mt-4 rounded-lg border border-line/5 transition-colors hover:border-line/15 ${provenance?.accent ?? ''}`}
+        className={`group scroll-mt-4 rounded-lg border transition-colors ${
+          open ? 'border-line/10 bg-surface/60' : 'border-transparent hover:border-line/10 hover:bg-fg/[0.025]'
+        } ${provenance?.accent ?? ''}`}
       >
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
           className="flex w-full items-center gap-2 px-3.5 py-2 text-left"
         >
-          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${meta.dot}`} />
+          {!onLane && <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${meta.dot}`} />}
           <span className={`shrink-0 font-mono text-[0.55rem] font-bold uppercase tracking-widest ${meta.color}`}>
             {meta.label}
           </span>

@@ -81,6 +81,52 @@
     -webkit-backdrop-filter: blur(16px);
     border: 1px solid rgb(var(--line) / 0.1);
   }
+  /* Session timeline. Everything the agent does hangs off one vertical spine
+     (the chain of thought); the user's messages sit outside it, on the right. */
+  .lane {
+    position: relative;
+    padding-left: 2.75rem;
+  }
+  .lane::before {
+    content: '';
+    position: absolute;
+    left: 1rem;
+    top: -0.25rem;
+    bottom: 0;
+    width: 1px;
+    background: rgb(var(--line) / 0.2);
+  }
+  .lane-node {
+    position: absolute;
+    left: 1rem;
+    transform: translateX(-50%);
+  }
+  .bubble-user {
+    background: linear-gradient(135deg, rgb(43 92 230 / 0.2), rgb(43 92 230 / 0.07));
+    box-shadow:
+      inset 0 0 0 1px rgb(43 92 230 / 0.3),
+      0 14px 34px -22px rgb(43 92 230 / 0.9);
+  }
+  .card-agent {
+    position: relative;
+    @apply bg-surface;
+    box-shadow:
+      inset 0 0 0 1px rgb(var(--line) / 0.09),
+      0 16px 40px -28px rgb(var(--shadow) / 0.7);
+  }
+  /* Hairline of the brand accents along the top edge. */
+  .card-agent::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 1.25rem;
+    right: 40%;
+    height: 1px;
+    background: linear-gradient(90deg, rgb(255 69 0 / 0.7), rgb(43 92 230 / 0.45) 55%, transparent);
+  }
+  .fade-bottom {
+    mask-image: linear-gradient(to bottom, black 45%, transparent);
+  }
   /* Tinted ring chip, as used for event kinds in the site trace viewer. */
   .chip {
     @apply inline-flex items-center gap-1 rounded-[3px] px-1.5 py-0.5 font-mono text-[0.58rem] font-bold uppercase tracking-[0.12em] ring-1 ring-inset;
