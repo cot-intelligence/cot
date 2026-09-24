@@ -10,9 +10,11 @@ interface SessionDetailViewProps {
   sessionId: string;
   /** When set, open the timeline focused on this event (e.g. from search). */
   focusEventId?: number;
+  /** Search text that led here; highlighted inside the focused event. */
+  focusQuery?: string;
 }
 
-export function SessionDetailView({ sessionId, focusEventId }: SessionDetailViewProps) {
+export function SessionDetailView({ sessionId, focusEventId, focusQuery }: SessionDetailViewProps) {
   const [activeTab, setActiveTab] = useState('timeline');
   const queryClient = useQueryClient();
 
@@ -77,6 +79,7 @@ export function SessionDetailView({ sessionId, focusEventId }: SessionDetailView
         activeTab={activeTab}
         onTabChange={setActiveTab}
         focusEventId={focusEventId}
+        focusQuery={focusQuery}
       />
     </div>
   );

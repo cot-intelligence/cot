@@ -224,3 +224,29 @@
     @apply italic;
   }
 }
+
+/* Jumping to a search result: the target card pulses once, and the search
+   words inside it are painted by searchHighlight.ts via the Highlight API. */
+::highlight(search-hit) {
+  background-color: rgb(255 69 0 / 0.3);
+  color: inherit;
+}
+[data-search-target] {
+  border-radius: 0.5rem;
+  animation: search-target 2.4s ease-out;
+}
+@keyframes search-target {
+  0%,
+  40% {
+    box-shadow: 0 0 0 2px rgb(255 69 0 / 0.65);
+  }
+  100% {
+    box-shadow: 0 0 0 2px rgb(255 69 0 / 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-search-target] {
+    animation: none;
+    box-shadow: 0 0 0 2px rgb(255 69 0 / 0.5);
+  }
+}

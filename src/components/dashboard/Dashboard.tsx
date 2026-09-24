@@ -26,7 +26,7 @@ interface DashboardProps {
 
 type DashboardRoute =
   | { view: 'list' }
-  | { view: 'session'; sessionId: string; focusEventId?: number }
+  | { view: 'session'; sessionId: string; focusEventId?: number; focusQuery?: string }
   | { view: 'overview' }
   | { view: 'metrics-history'; tab?: MetricsHistoryTab }
   | { view: 'settings' };
@@ -40,13 +40,15 @@ function parseHash(): DashboardRoute {
   if (historyMatch) return { view: 'metrics-history', tab: historyMatch[1] as MetricsHistoryTab | undefined };
   // Legacy #/metrics and #/insights merged into the unified Overview page.
   if (hash === 'overview' || hash === 'metrics' || hash === 'insights') return { view: 'overview' };
-  // #/session/<id> optionally followed by ?e=<eventId> to focus one event.
-  const match = hash.match(/^session\/([^?]+)(?:\?e=(\d+))?$/);
+  // #/session/<id> optionally followed by ?e=<eventId>[&q=<search>] to focus
+  // one event and highlight the search that found it.
+  const match = hash.match(/^session\/([^?]+)(?:\?e=(\d+)(?:&q=([^&]*))?)?$/);
   if (match?.[1]) {
     return {
       view: 'session',
       sessionId: decodeURIComponent(match[1]),
       focusEventId: match[2] ? Number(match[2]) : undefined,
+      focusQuery: match[3] ? decodeURIComponent(match[3]) : undefined,
     };
   }
   return { view: 'list' };
@@ -140,10 +142,11 @@ export function Dashboard({ onSetup }: DashboardProps) {
     else if (route.view === 'metrics-history') setDocumentTitle('Activity History');
   }, [route.view]);
 
-  const selectSession = useCallback((id: string, eventId?: number) => {
-    setRoute({ view: 'session', sessionId: id, focusEventId: eventId });
+  const selectSession = useCallback((id: string, eventId?: number, query?: string) => {
+    setRoute({ view: 'session', sessionId: id, focusEventId: eventId, focusQuery: query });
     const base = `#/session/${encodeURIComponent(id)}`;
-    window.location.hash = eventId != null ? `${base}?e=${eventId}` : base;
+    const q = query ? `&q=${encodeURIComponent(query)}` : '';
+    window.location.hash = eventId != null ? `${base}?e=${eventId}${q}` : base;
   }, []);
 
   const goSessions = useCallback(() => {
@@ -316,6 +319,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
                 <SessionDetailView
                   sessionId={selectedId}
                   focusEventId={route.view === 'session' ? route.focusEventId : undefined}
+                  focusQuery={route.view === 'session' ? route.focusQuery : undefined}
                 />
               </main>
             </>

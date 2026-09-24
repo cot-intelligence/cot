@@ -66,6 +66,8 @@ export interface TimelineItem {
   attachments: Attachment[] | null;
   start_ts: string;
   end_ts: string | null;
+  /** Id of the end event merged into this span; search can return either half. */
+  end_id?: number | null;
   ongoing?: boolean;
   payload?: string | null;
   /** True when `detail` is a preview; fetch the full body via getEventDetail. */

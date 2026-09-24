@@ -310,6 +310,7 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
             merged = {
                 **start,
                 "end_ts": event["ts"],
+                "end_id": event.get("id"),
                 "ongoing": False,
                 "duration_ms": duration,
                 "detail": _merge_detail(start.get("detail"), event.get("detail")),
@@ -351,6 +352,7 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
                 merged = {
                     **start,
                     "end_ts": event["ts"],
+                    "end_id": event.get("id"),
                     "ongoing": False,
                     "duration_ms": duration,
                     "detail": _merge_detail(start.get("detail"), event.get("detail")),
@@ -378,6 +380,7 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
                 items.append({
                     **start,
                     "end_ts": event["ts"],
+                    "end_id": event.get("id"),
                     "ongoing": False,
                     "duration_ms": duration,
                     "detail": _merge_detail(start.get("detail"), event.get("detail")),

@@ -13,6 +13,7 @@ import {
   writeTimelineSidebarMode,
   type TimelineSidebarMode,
 } from '../../../../lib/settings';
+import { clearSearchHits } from '../../../../lib/searchHighlight';
 import { Icon } from '../../../ui/icons';
 import { ActivityMap } from '../ActivityMap';
 import { ChatTimeline, type ChatTimelineHandle, type ExpansionRequest } from '../ChatTimeline';
@@ -22,12 +23,14 @@ interface TimelineTabProps {
   items: TimelineItem[];
   runs: SubagentRun[];
   focusEventId?: number;
+  /** Search text that led here; highlighted inside the focused event. */
+  focusQuery?: string;
   sessionId: string;
   /** Tab switcher rendered at the start of the toolbar row. */
   tabs?: ReactNode;
 }
 
-export function TimelineTab({ items, runs, focusEventId, sessionId, tabs }: TimelineTabProps) {
+export function TimelineTab({ items, runs, focusEventId, focusQuery, sessionId, tabs }: TimelineTabProps) {
   // Hidden categories / models — toggle to hide, empty set = show all
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [hiddenModels, setHiddenModels] = useState<Set<string>>(new Set());
@@ -39,17 +42,24 @@ export function TimelineTab({ items, runs, focusEventId, sessionId, tabs }: Time
   const [sidebarMode, setSidebarMode] = useState<TimelineSidebarMode>(readTimelineSidebarMode);
   const [pendingJump, setPendingJump] = useState<string | null>(null);
   const chatRef = useRef<ChatTimelineHandle>(null);
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
   const sidebarRef = useRef<HTMLDivElement>(null);
   const sidebarRaf = useRef(0);
 
   useEffect(() => {
     if (focusEventId != null) {
       setHidden(new Set());
-      const key = `${sessionId}:${focusEventId}`;
+      setHiddenModels(new Set());
+      // A tool call shows as one item under its start id; search may hit its end.
+      const target = itemsRef.current.find((it) => it.id === focusEventId || it.end_id === focusEventId);
+      const key = target ? eventKey(target, sessionId) : `${sessionId}:${focusEventId}`;
       setActiveKey(key);
-      requestAnimationFrame(() => chatRef.current?.scrollToAndExpand(key));
+      requestAnimationFrame(() => chatRef.current?.scrollToAndExpand(key, focusQuery));
     }
-  }, [focusEventId, sessionId]);
+  }, [focusEventId, focusQuery, sessionId]);
+
+  useEffect(() => clearSearchHits, [sessionId]);
 
   // Build per-category counts from the actual data
   const categories = useMemo(() => {
