@@ -2971,7 +2971,9 @@ def _search_terms(query: str) -> list[str]:
     return terms
 
 
-def search(query: str, limit: int = 40) -> list[dict[str, Any]]:
+def search(
+    query: str, limit: int = 40, session_id: str | None = None
+) -> list[dict[str, Any]]:
     """Full-text-ish search across event titles, targets and detail bodies.
 
     Covers everything captured: prompts/responses (conversation), file paths,
@@ -2981,6 +2983,9 @@ def search(query: str, limit: int = 40) -> list[dict[str, Any]]:
     single contiguous substring. This way formatting that sits between words in
     the stored text — markdown like ``**bold**``, links, punctuation — does not
     prevent a match against the plain text the user sees and types.
+
+    ``session_id`` narrows the search to one session in SQL, so the limit applies
+    within that session rather than to the newest matches across all sessions.
     """
     terms = _search_terms(query)
     if not terms:
@@ -2994,6 +2999,9 @@ def search(query: str, limit: int = 40) -> list[dict[str, Any]]:
             " OR e.detail LIKE ? ESCAPE '\\')"
         )
         params.extend([like, like, like])
+    if session_id:
+        clauses.append("e.session_id = ?")
+        params.append(session_id)
     params.append(limit)
     with store.read() as conn:
         rows = conn.execute(
