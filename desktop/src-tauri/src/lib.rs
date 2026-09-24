@@ -7,13 +7,16 @@ mod collector;
 mod updates;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use collector::{Bundle, Collector, CotHome, StartError};
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
+use tauri::webview::DownloadEvent;
 use tauri::{AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -401,6 +404,9 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 fn build_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let nav_app = app.clone();
     let popup_app = app.clone();
+    let download_app = app.clone();
+    // Where each download landed, by URL: on macOS the Finished event doesn't say.
+    let downloads: Arc<Mutex<HashMap<String, PathBuf>>> = Arc::default();
     let builder = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
         .title("cot")
         .inner_size(1280.0, 860.0)
@@ -421,6 +427,26 @@ fn build_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             // target="_blank" links and window.open: always the browser.
             let _ = popup_app.opener().open_url(url.as_str(), None::<&str>);
             tauri::webview::NewWindowResponse::Deny
+        })
+        // Without a handler WebKit cancels `<a download>` links (the sessions
+        // page's JSON export). Keep WebKit's pick of ~/Downloads, which never
+        // overwrites, and show the file in Finder since there's no download bar.
+        .on_download(move |_webview, event| {
+            match event {
+                DownloadEvent::Requested { url, destination } => {
+                    if let Ok(mut map) = downloads.lock() {
+                        map.insert(url.to_string(), destination.clone());
+                    }
+                }
+                DownloadEvent::Finished { url, success, .. } => {
+                    let path = downloads.lock().ok().and_then(|mut map| map.remove(url.as_str()));
+                    if let (true, Some(path)) = (success, path) {
+                        let _ = download_app.opener().reveal_item_in_dir(path);
+                    }
+                }
+                _ => {}
+            }
+            true
         });
 
     #[cfg(target_os = "macos")]
