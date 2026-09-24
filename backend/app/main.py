@@ -1260,6 +1260,20 @@ def get_session(session_id: str) -> dict[str, Any]:
     return session
 
 
+class DashboardFiles(StaticFiles):
+    """Hashed bundles under /assets never change; everything else (index.html)
+    must be revalidated, or a webview's heuristic cache keeps loading an old
+    page whose bundles are gone after an upgrade: a blank window."""
+
+    async def get_response(self, path: str, scope):  # type: ignore[no-untyped-def]
+        response = await super().get_response(path, scope)
+        if path.startswith("assets/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 # Serve the built dashboard so the whole app runs from one container. Mounted
 # last so the API routes above take precedence. Absent in local dev (Vite serves
 # the frontend), so this is skipped there.
@@ -1267,4 +1281,4 @@ _STATIC_DIR = Path(
     os.environ.get("COT_STATIC_DIR", str(Path(__file__).resolve().parent.parent / "static"))
 )
 if _STATIC_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="dashboard")
+    app.mount("/", DashboardFiles(directory=str(_STATIC_DIR), html=True), name="dashboard")
