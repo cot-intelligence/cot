@@ -113,3 +113,23 @@ def test_quotes_and_operators_in_the_query_are_plain_text():
     assert len(db.search('"NOT found" OR')) == 1
     assert len(db.search("NEAR(")) == 1
     assert len(db.search("found*")) == 1
+
+
+def test_startup_can_defer_the_index_build_and_search_still_works():
+    # The desktop app gives the collector 15s to start; building the index for a
+    # large DB can take longer, so the server builds it after it is up.
+    with store.write() as conn:
+        for trigger in ("events_fts_insert", "events_fts_delete", "events_fts_update"):
+            conn.execute(f"DROP TRIGGER {trigger}")
+        conn.execute("DROP TABLE events_fts")
+    _prompt("s", "deferred index text", minutes_ago=1)
+
+    db.init_db(build_search_index=False)
+    with store.read() as conn:
+        assert not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'events_fts'"
+        ).fetchone()
+    assert len(db.search("deferred")) == 1  # answered by the scan
+
+    db.ensure_search_index()
+    assert len(db.search("deferr")) == 1  # a prefix only the index matches

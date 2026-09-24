@@ -1165,13 +1165,24 @@ def _ensure_search_index(conn: sqlite3.Connection) -> None:
     conn.execute("INSERT INTO events_fts(events_fts) VALUES ('rebuild')")
 
 
-def init_db() -> None:
+def ensure_search_index() -> None:
+    """Build the search index if it doesn't exist yet, in one transaction:
+    readers see either no index (search scans) or the complete one."""
+    with store.write() as conn:
+        _ensure_search_index(conn)
+
+
+def init_db(build_search_index: bool = True) -> None:
+    """``build_search_index=False`` leaves a first-time index build to
+    :func:`ensure_search_index`; the server runs that after it starts, because
+    on a large DB the build outlasts the desktop app's startup timeout."""
     with store.write() as conn:
         for statement in SCHEMA.split(";"):
             if statement.strip():
                 conn.execute(statement)
         _migrate(conn)
-        _ensure_search_index(conn)
+        if build_search_index:
+            _ensure_search_index(conn)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source)"
         )
