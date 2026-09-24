@@ -383,22 +383,22 @@ function CardMeta({ item }: { item: TimelineItem }) {
 }
 
 /**
- * Replies after the first in a turn, from the same agent and model: like a
- * messaging app, only the first carries the sender's name.
+ * Replies that directly follow another reply from the same agent and model:
+ * like a messaging app, a run of adjacent messages carries the sender's name
+ * once. Anything in between (a tool call, a thought) starts a new run.
  */
 function continuedReplies(segments: Segment[], keyFor: (item: TimelineItem) => string): Set<string> {
   const continued = new Set<string>();
   let speaker: string | null = null;
   for (const seg of segments) {
-    if (seg.type !== 'event') continue;
-    const { item } = seg;
-    if (isUserMessage(item)) {
+    const item = seg.type === 'event' ? seg.item : null;
+    if (!item || isUserMessage(item) || !isConversationCategory(item.category) || item.category === 'thought') {
       speaker = null;
-    } else if (isConversationCategory(item.category) && item.category !== 'thought') {
-      const who = `${item.source}:${item.model ?? ''}`;
-      if (who === speaker) continued.add(keyFor(item));
-      speaker = who;
+      continue;
     }
+    const who = `${item.source}:${item.model ?? ''}`;
+    if (who === speaker) continued.add(keyFor(item));
+    speaker = who;
   }
   return continued;
 }
