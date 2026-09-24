@@ -181,14 +181,14 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
     return (
       <div ref={containerRef} data-chat-scroll className="scroll-thin h-full overflow-y-auto" onClick={handleClick}>
         <div className="mx-auto max-w-4xl space-y-1 px-4 py-4 pb-48 sm:px-6">
-          {segments.map((seg) =>
+          {segments.map((seg, i) =>
             seg.type === 'event' ? (
               <LazyRow
                 key={keyFor(seg.item)}
                 estimate={estimateRowHeight(seg.item)}
                 refKeys={[keyFor(seg.item)]}
                 setCardRef={setCardRef}
-                className={isUserMessage(seg.item) ? 'pb-2 pt-6' : 'lane'}
+                className={isUserMessage(seg.item) ? 'pb-2 pt-6' : laneClass(segments, i)}
               >
                 {!isUserMessage(seg.item) && <LaneNode item={seg.item} />}
                 {renderEvent(seg.item, false, !isUserMessage(seg.item))}
@@ -199,9 +199,9 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
                 estimate={ACTION_ROW_HEIGHT}
                 refKeys={[keyFor(seg.run.item), keyFor(seg.item), keyFor(seg.resultItem)]}
                 setCardRef={setCardRef}
-                className="lane"
+                className={laneClass(segments, i)}
               >
-              <span className="lane-node top-[15px] h-2 w-2 rounded-full bg-cobalt ring-4 ring-bg" />
+              <StepDot className="top-[15px]" dot="bg-cobalt" />
               <SubagentGroup
                 run={seg.run}
                 resultItem={seg.resultItem}
@@ -340,6 +340,28 @@ function isUserMessage(item: TimelineItem): boolean {
   return item.category === 'prompt' || item.category === 'question';
 }
 
+function onLane(seg: Segment | undefined): boolean {
+  return seg != null && (seg.type === 'subagent' || !isUserMessage(seg.item));
+}
+
+/** Rows between two user messages share one spine; mark where it starts and ends. */
+function laneClass(segments: Segment[], i: number): string {
+  let cls = 'lane';
+  if (!onLane(segments[i - 1])) cls += ' lane-start';
+  if (!onLane(segments[i + 1])) cls += ' lane-end';
+  return cls;
+}
+
+/** A step's dot on the spine, backed by the page colour so the translucent
+ *  category colours don't show the line through them. */
+function StepDot({ className, dot }: { className: string; dot: string }) {
+  return (
+    <span className={`lane-node inline-flex h-[9px] w-[9px] items-center justify-center rounded-full bg-bg ${className}`}>
+      <span className={`h-[7px] w-[7px] rounded-full ${dot}`} />
+    </span>
+  );
+}
+
 function agentName(item: TimelineItem): string {
   return AGENTS.find((a) => a.id === item.source)?.name ?? 'Agent';
 }
@@ -374,16 +396,14 @@ function LaneNode({ item }: { item: TimelineItem }) {
   }
   if (isConversationCategory(item.category)) {
     return (
-      <span className="lane-node top-[10px] rounded-lg ring-4 ring-bg">
+      <span className="lane-node top-[10px] rounded-lg ring-2 ring-bg">
         <AgentAvatar item={item} />
       </span>
     );
   }
   const meta = getCategoryMeta(item.category);
   const failed = item.status === 'error' || item.status === 'blocked';
-  return (
-    <span className={`lane-node top-[16px] h-[7px] w-[7px] rounded-full ring-4 ring-bg ${failed ? 'bg-vermilion' : meta.dot}`} />
-  );
+  return <StepDot className="top-[15px]" dot={failed ? 'bg-vermilion' : meta.dot} />;
 }
 
 function CardMeta({ item }: { item: TimelineItem }) {
