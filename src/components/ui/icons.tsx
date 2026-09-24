@@ -34,6 +34,9 @@ export type IconName =
   | 'archive'
   | 'unarchive'
   | 'download'
+  | 'upload'
+  | 'replay'
+  | 'trash'
   | 'bookmark'
   | 'bookmark-filled'
   | 'image'
@@ -206,6 +209,25 @@ const PATHS: Record<IconName, JSX.Element> = {
       <rect x="3" y="4" width="18" height="4" rx="1" />
       <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
       <path d="M12 18v-6M9 15l3-3 3 3" />
+    </>
+  ),
+  upload: (
+    <>
+      <path d="M12 15V4M7 9l5-5 5 5" />
+      <path d="M5 19h14" />
+    </>
+  ),
+  replay: (
+    <>
+      <path d="M4 12a8 8 0 1 0 2.4-5.7L4 8.5" />
+      <path d="M4 4v4.5h4.5" />
+      <path d="M10.5 9.5v5l4-2.5z" />
+    </>
+  ),
+  trash: (
+    <>
+      <path d="M4 7h16M10 11v6M14 11v6" />
+      <path d="M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3" />
     </>
   ),
   download: (

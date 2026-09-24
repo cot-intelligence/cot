@@ -46,6 +46,9 @@ export interface SessionSummary {
   };
   cost_usd: number;
   has_cost: boolean;
+  /** Session Replay copies only: the id the session had where it was exported. */
+  imported_from?: string;
+  imported_at?: string | null;
 }
 
 export interface TimelineItem {
@@ -230,6 +233,18 @@ export interface SessionFilters {
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error(`${res.url} -> ${res.status}`);
   return (await res.json()) as T;
+}
+
+/**
+ * Which DB a session lives in: traced sessions (`main`) or Session Replay
+ * imports (`replay`), which the collector keeps in a separate file.
+ */
+export type Store = 'main' | 'replay';
+
+/** Append `store=replay` when needed; main-store URLs are unchanged. */
+function inStore(url: string, store: Store = 'main'): string {
+  if (store === 'main') return url;
+  return `${url}${url.includes('?') ? '&' : '?'}store=${store}`;
 }
 
 export async function getStats(): Promise<Stats> {
@@ -503,9 +518,12 @@ export async function getInsights(
   return json<InsightsResponse>(await fetch(`/v1/insights?${params.toString()}`));
 }
 
-export async function getSessionInsights(sessionId: string): Promise<InsightsResponse> {
+export async function getSessionInsights(
+  sessionId: string,
+  store: Store = 'main',
+): Promise<InsightsResponse> {
   return json<InsightsResponse>(
-    await fetch(`/v1/sessions/${encodeURIComponent(sessionId)}/insights`),
+    await fetch(inStore(`/v1/sessions/${encodeURIComponent(sessionId)}/insights`, store)),
   );
 }
 
@@ -658,8 +676,8 @@ export async function getSessions(filters: SessionFilters = {}): Promise<Session
   return data.sessions;
 }
 
-export async function getSessionDetail(id: string): Promise<SessionDetail> {
-  return json<SessionDetail>(await fetch(`/v1/sessions/${id}`));
+export async function getSessionDetail(id: string, store: Store = 'main'): Promise<SessionDetail> {
+  return json<SessionDetail>(await fetch(inStore(`/v1/sessions/${id}`, store)));
 }
 
 export interface EventDetail {
@@ -670,8 +688,12 @@ export interface EventDetail {
 
 /** Full detail body for one event, fetched on demand when its list entry was
  * truncated (keeps the session list payload small). */
-export async function getEventDetail(sessionId: string, eventId: number): Promise<EventDetail> {
-  return json<EventDetail>(await fetch(`/v1/sessions/${sessionId}/events/${eventId}`));
+export async function getEventDetail(
+  sessionId: string,
+  eventId: number,
+  store: Store = 'main',
+): Promise<EventDetail> {
+  return json<EventDetail>(await fetch(inStore(`/v1/sessions/${sessionId}/events/${eventId}`, store)));
 }
 
 export async function setSessionArchived(id: string, archived: boolean): Promise<void> {
@@ -685,8 +707,41 @@ export async function setSessionBookmarked(id: string, bookmarked: boolean): Pro
 }
 
 /** Downloads the whole session (untrimmed events, raw hook rows) as JSON. */
-export function sessionExportUrl(id: string): string {
-  return `/v1/sessions/${encodeURIComponent(id)}/export`;
+export function sessionExportUrl(id: string, store: Store = 'main'): string {
+  return inStore(`/v1/sessions/${encodeURIComponent(id)}/export`, store);
+}
+
+/** Imported sessions, newest import first (one row per imported file). */
+export async function getReplaySessions(): Promise<SessionSummary[]> {
+  const data = await json<{ sessions: SessionSummary[] }>(
+    await fetch(inStore('/v1/sessions?limit=500', 'replay')),
+  );
+  return data.sessions.sort((a, b) => (b.imported_at ?? '').localeCompare(a.imported_at ?? ''));
+}
+
+export interface ReplayImportResult {
+  session_id: string;
+  sessions: number;
+  events: number;
+}
+
+/** Import a session export file into Session Replay. Rejects with the collector's reason. */
+export async function importReplaySession(file: File): Promise<ReplayImportResult> {
+  const res = await fetch('/v1/replay/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: file,
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(body?.detail || `Import failed (${res.status})`);
+  }
+  return (await res.json()) as ReplayImportResult;
+}
+
+/** Delete an imported session, with every session its file brought along. */
+export async function deleteReplaySession(id: string): Promise<void> {
+  await json(await fetch(inStore(`/v1/sessions/${encodeURIComponent(id)}`, 'replay'), { method: 'DELETE' }));
 }
 
 export interface SearchResult {
@@ -706,11 +761,12 @@ export async function search(
   q: string,
   limit = 40,
   sessionId?: string,
+  store: Store = 'main',
 ): Promise<SearchResult[]> {
   const params = new URLSearchParams({ q, limit: String(limit) });
   if (sessionId) params.set('session_id', sessionId);
   const data = await json<{ results: SearchResult[] }>(
-    await fetch(`/v1/search?${params.toString()}`),
+    await fetch(inStore(`/v1/search?${params.toString()}`, store)),
   );
   return data.results;
 }
