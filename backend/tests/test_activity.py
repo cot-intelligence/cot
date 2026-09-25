@@ -34,6 +34,11 @@ _NOW = datetime.now(timezone.utc)
         ("for f in *.md; do echo \"== $f\"; rtk grep -n x \"$f\"; done", "grep", None),
         ("if [ -f x ]; then make test; fi", "make", "test"),
         ("S=/tmp/scratch\n…", "(script)", None),
+        ("IDS=$(sqlite3 -readonly db.sqlite 'select 1')", "sqlite3", None),
+        ("time (PYTHONPATH=. python3 x.py)", "python3", None),
+        ("for f in a b; do s=$(grep -n x $f | cut -d: -f1); done", "grep", None),
+        ("$EDITOR notes.md", "(script)", None),
+        ("INCLUDE=(_Attendee _Pre \"Lab 00\") ; zip -r out.zip \"${INCLUDE[@]}\"", "zip", None),
         ("grep -n 'a && b' file.txt", "grep", None),  # && inside quotes is not a separator
         ("ls -la || true", "ls", None),
     ],
@@ -149,6 +154,8 @@ def seeded(fresh_db):
         add("s1", "cd /repo && pytest -x", minutes=3, status="error", ms=39_000, error="Exit code 1\nImportError: no module x")
         add("s1", "cd /repo && pytest -x", minutes=4, ms=41_000)
         add("s2", "git push --force origin main", minutes=5)
+        add("s1", "grep -rn nothing-here src", minutes=8, status="error", error="Exit code 1")
+        add("s1", "cd /repo && make lint", minutes=9, status="error", error="Exit code 2\nlint failed")
         add("s2", "npm run build", days=10)  # outside a 7-day window
         add("s1", "sqlite fts5", minutes=6, category="web", title="WebSearch")
         add("s1", "https://github.com/x", minutes=7, category="web", title="WebFetch", status="error")
@@ -158,17 +165,21 @@ def seeded(fresh_db):
 def test_summary_groups_by_real_program_and_respects_window(seeded) -> None:
     out = activity.summarize("shell", 7)
     keys = {g["key"]: g for g in out["groups"]}
-    assert set(keys) == {"git", "pytest"}  # not "cd"; npm is older than 7 days
+    assert set(keys) == {"git", "pytest", "grep", "make"}  # not "cd"; npm is older than 7 days
     assert keys["pytest"]["runs"] == 3 and keys["pytest"]["failed"] == 2
-    assert out["summary"]["runs"] == 5 and out["summary"]["failed"] == 2
+    # grep's exit 1 means "no match": counted as a run, not as a failure.
+    assert keys["grep"]["failed"] == 0
+    assert out["summary"]["runs"] == 7 and out["summary"]["failed"] == 3
     assert "npm" in {g["key"] for g in activity.summarize("shell", 0)["groups"]}
 
 
 def test_summary_failing_carries_the_error_and_latest_failure(seeded) -> None:
-    failing = activity.summarize("shell", 7)["failing"]
-    assert failing[0]["command"] == "pytest -x"
-    assert failing[0]["failed"] == 2 and failing[0]["runs"] == 3
+    out = activity.summarize("shell", 7)
+    failing = out["failing"]
+    assert [f["command"] for f in failing] == ["pytest -x"]  # only repeated failures
+    assert failing[0]["failed"] == 2 and failing[0]["runs"] == 3 and failing[0]["program"] == "pytest"
     assert failing[0]["last_error"] == {"exit_code": 1, "message": "ImportError: no module x"}
+    assert [f["command"] for f in out["recent_failures"]] == ["make lint"]
 
 
 def test_summary_slowest_and_risky(seeded) -> None:
@@ -178,7 +189,7 @@ def test_summary_slowest_and_risky(seeded) -> None:
 
 
 def test_log_filters(seeded) -> None:
-    assert activity.log("shell", 7, failed_only=True)["total"] == 2
+    assert activity.log("shell", 7, failed_only=True)["total"] == 3
     assert activity.log("shell", 7, group="git")["total"] == 2
     assert activity.log("shell", 7, project="/other")["total"] == 1
     assert activity.log("shell", 7, risky_only=True)["items"][0]["risk"]["label"] == "force push"
@@ -190,3 +201,92 @@ def test_web_summary(seeded) -> None:
     assert out["searches"] == [{"query": "sqlite fts5", "runs": 1}]
     assert {g["key"] for g in out["groups"]} == {"github.com"}
     assert out["summary"]["failed"] == 1
+
+
+# --- anomalies ---------------------------------------------------------------------
+
+
+def _run(program: str, *, core: str | None = None, verb: str | None = None, hours_ago: float = 0,
+         failed: bool = False, ms: int = 1000, sid: str = "s1") -> dict:
+    ts = (_NOW - timedelta(hours=hours_ago)).isoformat()
+    return {
+        "event_id": int(hours_ago * 1000) + hash(core or program) % 997,
+        "session_id": sid, "ts": ts, "source": "claude", "cwd": "/repo",
+        "duration_ms": ms, "failed": failed,
+        "error": {"exit_code": 1, "message": "boom"} if failed else None,
+        "target": core or program, "program": program, "verb": verb, "core": core or program,
+        "tool": None, "risk": None,
+    }
+
+
+@pytest.fixture
+def baseline() -> list[dict]:
+    """250 ordinary runs spread over the 30 days before a 7-day window."""
+    runs = []
+    for i in range(250):
+        hours = 24 * 8 + i * 2.8
+        runs.append(_run("git", verb="status", core="git status", hours_ago=hours, ms=200, failed=(i % 50 == 0)))
+    for i in range(12):
+        runs.append(_run("pytest", core="pytest -x", hours_ago=24 * 9 + i * 20, ms=40_000))
+    return runs
+
+
+def _kinds(found: list[dict]) -> list[str]:
+    return [a["kind"] for a in found]
+
+
+def test_quiet_window_has_no_anomalies(baseline) -> None:
+    window = [_run("git", verb="status", core="git status", hours_ago=h, ms=200) for h in range(1, 10)]
+    assert activity.find_anomalies("shell", window, baseline, 7) == []
+
+
+def test_retry_loop_is_flagged(baseline) -> None:
+    window = [_run("npx", verb="tsc", core="npx tsc --noEmit", hours_ago=1 + m / 60, failed=m < 5) for m in range(7)]
+    found = activity.find_anomalies("shell", window, baseline, 7)
+    loop = next(a for a in found if a["kind"] == "loop")
+    assert loop["title"] == "Retried 7 times in 6 min, 5 failed"
+    assert loop["subject"] == "npx tsc --noEmit"
+
+
+def test_first_time_sensitive_program_is_a_warning(baseline) -> None:
+    found = activity.find_anomalies("shell", [_run("sshpass", core="sshpass -p ****** ssh host", hours_ago=2)], baseline, 7)
+    first = next(a for a in found if a["kind"] == "first_seen")
+    assert first["title"] == "First time running sshpass" and first["severity"] == "warn"
+
+
+def test_no_baseline_means_no_first_time_noise() -> None:
+    assert activity.find_anomalies("shell", [_run("sshpass", hours_ago=2)], [], 7) == []
+
+
+def test_failure_spike(baseline) -> None:
+    window = [_run("git", verb="status", core="git status", hours_ago=h, failed=h % 2 == 0) for h in range(1, 11)]
+    spike = next(a for a in activity.find_anomalies("shell", window, baseline, 7) if a["kind"] == "failure_spike")
+    assert spike["title"] == "git failing 50% of the time, usually 2%"
+
+
+def test_ordinary_new_tools_share_one_line(baseline) -> None:
+    window = [_run(p, core=f"{p} build", hours_ago=2) for p in ("mdbook", "cargo", "vitest", "hugo")]
+    window.append(_run("build.sh", core="./build.sh", hours_ago=2))  # project scripts are not "tools"
+    firsts = [a for a in activity.find_anomalies("shell", window, baseline, 7) if a["kind"] == "first_seen"]
+    assert len(firsts) == 1
+    assert firsts[0]["title"] == "First time using mdbook, cargo, vitest +1"
+    assert "build.sh" not in firsts[0]["names"]
+
+
+def test_worth_a_look_ranks_and_dedupes(seeded) -> None:
+    out = activity.summarize("shell", 7)
+    kinds = [a["kind"] for a in out["attention"]]
+    assert kinds[0] == "risky" and out["attention"][0]["title"] == "Force push"
+    assert "failing" in kinds
+
+
+def test_unusually_slow_run(baseline) -> None:
+    window = [_run("pytest", core="pytest -x", hours_ago=3, ms=900_000)]
+    slow = next(a for a in activity.find_anomalies("shell", window, baseline, 7) if a["kind"] == "slow")
+    assert slow["title"] == "pytest took 15 min, usually 40s"
+
+
+def test_instant_commands_are_not_called_slow(baseline) -> None:
+    fast_history = baseline + [_run("sed", core="sed -n 1p f", hours_ago=24 * 10 + i, ms=50) for i in range(20)]
+    window = [_run("sed", core="sed -n 1p f", hours_ago=2, ms=120_000)]  # sat on an approval prompt
+    assert "slow" not in _kinds(activity.find_anomalies("shell", window, fast_history, 7))

@@ -1,203 +1,82 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { activateOnKey } from '../../lib/a11y';
-import { getMetricsHistory, type MetricsHistoryItem } from '../../lib/api';
-import { formatRelative, formatTime } from '../../lib/categoryMeta';
+import {
+  getActivity,
+  type ActivityAttention,
+  type ActivityCategory,
+  type ActivityFilters,
+  type ActivitySummary,
+} from '../../lib/api';
+import { formatDuration, formatRelative } from '../../lib/categoryMeta';
+import { compact } from '../../lib/format';
+import { sourceLabel } from '../../lib/sourceLabels';
 import { FadeIn } from '../ui/FadeIn';
-import { highlight } from '../ui/Highlight';
 import { Icon } from '../ui/icons';
 import { PageHeader } from '../ui/PageHeader';
 import { Select } from '../ui/Select';
-import { SourceBadge } from '../ui/SourceBadge';
-import { TableRowsSkeleton } from '../ui/Skeleton';
+import { ActivityLog, type LogStatus } from './activity/ActivityLog';
+import { CommandText, Grid, Section, Stat, shortPath } from './activity/parts';
 
 interface MetricsHistoryViewProps {
   onSelect: (sessionId: string, eventId?: number) => void;
   onBack: () => void;
-  initialTab?: Tab;
+  initialTab?: ActivityCategory;
 }
 
-interface GroupedEntry {
-  key: string;
-  /** How to render the group + its occurrences. */
-  kind: GroupKind;
-  occurrences: MetricsHistoryItem[];
-}
+const RANGES: { days: number; label: string }[] = [
+  { days: 1, label: '24h' },
+  { days: 7, label: '7 days' },
+  { days: 30, label: '30 days' },
+  { days: 0, label: 'All time' },
+];
 
-/** command: a real shell command · tool: a structured search tool (Grep, Glob…)
- * · web: a URL grouped by domain · query: a non-URL web target (WebSearch). */
-type GroupKind = 'command' | 'tool' | 'web' | 'query';
+/** How many "Worth a look" entries show before "Show more". */
+const ATTENTION_SHOWN = 5;
+const MOST_USED_SHOWN = 6;
 
-type Tab = 'shell' | 'web';
-type SortKey = 'recent' | 'frequent';
-
-const COLS = 6;
-
-const TD = 'px-3 py-3 align-middle';
-const SUB_TD = 'px-3 py-2 align-middle';
-const TH =
-  'px-3 py-2.5 text-left font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/40';
-
-function shortPath(p: string | null): string {
-  if (!p) return '(unknown)';
-  const parts = p.split('/').filter(Boolean);
-  return parts.length <= 2 ? p : `…/${parts.slice(-2).join('/')}`;
-}
-
-/** Structured search tools (Grep, Glob, …) land in the shell bucket but carry
- * the tool name as their title rather than "Shell command". */
-function isToolItem(item: MetricsHistoryItem): boolean {
-  return !!item.title && item.title !== 'Shell command';
-}
-
-/** The leading program of a shell command — e.g. `cd src/` → `cd`,
- * `FOO=1 sudo /usr/bin/git commit` → `git`. Falls back to the raw command. */
-function mainCommand(cmd: string): string {
-  const trimmed = (cmd || '').trim();
-  if (!trimmed) return '';
-  const tokens = trimmed.split(/\s+/);
-  let i = 0;
-  // Skip leading env-var assignments (FOO=bar) and a few transparent wrappers.
-  while (i < tokens.length && /^[A-Za-z_][\w]*=/.test(tokens[i])) i += 1;
-  while (
-    i < tokens.length &&
-    ['sudo', 'command', 'time', 'exec', 'nohup', 'env'].includes(tokens[i])
-  ) {
-    i += 1;
-  }
-  let first = (tokens[i] ?? trimmed).replace(/^[('"`]+/, '');
-  const slash = first.lastIndexOf('/');
-  if (slash >= 0) first = first.slice(slash + 1);
-  return first || trimmed;
-}
-
-/** Hostname of a URL (minus a leading `www.`), or null when the target isn't a
- * web address (e.g. a WebSearch query). */
-function domainOf(target: string): string | null {
-  const raw = (target || '').trim();
-  if (!raw) return null;
-  const parse = (input: string): string | null => {
-    try {
-      const u = new URL(input);
-      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-      return u.hostname.replace(/^www\./, '') || null;
-    } catch {
-      return null;
-    }
-  };
-  if (/^[a-z][\w+.-]*:\/\//i.test(raw)) return parse(raw);
-  // Bare host like `example.com/path` — retry with a protocol.
-  if (/^[^\s/]+\.[^\s/]+/.test(raw)) return parse(`https://${raw}`);
-  return null;
-}
-
-function groupKind(item: MetricsHistoryItem, tab: Tab): GroupKind {
-  if (tab === 'shell') return isToolItem(item) ? 'tool' : 'command';
-  return domainOf(item.target) ? 'web' : 'query';
-}
-
-function groupKeyFor(item: MetricsHistoryItem, tab: Tab): string {
-  if (tab === 'shell') {
-    return isToolItem(item) ? item.title! : mainCommand(item.target) || item.target;
-  }
-  return domainOf(item.target) ?? item.title ?? 'Search';
-}
-
-function groupItems(items: MetricsHistoryItem[], tab: Tab): GroupedEntry[] {
-  const map = new Map<string, GroupedEntry>();
-  const order: string[] = [];
-  for (const item of items) {
-    const key = groupKeyFor(item, tab);
-    let entry = map.get(key);
-    if (!entry) {
-      entry = { key, kind: groupKind(item, tab), occurrences: [] };
-      map.set(key, entry);
-      order.push(key);
-    }
-    entry.occurrences.push(item);
-  }
-  return order.map((key) => map.get(key)!);
-}
-
-function sortGroups(groups: GroupedEntry[], sort: SortKey): GroupedEntry[] {
-  const copy = [...groups];
-  if (sort === 'frequent') {
-    copy.sort((a, b) => b.occurrences.length - a.occurrences.length);
-  } else {
-    copy.sort((a, b) => (b.occurrences[0]?.ts ?? '').localeCompare(a.occurrences[0]?.ts ?? ''));
-  }
-  return copy;
-}
-
-function groupBg(expanded: boolean) {
-  return expanded ? 'bg-surface/25' : '';
-}
-
+/**
+ * Activity: what agents ran in the shell and fetched from the web. Four
+ * numbers, a short ranked list of what is worth a look (measured against the
+ * history before the range), what agents rely on, then every command.
+ */
 export function MetricsHistoryView({ onSelect, onBack, initialTab = 'shell' }: MetricsHistoryViewProps) {
-  const [tab, setTab] = useState<Tab>(initialTab);
-  const [items, setItems] = useState<MetricsHistoryItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
-  const [filter, setFilter] = useState('');
-  const [sort, setSort] = useState<SortKey>('recent');
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [tab, setTab] = useState<ActivityCategory>(initialTab);
+  const [days, setDays] = useState(7);
+  const [project, setProject] = useState('');
+  const [source, setSource] = useState('');
+  const [group, setGroup] = useState<string | null>(null);
+  const [status, setStatus] = useState<LogStatus>('all');
+  const logRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    setTab(initialTab);
-  }, [initialTab]);
+  useEffect(() => setTab(initialTab), [initialTab]);
 
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    setError(false);
-    setExpanded(new Set());
-    getMetricsHistory(tab, 500)
-      .then((data) => {
-        if (active) {
-          setItems(data);
-          setLoading(false);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setLoading(false);
-          setError(true);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [tab]);
+  const filters: ActivityFilters = { days, project: project || undefined, source: source || undefined };
+  const { data, isPending, isError } = useQuery({
+    queryKey: ['activity', tab, filters],
+    queryFn: () => getActivity(tab, filters),
+    placeholderData: (prev) => (prev?.category === tab ? prev : undefined),
+  });
 
-  const grouped = useMemo(() => {
-    const base = filter
-      ? items.filter((i) => i.target.toLowerCase().includes(filter.toLowerCase()))
-      : items;
-    return sortGroups(groupItems(base, tab), sort);
-  }, [items, filter, sort, tab]);
-
-  const totalRuns = grouped.reduce((n, g) => n + g.occurrences.length, 0);
-
-  const toggle = (target: string) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(target)) next.delete(target);
-      else next.add(target);
-      return next;
-    });
-
-  const switchTab = (next: Tab) => {
+  const switchTab = (next: ActivityCategory) => {
     setTab(next);
-    setFilter('');
-    window.history.replaceState(
-      null,
-      '',
-      next === 'web' ? '#/metrics-history?tab=web' : '#/metrics-history',
-    );
+    setGroup(null);
+    setStatus('all');
+    window.history.replaceState(null, '', next === 'web' ? '#/metrics-history?tab=web' : '#/metrics-history');
   };
+
+  /** Jump from a summary to the matching slice of the log. */
+  const showInLog = (next: { group?: string | null; status?: LogStatus }) => {
+    if (next.group !== undefined) setGroup(next.group);
+    if (next.status) setStatus(next.status);
+    requestAnimationFrame(() => logRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  };
+
+  const shell = tab === 'shell';
 
   return (
     <div className="scroll-thin flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-6xl space-y-6 px-6 py-8 sm:px-8">
+      <div className="mx-auto max-w-5xl space-y-8 px-6 py-8 sm:px-8">
         <FadeIn>
           <PageHeader
             above={
@@ -209,330 +88,292 @@ export function MetricsHistoryView({ onSelect, onBack, initialTab = 'shell' }: M
                 Overview
               </button>
             }
-            eyebrow="Shell + web"
-            title="Activity history"
-            description="Every command and URL your agents ran. Click a row to open its event in the session timeline."
-            actions={
-              !loading && !error && grouped.length > 0 ? (
-                <p className="font-mono text-[0.62rem] tabular-nums text-fg/40">
-                  {grouped.length} unique · {totalRuns} runs
-                </p>
-              ) : undefined
-            }
+            title="Activity"
+            description="What your agents ran and fetched, and what is worth a look."
           />
         </FadeIn>
 
-        <FadeIn delay={0.03}>
-          <div className="border border-fg/15 bg-bg">
-            <div className="flex flex-wrap items-center gap-2 border-b border-fg/15 p-3">
-              <div className="flex border border-fg/20">
-                <TabBtn active={tab === 'shell'} onClick={() => switchTab('shell')}>
-                  <Icon name="terminal" className="h-3.5 w-3.5" />
-                  Shell
-                </TabBtn>
-                <TabBtn active={tab === 'web'} onClick={() => switchTab('web')}>
-                  <Icon name="globe" className="h-3.5 w-3.5" />
-                  Web
-                </TabBtn>
-              </div>
-
-              <input
-                type="search"
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-                placeholder={tab === 'shell' ? 'Filter commands…' : 'Filter URLs…'}
-                className="min-w-[12rem] flex-1 border border-fg/20 bg-surface px-3 py-2 font-mono text-sm text-fg placeholder:text-fg/30 focus:border-vermilion focus:outline-none"
-              />
-
+        <FadeIn delay={0.03} className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex border border-fg/20">
+              <TabBtn active={shell} onClick={() => switchTab('shell')}>
+                <Icon name="terminal" className="h-3.5 w-3.5" />
+                Shell
+              </TabBtn>
+              <TabBtn active={!shell} onClick={() => switchTab('web')}>
+                <Icon name="globe" className="h-3.5 w-3.5" />
+                Web
+              </TabBtn>
+            </div>
+            <div className="seg" role="tablist" aria-label="Time range">
+              {RANGES.map((r) => (
+                <button
+                  key={r.days}
+                  type="button"
+                  role="tab"
+                  aria-selected={days === r.days}
+                  aria-pressed={days === r.days}
+                  onClick={() => setDays(r.days)}
+                  className="seg-item">
+                  {r.label}
+                </button>
+              ))}
+            </div>
+            <div className="ml-auto flex flex-wrap gap-2">
               <Select
-                aria-label="Sort entries"
-                value={sort}
-                onChange={(v) => setSort(v as SortKey)}
+                aria-label="Project"
+                value={project}
+                onChange={setProject}
                 options={[
-                  { value: 'recent', label: 'Recent' },
-                  { value: 'frequent', label: 'Most used' },
+                  { value: '', label: 'All projects' },
+                  ...(data?.projects ?? []).map((p) => ({ value: p.cwd, label: shortPath(p.cwd) })),
+                  ...(project && !data?.projects.some((p) => p.cwd === project)
+                    ? [{ value: project, label: shortPath(project) }]
+                    : []),
+                ]}
+              />
+              <Select
+                aria-label="Agent"
+                value={source}
+                onChange={setSource}
+                options={[
+                  { value: '', label: 'All agents' },
+                  ...(data?.sources ?? []).map((s) => ({ value: s.source, label: sourceLabel(s.source) })),
+                  ...(source && !data?.sources.some((s) => s.source === source)
+                    ? [{ value: source, label: sourceLabel(source) }]
+                    : []),
                 ]}
               />
             </div>
-
-            <div className="scroll-thin overflow-x-auto">
-              {error ? (
-                <p className="p-8 text-center font-mono text-xs text-fg/40">
-                  Collector offline — activity log unavailable.
-                </p>
-              ) : (
-                <table className="w-full min-w-[36rem] border-collapse border-spacing-0">
-                  <colgroup>
-                    <col className="w-9" />
-                    <col />
-                    <col className="w-16" />
-                    <col className="w-28" />
-                    <col />
-                    <col className="w-24" />
-                  </colgroup>
-                  <thead>
-                    <tr className="border-b border-fg/15 bg-surface/40">
-                      <th className={`${TH} w-9`} aria-hidden="true" />
-                      <th className={TH}>{tab === 'shell' ? 'Command' : 'Domain'}</th>
-                      <th className={`${TH} text-right`}>Runs</th>
-                      <th className={`${TH} hidden sm:table-cell`}>Agent</th>
-                      <th className={`${TH} hidden md:table-cell`}>Project</th>
-                      <th className={`${TH} text-right`}>Last</th>
-                    </tr>
-                  </thead>
-
-                  <tbody>
-                    {loading ? (
-                      <TableRowsSkeleton rows={10} cols={COLS} />
-                    ) : grouped.length === 0 ? (
-                      <tr>
-                        <td colSpan={COLS} className="px-3 py-16 text-center">
-                          <Icon
-                            name={tab === 'shell' ? 'terminal' : 'globe'}
-                            className="mx-auto mb-3 h-7 w-7 text-fg/15"
-                          />
-                          <p className="font-mono text-xs text-fg/40">
-                            {filter
-                              ? 'No matches for that filter.'
-                              : tab === 'shell'
-                                ? 'No shell commands recorded yet.'
-                                : 'No web requests recorded yet.'}
-                          </p>
-                        </td>
-                      </tr>
-                    ) : (
-                      grouped.map((group) => (
-                        <GroupRows
-                          key={group.key}
-                          group={group}
-                          filter={filter}
-                          expanded={expanded.has(group.key)}
-                          onToggle={() => toggle(group.key)}
-                          onSelect={onSelect}
-                        />
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              )}
-            </div>
           </div>
+
+          {!isError && (
+            <Glance data={data} pending={isPending} shell={shell} onFailed={() => showInLog({ status: 'failed' })} />
+          )}
         </FadeIn>
+
+        {isError ? (
+          <p className="border border-fg/15 p-8 text-center font-mono text-xs text-fg/50">
+            Collector offline. Activity is unavailable.
+          </p>
+        ) : (
+          <FadeIn delay={0.06} className="space-y-8">
+            <WorthALook data={data} onSelect={onSelect} />
+            <MostUsed data={data} shell={shell} active={group} onPick={(key) => showInLog({ group: key })} />
+            <div ref={logRef} className="scroll-mt-4">
+              <Section n="03" title={shell ? 'Every command' : 'Every request'}>
+                <ActivityLog
+                  category={tab}
+                  filters={filters}
+                  group={group}
+                  onClearGroup={() => setGroup(null)}
+                  status={status}
+                  onStatus={setStatus}
+                  onSelect={onSelect}
+                />
+              </Section>
+            </div>
+          </FadeIn>
+        )}
       </div>
     </div>
   );
 }
 
-const KIND_ICON: Record<GroupKind, 'terminal' | 'search' | 'globe'> = {
-  command: 'terminal',
-  tool: 'search',
-  web: 'globe',
-  query: 'search',
+function Glance({
+  data,
+  pending,
+  shell,
+  onFailed,
+}: {
+  data?: ActivitySummary;
+  pending: boolean;
+  shell: boolean;
+  onFailed: () => void;
+}) {
+  const s = data?.summary;
+  const none = pending ? '…' : '0';
+  return (
+    <Grid cols="grid-cols-2 lg:grid-cols-4">
+      <Stat
+        label={shell ? 'Commands' : 'Requests'}
+        value={s ? compact(s.runs) : none}
+        hint={s ? `in ${s.sessions} sessions` : undefined}
+      />
+      <button type="button" onClick={onFailed} disabled={!s?.failed} className="bg-bg text-left disabled:cursor-default">
+        <Stat
+          label="Failed"
+          value={s ? compact(s.failed) : none}
+          hint={s && s.runs ? `${(s.fail_rate * 100).toFixed(1)}% of runs` : undefined}
+          accent={s?.failed ? 'text-vermilion' : undefined}
+        />
+      </button>
+      <Stat label={shell ? 'Time running' : 'Time waiting'} value={s ? formatDuration(s.total_ms) : none} />
+      <Stat label={shell ? 'Programs' : 'Domains'} value={s ? compact(s.groups) : none} />
+    </Grid>
+  );
+}
+
+const KIND_LABEL: Record<ActivityAttention['kind'], string> = {
+  loop: 'Loop',
+  failure_spike: 'Failing more',
+  failing: 'Failing',
+  risky: 'Risky',
+  first_seen: 'New',
+  slow: 'Slow',
 };
 
-function GroupRows({
-  group,
-  filter,
-  expanded,
-  onToggle,
+const SEVERITY_TAG: Record<ActivityAttention['severity'], string> = {
+  critical: 'border-vermilion bg-vermilion text-cream',
+  warn: 'border-vermilion/60 text-vermilion',
+  info: 'border-line/30 text-fg/60',
+};
+
+function WorthALook({
+  data,
   onSelect,
 }: {
-  group: GroupedEntry;
-  filter: string;
-  expanded: boolean;
-  onToggle: () => void;
+  data?: ActivitySummary;
   onSelect: (sessionId: string, eventId?: number) => void;
 }) {
-  const latest = group.occurrences[0];
-  const count = group.occurrences.length;
-  // Even single-run groups expand — the header shows the command/domain, the
-  // panel shows the full command / URL that ran.
-  const hasMore = count >= 1;
-  const openLatest = () => onSelect(latest.session_id, latest.event_id);
-  const bg = groupBg(expanded);
-  const groupBorder = expanded && hasMore ? '' : 'border-b border-fg/15';
-  const isShell = group.kind === 'command';
-
+  const [expanded, setExpanded] = useState(false);
+  const all = data?.attention ?? [];
+  const shown = expanded ? all : all.slice(0, ATTENTION_SHOWN);
   return (
-    <Fragment>
-      <tr
-        role="button"
-        tabIndex={0}
-        onClick={openLatest}
-        onKeyDown={(e) => activateOnKey(e, openLatest)}
-        className={`group cursor-pointer transition-colors duration-150 hover:bg-surface/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-vermilion ${groupBorder} ${bg}`}>
-        <td className={`w-9 px-2 py-0 ${bg}`} onClick={(e) => e.stopPropagation()}>
-          {hasMore ? (
-            <button
-              type="button"
-              onClick={onToggle}
-              aria-expanded={expanded}
-              aria-label={expanded ? 'Collapse runs' : `Expand ${count} runs`}
-              className="flex h-9 w-9 items-center justify-center rounded-sm transition-colors duration-150 hover:bg-fg/[0.04] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-vermilion">
-              <Icon
-                name="chevron-right"
-                className={`h-4 w-4 text-fg/40 transition-transform duration-200 ease-out motion-reduce:transition-none motion-reduce:transform-none ${
-                  expanded ? 'rotate-90' : ''
-                }`}
-              />
-            </button>
-          ) : (
-            <span className="block h-9 w-9" aria-hidden="true" />
-          )}
-        </td>
-        <td className={`${TD} ${bg}`}>
-          <span className="flex max-w-md items-center gap-2 sm:max-w-xl">
-            {isShell ? (
-              <span className="select-none font-mono text-sm text-vermilion/70">$</span>
-            ) : (
-              <Icon name={KIND_ICON[group.kind]} className="h-3.5 w-3.5 shrink-0 text-fg/35" />
-            )}
-            <span
-              className="block truncate font-mono text-sm font-medium text-fg transition-colors duration-150 group-hover:text-vermilion"
-              title={group.key}>
-              {filter ? highlight(group.key, filter) : group.key}
-            </span>
-          </span>
-        </td>
-        <td className={`${TD} text-right font-mono text-sm tabular-nums text-fg/70 ${bg}`}>
-          {count}
-        </td>
-        <td className={`${TD} hidden sm:table-cell ${bg}`}>
-          <SourceBadge source={latest.source} />
-        </td>
-        <td className={`${TD} hidden md:table-cell ${bg}`}>
-          <span
-            className="block max-w-[10rem] truncate font-mono text-xs text-fg/55"
-            title={latest.cwd ?? undefined}>
-            {shortPath(latest.cwd)}
-          </span>
-        </td>
-        <td className={`${TD} text-right font-mono text-xs text-fg/45 ${bg}`}>
-          {latest.ts ? formatRelative(latest.ts) : '—'}
-        </td>
-      </tr>
-
-      {hasMore && (
-        <tr className={`border-0 ${expanded ? `border-b border-fg/15 ${bg}` : 'h-0 leading-[0]'}`}>
-          <td colSpan={COLS} className={`border-0 p-0 ${expanded ? bg : 'h-0 p-0 leading-[0]'}`}>
-            <ExpandPanel open={expanded}>
-              <table className="w-full border-collapse border-spacing-0">
-                <colgroup>
-                  <col className="w-9" />
-                  <col />
-                  <col className="w-16" />
-                  <col className="w-28" />
-                  <col />
-                  <col className="w-24" />
-                </colgroup>
-                <tbody>
-                  {group.occurrences.map((item, i) => (
-                    <OccurrenceRow
-                      key={`${item.session_id}-${item.event_id}`}
-                      item={item}
-                      kind={group.kind}
-                      filter={filter}
-                      onSelect={onSelect}
-                      isLast={i === count - 1}
-                      bg={bg}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </ExpandPanel>
-          </td>
-        </tr>
-      )}
-    </Fragment>
+    <Section
+      n="01"
+      title="Worth a look"
+      aside={
+        all.length > 0 ? <span className="font-mono text-[0.6rem] tabular-nums text-fg/50">{all.length}</span> : undefined
+      }>
+      <div className="border border-fg/15 bg-bg">
+        {!data ? (
+          <p className="px-4 py-5 font-mono text-xs text-fg/50">Loading…</p>
+        ) : all.length === 0 ? (
+          <p className="flex items-center gap-2.5 px-4 py-5 font-mono text-xs text-fg/60">
+            <Icon name="check" className="h-4 w-4 text-olive" />
+            Nothing unusual in this range.
+          </p>
+        ) : (
+          <ul className="divide-y divide-fg/[0.07]">
+            {shown.map((a, i) => (
+              <AttentionRow key={`${a.kind}-${a.title}-${i}`} item={a} onSelect={onSelect} />
+            ))}
+          </ul>
+        )}
+        {all.length > ATTENTION_SHOWN && (
+          <button
+            type="button"
+            onClick={() => setExpanded(!expanded)}
+            className="w-full border-t border-fg/10 px-4 py-2 text-left font-mono text-[0.62rem] font-bold text-fg/55 transition-colors hover:bg-surface/60 hover:text-fg">
+            {expanded ? 'Show fewer' : `Show ${all.length - ATTENTION_SHOWN} more`}
+          </button>
+        )}
+      </div>
+    </Section>
   );
 }
 
-function ExpandPanel({ open, children }: { open: boolean; children: React.ReactNode }) {
-  return (
-    <div
-      className="grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none"
-      style={{ gridTemplateRows: open ? '1fr' : '0fr' }}>
-      <div className="overflow-hidden">{children}</div>
-    </div>
-  );
-}
-
-function OccurrenceRow({
-  item,
-  kind,
-  filter,
+function AttentionRow({
+  item: a,
   onSelect,
-  isLast,
-  bg,
 }: {
-  item: MetricsHistoryItem;
-  kind: GroupKind;
-  filter: string;
+  item: ActivityAttention;
   onSelect: (sessionId: string, eventId?: number) => void;
-  isLast: boolean;
-  bg: string;
 }) {
-  const open = () => onSelect(item.session_id, item.event_id);
-  const text = item.target || (kind === 'tool' ? '(no query)' : '—');
-
+  const open = () => onSelect(a.ref.session_id, a.ref.event_id);
   return (
-    <tr
+    <li
       role="button"
       tabIndex={0}
       onClick={open}
       onKeyDown={(e) => activateOnKey(e, open)}
-      className={`group cursor-pointer transition-colors duration-150 hover:bg-surface/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-vermilion ${bg} ${
-        isLast ? '' : 'border-b border-fg/[0.06]'
-      }`}>
-      <td className={`w-9 ${bg}`} aria-hidden="true" />
-      <td className={`${SUB_TD} pl-9 ${bg}`}>
-        <div className="flex max-w-md flex-col gap-0.5 sm:max-w-xl">
-          <span
-            className="block truncate font-mono text-[0.72rem] text-fg/75 transition-colors duration-150 group-hover:text-vermilion"
-            title={item.target || undefined}>
-            {kind === 'command' && item.target && (
-              <span className="select-none text-vermilion/60">$ </span>
-            )}
-            {filter && item.target ? highlight(text, filter) : text}
+      title={a.names ? a.names.join(', ') : (a.subject ?? undefined)}
+      className="group grid cursor-pointer grid-cols-[5.75rem_minmax(0,1fr)_auto] items-start gap-x-3 px-4 py-3 transition-colors hover:bg-surface/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-vermilion">
+      <span
+        className={`mt-px justify-self-start border px-1.5 py-0.5 font-mono text-[0.52rem] font-bold uppercase tracking-widest ${SEVERITY_TAG[a.severity]}`}>
+        {KIND_LABEL[a.kind]}
+      </span>
+      <span className="min-w-0">
+        <span className="block font-mono text-xs font-bold text-fg">{a.title}</span>
+        {a.subject && (
+          <span className="mt-1 block truncate font-mono text-[0.68rem]">
+            <CommandText core={a.subject} program={a.program ?? undefined} />
           </span>
-          <span className="font-mono text-[0.55rem] tabular-nums text-fg/30">
-            {item.session_id.slice(0, 8)}
-          </span>
-        </div>
-      </td>
-      <td className={`${SUB_TD} ${bg}`} aria-hidden="true" />
-      <td className={`${SUB_TD} hidden sm:table-cell ${bg}`}>
-        <SourceBadge source={item.source} className="scale-90 origin-left" />
-      </td>
-      <td className={`${SUB_TD} hidden md:table-cell ${bg}`}>
-        <span
-          className="block max-w-[10rem] truncate font-mono text-[0.62rem] text-fg/55"
-          title={item.cwd ?? undefined}>
-          {shortPath(item.cwd)}
-        </span>
-      </td>
-      <td className={`${SUB_TD} text-right ${bg}`}>
-        <span className="font-mono text-[0.62rem] tabular-nums text-fg/45">
-          {item.ts ? formatTime(item.ts) : '—'}
-        </span>
-        <Icon
-          name="chevron-right"
-          className="ml-1.5 inline h-2.5 w-2.5 text-fg/15 transition-colors duration-150 group-hover:text-vermilion"
-        />
-      </td>
-    </tr>
+        )}
+        {a.detail && <span className="mt-0.5 block truncate font-mono text-[0.65rem] text-fg/55">{a.detail}</span>}
+      </span>
+      <span className="flex items-center gap-1.5 pt-px font-mono text-[0.6rem] tabular-nums text-fg/50">
+        {a.ref.ts ? formatRelative(a.ref.ts) : ''}
+        <Icon name="chevron-right" className="h-3 w-3 text-fg/30 transition-colors group-hover:text-fg/70" />
+      </span>
+    </li>
   );
 }
 
-function TabBtn({
+function MostUsed({
+  data,
+  shell,
   active,
-  onClick,
-  children,
+  onPick,
 }: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
+  data?: ActivitySummary;
+  shell: boolean;
+  active: string | null;
+  onPick: (key: string) => void;
 }) {
+  const rows = (data?.groups ?? []).slice(0, MOST_USED_SHOWN);
+  const max = rows[0]?.runs ?? 1;
+  return (
+    <Section
+      n="02"
+      title={shell ? 'Most used' : 'Top domains'}
+      aside={<span className="font-mono text-[0.6rem] text-fg/50">click one to filter the list</span>}>
+      <div className="border border-fg/15 bg-bg">
+        {!data ? (
+          <p className="px-4 py-5 font-mono text-xs text-fg/50">Loading…</p>
+        ) : rows.length === 0 ? (
+          <p className="px-4 py-5 font-mono text-xs text-fg/55">Nothing in this range.</p>
+        ) : (
+          <ul className="divide-y divide-fg/[0.06]">
+            {rows.map((g) => {
+              const pick = () => onPick(g.key);
+              const on = active === g.key;
+              return (
+                <li
+                  key={g.key}
+                  role="button"
+                  tabIndex={0}
+                  aria-pressed={on}
+                  onClick={pick}
+                  onKeyDown={(e) => activateOnKey(e, pick)}
+                  title={g.verbs?.length ? g.verbs.map((v) => `${g.key} ${v.key}: ${v.runs}`).join('\n') : undefined}
+                  className={`grid cursor-pointer grid-cols-[minmax(0,10rem)_minmax(0,1fr)_3.5rem_4.5rem] items-center gap-4 px-4 py-2 transition-colors hover:bg-surface/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-vermilion ${
+                    on ? 'bg-surface' : ''
+                  }`}>
+                  <span className="truncate font-mono text-xs font-bold text-fg">
+                    {g.key}
+                    {g.local && <span className="ml-2 font-normal text-fg/45">local</span>}
+                  </span>
+                  {/* Share of the top entry; the count carries the scale. */}
+                  <span className="block h-1.5" aria-hidden="true">
+                    <span className="block h-full bg-fg/45" style={{ width: `${Math.max(3, (g.runs / max) * 100)}%` }} />
+                  </span>
+                  <span className="text-right font-mono text-xs tabular-nums text-fg/80">{compact(g.runs)}</span>
+                  <span className="text-right font-mono text-[0.62rem] tabular-nums text-vermilion/90">
+                    {g.failed > 0 ? `${g.failed} failed` : ''}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </Section>
+  );
+}
+
+function TabBtn({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
     <button
       type="button"

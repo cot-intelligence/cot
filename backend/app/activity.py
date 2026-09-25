@@ -47,6 +47,7 @@ _RUNNERS = {"npm", "pnpm", "yarn", "bun"}
 _OPTS_WITH_VALUE = {"git": {"-C", "-c"}, "docker": {"-H", "--context"}, "kubectl": {"-n", "--namespace", "--context"}}
 
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_PROGRAM_NAME = re.compile(r"^[A-Za-z0-9_\[][\w.+\-\[\]]*$")
 _EXIT_CODE = re.compile(r"exit(?:ed)?(?: with)?(?: code| status)?\s*[:=]?\s*(-?\d+)\.?", re.IGNORECASE)
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"}
 _HEREDOC = re.compile(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
@@ -59,6 +60,8 @@ _COMMAND_SECRETS = [
 ]
 
 MAX_COMMAND_CHARS = 2000
+# Exit 1 from these means "no match" / "differs", not that something broke.
+_EXIT_1_IS_ANSWER = {"grep", "egrep", "fgrep", "rg", "ag", "diff", "cmp", "test", "["}
 
 
 @dataclass(frozen=True)
@@ -157,11 +160,24 @@ def _tokens(text: str) -> list[str]:
 
 
 def _program_and_args(tokens: list[str]) -> tuple[str, list[str]]:
+    # A subshell `( … )` or `time (…)` only adds a paren to the next token.
+    tokens = [t.lstrip("(") for t in tokens]
+    tokens = [t for t in tokens if t]
     i = 0
     while i < len(tokens) and tokens[i] in _CONTROL_PREFIX:
         i += 1
     while i < len(tokens) and _ASSIGNMENT.match(tokens[i]):
+        # `IDS=$(sqlite3 …)` runs sqlite3: the work is inside the substitution.
+        inner = tokens[i].split("=$(", 1)
+        if len(inner) == 2 and inner[1]:
+            return _program_and_args([inner[1], *tokens[i + 1 :]])
+        value = tokens[i].split("=", 1)[1]
         i += 1
+        if value.startswith("(") and not value.endswith(")"):
+            # Array assignment `A=(x y z)`: its items are not commands.
+            while i < len(tokens) and not tokens[i].endswith(")"):
+                i += 1
+            i += 1
     while i < len(tokens) and tokens[i] in _WRAPPERS:
         wrapper = tokens[i]
         i += 1
@@ -173,8 +189,9 @@ def _program_and_args(tokens: list[str]) -> tuple[str, list[str]]:
             i += 1  # wrapper flags (`sudo -E`) and `env FOO=1`
     if i >= len(tokens) or tokens[i] == "…":
         return "", []
-    program = tokens[i].lstrip("(")
-    program = program.rsplit("/", 1)[-1] or program
+    program = tokens[i].rsplit("/", 1)[-1] or tokens[i]
+    if not _PROGRAM_NAME.match(program):
+        return "", []  # a flag, a variable, a fragment: not something to group by
     return program, tokens[i + 1 :]
 
 
@@ -327,7 +344,7 @@ def _item(row: dict[str, Any], category: str) -> dict[str, Any]:
         "source": row["source"],
         "cwd": row["cwd"],
         "duration_ms": row["duration_ms"],
-        "failed": row["status"] == "error",
+        "failed": row["status"] == "error" and not cached.get("no_match"),
         **cached,
     }
 
@@ -361,6 +378,7 @@ def _parse_row(row: dict[str, Any], category: str) -> dict[str, Any]:
             "risk": None,
         }
     parsed = parse_command(command)
+    no_match = bool(error) and error.get("exit_code") == 1 and parsed.program in _EXIT_1_IS_ANSWER
     return {
         **base,
         "target": mask_secrets(command),
@@ -369,6 +387,8 @@ def _parse_row(row: dict[str, Any], category: str) -> dict[str, Any]:
         "core": mask_secrets(parsed.core),
         "tool": None,
         "risk": risk_of(command),
+        # A search that found nothing: recorded as an error by the agent, but not a failure.
+        "no_match": no_match,
     }
 
 
@@ -382,7 +402,12 @@ def _ref(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def summarize(category: str, days: int, project: str | None = None, source: str | None = None) -> dict[str, Any]:
-    items = load(category, days, project, source)
+    # Load the whole history once: the window is summarized, and everything
+    # before it is the baseline that anomalies are measured against.
+    history = load(category, 0, project, source)
+    since = _since(days)
+    items = [it for it in history if since is None or (it["ts"] or "") >= since]
+    baseline = [it for it in history if since is not None and (it["ts"] or "") < since]
     group_key = "key" if category == "web" else "program"
 
     groups: dict[str, dict[str, Any]] = {}
@@ -408,13 +433,23 @@ def summarize(category: str, days: int, project: str | None = None, source: str 
     for g in top:
         g["verbs"] = [{"key": v, "runs": c} for v, c in verbs[g["key"]].most_common(4)]
 
-    # Same command failing more than once is the signal; one-offs are noise.
+    # The same command failing more than once is the signal. One-off failures
+    # are listed separately, most recent first.
     fail_groups: dict[str, dict[str, Any]] = {}
     for it in items:
         if it.get("tool"):
             continue  # a Grep/Glob that matched nothing is not a failure worth chasing
         norm = " ".join((it.get("core") or it["target"]).split())[:300] if category == "shell" else it["key"]
-        f = fail_groups.setdefault(norm, {"command": norm, "runs": 0, "failed": 0, "last_error": None, "last": None})
+        f = fail_groups.get(norm)
+        if f is None:
+            f = fail_groups[norm] = {
+                "command": norm,
+                "program": it.get("program"),
+                "runs": 0,
+                "failed": 0,
+                "last_error": None,
+                "last": None,
+            }
         f["runs"] += 1
         if it["failed"]:
             f["failed"] += 1
@@ -422,10 +457,15 @@ def summarize(category: str, days: int, project: str | None = None, source: str 
                 f["last"] = _ref(it)
                 f["last_error"] = it["error"]
     failing = sorted(
-        (f for f in fail_groups.values() if f["failed"] >= 2 or (f["failed"] == 1 and f["runs"] == 1 and f["last_error"])),
+        (f for f in fail_groups.values() if f["failed"] >= 2),
         key=lambda f: (f["failed"], f["runs"]),
         reverse=True,
     )[:8]
+    one_off = sorted(
+        (f for f in fail_groups.values() if f["failed"] == 1),
+        key=lambda f: f["last"]["ts"] or "",
+        reverse=True,
+    )[:5]
 
     timed = [it for it in items if it["duration_ms"]]
     slowest = [
@@ -455,16 +495,275 @@ def summarize(category: str, days: int, project: str | None = None, source: str 
         },
         "groups": top[:24],
         "failing": failing,
+        "recent_failures": one_off,
         "slowest": slowest,
         "risky": risky[:20],
         "projects": [{"cwd": c, "runs": n} for c, n in projects.most_common(40)],
         "sources": [{"source": s, "runs": n} for s, n in sources.most_common()],
     }
+    result["attention"] = worth_a_look(find_anomalies(category, items, baseline, days), failing, risky)
     if category == "web":
         searches = Counter(it["key"] for it in items if it["kind"] == "search")
         result["searches"] = [{"query": q, "runs": n} for q, n in searches.most_common(12)]
         result["summary"]["local"] = sum(1 for it in items if it["local"])
     return result
+
+
+# --- anomalies -----------------------------------------------------------------
+
+# Programs worth a closer look the first time an agent reaches for them.
+_SENSITIVE_PROGRAMS = {
+    "ssh", "sshpass", "scp", "sftp", "rsync", "nc", "ncat", "netcat", "socat", "telnet", "ftp",
+    "sudo", "su", "chmod", "chown", "security", "keychain", "gpg", "openssl", "aws", "gcloud",
+    "az", "kubectl", "terraform", "dd", "mkfs", "diskutil", "launchctl", "crontab", "nmap",
+}
+_LOOP_MIN_RUNS = 5
+_LOOP_WINDOW_S = 15 * 60
+# Below this much history, "first time" says more about cot than about the agent.
+# Web traffic is far lower volume than shell, so it needs less.
+_MIN_BASELINE_RUNS = {"shell": 200, "web": 50}
+_SEVERITY_RANK = {"critical": 0, "warn": 1, "info": 2}
+
+
+def _epoch(ts: str | None) -> float:
+    if not ts:
+        return 0.0
+    try:
+        return datetime.fromisoformat(ts).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _span_days(items: list[dict[str, Any]], floor: float = 1.0) -> float:
+    stamps = [_epoch(it["ts"]) for it in items if it["ts"]]
+    if len(stamps) < 2:
+        return floor
+    return max(floor, (max(stamps) - min(stamps)) / 86400)
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _fmt_s(ms: float) -> str:
+    sec = ms / 1000
+    if sec < 90:
+        return f"{sec:.0f}s"
+    if sec < 5400:
+        return f"{sec / 60:.0f} min"
+    return f"{sec / 3600:.1f} h"
+
+
+def find_anomalies(
+    category: str,
+    window: list[dict[str, Any]],
+    baseline: list[dict[str, Any]],
+    days: int,
+) -> list[dict[str, Any]]:
+    """What is unusual in the window compared with the history before it.
+
+    Rule-based and explainable: every anomaly says what was measured and links
+    to the run that shows it. Detectors that need a baseline stay quiet when
+    there is not enough history to compare against.
+    """
+    found: list[dict[str, Any]] = []
+    key_of = (lambda it: it["key"]) if category == "web" else (lambda it: it["program"])
+    runs_only = [it for it in window if not it.get("tool") and not (category == "web" and it["kind"] == "search")]
+    base_runs = [it for it in baseline if not it.get("tool") and not (category == "web" and it["kind"] == "search")]
+
+    # 1. Stuck loops: the same command over and over in one session, mostly failing.
+    if category == "shell":
+        by_cmd: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        for it in runs_only:
+            by_cmd[(it["session_id"], " ".join((it["core"] or "").split()))].append(it)
+        loops = []
+        for (_sid, cmd), runs in by_cmd.items():
+            if len(runs) < _LOOP_MIN_RUNS or not cmd:
+                continue
+            runs.sort(key=lambda it: _epoch(it["ts"]))
+            best: tuple[int, int, int] | None = None  # (count, start, end)
+            j = 0
+            for i in range(len(runs)):
+                while _epoch(runs[i]["ts"]) - _epoch(runs[j]["ts"]) > _LOOP_WINDOW_S:
+                    j += 1
+                if best is None or i - j + 1 > best[0]:
+                    best = (i - j + 1, j, i)
+            if not best or best[0] < _LOOP_MIN_RUNS:
+                continue
+            burst = runs[best[1] : best[2] + 1]
+            failed = sum(1 for it in burst if it["failed"])
+            if failed < 3:
+                continue
+            minutes = max(1, round((_epoch(burst[-1]["ts"]) - _epoch(burst[0]["ts"])) / 60))
+            loops.append((failed, burst, cmd, minutes))
+        for failed, burst, cmd, minutes in sorted(loops, key=lambda x: x[0], reverse=True)[:3]:
+            last_fail = next(it for it in reversed(burst) if it["failed"])
+            found.append({
+                "kind": "loop",
+                "severity": "warn",
+                "title": f"Retried {len(burst)} times in {minutes} min, {failed} failed",
+                "detail": "The agent kept rerunning the same command in one session instead of changing course.",
+                "subject": cmd[:200],
+                "ref": _ref(last_fail),
+            })
+
+    if len(base_runs) >= _MIN_BASELINE_RUNS[category]:
+        base_keys = Counter(key_of(it) for it in base_runs)
+        win_keys = Counter(key_of(it) for it in runs_only)
+
+        # 2. First time: a program / domain never seen before this window.
+        # Sensitive programs get their own entry; the rest share one line.
+        firsts = sorted(
+            ((k, n) for k, n in win_keys.items() if k and base_keys.get(k, 0) == 0 and _is_tool_name(category, k)),
+            key=lambda kn: kn[1],
+            reverse=True,
+        )
+        plain: list[tuple[str, int, dict[str, Any]]] = []
+        for key, n in firsts:
+            first_run = min((it for it in runs_only if key_of(it) == key), key=lambda it: _epoch(it["ts"]))
+            if category == "web" and first_run.get("local"):
+                continue
+            if category == "shell" and key in _SENSITIVE_PROGRAMS:
+                found.append({
+                    "kind": "first_seen",
+                    "severity": "warn",
+                    "title": f"First time running {key}",
+                    "detail": "It reaches other machines or changes system state. Agents had never run it before.",
+                    "subject": first_run.get("core") or first_run["target"],
+                    "ref": _ref(first_run),
+                })
+            else:
+                plain.append((key, n, first_run))
+        if plain:
+            names = [k for k, _n, _r in plain]
+            shown = ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
+            found.append({
+                "kind": "first_seen",
+                "severity": "info",
+                "title": f"First time using {shown}" if category == "shell" else f"First requests to {shown}",
+                "detail": ("Tools" if category == "shell" else "Domains") + " no agent had used before this range.",
+                "subject": None,
+                "names": names,
+                "ref": _ref(plain[0][2]),
+            })
+
+        # 3. Failure spike: failing far more often than this program usually does.
+        base_fail = Counter(key_of(it) for it in base_runs if it["failed"])
+        win_fail = Counter(key_of(it) for it in runs_only if it["failed"])
+        for key, fails in win_fail.most_common():
+            runs = win_keys[key]
+            base_n = base_keys.get(key, 0)
+            if fails < 3 or runs < 5 or base_n < 20:
+                continue
+            rate = fails / runs
+            base_rate = base_fail.get(key, 0) / base_n
+            if rate >= 0.2 and rate >= 3 * max(base_rate, 0.01):
+                last_fail = next(it for it in runs_only if key_of(it) == key and it["failed"])
+                found.append({
+                    "kind": "failure_spike",
+                    "severity": "warn",
+                    "title": f"{key} failing {rate:.0%} of the time, usually {base_rate:.0%}",
+                    "detail": f"{fails} of {runs} runs failed in this range.",
+                    "subject": last_fail.get("core") or last_fail["target"],
+                    "error": last_fail["error"],
+                    "ref": _ref(last_fail),
+                })
+
+    # 5. Unusually slow: far slower than the same kind of command usually takes.
+    if category == "shell":
+        durations: dict[str, list[float]] = defaultdict(list)
+
+        def kind_of(it: dict[str, Any]) -> str:
+            return f"{it['program']} {it['verb']}" if it.get("verb") else it["program"]
+
+        for it in base_runs + runs_only:
+            if it["duration_ms"]:
+                durations[kind_of(it)].append(float(it["duration_ms"]))
+        slow = []
+        for it in runs_only:
+            ms = it["duration_ms"] or 0
+            samples = durations.get(kind_of(it), [])
+            if ms < 30_000 or len(samples) < 8:
+                continue
+            usual = _median(samples)
+            # A normally instant command that "took minutes" was waiting on an
+            # approval prompt, not working; only judge commands that do work.
+            if usual < 2_000:
+                continue
+            if ms >= 10 * usual and ms - usual >= 20_000:
+                slow.append((ms / max(usual, 1), it, usual))
+        seen: set[str] = set()
+        for ratio, it, usual in sorted(slow, key=lambda x: x[0], reverse=True):
+            k = kind_of(it)
+            if k in seen:
+                continue
+            seen.add(k)
+            found.append({
+                "kind": "slow",
+                "severity": "info",
+                "title": f"{k} took {_fmt_s(it['duration_ms'])}, usually {_fmt_s(usual)}",
+                "detail": f"{ratio:.0f}× its median run time.",
+                "subject": it.get("core") or it["target"],
+                "ref": _ref(it),
+            })
+            if len(seen) >= 2:
+                break
+
+    return found
+
+
+_SCRIPT_SUFFIX = re.compile(r"\.(?:sh|bash|zsh|py|js|mjs|ts|rb|pl)$")
+
+
+def _is_tool_name(category: str, key: str) -> bool:
+    """A reusable tool, not a one-off project script like ``./build.sh``."""
+    if category == "web":
+        return True
+    return bool(_PROGRAM_NAME.match(key)) and not _SCRIPT_SUFFIX.search(key) and key != "(script)"
+
+
+# Order within a severity: the most actionable first.
+_KIND_ORDER = {"risky": 0, "loop": 1, "failure_spike": 2, "failing": 3, "first_seen": 4, "slow": 5}
+
+
+def worth_a_look(
+    anomalies: list[dict[str, Any]],
+    failing: list[dict[str, Any]],
+    risky: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One ranked list of what deserves attention in the window."""
+    out = list(anomalies)
+    looped = {a["subject"] for a in anomalies if a["kind"] == "loop"}
+    for f in failing:
+        if f["command"] in looped or not f["last"]:
+            continue
+        err = f["last_error"] or {}
+        out.append({
+            "kind": "failing",
+            "severity": "warn" if f["failed"] >= 3 else "info",
+            "title": f"Failed {f['failed']} of {f['runs']} runs",
+            "detail": err.get("message"),
+            "subject": f["command"],
+            "program": f.get("program"),
+            "ref": f["last"],
+        })
+    by_rule: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for r in risky:  # newest first
+        by_rule[r["risk"]["label"]].append(r)
+    for label, hits in by_rule.items():
+        latest = hits[0]
+        out.append({
+            "kind": "risky",
+            "severity": latest["risk"]["severity"],
+            "title": label[:1].upper() + label[1:] + (f", {len(hits)} times" if len(hits) > 1 else ""),
+            "detail": None,
+            "subject": latest["command"],
+            "ref": {"session_id": latest["session_id"], "event_id": latest["event_id"], "ts": latest["ts"]},
+        })
+    out.sort(key=lambda a: (_SEVERITY_RANK[a["severity"]], _KIND_ORDER.get(a["kind"], 9)))
+    return out
 
 
 def log(
