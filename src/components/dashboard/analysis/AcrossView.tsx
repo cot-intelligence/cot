@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { ACROSS_REPORT, type Improvement, type ImprovementArea } from '../../../lib/analysisPreview';
 import { Icon } from '../../ui/icons';
 import { PageHeader } from '../../ui/PageHeader';
-import { Composer, ComposerRow, EvidenceChips, Pills, Section, SoonChip } from './parts';
+import { BackToAnalysis, Composer, ComposerRow, EvidenceChips, Pills, Section, SoonChip } from './parts';
 
 const RANGES = ['7 days', '30 days', '90 days', 'All time'] as const;
 const SCOPES = ['All sessions', 'Bookmarked only'] as const;
@@ -32,6 +32,7 @@ export function AcrossView() {
   return (
     <div className="space-y-8">
       <PageHeader
+        above={<BackToAnalysis />}
         title="Across all sessions"
         description="Finds the habits that repeat across your sessions, so you fix the cause once."
         actions={<SoonChip label="Coming soon" />}

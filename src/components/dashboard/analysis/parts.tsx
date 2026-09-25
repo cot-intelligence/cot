@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { Icon } from '../../ui/icons';
 import { LENSES, type AnalysisFinding, type FindingSeverity } from '../../../lib/analysisPreview';
 
 // Shared building blocks for the Analysis design preview. The feature is not
@@ -20,6 +21,18 @@ const SEVERITY_RANK: FindingSeverity[] = ['critical', 'warn', 'info'];
 
 export function worstSeverity(findings: AnalysisFinding[]): FindingSeverity {
   return SEVERITY_RANK.find((s) => findings.some((f) => f.severity === s)) ?? 'info';
+}
+
+/** Back to the Analysis home, styled like Activity's back link to Overview. */
+export function BackToAnalysis() {
+  return (
+    <a
+      href="#/analysis"
+      className="flex w-fit items-center gap-1.5 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/45 transition-colors hover:text-fg">
+      <Icon name="chevron-left" className="h-3 w-3" />
+      Analysis
+    </a>
+  );
 }
 
 export function SoonChip({ label = 'Soon' }: { label?: string }) {

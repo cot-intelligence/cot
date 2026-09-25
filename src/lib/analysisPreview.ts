@@ -130,6 +130,17 @@ export const LENSES: AnalysisLens[] = [
   },
 ];
 
+/** A question asked about a finished run, and the analysis model's answer. */
+export interface FollowUp {
+  question: string;
+  when: string;
+  answer: string;
+  /** Turns the answer cites. */
+  evidence: string[];
+  /** Optional short list the answer breaks out, e.g. the retried commands. */
+  points?: string[];
+}
+
 export type RunGroup = 'Today' | 'Yesterday' | 'Earlier this week' | 'Last week';
 
 export interface SampleRun {
@@ -141,6 +152,7 @@ export interface SampleRun {
   when: string;
   /** Free-text question, for runs made with the custom lens. */
   customQuestion?: string;
+  followUps?: FollowUp[];
 }
 
 /** Past runs listed in the Analysis library. */
@@ -160,6 +172,26 @@ export const SAMPLE_RUNS: SampleRun[] = [
     sessionTitle: 'fix the flaky import test in the collector',
     group: 'Today',
     when: '5h ago',
+    followUps: [
+      {
+        question: 'Why did it keep rerunning pytest instead of reading the error?',
+        when: '4h ago',
+        answer:
+          'Each failure printed the same ImportError, but the agent read it as a flaky test because the first run had passed locally in turn 9. It only opened the traceback after you wrote "stop rerunning it" in turn 13.',
+        evidence: ['T9', 'T11', 'T13'],
+      },
+      {
+        question: 'What would have caught this earlier?',
+        when: '4h ago',
+        answer: 'Three things, in order of how much time they would have saved:',
+        evidence: ['T6', 'T11'],
+        points: [
+          'A project rule to read the traceback before any rerun (saves about 9 minutes here).',
+          'Running the single failing test instead of the whole suite, so each retry took 4s instead of 40s.',
+          'Reading settings.py before editing it in turn 6, which caused the import error in the first place.',
+        ],
+      },
+    ],
   },
   {
     id: 'run-3',
