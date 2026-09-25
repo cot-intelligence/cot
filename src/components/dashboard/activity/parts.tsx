@@ -52,17 +52,39 @@ export function shortPath(p: string | null | undefined): string {
 
 /**
  * A shell command with the program that does the work in full strength and
- * the wrappers before it (`rtk`, `FOO=1`) dimmed.
+ * the wrappers before it (`rtk`, `FOO=1`) dimmed. Privilege elevation is the
+ * exception: `sudo` is the most important word in a prefix, so it stands out.
  */
 export function CommandText({ core, program, className = '' }: { core: string; program?: string; className?: string }) {
   const at = program ? findProgram(core, program) : -1;
   if (at < 0) return <span className={className}>{core}</span>;
   return (
     <span className={className}>
-      {at > 0 && <span className="text-fg/45">{core.slice(0, at)}</span>}
+      {at > 0 && <Prefix text={core.slice(0, at)} />}
       <span className="font-bold text-fg">{core.slice(at, at + program!.length)}</span>
       <span className="text-fg/75">{core.slice(at + program!.length)}</span>
     </span>
+  );
+}
+
+const ELEVATION = /(\b(?:sudo|doas|pkexec)\b)/;
+
+function Prefix({ text }: { text: string }) {
+  const parts = text.split(ELEVATION);
+  return (
+    <>
+      {parts.map((part, i) =>
+        ELEVATION.test(part) ? (
+          <span key={i} className="font-bold text-vermilion">
+            {part}
+          </span>
+        ) : (
+          <span key={i} className="text-fg/45">
+            {part}
+          </span>
+        ),
+      )}
+    </>
   );
 }
 

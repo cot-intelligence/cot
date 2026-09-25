@@ -290,3 +290,55 @@ def test_instant_commands_are_not_called_slow(baseline) -> None:
     fast_history = baseline + [_run("sed", core="sed -n 1p f", hours_ago=24 * 10 + i, ms=50) for i in range(20)]
     window = [_run("sed", core="sed -n 1p f", hours_ago=2, ms=120_000)]  # sat on an approval prompt
     assert "slow" not in _kinds(activity.find_anomalies("shell", window, fast_history, 7))
+
+
+# --- running as root -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("command", "elevated"),
+    [
+        ("sudo lsof -iTCP:5432", True),
+        ("cd /x && rtk proxy sudo -E make install", True),
+        ("ssh host 'sudo systemctl restart nginx'", True),
+        ("ssh -i k host 'bash -s' <<'EOF'\napt-get update\nsudo apt-get install -y nginx\nEOF", True),
+        ("doas pkg_add vim", True),
+        ("su -c 'id'", True),
+        ("python3 - <<'PY'\nprint('sudo rm -rf /')\nPY", False),  # a string in a Python script
+        ("grep -rn pseudo src/", False),
+        ("echo sudoers", False),
+    ],
+)
+def test_is_elevated(command: str, elevated: bool) -> None:
+    assert activity.is_elevated(command) is elevated
+
+
+def test_sudo_inside_a_shell_heredoc_is_risk_scanned() -> None:
+    cmd = "ssh host 'bash -s' <<'EOF'\nsudo apt-get install -y x\nEOF"
+    assert activity.risk_of(cmd) == {"severity": "warn", "label": "privilege escalation"}
+
+
+def test_groups_count_runs_as_root(fresh_db) -> None:
+    with store.write() as conn:
+        conn.execute(
+            "INSERT INTO sessions (id, source, cwd, started_at, status, archived, created_at)"
+            " VALUES ('s', 'claude', '/r', ?, 'active', 0, ?)",
+            (_NOW.isoformat(), timeutil.now()),
+        )
+        for target in ("sudo lsof -i :5432", "lsof -i :5432"):
+            store.insert_event(
+                conn, session_id="s", source="claude", hook="PostToolUse", tool="Bash", phase="end",
+                ts=_NOW.isoformat(), category="shell", title="Shell command", target=target, status="ok",
+            )
+    out = activity.summarize("shell", 7)
+    lsof = next(g for g in out["groups"] if g["key"] == "lsof")
+    assert lsof["runs"] == 2 and lsof["elevated"] == 1
+    assert out["summary"]["elevated"] == 1
+
+
+def test_quoted_remote_sudo_is_still_flagged(fresh_db) -> None:
+    item = activity._parse_row(
+        {"id": 1, "target": "ssh host 'sudo systemctl restart x'", "title": "Shell command", "status": "ok"},
+        "shell",
+    )
+    assert item["elevated"] and item["risk"] == {"severity": "warn", "label": "privilege escalation"}

@@ -50,6 +50,9 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _PROGRAM_NAME = re.compile(r"^[A-Za-z0-9_\[][\w.+\-\[\]]*$")
 _EXIT_CODE = re.compile(r"exit(?:ed)?(?: with)?(?: code| status)?\s*[:=]?\s*(-?\d+)\.?", re.IGNORECASE)
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"}
+# A heredoc opened by one of these is shell input, not a script in another language.
+_SHELL_FED = re.compile(r"(?:^|[\s;&|(])(?:ba|z|da|k)?sh\b|\bssh\b")
+_ELEVATED = re.compile(r"(?:^|[\s;&|('\"])(?:sudo|doas|pkexec)\s|\bsu\s+(?:-c|-|root)\b")
 _HEREDOC = re.compile(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
 # Credentials that show up in commands but not in the Insights secret list.
 _COMMAND_SECRETS = [
@@ -131,25 +134,35 @@ def _split_top_level(command: str) -> list[tuple[str, str]]:
     return [(s, t.strip()) for s, t in parts if t.strip()]
 
 
-def strip_heredocs(command: str) -> str:
+def strip_heredocs(command: str, keep_shell: bool = False) -> str:
     """Drop heredoc bodies, keeping the line that opens them.
 
     ``python3 - <<'PY'`` is followed by a script, not shell: parsing it as
     statements invents programs, and scanning it for risky commands flags
-    strings inside the script.
+    strings inside the script. With ``keep_shell``, bodies fed to a shell
+    (``bash -s <<EOF``, ``ssh host <<EOF``) are kept: they are commands.
     """
     out: list[str] = []
     end: str | None = None
+    keep = False
     for line in command.split("\n"):
         if end is not None:
             if line.strip() == end:
                 end = None
+            elif keep:
+                out.append(line)
             continue
         out.append(line)
         match = _HEREDOC.search(line)
         if match:
             end = match.group(1)
+            keep = keep_shell and bool(_SHELL_FED.search(line[: match.start()]))
     return "\n".join(out)
+
+
+def is_elevated(command: str) -> bool:
+    """Runs something as root (locally, or on another machine via ssh)."""
+    return bool(_ELEVATED.search(strip_heredocs(command, keep_shell=True)))
 
 
 def _tokens(text: str) -> list[str]:
@@ -261,7 +274,7 @@ def mask_secrets(text: str) -> str:
 def risk_of(command: str) -> dict[str, str] | None:
     """The most severe risky-command rule the command matches (same rules as Insights)."""
     best: dict[str, str] | None = None
-    shell_only = strip_heredocs(command)
+    shell_only = strip_heredocs(command, keep_shell=True)
     for pattern, severity, label in RISKY_COMMAND_PATTERNS:
         if pattern.search(shell_only):
             if best is None or (severity == "critical" and best["severity"] != "critical"):
@@ -378,6 +391,12 @@ def _parse_row(row: dict[str, Any], category: str) -> dict[str, Any]:
             "risk": None,
         }
     parsed = parse_command(command)
+    elevated = is_elevated(command)
+    risk = risk_of(command)
+    if elevated and risk is None:
+        # The Insights sudo rule needs whitespace before it; `ssh h 'sudo …'` and
+        # doas/su still run as root and belong under the same flag.
+        risk = {"severity": "warn", "label": "privilege escalation"}
     no_match = bool(error) and error.get("exit_code") == 1 and parsed.program in _EXIT_1_IS_ANSWER
     return {
         **base,
@@ -386,7 +405,8 @@ def _parse_row(row: dict[str, Any], category: str) -> dict[str, Any]:
         "verb": parsed.verb,
         "core": mask_secrets(parsed.core),
         "tool": None,
-        "risk": risk_of(command),
+        "risk": risk,
+        "elevated": elevated,
         # A search that found nothing: recorded as an error by the agent, but not a failure.
         "no_match": no_match,
     }
@@ -418,7 +438,7 @@ def summarize(category: str, days: int, project: str | None = None, source: str 
         key = it[group_key]
         g = groups.get(key)
         if g is None:
-            g = groups[key] = {"key": key, "runs": 0, "failed": 0, "total_ms": 0, "last": _ref(it)}
+            g = groups[key] = {"key": key, "runs": 0, "failed": 0, "elevated": 0, "total_ms": 0, "last": _ref(it)}
             if category == "web":
                 g["local"] = it["local"]
                 g["kind"] = it["kind"]
@@ -426,6 +446,7 @@ def summarize(category: str, days: int, project: str | None = None, source: str 
                 g["tool"] = it["tool"]
         g["runs"] += 1
         g["failed"] += it["failed"]
+        g["elevated"] += bool(it.get("elevated"))
         g["total_ms"] += it["duration_ms"] or 0
         if category == "shell" and it["verb"]:
             verbs[key][it["verb"]] += 1
@@ -492,6 +513,7 @@ def summarize(category: str, days: int, project: str | None = None, source: str 
             "sessions": len({it["session_id"] for it in items}),
             "groups": len(groups),
             "risky": len(risky),
+            "elevated": sum(1 for it in items if it.get("elevated")),
         },
         "groups": top[:24],
         "failing": failing,

@@ -492,6 +492,8 @@ export interface ActivityGroup {
   key: string;
   runs: number;
   failed: number;
+  /** Runs made with sudo / doas / su (locally or over ssh). */
+  elevated: number;
   total_ms: number;
   last: ActivityRef;
   verbs?: { key: string; runs: number }[];
@@ -535,6 +537,7 @@ export interface ActivitySummary {
     sessions: number;
     groups: number;
     risky: number;
+    elevated: number;
     local?: number;
   };
   groups: ActivityGroup[];
@@ -569,6 +572,8 @@ export interface ActivityItem {
   /** Command from the statement that does the work (setup like `cd … &&` dropped). */
   core?: string;
   risk?: ActivityRisk | null;
+  /** Ran with sudo / doas / su. */
+  elevated?: boolean;
   /** Exit 1 from grep/rg/diff: the agent logged an error, but it means "no match". */
   no_match?: boolean;
   // web

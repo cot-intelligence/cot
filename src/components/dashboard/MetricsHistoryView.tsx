@@ -198,7 +198,7 @@ function Glance({
       <Stat
         label={shell ? 'Commands' : 'Requests'}
         value={s ? compact(s.runs) : none}
-        hint={s ? `in ${s.sessions} sessions` : undefined}
+        hint={s ? `in ${s.sessions} sessions${s.elevated ? `, ${s.elevated} as root` : ''}` : undefined}
       />
       <button type="button" onClick={onFailed} disabled={!s?.failed} className="bg-bg text-left disabled:cursor-default">
         <Stat
@@ -360,8 +360,13 @@ function MostUsed({
                     <span className="block h-full bg-fg/45" style={{ width: `${Math.max(3, (g.runs / max) * 100)}%` }} />
                   </span>
                   <span className="text-right font-mono text-xs tabular-nums text-fg/80">{compact(g.runs)}</span>
-                  <span className="text-right font-mono text-[0.62rem] tabular-nums text-vermilion/90">
-                    {g.failed > 0 ? `${g.failed} failed` : ''}
+                  <span className="flex flex-col items-end text-right font-mono text-[0.62rem] tabular-nums text-vermilion/90">
+                    {g.failed > 0 && <span>{g.failed} failed</span>}
+                    {g.elevated > 0 && (
+                      <span className="font-bold" title="Ran with sudo / doas / su">
+                        {g.elevated} as root
+                      </span>
+                    )}
                   </span>
                 </li>
               );
