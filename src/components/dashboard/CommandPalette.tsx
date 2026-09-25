@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { search, type SearchResult } from '../../lib/api';
+import { search, type SearchResult, type Store } from '../../lib/api';
 import { formatRelative, getCategoryMeta } from '../../lib/categoryMeta';
 import { formatModel } from '../../lib/modelMeta';
 import { highlight } from '../ui/Highlight';
@@ -21,12 +21,14 @@ export interface PaletteCommand {
 export interface PaletteScope {
   sessionId: string;
   label: string;
+  /** `replay` when the session is a Session Replay import. */
+  store?: Store;
 }
 
 interface CommandPaletteProps {
   open: boolean;
   onClose: () => void;
-  onSelect: (sessionId: string, eventId?: number) => void;
+  onSelect: (sessionId: string, eventId?: number, query?: string, store?: Store) => void;
   /** Navigation/actions relevant to the current location. */
   commands: PaletteCommand[];
   /** Current session scope, or null when not on a session. */
@@ -62,8 +64,10 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
   const activeScope = scoped && scope ? scope : null;
   const term = q.trim();
 
-  // Debounced search. Pull a few extra rows so client-side scoping still has
-  // enough within-session matches to show.
+  // Debounced search, narrowed server-side when scoped so older sessions aren't
+  // crowded out by newer matches elsewhere.
+  const scopeId = activeScope?.sessionId;
+  const scopeStore = activeScope?.store ?? 'main';
   useEffect(() => {
     if (!open) return;
     if (term.length < 2) {
@@ -75,7 +79,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
     let live = true;
     const t = window.setTimeout(async () => {
       try {
-        const r = await search(term, 60);
+        const r = await search(term, 60, scopeId, scopeStore);
         if (live) setResults(r);
       } catch {
         if (live) setResults([]);
@@ -87,7 +91,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
       live = false;
       window.clearTimeout(t);
     };
-  }, [term, open]);
+  }, [term, open, scopeId, scopeStore]);
 
   // Commands matching the query (all of them when the box is empty).
   const cmdMatches = useMemo(() => {
@@ -99,18 +103,12 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
     });
   }, [commands, term]);
 
-  const shownResults = useMemo(
-    () =>
-      activeScope ? results.filter((r) => r.session_id === activeScope.sessionId) : results,
-    [results, activeScope],
-  );
-
   const items = useMemo<PaletteItem[]>(
     () => [
       ...cmdMatches.map((command) => ({ kind: 'command' as const, command })),
-      ...shownResults.map((result) => ({ kind: 'result' as const, result })),
+      ...results.map((result) => ({ kind: 'result' as const, result })),
     ],
-    [cmdMatches, shownResults],
+    [cmdMatches, results],
   );
 
   // Keep the active index inside the current item list.
@@ -120,7 +118,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
 
   const choose = (item: PaletteItem) => {
     if (item.kind === 'command') item.command.run();
-    else onSelect(item.result.session_id, item.result.event_id);
+    else onSelect(item.result.session_id, item.result.event_id, term, scopeStore);
     onClose();
   };
 
@@ -150,7 +148,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
     el?.scrollIntoView({ block: 'nearest' });
   }, [active]);
 
-  const noResults = term.length >= 2 && !loading && !shownResults.length;
+  const noResults = term.length >= 2 && !loading && !results.length;
 
   if (!open) return null;
 
@@ -288,7 +286,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
                 : 'Type at least 2 characters to search across all sessions.'}
             </li>
           )}
-          {loading && !shownResults.length && (
+          {loading && !results.length && (
             <li className="px-4 py-6 text-center font-mono text-xs text-fg/40">Searching…</li>
           )}
         </ul>
@@ -297,8 +295,8 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
           <span>↑↓ navigate</span>
           <span>↵ open</span>
           {activeScope && <span>⌫ search all</span>}
-          {!!shownResults.length && (
-            <span className="ml-auto tabular-nums">{shownResults.length} results</span>
+          {!!results.length && (
+            <span className="ml-auto tabular-nums">{results.length} results</span>
           )}
         </div>
       </div>

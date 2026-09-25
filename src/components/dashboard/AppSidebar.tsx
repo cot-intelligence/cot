@@ -3,12 +3,13 @@ import { usePeek } from '../../lib/usePeek';
 import { usePolling } from '../../lib/usePolling';
 import { Icon, type IconName } from '../ui/icons';
 
-export type NavKey = 'sessions' | 'overview' | 'history' | 'settings';
+export type NavKey = 'sessions' | 'overview' | 'history' | 'replay' | 'settings';
 
 const NAV: { key: NavKey; label: string; href: string; icon: IconName }[] = [
   { key: 'sessions', label: 'Sessions', href: '#/sessions', icon: 'list' },
   { key: 'overview', label: 'Overview', href: '#/overview', icon: 'chart' },
   { key: 'history', label: 'Activity', href: '#/metrics-history', icon: 'terminal' },
+  { key: 'replay', label: 'Session Replay', href: '#/replay', icon: 'replay' },
 ];
 
 interface AppSidebarProps {
