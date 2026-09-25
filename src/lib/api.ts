@@ -46,6 +46,9 @@ export interface SessionSummary {
   };
   cost_usd: number;
   has_cost: boolean;
+  /** Session Replay copies only: the id the session had where it was exported. */
+  imported_from?: string;
+  imported_at?: string | null;
 }
 
 export interface TimelineItem {
@@ -66,6 +69,8 @@ export interface TimelineItem {
   attachments: Attachment[] | null;
   start_ts: string;
   end_ts: string | null;
+  /** Id of the end event merged into this span; search can return either half. */
+  end_id?: number | null;
   ongoing?: boolean;
   payload?: string | null;
   /** True when `detail` is a preview; fetch the full body via getEventDetail. */
@@ -228,6 +233,18 @@ export interface SessionFilters {
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error(`${res.url} -> ${res.status}`);
   return (await res.json()) as T;
+}
+
+/**
+ * Which DB a session lives in: traced sessions (`main`) or Session Replay
+ * imports (`replay`), which the collector keeps in a separate file.
+ */
+export type Store = 'main' | 'replay';
+
+/** Append `store=replay` when needed; main-store URLs are unchanged. */
+function inStore(url: string, store: Store = 'main'): string {
+  if (store === 'main') return url;
+  return `${url}${url.includes('?') ? '&' : '?'}store=${store}`;
 }
 
 export async function getStats(): Promise<Stats> {
@@ -450,6 +467,169 @@ export async function getMetricsHistory(
   return data.items;
 }
 
+// --- Activity (shell + web) ---
+
+export type ActivityCategory = 'shell' | 'web';
+
+export interface ActivityRef {
+  session_id: string;
+  event_id: number;
+  ts: string | null;
+}
+
+export interface ActivityError {
+  exit_code: number | null;
+  message: string | null;
+}
+
+export interface ActivityRisk {
+  severity: 'critical' | 'warn';
+  label: string;
+}
+
+export interface ActivityGroup {
+  /** Program (shell: `git`, `pytest`, `Grep`) or domain (web). */
+  key: string;
+  runs: number;
+  failed: number;
+  /** Runs made with sudo / doas / su (locally or over ssh). */
+  elevated: number;
+  total_ms: number;
+  last: ActivityRef;
+  verbs?: { key: string; runs: number }[];
+  /** Wrappers this program's runs went through (rtk, sudo, timeout, env…). */
+  via?: { key: string; runs: number }[];
+  /** Shell: set for Grep/Glob search tools rather than shell programs. */
+  tool?: string | null;
+  /** Web: localhost / file:// rather than the internet. */
+  local?: boolean;
+}
+
+export interface ActivityFailure {
+  command: string;
+  program?: string | null;
+  runs: number;
+  failed: number;
+  last_error: ActivityError | null;
+  last: ActivityRef | null;
+}
+
+/** One entry in "Worth a look": an anomaly, a repeated failure or a risky command. */
+export interface ActivityAttention {
+  kind: 'loop' | 'failure_spike' | 'failing' | 'risky' | 'first_seen' | 'slow';
+  severity: 'critical' | 'warn' | 'info';
+  title: string;
+  detail: string | null;
+  /** The command (or domain) it is about; null for grouped entries. */
+  subject: string | null;
+  program?: string | null;
+  /** Grouped "first time" entries list every name. */
+  names?: string[];
+  ref: ActivityRef;
+}
+
+export interface ActivitySummary {
+  category: ActivityCategory;
+  days: number;
+  summary: {
+    runs: number;
+    failed: number;
+    fail_rate: number;
+    total_ms: number;
+    sessions: number;
+    groups: number;
+    risky: number;
+    elevated: number;
+    local?: number;
+  };
+  groups: ActivityGroup[];
+  /** Commands that failed at least twice in the window. */
+  failing: ActivityFailure[];
+  /** One-off failures, most recent first. */
+  recent_failures: ActivityFailure[];
+  slowest: (ActivityRef & { command: string; duration_ms: number; failed: boolean })[];
+  risky: (ActivityRef & { command: string; risk: ActivityRisk })[];
+  projects: { cwd: string; runs: number }[];
+  sources: { source: string; runs: number }[];
+  searches?: { query: string; runs: number }[];
+  /** Wrapper counts for the window; `env` covers FOO=1 and env FOO=1. */
+  via: { key: string; runs: number }[];
+  /** Ranked: anomalies against the history before the window, repeated failures, risky commands. */
+  attention: ActivityAttention[];
+}
+
+export interface ActivityItem {
+  event_id: number;
+  session_id: string;
+  ts: string | null;
+  source: string;
+  cwd: string | null;
+  duration_ms: number | null;
+  failed: boolean;
+  error: ActivityError | null;
+  /** Full command or URL, credentials masked. */
+  target: string;
+  tool: string | null;
+  // shell
+  program?: string;
+  verb?: string | null;
+  /** Command from the statement that does the work (setup like `cd … &&` dropped). */
+  core?: string;
+  risk?: ActivityRisk | null;
+  /** Ran with sudo / doas / su. */
+  elevated?: boolean;
+  /** Wrappers anywhere in the chain: rtk, rtk proxy, sudo, timeout, nohup, env… */
+  via?: string[];
+  /** Names (never values) of variables set inline. */
+  env_names?: string[];
+  /** Exit 1 from grep/rg/diff: the agent logged an error, but it means "no match". */
+  no_match?: boolean;
+  // web
+  key?: string;
+  kind?: 'fetch' | 'search';
+  local?: boolean;
+}
+
+export interface ActivityFilters {
+  days: number;
+  project?: string;
+  source?: string;
+}
+
+function activityParams(category: ActivityCategory, f: ActivityFilters): URLSearchParams {
+  const params = new URLSearchParams({ category, days: String(f.days) });
+  if (f.project) params.set('project', f.project);
+  if (f.source) params.set('source', f.source);
+  return params;
+}
+
+export async function getActivity(category: ActivityCategory, f: ActivityFilters): Promise<ActivitySummary> {
+  return json<ActivitySummary>(await fetch(`/v1/activity?${activityParams(category, f)}`));
+}
+
+export async function getActivityLog(
+  category: ActivityCategory,
+  f: ActivityFilters & {
+    q?: string;
+    group?: string;
+    failed?: boolean;
+    risky?: boolean;
+    via?: string;
+    offset?: number;
+    limit?: number;
+  },
+): Promise<{ total: number; items: ActivityItem[] }> {
+  const params = activityParams(category, f);
+  if (f.q) params.set('q', f.q);
+  if (f.group) params.set('group', f.group);
+  if (f.failed) params.set('failed', 'true');
+  if (f.risky) params.set('risky', 'true');
+  if (f.via) params.set('via', f.via);
+  if (f.offset) params.set('offset', String(f.offset));
+  if (f.limit) params.set('limit', String(f.limit));
+  return json(await fetch(`/v1/activity/log?${params}`));
+}
+
 export type InsightPillar = 'usability' | 'cost' | 'security';
 export type InsightSeverity = 'info' | 'warn' | 'critical';
 export type InsightStatus = 'active' | 'resolved' | 'dismissed';
@@ -501,9 +681,12 @@ export async function getInsights(
   return json<InsightsResponse>(await fetch(`/v1/insights?${params.toString()}`));
 }
 
-export async function getSessionInsights(sessionId: string): Promise<InsightsResponse> {
+export async function getSessionInsights(
+  sessionId: string,
+  store: Store = 'main',
+): Promise<InsightsResponse> {
   return json<InsightsResponse>(
-    await fetch(`/v1/sessions/${encodeURIComponent(sessionId)}/insights`),
+    await fetch(inStore(`/v1/sessions/${encodeURIComponent(sessionId)}/insights`, store)),
   );
 }
 
@@ -656,8 +839,8 @@ export async function getSessions(filters: SessionFilters = {}): Promise<Session
   return data.sessions;
 }
 
-export async function getSessionDetail(id: string): Promise<SessionDetail> {
-  return json<SessionDetail>(await fetch(`/v1/sessions/${id}`));
+export async function getSessionDetail(id: string, store: Store = 'main'): Promise<SessionDetail> {
+  return json<SessionDetail>(await fetch(inStore(`/v1/sessions/${id}`, store)));
 }
 
 export interface EventDetail {
@@ -668,8 +851,12 @@ export interface EventDetail {
 
 /** Full detail body for one event, fetched on demand when its list entry was
  * truncated (keeps the session list payload small). */
-export async function getEventDetail(sessionId: string, eventId: number): Promise<EventDetail> {
-  return json<EventDetail>(await fetch(`/v1/sessions/${sessionId}/events/${eventId}`));
+export async function getEventDetail(
+  sessionId: string,
+  eventId: number,
+  store: Store = 'main',
+): Promise<EventDetail> {
+  return json<EventDetail>(await fetch(inStore(`/v1/sessions/${sessionId}/events/${eventId}`, store)));
 }
 
 export async function setSessionArchived(id: string, archived: boolean): Promise<void> {
@@ -680,6 +867,44 @@ export async function setSessionArchived(id: string, archived: boolean): Promise
 export async function setSessionBookmarked(id: string, bookmarked: boolean): Promise<void> {
   const action = bookmarked ? 'bookmark' : 'unbookmark';
   await json(await fetch(`/v1/sessions/${id}/${action}`, { method: 'POST' }));
+}
+
+/** Downloads the whole session (untrimmed events, raw hook rows) as JSON. */
+export function sessionExportUrl(id: string, store: Store = 'main'): string {
+  return inStore(`/v1/sessions/${encodeURIComponent(id)}/export`, store);
+}
+
+/** Imported sessions, newest import first (one row per imported file). */
+export async function getReplaySessions(): Promise<SessionSummary[]> {
+  const data = await json<{ sessions: SessionSummary[] }>(
+    await fetch(inStore('/v1/sessions?limit=500', 'replay')),
+  );
+  return data.sessions.sort((a, b) => (b.imported_at ?? '').localeCompare(a.imported_at ?? ''));
+}
+
+export interface ReplayImportResult {
+  session_id: string;
+  sessions: number;
+  events: number;
+}
+
+/** Import a session export file into Session Replay. Rejects with the collector's reason. */
+export async function importReplaySession(file: File): Promise<ReplayImportResult> {
+  const res = await fetch('/v1/replay/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: file,
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(body?.detail || `Import failed (${res.status})`);
+  }
+  return (await res.json()) as ReplayImportResult;
+}
+
+/** Delete an imported session, with every session its file brought along. */
+export async function deleteReplaySession(id: string): Promise<void> {
+  await json(await fetch(inStore(`/v1/sessions/${encodeURIComponent(id)}`, 'replay'), { method: 'DELETE' }));
 }
 
 export interface SearchResult {
@@ -695,10 +920,16 @@ export interface SearchResult {
   snippet: string;
 }
 
-export async function search(q: string, limit = 40): Promise<SearchResult[]> {
+export async function search(
+  q: string,
+  limit = 40,
+  sessionId?: string,
+  store: Store = 'main',
+): Promise<SearchResult[]> {
   const params = new URLSearchParams({ q, limit: String(limit) });
+  if (sessionId) params.set('session_id', sessionId);
   const data = await json<{ results: SearchResult[] }>(
-    await fetch(`/v1/search?${params.toString()}`),
+    await fetch(inStore(`/v1/search?${params.toString()}`, store)),
   );
   return data.results;
 }
