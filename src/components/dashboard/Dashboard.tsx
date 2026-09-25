@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { getSettings, updateSettings } from '../../lib/api';
+import { getSettings, updateSettings, type Store } from '../../lib/api';
 import { setDocumentTitle } from '../../lib/documentTitle';
+import { sessionHref } from '../../lib/sessionStore';
 import { usePeek } from '../../lib/usePeek';
 import { readNavCollapsed, readSidebarOpen, writeNavCollapsed, writeSidebarOpen } from '../../lib/settings';
 import { ThemeToggle } from '../ui/ThemeToggle';
@@ -8,6 +9,7 @@ import { MetricsSkeleton } from '../ui/Skeleton';
 import { AppSidebar, type NavKey } from './AppSidebar';
 import { CommandPalette, type PaletteCommand, type PaletteScope } from './CommandPalette';
 import { DashboardHome } from './DashboardHome';
+import { ReplayView } from './ReplayView';
 import { SessionDetailView } from './SessionDetailView';
 import { SessionList } from './SessionList';
 import { SettingsView } from './SettingsView';
@@ -26,9 +28,11 @@ interface DashboardProps {
 
 type DashboardRoute =
   | { view: 'list' }
-  | { view: 'session'; sessionId: string; focusEventId?: number }
+  | { view: 'session'; sessionId: string; focusEventId?: number; focusQuery?: string }
   | { view: 'overview' }
   | { view: 'metrics-history'; tab?: MetricsHistoryTab }
+  | { view: 'replay' }
+  | { view: 'replay-session'; sessionId: string; focusEventId?: number; focusQuery?: string }
   | { view: 'settings' };
 
 type MetricsHistoryTab = 'shell' | 'web';
@@ -40,13 +44,17 @@ function parseHash(): DashboardRoute {
   if (historyMatch) return { view: 'metrics-history', tab: historyMatch[1] as MetricsHistoryTab | undefined };
   // Legacy #/metrics and #/insights merged into the unified Overview page.
   if (hash === 'overview' || hash === 'metrics' || hash === 'insights') return { view: 'overview' };
-  // #/session/<id> optionally followed by ?e=<eventId> to focus one event.
-  const match = hash.match(/^session\/([^?]+)(?:\?e=(\d+))?$/);
-  if (match?.[1]) {
+  if (hash === 'replay') return { view: 'replay' };
+  // #/session/<id> optionally followed by ?e=<eventId>[&q=<search>] to focus
+  // one event and highlight the search that found it.
+  // #/replay/<id> is the same page for a Session Replay import.
+  const match = hash.match(/^(session|replay)\/([^?]+)(?:\?e=(\d+)(?:&q=([^&]*))?)?$/);
+  if (match?.[2]) {
     return {
-      view: 'session',
-      sessionId: decodeURIComponent(match[1]),
-      focusEventId: match[2] ? Number(match[2]) : undefined,
+      view: match[1] === 'replay' ? 'replay-session' : 'session',
+      sessionId: decodeURIComponent(match[2]),
+      focusEventId: match[3] ? Number(match[3]) : undefined,
+      focusQuery: match[4] ? decodeURIComponent(match[4]) : undefined,
     };
   }
   return { view: 'list' };
@@ -137,13 +145,16 @@ export function Dashboard({ onSetup }: DashboardProps) {
     if (route.view === 'list') setDocumentTitle('Sessions');
     else if (route.view === 'settings') setDocumentTitle('Settings');
     else if (route.view === 'overview') setDocumentTitle('Overview');
-    else if (route.view === 'metrics-history') setDocumentTitle('Activity History');
+    else if (route.view === 'metrics-history') setDocumentTitle('Activity');
+    else if (route.view === 'replay') setDocumentTitle('Session Replay');
   }, [route.view]);
 
-  const selectSession = useCallback((id: string, eventId?: number) => {
-    setRoute({ view: 'session', sessionId: id, focusEventId: eventId });
-    const base = `#/session/${encodeURIComponent(id)}`;
-    window.location.hash = eventId != null ? `${base}?e=${eventId}` : base;
+  const selectSession = useCallback((id: string, eventId?: number, query?: string, store: Store = 'main') => {
+    const view = store === 'replay' ? 'replay-session' : 'session';
+    setRoute({ view, sessionId: id, focusEventId: eventId, focusQuery: query });
+    const base = sessionHref(id, store);
+    const q = query ? `&q=${encodeURIComponent(query)}` : '';
+    window.location.hash = eventId != null ? `${base}?e=${eventId}${q}` : base;
   }, []);
 
   const goSessions = useCallback(() => {
@@ -166,11 +177,18 @@ export function Dashboard({ onSetup }: DashboardProps) {
     window.location.hash = tab === 'web' ? '#/metrics-history?tab=web' : '#/metrics-history';
   }, []);
 
+  const goReplay = useCallback(() => {
+    setRoute({ view: 'replay' });
+    window.location.hash = '#/replay';
+  }, []);
+
   const selectedId = route.view === 'session' ? route.sessionId : null;
+  const replayId = route.view === 'replay-session' ? route.sessionId : null;
   const onSettings = route.view === 'settings';
   const onOverview = route.view === 'overview';
   const onMetricsHistory = route.view === 'metrics-history';
-  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory;
+  const onReplay = route.view === 'replay' || replayId !== null;
+  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay;
 
   // Navigation entries shown in the palette, marked active for the current view.
   const paletteCommands = useMemo<PaletteCommand[]>(
@@ -193,11 +211,19 @@ export function Dashboard({ onSetup }: DashboardProps) {
       },
       {
         id: 'nav-metrics-history',
-        label: 'Activity History',
+        label: 'Go to Activity',
         icon: 'terminal',
         keywords: 'shell commands urls web history bash activity',
         active: onMetricsHistory,
         run: goMetricsHistory,
+      },
+      {
+        id: 'nav-replay',
+        label: 'Go to Session Replay',
+        icon: 'replay',
+        keywords: 'replay import imported json upload export',
+        active: onReplay,
+        run: goReplay,
       },
       {
         id: 'nav-settings',
@@ -208,7 +234,19 @@ export function Dashboard({ onSetup }: DashboardProps) {
         run: goSettings,
       },
     ],
-    [selectedId, onList, onOverview, onMetricsHistory, onSettings, goSessions, goOverview, goMetricsHistory, goSettings],
+    [
+      selectedId,
+      onList,
+      onOverview,
+      onMetricsHistory,
+      onReplay,
+      onSettings,
+      goSessions,
+      goOverview,
+      goMetricsHistory,
+      goReplay,
+      goSettings,
+    ],
   );
 
   // On a session, ⌘K opens scoped to it (clearable to search everything).
@@ -216,8 +254,10 @@ export function Dashboard({ onSetup }: DashboardProps) {
     () =>
       selectedId
         ? { sessionId: selectedId, label: shortSession(selectedId) }
-        : null,
-    [selectedId],
+        : replayId
+          ? { sessionId: replayId, label: shortSession(replayId), store: 'replay' }
+          : null,
+    [selectedId, replayId],
   );
 
   const activeNav: NavKey = onSettings
@@ -226,12 +266,18 @@ export function Dashboard({ onSetup }: DashboardProps) {
       ? 'overview'
       : onMetricsHistory
         ? 'history'
-        : 'sessions';
+        : onReplay
+          ? 'replay'
+          : 'sessions';
 
   const crumbs: { label: string; href?: string }[] = selectedId
     ? [{ label: 'Sessions', href: '#/sessions' }, { label: shortSession(selectedId) }]
-    : onMetricsHistory
-      ? [{ label: 'Overview', href: '#/overview' }, { label: 'Activity history' }]
+    : replayId
+      ? [{ label: 'Session Replay', href: '#/replay' }, { label: shortSession(replayId) }]
+      : route.view === 'replay'
+        ? [{ label: 'Session Replay' }]
+        : onMetricsHistory
+      ? [{ label: 'Overview', href: '#/overview' }, { label: 'Activity' }]
       : [{ label: onSettings ? 'Settings' : onOverview ? 'Overview' : 'Sessions' }];
 
   return (
@@ -285,6 +331,19 @@ export function Dashboard({ onSetup }: DashboardProps) {
                 />
               </Suspense>
             </main>
+          ) : route.view === 'replay' ? (
+            <main className="flex min-w-0 flex-1 flex-col">
+              <ReplayView />
+            </main>
+          ) : replayId ? (
+            <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+              <SessionDetailView
+                sessionId={replayId}
+                store="replay"
+                focusEventId={route.view === 'replay-session' ? route.focusEventId : undefined}
+                focusQuery={route.view === 'replay-session' ? route.focusQuery : undefined}
+              />
+            </main>
           ) : onOverview ? (
             <main className="flex min-w-0 flex-1 flex-col">
               <Suspense fallback={<MetricsSkeleton />}>
@@ -316,6 +375,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
                 <SessionDetailView
                   sessionId={selectedId}
                   focusEventId={route.view === 'session' ? route.focusEventId : undefined}
+                  focusQuery={route.view === 'session' ? route.focusQuery : undefined}
                 />
               </main>
             </>

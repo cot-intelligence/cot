@@ -63,4 +63,12 @@ describe('buildActivityMap', () => {
     expect(groups[0].overflow?.label).toBe('+2 more');
     expect(groups[0].overflow?.items).toHaveLength(2);
   });
+
+  it('keeps the rolled-up leaves so the overflow can be expanded', () => {
+    const groups = buildActivityMap(
+      ['a', 'b', 'c', 'd', 'e', 'f'].map((f) => ev({ category: 'file_read', target: `/r/${f}.ts` })),
+    );
+    expect(groups[0].hidden.map((l) => l.label)).toEqual(['e.ts', 'f.ts']);
+    expect(groups[0].hidden.every((l) => l.items.length === 1)).toBe(true);
+  });
 });

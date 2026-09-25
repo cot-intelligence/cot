@@ -8,6 +8,7 @@ import sqlite3
 import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -25,11 +26,36 @@ _EVENT_INSERT_SQL = (
 )
 
 
-def path() -> Path:
+# The DB file this request (or thread) reads and writes. Unset means the main
+# store; Session Replay points it at replay.db so imported sessions never mix
+# with traced ones.
+_path_override: ContextVar[Path | None] = ContextVar("cot_store_path", default=None)
+
+
+def main_path() -> Path:
     configured = os.environ.get("COT_DB_PATH")
     if configured:
         return Path(configured)
     return Path.home() / ".cot" / "cot.db"
+
+
+def replay_path() -> Path:
+    """Imported sessions (Session Replay) live beside the main DB, in their own file."""
+    return main_path().with_name("replay.db")
+
+
+def path() -> Path:
+    return _path_override.get() or main_path()
+
+
+@contextmanager
+def use(db_file: Path) -> Iterator[None]:
+    """Point every read/write in this context at ``db_file``."""
+    token = _path_override.set(db_file)
+    try:
+        yield
+    finally:
+        _path_override.reset(token)
 
 
 def _connect() -> sqlite3.Connection:

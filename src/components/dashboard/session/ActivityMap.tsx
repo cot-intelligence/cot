@@ -42,10 +42,21 @@ interface Placed {
   leaves: { leaf: ActivityLeaf; cy: number }[];
 }
 
-function layout(groups: ActivityGroup[]): { placed: Placed[]; height: number } {
+const MORE = ':__more';
+const LESS = ':__less';
+
+/** The leaves a group shows: its top ones plus "+N more", or, expanded, all of
+ *  them plus a node to collapse again. */
+function visibleLeaves(group: ActivityGroup, expanded: Set<ActivityKind>): ActivityLeaf[] {
+  if (!group.overflow) return group.leaves;
+  if (!expanded.has(group.id)) return [...group.leaves, group.overflow];
+  return [...group.leaves, ...group.hidden, { id: `${group.id}${LESS}`, label: 'Show less', items: [], errors: 0 }];
+}
+
+function layout(groups: ActivityGroup[], expanded: Set<ActivityKind>): { placed: Placed[]; height: number } {
   let y = TOP;
   const placed = groups.map((group) => {
-    const leaves = group.overflow ? [...group.leaves, group.overflow] : group.leaves;
+    const leaves = visibleLeaves(group, expanded);
     const h = Math.max(leaves.length, 1) * ROW;
     const p: Placed = {
       group,
@@ -65,18 +76,19 @@ function strokeWidth(count: number, max: number): number {
 
 export function ActivityMap({ items, sessionId, activeKey, onJump }: ActivityMapProps) {
   const groups = useMemo(() => buildActivityMap(items), [items]);
-  const { placed, height } = useMemo(() => layout(groups), [groups]);
+  const [expanded, setExpanded] = useState<Set<ActivityKind>>(new Set());
+  const { placed, height } = useMemo(() => layout(groups, expanded), [groups, expanded]);
   // Per-node step position: repeated clicks walk through that node's events.
   const [cursor, setCursor] = useState<{ id: string; index: number } | null>(null);
 
   const maxGroup = Math.max(1, ...groups.map((g) => g.items.length));
-  const maxLeaf = Math.max(1, ...groups.flatMap((g) => g.leaves.map((l) => l.items.length)));
+  const maxLeaf = Math.max(1, ...groups.flatMap((g) => [...g.leaves, ...g.hidden].map((l) => l.items.length)));
 
   const activeNodes = useMemo(() => {
     const ids = new Set<string>();
     if (!activeKey) return ids;
     for (const g of groups) {
-      for (const leaf of g.overflow ? [...g.leaves, g.overflow] : g.leaves) {
+      for (const leaf of visibleLeaves(g, expanded)) {
         if (leaf.items.some((it) => eventKey(it, sessionId) === activeKey)) {
           ids.add(g.id);
           ids.add(leaf.id);
@@ -84,7 +96,15 @@ export function ActivityMap({ items, sessionId, activeKey, onJump }: ActivityMap
       }
     }
     return ids;
-  }, [groups, activeKey, sessionId]);
+  }, [groups, expanded, activeKey, sessionId]);
+
+  const toggleGroup = (id: ActivityKind, open: boolean) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (open) next.add(id);
+      else next.delete(id);
+      return next;
+    });
 
   const step = (id: string, list: TimelineItem[]) => {
     if (!list.length) return;
@@ -182,15 +202,25 @@ export function ActivityMap({ items, sessionId, activeKey, onJump }: ActivityMap
 
               {leaves.map(({ leaf, cy: ly }) => {
                 const leafPos = position(leaf.id, leaf.items.length);
-                const isMore = leaf.id.endsWith(':__more');
+                const isMore = leaf.id.endsWith(MORE);
+                const isLess = leaf.id.endsWith(LESS);
                 return (
                   <button
                     key={leaf.id}
                     type="button"
-                    onClick={() => step(leaf.id, leaf.items)}
-                    title={`${leaf.label}: ${leaf.items.length} event${leaf.items.length === 1 ? '' : 's'}${
-                      leaf.errors ? `, ${leaf.errors} failed` : ''
-                    }`}
+                    onClick={() =>
+                      isMore || isLess ? toggleGroup(group.id, isMore) : step(leaf.id, leaf.items)
+                    }
+                    aria-expanded={isMore ? false : isLess ? true : undefined}
+                    title={
+                      isMore
+                        ? `Show ${group.hidden.length} more`
+                        : isLess
+                          ? 'Show fewer'
+                          : `${leaf.label}: ${leaf.items.length} event${leaf.items.length === 1 ? '' : 's'}${
+                              leaf.errors ? `, ${leaf.errors} failed` : ''
+                            }`
+                    }
                     className={`focus-ring absolute flex items-center gap-1.5 rounded-[3px] px-1.5 text-left transition-colors hover:bg-fg/[0.06] ${
                       activeNodes.has(leaf.id) ? 'bg-vermilion/10 ring-1 ring-inset ring-vermilion/40' : ''
                     }`}
@@ -198,7 +228,7 @@ export function ActivityMap({ items, sessionId, activeKey, onJump }: ActivityMap
                   >
                     <span
                       className={`min-w-0 truncate font-mono text-[0.62rem] ${
-                        isMore ? 'italic text-fg/40' : 'text-fg/80'
+                        isMore || isLess ? 'italic text-fg/40' : 'text-fg/80'
                       }`}
                     >
                       {leaf.label}
@@ -208,9 +238,11 @@ export function ActivityMap({ items, sessionId, activeKey, onJump }: ActivityMap
                         {leaf.errors}✕
                       </span>
                     )}
-                    <span className="ml-auto shrink-0 font-mono text-[0.55rem] tabular-nums text-fg/35">
-                      {leafPos ?? `×${leaf.items.length}`}
-                    </span>
+                    {!isLess && (
+                      <span className="ml-auto shrink-0 font-mono text-[0.55rem] tabular-nums text-fg/35">
+                        {leafPos ?? `×${leaf.items.length}`}
+                      </span>
+                    )}
                   </button>
                 );
               })}

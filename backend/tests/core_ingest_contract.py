@@ -272,6 +272,11 @@ def normalize_projection(projection: dict[str, Any]) -> dict[str, Any]:
             for key in ("answer_event_id", "answers_event_id"):
                 if key in item:
                     item[key] = event_ref(item[key])
+    # After every row id, so a span's end event doesn't shift the labels above.
+    for collection_name in ("events", "timeline"):
+        for item in normalized.get(collection_name, []):
+            if "end_id" in item:
+                item["end_id"] = event_ref(item["end_id"])
 
     for clarification in normalized.get("clarifications", []):
         for key in ("question_event_id", "answer_event_id"):

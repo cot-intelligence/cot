@@ -31,7 +31,9 @@ export interface ActivityGroup {
   items: TimelineItem[];
   errors: number;
   leaves: ActivityLeaf[];
-  /** Everything past the top leaves, rolled into one "+N more" node. */
+  /** The leaves past the top ones, shown when the group is expanded. */
+  hidden: ActivityLeaf[];
+  /** The hidden leaves rolled into one "+N more" node. */
   overflow: ActivityLeaf | null;
 }
 
@@ -172,6 +174,7 @@ export function buildActivityMap(items: TimelineItem[]): ActivityGroup[] {
       items: groupItems,
       errors: groupItems.filter(isError).length,
       leaves: top,
+      hidden: rest,
       overflow: rest.length
         ? {
             id: `${kind}:__more`,
