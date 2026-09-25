@@ -208,7 +208,8 @@ def db_size_bytes() -> int:
 
 def _dedup_key(raw: dict[str, Any]) -> str:
     return hashlib.sha1(
-        json.dumps(raw, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+        json.dumps(raw, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8"),
+        usedforsecurity=False,
     ).hexdigest()
 
 
@@ -1750,7 +1751,9 @@ def get_install_id() -> str:
 
 
 def _raw_hash(raw_text: str) -> str:
-    return hashlib.sha1(raw_text.encode("utf-8", errors="replace")).hexdigest()
+    return hashlib.sha1(
+        raw_text.encode("utf-8", errors="replace"), usedforsecurity=False
+    ).hexdigest()
 
 
 def _raw_payload_text(raw: Any) -> tuple[str, int]:
@@ -1933,7 +1936,8 @@ def record_ingest(source: str, raw: dict[str, Any]) -> dict[str, Any]:
             "raw_status": "failed",
             "session_id": _session_id_guess(source, raw),
             "event_id": None,
-            "error": str(exc),
+            # Details stay in raw_ingest.projection_error; don't echo them back.
+            "error": "projection failed",
         }
 
     raw_status = "projected" if inserted else "duplicate"
