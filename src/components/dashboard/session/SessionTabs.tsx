@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import type { SessionDetail } from '../../../lib/api';
 import { sessionRuns } from '../../../lib/sessionView';
-import { AnalysisPanel } from '../analysis/AnalysisPanel';
+import { SessionAnalysisTab } from '../analysis/SessionAnalysisTab';
 import { InsightsTab } from './tabs/InsightsTab';
 import { TimelineTab } from './tabs/TimelineTab';
 
@@ -51,7 +51,7 @@ export function SessionTabs({ detail, activeTab, onTabChange, focusEventId, focu
           <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-6 py-6 sm:px-8">
             <div className="mx-auto max-w-7xl">
               {activeTab === 'analysis' ? (
-                <AnalysisPanel sessionEvents={detail.summary.event_count} />
+                <SessionAnalysisTab eventCount={detail.summary.event_count} />
               ) : (
                 <InsightsTab detail={detail} />
               )}

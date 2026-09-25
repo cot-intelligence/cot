@@ -1,30 +1,29 @@
-import { lensFor, runFor } from '../../lib/analysisPreview';
+import { runFor } from '../../lib/analysisPreview';
 import { FadeIn } from '../ui/FadeIn';
-import { PageHeader } from '../ui/PageHeader';
-import { AnalysisPanel } from './analysis/AnalysisPanel';
+import { AcrossView } from './analysis/AcrossView';
+import { AnalysisHome } from './analysis/AnalysisHome';
+import { RunView } from './analysis/RunView';
 
 /**
- * Standalone Analysis page. A design preview: the feature is not built yet, so
- * everything shown is sample data. `runId` opens a past run from the sidebar.
+ * Analysis page (design preview; the feature is not built yet). `#/analysis`
+ * is home: start a run, then the library of saved runs beneath it.
+ * `#/analysis/across` is the cross-session report, `#/analysis/<runId>` a saved run.
  */
 export function AnalysisView({ runId }: { runId?: string }) {
   const run = runFor(runId);
+  const activeId = runId === 'across' ? 'across' : run?.id;
 
   return (
     <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-6 py-8 sm:px-8">
-      <FadeIn className="mx-auto max-w-7xl space-y-8">
-        <PageHeader
-          eyebrow="Agentic analysis"
-          title={run ? lensFor(run.lensKey).name : 'Analysis'}
-          description={
-            run
-              ? `Session ${run.sessionShortId} · ${run.when}`
-              : 'Have an LLM read a session through a lens you choose, and point at the moments behind every finding.'
-          }
-          actions={<span className="chip text-vermilion ring-vermilion/50">Coming soon</span>}
-        />
-        {/* Keyed so opening another run resets the lens picker to that run's lens. */}
-        <AnalysisPanel key={runId ?? 'new'} runId={runId} pickSession />
+      <FadeIn key={activeId ?? 'home'} className="mx-auto max-w-6xl">
+        {activeId && (
+          <a
+            href="#/analysis"
+            className="mb-5 inline-block font-mono text-[0.6rem] font-bold uppercase tracking-widest text-fg/45 hover:text-fg">
+            ← All analyses
+          </a>
+        )}
+        {activeId === 'across' ? <AcrossView /> : run ? <RunView run={run} /> : <AnalysisHome />}
       </FadeIn>
     </div>
   );

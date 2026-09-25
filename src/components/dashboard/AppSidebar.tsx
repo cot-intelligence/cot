@@ -1,5 +1,4 @@
 import { getHealth, type Health } from '../../lib/api';
-import { lensFor, SAMPLE_RUNS } from '../../lib/analysisPreview';
 import { usePeek } from '../../lib/usePeek';
 import { usePolling } from '../../lib/usePolling';
 import { Icon, type IconName } from '../ui/icons';
@@ -16,8 +15,6 @@ const NAV: { key: NavKey; label: string; href: string; icon: IconName }[] = [
 
 interface AppSidebarProps {
   active: NavKey;
-  /** Past analysis run open on the Analysis page, if any. */
-  activeRunId?: string;
   collapsed: boolean;
   onToggleCollapsed: () => void;
   onSearch: () => void;
@@ -28,13 +25,7 @@ interface AppSidebarProps {
  * it is an icon rail, with each entry's label kept as a tooltip. Hovering the
  * collapsed rail peeks the full panel over the content without reflowing it.
  */
-export function AppSidebar({
-  active,
-  activeRunId,
-  collapsed: pinnedCollapsed,
-  onToggleCollapsed,
-  onSearch,
-}: AppSidebarProps) {
+export function AppSidebar({ active, collapsed: pinnedCollapsed, onToggleCollapsed, onSearch }: AppSidebarProps) {
   const { peek, handlers } = usePeek(pinnedCollapsed);
   const collapsed = pinnedCollapsed && !peek;
 
@@ -78,11 +69,9 @@ export function AppSidebar({
               label={item.label}
               href={item.href}
               icon={item.icon}
-              current={active === item.key && !(item.key === 'analysis' && activeRunId)}
+              current={active === item.key}
             />
           ))}
-
-          {!collapsed && <AnalysisRuns activeRunId={active === 'analysis' ? activeRunId : undefined} />}
 
           <div className="mt-auto flex flex-col gap-1">
             <NavLink label="Settings" href="#/settings" icon="settings" current={active === 'settings'} />
@@ -131,41 +120,6 @@ function NavLink({
       <Icon name={icon} className={`h-4 w-4 shrink-0 ${current ? 'text-vermilion' : ''}`} />
       <span className="rail-label">{label}</span>
     </a>
-  );
-}
-
-/**
- * Past analysis runs, so any run can be reopened from anywhere. Hidden on the
- * icon rail. Sample data until the Analysis feature is built.
- */
-function AnalysisRuns({ activeRunId }: { activeRunId?: string }) {
-  return (
-    <div className="mt-4 hidden flex-col gap-0.5 md:flex">
-      <p className="rail-label eyebrow flex items-center gap-2 px-3 pb-1">
-        Analyses
-        <span className="chip text-vermilion ring-vermilion/50">Soon</span>
-      </p>
-      {SAMPLE_RUNS.map((run) => {
-        const lens = lensFor(run.lensKey);
-        const current = run.id === activeRunId;
-        return (
-          <a
-            key={run.id}
-            href={`#/analysis/${run.id}`}
-            title={`${lens.name} · ${run.sessionTitle}`}
-            aria-current={current ? 'page' : undefined}
-            className={`rail-label focus-ring relative block shrink-0 rounded-[5px] py-1.5 pl-10 pr-3 transition-colors ${
-              current ? 'bg-fg/[0.07] text-fg' : 'text-fg/55 hover:bg-fg/[0.04] hover:text-fg'
-            }`}>
-            {current && <span className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-vermilion" aria-hidden="true" />}
-            <span className="block truncate font-mono text-[0.65rem] font-bold">{lens.name}</span>
-            <span className="block truncate font-mono text-[0.58rem] text-fg/40">
-              {run.sessionShortId} · {run.when}
-            </span>
-          </a>
-        );
-      })}
-    </div>
   );
 }
 

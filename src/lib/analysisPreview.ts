@@ -130,21 +130,27 @@ export const LENSES: AnalysisLens[] = [
   },
 ];
 
+export type RunGroup = 'Today' | 'Yesterday' | 'Earlier this week' | 'Last week';
+
 export interface SampleRun {
   id: string;
   lensKey: string;
   sessionShortId: string;
   sessionTitle: string;
+  group: RunGroup;
   when: string;
+  /** Free-text question, for runs made with the custom lens. */
+  customQuestion?: string;
 }
 
-/** Past runs shown in the sidebar and on the Analysis page. */
+/** Past runs listed in the Analysis library. */
 export const SAMPLE_RUNS: SampleRun[] = [
   {
     id: 'run-1',
     lensKey: 'coach',
     sessionShortId: '9028f3d9',
     sessionTitle: 'i want to improve the search functionality what can i do?',
+    group: 'Today',
     when: '2h ago',
   },
   {
@@ -152,23 +158,53 @@ export const SAMPLE_RUNS: SampleRun[] = [
     lensKey: 'debugger',
     sessionShortId: '8b1f3b2c',
     sessionTitle: 'fix the flaky import test in the collector',
-    when: 'Yesterday',
+    group: 'Today',
+    when: '5h ago',
   },
   {
     id: 'run-3',
     lensKey: 'cost',
     sessionShortId: 'a15774e0',
     sessionTitle: 'is this a good idea to have different color themes?',
-    when: 'Yesterday',
+    group: 'Yesterday',
+    when: '18:40',
   },
   {
     id: 'run-4',
     lensKey: 'security',
     sessionShortId: '7eb89210',
     sessionTitle: 'why am i not getting this data in cot?',
-    when: '3 days ago',
+    group: 'Yesterday',
+    when: '11:05',
+  },
+  {
+    id: 'run-5',
+    lensKey: 'manager',
+    sessionShortId: '3c9e0d41',
+    sessionTitle: 'ship the v1.9.0 release notes and tag',
+    group: 'Earlier this week',
+    when: 'Tue',
+  },
+  {
+    id: 'run-6',
+    lensKey: 'coach',
+    sessionShortId: 'f02a7b66',
+    sessionTitle: 'add session replay import from exported json',
+    group: 'Earlier this week',
+    when: 'Mon',
+    customQuestion: 'Did the agent follow our testing conventions?',
+  },
+  {
+    id: 'run-7',
+    lensKey: 'debugger',
+    sessionShortId: '51d8c3aa',
+    sessionTitle: 'tauri app does not start the collector on boot',
+    group: 'Last week',
+    when: 'Sep 17',
   },
 ];
+
+export const RUN_GROUPS: RunGroup[] = ['Today', 'Yesterday', 'Earlier this week', 'Last week'];
 
 export function lensFor(key: string): AnalysisLens {
   return LENSES.find((l) => l.key === key) ?? LENSES[0];
@@ -177,3 +213,117 @@ export function lensFor(key: string): AnalysisLens {
 export function runFor(id: string | undefined): SampleRun | undefined {
   return SAMPLE_RUNS.find((r) => r.id === id);
 }
+
+export function severityCounts(findings: AnalysisFinding[]): Record<FindingSeverity, number> {
+  const counts = { critical: 0, warn: 0, info: 0 };
+  for (const f of findings) counts[f.severity] += 1;
+  return counts;
+}
+
+// --- Across all sessions ---
+
+export type ImprovementArea = 'Prompting' | 'Agent behaviour' | 'Cost' | 'Security';
+
+export interface Improvement {
+  title: string;
+  area: ImprovementArea;
+  impact: 'High' | 'Medium' | 'Low';
+  /** Sessions the pattern showed up in, out of the report's `sessions`. */
+  seenIn: number;
+  trend: 'rising' | 'falling' | 'steady';
+  detail: string;
+  fix: string;
+  /** Short ids of example sessions; real results link to each one. */
+  examples: string[];
+}
+
+export interface AcrossReport {
+  sessions: number;
+  projects: number;
+  lastRun: string;
+  stats: [label: string, value: string][];
+  improvements: Improvement[];
+  strengths: string[];
+}
+
+export const ACROSS_REPORT: AcrossReport = {
+  sessions: 48,
+  projects: 3,
+  lastRun: '2 days ago',
+  stats: [
+    ['Sessions read', '48'],
+    ['Patterns found', '6'],
+    ['Rework turns', '14%'],
+    ['Avoidable spend', '~$38 / mo'],
+  ],
+  improvements: [
+    {
+      title: 'Constraints are stated late, then repeated',
+      area: 'Prompting',
+      impact: 'High',
+      seenIn: 17,
+      trend: 'rising',
+      detail:
+        'Rules like "keep the API backwards compatible" or "no new dependencies" usually arrive after the agent has already broken them, and get repeated 2 to 3 times per session.',
+      fix: 'Move the five most repeated rules into CLAUDE.md / AGENTS.md. They cover 80% of the repeats.',
+      examples: ['9028f3d9', 'a15774e0', '3c9e0d41'],
+    },
+    {
+      title: 'Test failures retried without reading the error',
+      area: 'Agent behaviour',
+      impact: 'High',
+      seenIn: 11,
+      trend: 'steady',
+      detail:
+        'The agent reruns the same failing test command 3 or more times before opening the failing file. It happens most with pytest import errors.',
+      fix: 'Add a project rule: "after a failing test, read the traceback and the failing file before rerunning".',
+      examples: ['8b1f3b2c', '51d8c3aa'],
+    },
+    {
+      title: 'Large unchanged files re-read many times',
+      area: 'Cost',
+      impact: 'Medium',
+      seenIn: 22,
+      trend: 'falling',
+      detail:
+        'Files over 1,500 lines are read on average 6 times per session with no edits in between. This is the single biggest source of input tokens.',
+      fix: 'Split api.ts and SettingsView.tsx. Ask for a plan that names the exact functions to touch.',
+      examples: ['a15774e0', '9028f3d9', 'f02a7b66'],
+    },
+    {
+      title: 'Env files read into context',
+      area: 'Security',
+      impact: 'High',
+      seenIn: 4,
+      trend: 'steady',
+      detail: '.env and config.json files with tokens were opened in 4 sessions, so their values reached the model provider.',
+      fix: 'Add a deny rule for **/.env* and ~/.cot/config.json in your agent permissions.',
+      examples: ['7eb89210', '51d8c3aa'],
+    },
+    {
+      title: 'Vague follow-ups cause detours',
+      area: 'Prompting',
+      impact: 'Medium',
+      seenIn: 9,
+      trend: 'falling',
+      detail: '"Make it better" and "fix it" style follow-ups lead to edits outside the area you meant, about 10 minutes each.',
+      fix: 'Name the target and the success check, e.g. "cut the p95 of /search below 200ms".',
+      examples: ['9028f3d9', 'f02a7b66'],
+    },
+    {
+      title: 'Model switched mid-session',
+      area: 'Cost',
+      impact: 'Low',
+      seenIn: 6,
+      trend: 'steady',
+      detail: 'Each switch drops the prompt cache and re-bills the full context.',
+      fix: 'Pick the model at the start; open a new session to change it.',
+      examples: ['3c9e0d41'],
+    },
+  ],
+  strengths: [
+    'Plans before large changes in 70% of sessions, and those sessions need half as many rework turns.',
+    'Tests are added alongside fixes in most release work.',
+    'Sessions stay focused: 85% cover a single task.',
+  ],
+};

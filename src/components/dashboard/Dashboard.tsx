@@ -305,7 +305,9 @@ export function Dashboard({ onSetup }: DashboardProps) {
         : onAnalysis
           ? analysisRun
             ? [{ label: 'Analysis', href: '#/analysis' }, { label: lensFor(analysisRun.lensKey).name }]
-            : [{ label: 'Analysis' }]
+            : route.runId === 'across'
+              ? [{ label: 'Analysis', href: '#/analysis' }, { label: 'Across all sessions' }]
+              : [{ label: 'Analysis' }]
         : onMetricsHistory
       ? [{ label: 'Overview', href: '#/overview' }, { label: 'Activity history' }]
       : [{ label: onSettings ? 'Settings' : onOverview ? 'Overview' : 'Sessions' }];
@@ -314,7 +316,6 @@ export function Dashboard({ onSetup }: DashboardProps) {
     <div className="relative flex h-screen">
       <AppSidebar
         active={activeNav}
-        activeRunId={route.view === 'analysis' ? route.runId : undefined}
         collapsed={navCollapsed}
         onToggleCollapsed={toggleNav}
         onSearch={() => setPaletteOpen(true)}
