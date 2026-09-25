@@ -1,5 +1,6 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { prettyJson } from '../../lib/json';
 
 interface MarkdownContentProps {
   content: string;
@@ -155,11 +156,16 @@ function MarkdownSegment({ content }: { content: string }) {
           </pre>
         ),
         code: ({ className: codeClass, children, ...props }) => {
-          const isBlock = Boolean(codeClass?.includes('language-'));
+          // Fenced blocks end in a newline; inline code never does.
+          const text = typeof children === 'string' ? children : null;
+          const isBlock = Boolean(codeClass?.includes('language-')) || Boolean(text?.endsWith('\n'));
           if (isBlock) {
+            // JSON (tagged json, or untagged) is re-indented when it parses.
+            const beautify = !codeClass || codeClass.includes('language-json');
+            const json = beautify && text ? prettyJson(text) : null;
             return (
               <code className={`${codeClass ?? ''} text-fg/90`} {...props}>
-                {children}
+                {json ?? children}
               </code>
             );
           }

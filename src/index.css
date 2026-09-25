@@ -81,6 +81,23 @@
     -webkit-backdrop-filter: blur(16px);
     border: 1px solid rgb(var(--line) / 0.1);
   }
+  /* Session timeline: the user's messages are cobalt bubbles, the agent's
+     replies plain raised cards. */
+  .bubble-user {
+    background: linear-gradient(135deg, rgb(43 92 230 / 0.2), rgb(43 92 230 / 0.07));
+    box-shadow:
+      inset 0 0 0 1px rgb(43 92 230 / 0.3),
+      0 8px 24px -18px rgb(43 92 230 / 0.45);
+  }
+  .card-agent {
+    @apply bg-surface;
+    box-shadow:
+      inset 0 0 0 1px rgb(var(--line) / 0.09),
+      0 16px 40px -28px rgb(var(--shadow) / 0.7);
+  }
+  .fade-bottom {
+    mask-image: linear-gradient(to bottom, black 45%, transparent);
+  }
   /* Tinted ring chip, as used for event kinds in the site trace viewer. */
   .chip {
     @apply inline-flex items-center gap-1 rounded-[3px] px-1.5 py-0.5 font-mono text-[0.58rem] font-bold uppercase tracking-[0.12em] ring-1 ring-inset;
@@ -205,5 +222,26 @@
   }
   .cot-prose em {
     @apply italic;
+  }
+}
+
+/* Jumping to a search result: the target card pulses once (searchHighlight.ts). */
+[data-search-target] {
+  border-radius: 0.5rem;
+  animation: search-target 2.4s ease-out;
+}
+@keyframes search-target {
+  0%,
+  40% {
+    box-shadow: 0 0 0 2px rgb(255 69 0 / 0.65);
+  }
+  100% {
+    box-shadow: 0 0 0 2px rgb(255 69 0 / 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-search-target] {
+    animation: none;
+    box-shadow: 0 0 0 2px rgb(255 69 0 / 0.5);
   }
 }

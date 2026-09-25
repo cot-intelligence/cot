@@ -10,6 +10,7 @@ TARGET="${BIN_DIR}/cot"
 COT_VERSION="${COT_VERSION:-}"
 REPAIR_MODE=0
 REPAIR_SELECTION=""
+PYTHON_BIN=""
 
 resolve_version() {
   [ -n "${COT_VERSION}" ] && return 0
@@ -80,6 +81,52 @@ details() {
   printf '%s\n' "${body}" | while IFS= read -r line; do
     printf '    %s\n' "${line}" >&2
   done
+}
+
+python_works() {
+  python_candidate="$1"
+  [ -n "${python_candidate}" ] || return 1
+  case "${python_candidate}" in
+    *[![:graph:]]*) return 1 ;;
+  esac
+  [ -x "${python_candidate}" ] || return 1
+  "${python_candidate}" \
+    -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' \
+    >/dev/null 2>&1
+}
+
+resolve_python() {
+  if python_works "${COT_PYTHON:-}"; then
+    PYTHON_BIN="${COT_PYTHON}"
+    return 0
+  fi
+
+  original_ifs="${IFS}"
+  IFS=:
+  for python_dir in ${PATH}; do
+    # The pinned interpreter becomes the bridge's shebang and hooks run from
+    # other directories, so skip relative (and empty, i.e. ".") PATH entries.
+    case "${python_dir}" in
+      /*) ;;
+      *) continue ;;
+    esac
+    python_candidate="${python_dir}/python3"
+    if python_works "${python_candidate}"; then
+      PYTHON_BIN="${python_candidate}"
+      break
+    fi
+  done
+  IFS="${original_ifs}"
+  [ -n "${PYTHON_BIN}" ] && return 0
+
+  for python_candidate in \
+    /opt/homebrew/bin/python3 /usr/bin/python3 /usr/local/bin/python3; do
+    if python_works "${python_candidate}"; then
+      PYTHON_BIN="${python_candidate}"
+      return 0
+    fi
+  done
+  return 1
 }
 
 ACTIVE_PID=""
@@ -170,6 +217,12 @@ summary_table
 
 # 1. Download the bridge.
 section "Bridge"
+if ! resolve_python; then
+  fail "Python 3.9 or newer is required, but no working interpreter was found."
+  printf '%s\n' "  Install Python 3, or set COT_PYTHON to its absolute path." >&2
+  exit 1
+fi
+step "Using ${PYTHON_BIN}"
 # Docker's bind-mount (docker-compose.yml) may have created ~/.cot as root
 # before the user runs this script. Reclaim ownership so mkdir/writes succeed.
 if [ -d "${COT_HOME}" ] && [ ! -w "${COT_HOME}" ]; then
@@ -188,6 +241,17 @@ fi
 if ! run_spinner "Downloading bridge from ${COT_ENDPOINT}" curl -fsSL "${COT_ENDPOINT}/cot" -o "${TARGET}"; then
   fail "Could not download cot bridge."
   details "Error found" "${RUN_OUTPUT}"
+  exit 1
+fi
+PATCHED_TARGET="${TARGET}.install.$$"
+if ! { printf '#!%s\n' "${PYTHON_BIN}"; sed '1d' "${TARGET}"; } > "${PATCHED_TARGET}"; then
+  rm -f "${PATCHED_TARGET}"
+  fail "Could not configure the bridge Python interpreter."
+  exit 1
+fi
+if ! mv "${PATCHED_TARGET}" "${TARGET}"; then
+  rm -f "${PATCHED_TARGET}"
+  fail "Could not install the configured bridge."
   exit 1
 fi
 if ! run_spinner "Making bridge executable" chmod +x "${TARGET}"; then

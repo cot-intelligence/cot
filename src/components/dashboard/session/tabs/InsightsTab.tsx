@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { getSessionInsights, type ActionableInsight, type SessionDetail } from '../../../../lib/api';
 import { formatDuration, getCategoryMeta, toTimestampString } from '../../../../lib/categoryMeta';
+import { sessionHref, useSessionStore } from '../../../../lib/sessionStore';
 import { compact } from '../../../../lib/format';
 import { formatModel } from '../../../../lib/modelMeta';
 import { buildInsights } from '../../../../lib/sessionInsights';
@@ -60,8 +61,9 @@ function FindingRow({ finding, sessionId }: { finding: ActionableInsight; sessio
       : finding.severity === 'warn'
         ? 'border-vermilion/60 text-vermilion'
         : 'border-cobalt/60 text-cobalt';
+  const store = useSessionStore();
   const focusEvent = (eventId: number | null) => {
-    const base = `#/session/${encodeURIComponent(sessionId)}`;
+    const base = sessionHref(sessionId, store);
     window.location.hash = eventId != null ? `${base}?e=${eventId}` : base;
   };
   return (
@@ -113,9 +115,10 @@ export function InsightsTab({ detail }: InsightsTabProps) {
 
   // One-shot fetch: the tab mounts lazily, so this doesn't touch the hot
   // session-detail polling path.
+  const store = useSessionStore();
   useEffect(() => {
     let active = true;
-    getSessionInsights(detail.summary.id)
+    getSessionInsights(detail.summary.id, store)
       .then((r) => {
         if (active) setFindings(r.insights);
       })
@@ -125,7 +128,7 @@ export function InsightsTab({ detail }: InsightsTabProps) {
     return () => {
       active = false;
     };
-  }, [detail.summary.id]);
+  }, [detail.summary.id, store]);
   const c = s.category_counts ?? {};
   const events = parentTimelineItems(detail);
   const cat = (k: string) => c[k] ?? 0;

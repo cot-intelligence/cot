@@ -43,7 +43,7 @@ def _ev(sid, *, source="claude", hook, tool=None, phase, category, target, title
         secs=0.0, status="ok"):
     ts = (_NOW + timedelta(seconds=secs)).isoformat()
     with store.write() as conn:
-        store.insert_event(
+        return store.insert_event(
             conn,
             session_id=sid,
             source=source,
@@ -115,3 +115,45 @@ def test_cursor_matched_stop_still_merges_normally():
     subs = _subs(sid)
     assert len(subs) == 1
     assert subs[0]["duration_ms"] >= 29_000
+
+
+def test_paired_span_records_its_end_event_id():
+    # Search can hit either half of a tool call; the timeline shows one item
+    # under the start id, so it must also carry the end id to be findable.
+    sid = _fresh()
+    start = _ev(sid, hook="PreToolUse", tool="Bash", phase="start", category="shell",
+                target="ls", title="Shell command", secs=0)
+    end = _ev(sid, hook="PostToolUse", tool="Bash", phase="end", category="shell",
+              target="ls", title="Shell command", secs=1)
+    (item,) = [it for it in db.timeline(sid) if it["category"] == "shell"]
+    assert item["id"] == start
+    assert item["end_id"] == end
+
+
+def test_retargeted_span_records_its_end_event_id():
+    # A hook rewrote the command between pre and post, so the halves pair by tool.
+    sid = _fresh()
+    _ev(sid, hook="PreToolUse", tool="Bash", phase="start", category="shell",
+        target="ls", title="Shell command", secs=0)
+    end = _ev(sid, hook="PostToolUse", tool="Bash", phase="end", category="shell",
+              target="rtk ls", title="Shell command", secs=1)
+    (item,) = [it for it in db.timeline(sid) if it["category"] == "shell"]
+    assert item["end_id"] == end
+
+
+def test_lazy_detail_of_a_retargeted_call_includes_its_output():
+    # A PreToolUse hook (e.g. rtk) rewrote the command, so start and end targets
+    # differ. The timeline pairs them by tool; the lazy detail must too, or the
+    # session page shows the command without its output.
+    sid = _fresh()
+    with store.write() as conn:
+        common = dict(session_id=sid, source="claude", tool="Bash", category="shell",
+                      title="Shell command", created_at=timeutil.now())
+        start = store.insert_event(conn, **common, hook="PreToolUse", phase="start",
+                                   ts=_NOW.isoformat(), target="ls",
+                                   detail='{"command": "ls"}')
+        store.insert_event(conn, **common, hook="PostToolUse", phase="end",
+                           ts=(_NOW + timedelta(seconds=1)).isoformat(), target="rtk ls",
+                           detail='{"command": "rtk ls", "response": "README.md"}')
+    detail = db.get_event_detail(sid, start)["detail"]
+    assert "README.md" in detail
