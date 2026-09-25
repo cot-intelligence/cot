@@ -145,7 +145,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
     if (route.view === 'list') setDocumentTitle('Sessions');
     else if (route.view === 'settings') setDocumentTitle('Settings');
     else if (route.view === 'overview') setDocumentTitle('Overview');
-    else if (route.view === 'metrics-history') setDocumentTitle('Activity History');
+    else if (route.view === 'metrics-history') setDocumentTitle('Activity');
     else if (route.view === 'replay') setDocumentTitle('Session Replay');
   }, [route.view]);
 
@@ -211,7 +211,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
       },
       {
         id: 'nav-metrics-history',
-        label: 'Activity History',
+        label: 'Go to Activity',
         icon: 'terminal',
         keywords: 'shell commands urls web history bash activity',
         active: onMetricsHistory,
@@ -277,7 +277,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
       : route.view === 'replay'
         ? [{ label: 'Session Replay' }]
         : onMetricsHistory
-      ? [{ label: 'Overview', href: '#/overview' }, { label: 'Activity history' }]
+      ? [{ label: 'Overview', href: '#/overview' }, { label: 'Activity' }]
       : [{ label: onSettings ? 'Settings' : onOverview ? 'Overview' : 'Sessions' }];
 
   return (
