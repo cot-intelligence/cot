@@ -9,6 +9,7 @@ interface SessionTabsProps {
   activeTab: string;
   onTabChange: (key: string) => void;
   focusEventId?: number;
+  focusQuery?: string;
 }
 
 const TABS = [
@@ -16,7 +17,7 @@ const TABS = [
   { key: 'insights', label: 'Insights' },
 ];
 
-export function SessionTabs({ detail, activeTab, onTabChange, focusEventId }: SessionTabsProps) {
+export function SessionTabs({ detail, activeTab, onTabChange, focusEventId, focusQuery }: SessionTabsProps) {
   const runs = useMemo(() => sessionRuns(detail), [detail]);
 
   const tabs = (
@@ -54,6 +55,7 @@ export function SessionTabs({ detail, activeTab, onTabChange, focusEventId }: Se
           items={detail.events}
           runs={runs}
           focusEventId={focusEventId}
+          focusQuery={focusQuery}
           sessionId={detail.summary.id}
           tabs={tabs}
         />

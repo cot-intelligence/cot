@@ -1,11 +1,13 @@
-export function highlight(text: string, q: string): (string | JSX.Element)[] {
+import type { ReactElement } from 'react';
+
+export function highlight(text: string, q: string): (string | ReactElement)[] {
   const terms = q.trim().split(/\s+/).filter(Boolean);
   if (!terms.length) return [text];
   const escaped = terms
     .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
     .sort((a, b) => b.length - a.length);
   const re = new RegExp(`(${escaped.join('|')})`, 'gi');
-  const out: (string | JSX.Element)[] = [];
+  const out: (string | ReactElement)[] = [];
   let last = 0;
   let key = 0;
   let m: RegExpExecArray | null;

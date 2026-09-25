@@ -11,6 +11,8 @@ import json
 import re
 import sqlite3
 import string
+import threading
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -323,6 +325,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # so the child's work embeds under the parent instead of orphaning.
         ("parent_session_id", "TEXT"),
         ("subagent_label", "TEXT"),
+        # Session Replay copies: the id the session had where it was exported.
+        ("imported_from", "TEXT"),
+        ("imported_at", "TEXT"),
+        # Every session from one imported file points at that file's root
+        # session, so Session Replay lists (and deletes) one row per import.
+        ("import_root_id", "TEXT"),
     ):
         _add_column_if_missing(conn, "sessions", name, col_def, session_cols)
     if "parent_session_id" in session_cols:
@@ -1120,12 +1128,69 @@ _MIGRATIONS_VERSION = "9"
 _RAW_PAYLOAD_MAX_BYTES = 64 * 1024
 
 
-def init_db() -> None:
+# Full-text index over what search matches. External content keeps one copy of
+# the text (in events); triggers keep the index in step with every write. The
+# triggers use only built-ins, so an older collector sharing the DB file still
+# writes through them.
+_SEARCH_INDEX_SQL = (
+    "CREATE VIRTUAL TABLE events_fts USING fts5("
+    " title, target, detail, content='events', content_rowid='id',"
+    " tokenize='unicode61 remove_diacritics 2')",
+    "CREATE TRIGGER IF NOT EXISTS events_fts_insert AFTER INSERT ON events BEGIN"
+    " INSERT INTO events_fts(rowid, title, target, detail)"
+    " VALUES (new.id, new.title, new.target, new.detail); END",
+    "CREATE TRIGGER IF NOT EXISTS events_fts_delete AFTER DELETE ON events BEGIN"
+    " INSERT INTO events_fts(events_fts, rowid, title, target, detail)"
+    " VALUES ('delete', old.id, old.title, old.target, old.detail); END",
+    "CREATE TRIGGER IF NOT EXISTS events_fts_update"
+    " AFTER UPDATE OF title, target, detail ON events BEGIN"
+    " INSERT INTO events_fts(events_fts, rowid, title, target, detail)"
+    " VALUES ('delete', old.id, old.title, old.target, old.detail);"
+    " INSERT INTO events_fts(rowid, title, target, detail)"
+    " VALUES (new.id, new.title, new.target, new.detail); END",
+)
+
+
+def _ensure_search_index(conn: sqlite3.Connection) -> None:
+    """Create the search index on first run and fill it from existing events.
+
+    SQLite builds without FTS5 skip it; search then falls back to a LIKE scan.
+    """
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events_fts'"
+    ).fetchone()
+    if exists:
+        return
+    # Triggers left behind without their table would fail every event write.
+    for trigger in ("events_fts_insert", "events_fts_delete", "events_fts_update"):
+        conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+    try:
+        conn.execute(_SEARCH_INDEX_SQL[0])
+    except sqlite3.OperationalError:
+        return
+    for statement in _SEARCH_INDEX_SQL[1:]:
+        conn.execute(statement)
+    conn.execute("INSERT INTO events_fts(events_fts) VALUES ('rebuild')")
+
+
+def ensure_search_index() -> None:
+    """Build the search index if it doesn't exist yet, in one transaction:
+    readers see either no index (search scans) or the complete one."""
+    with store.write() as conn:
+        _ensure_search_index(conn)
+
+
+def init_db(build_search_index: bool = True) -> None:
+    """``build_search_index=False`` leaves a first-time index build to
+    :func:`ensure_search_index`; the server runs that after it starts, because
+    on a large DB the build outlasts the desktop app's startup timeout."""
     with store.write() as conn:
         for statement in SCHEMA.split(";"):
             if statement.strip():
                 conn.execute(statement)
         _migrate(conn)
+        if build_search_index:
+            _ensure_search_index(conn)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source)"
         )
@@ -2212,6 +2277,17 @@ def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any
         "tokens": _tokens_dict(tok),
         "cost_usd": round(cost_usd, 6),
         "has_cost": has_cost,
+        **_import_fields(row),
+    }
+
+
+def _import_fields(row: sqlite3.Row) -> dict[str, Any]:
+    """Provenance of a Session Replay copy; nothing for a traced session."""
+    if "imported_from" not in row.keys() or not row["imported_from"]:
+        return {}
+    return {
+        "imported_from": row["imported_from"],
+        "imported_at": timeutil.format_ts(row["imported_at"]),
     }
 
 
@@ -2278,6 +2354,7 @@ def _batched_session_summaries(
                 "tokens": _tokens_from_parts(row["i"], row["o"], row["cr"], row["cw"]),
                 "cost_usd": round(cost_usd, 6),
                 "has_cost": has_cost,
+                **_import_fields(row),
             }
         )
     return summaries
@@ -2606,6 +2683,67 @@ def metrics_history(category: str, limit: int = 200) -> list[dict[str, Any]]:
     ]
 
 
+def activity_rows(
+    category: str,
+    since: str | None,
+    project: str | None = None,
+    source: str | None = None,
+) -> list[dict[str, Any]]:
+    """Every finished shell command or web request in a window, newest first.
+
+    Unlike :func:`metrics_history` this has no row cap: the Activity page
+    aggregates over the whole window. Error text is pulled from the payload
+    only for failed rows, so the large payload column is read rarely.
+    """
+    if category not in ("shell", "web"):
+        return []
+    clauses = [
+        "e.category = ?",
+        "e.target IS NOT NULL AND e.target != ''",
+        "e.phase IN ('end', 'instant')",
+    ]
+    params: list[Any] = [category]
+    if since:
+        clauses.append("e.ts >= ?")
+        params.append(since)
+    if project:
+        clauses.append("s.cwd = ?")
+        params.append(project)
+    if source:
+        clauses.append("e.source = ?")
+        params.append(source)
+    with store.read() as conn:
+        rows = conn.execute(
+            "SELECT e.id, e.session_id, e.target, e.title, e.ts, e.source, e.duration_ms, e.status, s.cwd,"
+            " CASE WHEN e.status = 'error' AND json_valid(e.payload)"
+            # Claude reports `error`, Cursor `error_message`.
+            " THEN COALESCE(json_extract(e.payload, '$.error'), json_extract(e.payload, '$.error_message'))"
+            " END AS error,"
+            # target is clipped at 120 chars; the full shell command is in detail.
+            " CASE WHEN e.category = 'shell' AND e.target LIKE '%…' AND json_valid(e.detail)"
+            " THEN json_extract(e.detail, '$.command') END AS full_command"
+            " FROM events e LEFT JOIN sessions s ON s.id = e.session_id"
+            f" WHERE {' AND '.join(clauses)}"
+            " ORDER BY e.ts DESC",
+            params,
+        ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "session_id": r["session_id"],
+            "target": r["full_command"] if isinstance(r["full_command"], str) else r["target"],
+            "title": r["title"],
+            "ts": timeutil.format_ts(r["ts"]),
+            "source": r["source"],
+            "duration_ms": r["duration_ms"],
+            "status": r["status"],
+            "cwd": r["cwd"],
+            "error": r["error"],
+        }
+        for r in rows
+    ]
+
+
 def connections() -> list[dict[str, Any]]:
     """Per-source ingest activity — which agents are wired up and sending.
 
@@ -2731,6 +2869,7 @@ def export_sessions(
         rows = conn.execute(
             f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
             f" s.status, s.archived, s.bookmarked, s.created_at,"
+            f" s.imported_from, s.imported_at,"
             f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
             f" e.i, e.o, e.cr, e.cw,"
             f" (SELECT fp.detail FROM events fp"
@@ -2891,6 +3030,8 @@ def list_sessions(
         clauses.append("s.bookmarked = 1")
     # Subagent sessions embed under their parent, so they don't list standalone.
     clauses.append("s.parent_session_id IS NULL")
+    # Likewise every non-root session of a Session Replay import.
+    clauses.append("(s.import_root_id IS NULL OR s.import_root_id = s.id)")
     if source:
         clauses.append("s.source = ?")
         params.append(source)
@@ -2903,6 +3044,7 @@ def list_sessions(
         rows = conn.execute(
             f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
             f" s.status, s.archived, s.bookmarked, s.created_at,"
+            f" s.imported_from, s.imported_at,"
             f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
             f" e.i, e.o, e.cr, e.cw,"
             f" (SELECT fp.detail FROM events fp"
@@ -2971,20 +3113,52 @@ def _search_terms(query: str) -> list[str]:
     return terms
 
 
-def search(query: str, limit: int = 40) -> list[dict[str, Any]]:
-    """Full-text-ish search across event titles, targets and detail bodies.
+def _fts_query(terms: list[str]) -> str:
+    """Each term as a quoted prefix phrase, so FTS syntax typed by the user
+    (quotes, ``OR``, ``NEAR``, ``*``) is matched as plain text."""
+    return " ".join('"' + t.replace('"', '""') + '"*' for t in terms)
 
-    Covers everything captured: prompts/responses (conversation), file paths,
-    shell commands, MCP calls, etc. — each event's text is stored in detail.
 
-    Matching is token-based (every whitespace-separated word must appear), not a
-    single contiguous substring. This way formatting that sits between words in
-    the stored text — markdown like ``**bold**``, links, punctuation — does not
-    prevent a match against the plain text the user sees and types.
-    """
-    terms = _search_terms(query)
-    if not terms:
-        return []
+# A match this many days old counts half as much as an equal match from now.
+_SEARCH_RECENCY_HALF_DAYS = 14
+
+_SEARCH_COLUMNS = (
+    "SELECT e.id, e.session_id, e.category, e.title, e.target, e.detail,"
+    " e.ts, e.source, e.model, s.cwd AS cwd"
+    " FROM events e LEFT JOIN sessions s ON s.id = e.session_id"
+)
+
+
+def _search_indexed(
+    conn: sqlite3.Connection, terms: list[str], limit: int, session_id: str | None
+) -> list[sqlite3.Row] | None:
+    """Ranked matches from the full-text index; None when it can't answer."""
+    scope = " AND e.session_id = ?" if session_id else ""
+    params: list[Any] = [_fts_query(terms)]
+    if session_id:
+        params.append(session_id)
+    params.append(limit)
+    # bm25 is negative (lower is better); dividing by an age factor pulls older
+    # matches toward zero. Title and target hits outweigh ones deep in a body.
+    try:
+        return conn.execute(
+            f"{_SEARCH_COLUMNS} JOIN events_fts f ON f.rowid = e.id"
+            f" WHERE events_fts MATCH ?{scope}"
+            " ORDER BY bm25(events_fts, 3.0, 2.0, 1.0) / (1.0 + MAX(0.0,"
+            " julianday('now') - COALESCE(julianday(e.ts), julianday('now')))"
+            f" / {_SEARCH_RECENCY_HALF_DAYS}.0), e.ts DESC"
+            " LIMIT ?",
+            params,
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return None
+
+
+def _search_scan(
+    conn: sqlite3.Connection, terms: list[str], limit: int, session_id: str | None
+) -> list[sqlite3.Row]:
+    """Substring match over every row, newest first. Slow on a large DB, but it
+    also finds text inside words (``RangeInto`` in ``scrollRangeIntoView``)."""
     clauses: list[str] = []
     params: list[Any] = []
     for t in terms:
@@ -2994,16 +3168,38 @@ def search(query: str, limit: int = 40) -> list[dict[str, Any]]:
             " OR e.detail LIKE ? ESCAPE '\\')"
         )
         params.extend([like, like, like])
+    if session_id:
+        clauses.append("e.session_id = ?")
+        params.append(session_id)
     params.append(limit)
+    return conn.execute(
+        f"{_SEARCH_COLUMNS} WHERE {' AND '.join(clauses)} ORDER BY e.ts DESC LIMIT ?",
+        params,
+    ).fetchall()
+
+
+def search(
+    query: str, limit: int = 40, session_id: str | None = None
+) -> list[dict[str, Any]]:
+    """Search event titles, targets and detail bodies.
+
+    Covers everything captured: prompts/responses (conversation), file paths,
+    shell commands, MCP calls, etc. — each event's text is stored in detail.
+
+    Every whitespace-separated word must appear, matched as a word or the start
+    of one, ranked by relevance and recency. When that finds nothing, a slower
+    substring scan runs so text inside a word still turns up.
+
+    ``session_id`` narrows the search to one session in SQL, so the limit applies
+    within that session rather than to the newest matches across all sessions.
+    """
+    terms = _search_terms(query)
+    if not terms:
+        return []
     with store.read() as conn:
-        rows = conn.execute(
-            "SELECT e.id, e.session_id, e.category, e.title, e.target, e.detail,"
-            " e.ts, e.source, e.model, s.cwd AS cwd"
-            " FROM events e LEFT JOIN sessions s ON s.id = e.session_id"
-            f" WHERE {' AND '.join(clauses)}"
-            " ORDER BY e.ts DESC LIMIT ?",
-            params,
-        ).fetchall()
+        rows = _search_indexed(conn, terms, limit, session_id)
+        if not rows:
+            rows = _search_scan(conn, terms, limit, session_id)
     return [
         {
             "session_id": r["session_id"],
@@ -3204,6 +3400,214 @@ def get_session_detail(session_id: str) -> dict[str, Any] | None:
     from .session_read import build_session_detail
 
     return build_session_detail(session_id)
+
+
+EXPORT_FORMAT = "cot.session-export"
+EXPORT_FORMAT_VERSION = 2
+
+
+def export_session(session_id: str) -> dict[str, Any] | None:
+    """Everything stored for one session: the detail read model with bodies
+    untrimmed, every raw hook row (payload included), its insights, and the
+    same for each linked child session (subagents, approval reviews), so an
+    import can rebuild the whole family."""
+    from . import insights
+    from .session_read import build_session_detail
+
+    detail = build_session_detail(session_id, full_detail=True)
+    if detail is None:
+        return None
+    # Deprecated parent-only list whose bodies are blanked; `events` has them.
+    detail.pop("timeline", None)
+    with store.read() as conn:
+        session_row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        raw_events = _raw_events(conn, session_id)
+        linked = _linked_session_rows(conn, session_id)
+    return {
+        "format": EXPORT_FORMAT,
+        "format_version": EXPORT_FORMAT_VERSION,
+        "exported_at": timeutil.now(),
+        "cot_version": __version__,
+        "session": dict(session_row),
+        **detail,
+        "insights": insights.compute_insights(session_id=session_id),
+        "raw_events": raw_events,
+        "linked_sessions": linked,
+    }
+
+
+def _raw_events(conn: sqlite3.Connection, session_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT * FROM events WHERE session_id = ? ORDER BY ts ASC, id ASC",
+        (session_id,),
+    ).fetchall()
+    return [_raw_event(r) for r in rows]
+
+
+def _linked_session_rows(conn: sqlite3.Connection, session_id: str) -> list[dict[str, Any]]:
+    """Child sessions, recursively (a subagent can launch subagents)."""
+    out: list[dict[str, Any]] = []
+    seen = {session_id}
+    queue = [c["session_id"] for c in session_links(conn, session_id)["children"]]
+    while queue:
+        child_id = queue.pop(0)
+        if child_id in seen:
+            continue
+        seen.add(child_id)
+        row = conn.execute("SELECT * FROM sessions WHERE id = ?", (child_id,)).fetchone()
+        if row is None:
+            continue
+        out.append({"session": dict(row), "raw_events": _raw_events(conn, child_id)})
+        queue.extend(c["session_id"] for c in session_links(conn, child_id)["children"])
+    return out
+
+
+class ExportFileError(ValueError):
+    """An uploaded file that isn't a usable session export; the message says why."""
+
+
+def import_session_export(data: Any) -> dict[str, Any]:
+    """Store an exported session (and its linked children) as a new copy.
+
+    Rebuilt from the raw hook rows, so pairing, categories, insights and search
+    behave as for a traced session. Every session gets a fresh id, and the old
+    ids are rewritten wherever the rows mention them (an approval review names
+    its parent in its prompt), so links stay inside the copy. Meant to run
+    against the Session Replay store.
+    """
+    if not isinstance(data, dict) or data.get("format") != EXPORT_FORMAT:
+        raise ExportFileError(f'Not a cot session export (expected "format": "{EXPORT_FORMAT}").')
+    version = data.get("format_version")
+    if version not in (1, 2):
+        raise ExportFileError(
+            f"Unsupported export version {version!r}; this cot reads versions 1 and 2."
+        )
+    summary, raw = data.get("summary"), data.get("raw_events")
+    if not isinstance(summary, dict) or not summary.get("id") or not isinstance(raw, list):
+        raise ExportFileError("The export is missing its session summary or raw_events.")
+
+    root = data.get("session") if isinstance(data.get("session"), dict) else summary
+    family: list[tuple[dict[str, Any], list[Any]]] = [(root, raw)]
+    for linked in data.get("linked_sessions") or []:
+        if (
+            isinstance(linked, dict)
+            and isinstance(linked.get("session"), dict)
+            and linked["session"].get("id")
+            and isinstance(linked.get("raw_events"), list)
+        ):
+            family.append((linked["session"], linked["raw_events"]))
+
+    id_map = {str(row["id"]).lower(): str(uuid.uuid4()) for row, _ in family}
+    old_ids = re.compile("|".join(re.escape(k) for k in id_map), re.IGNORECASE)
+
+    def rewrite(value: Any) -> Any:
+        if value is None:
+            return None
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        return old_ids.sub(lambda m: id_map[m.group(0).lower()], text)
+
+    root_id = id_map[str(root["id"]).lower()]
+    now = timeutil.now()
+    events = 0
+    with store.write() as conn:
+        for row, rows in family:
+            old_id = str(row["id"])
+            source = row.get("source") or "unknown"
+            conn.execute(
+                "INSERT INTO sessions (id, source, cwd, started_at, ended_at, status,"
+                " created_at, parent_session_id, subagent_label,"
+                " imported_from, imported_at, import_root_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    id_map[old_id.lower()],
+                    source,
+                    row.get("cwd"),
+                    row.get("started_at") or now,
+                    row.get("ended_at"),
+                    row.get("status") or "completed",
+                    now,
+                    id_map.get(str(row.get("parent_session_id") or "").lower()),
+                    row.get("subagent_label"),
+                    old_id,
+                    now,
+                    root_id,
+                ),
+            )
+            for ev in rows:
+                if not isinstance(ev, dict):
+                    continue
+                store.insert_event(
+                    conn,
+                    session_id=id_map[old_id.lower()],
+                    source=ev.get("source") or source,
+                    hook=ev.get("hook") or "unknown",
+                    tool=ev.get("tool"),
+                    phase=ev.get("phase") or "instant",
+                    ts=ev.get("ts"),
+                    payload=rewrite(ev.get("payload")),
+                    category=ev.get("category"),
+                    title=rewrite(ev.get("title")),
+                    detail=rewrite(ev.get("detail")),
+                    target=rewrite(ev.get("target")),
+                    status=ev.get("status"),
+                    duration_ms=ev.get("duration_ms"),
+                    model=ev.get("model"),
+                    input_tokens=ev.get("input_tokens"),
+                    output_tokens=ev.get("output_tokens"),
+                    cache_read_tokens=ev.get("cache_read_tokens"),
+                    cache_write_tokens=ev.get("cache_write_tokens"),
+                    attachments=ev.get("attachments"),
+                    dedup_key=ev.get("dedup_key"),
+                    # Not "hook"/"import": transcript-import reconciliation keys
+                    # on those and must never touch a copied session.
+                    origin="file",
+                    created_at=now,
+                )
+                events += 1
+    return {"session_id": root_id, "sessions": len(family), "events": events}
+
+
+def delete_imported_session(session_id: str) -> bool:
+    """Delete a Session Replay import (the root and every session it brought).
+
+    Only import roots qualify; traced sessions are never deleted this way."""
+    with store.write() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sessions WHERE id = ? AND import_root_id = id", (session_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        conn.execute("DELETE FROM sessions WHERE import_root_id = ?", (session_id,))
+    return True
+
+
+_replay_ready: set[str] = set()
+_replay_lock = threading.Lock()
+
+
+def ensure_replay_store() -> None:
+    """Create or migrate the Session Replay DB once per process."""
+    replay = store.replay_path()
+    if str(replay) in _replay_ready:
+        return
+    with _replay_lock:
+        if str(replay) in _replay_ready:
+            return
+        with store.use(replay):
+            init_db()
+        _replay_ready.add(str(replay))
+
+
+def _raw_event(row: sqlite3.Row) -> dict[str, Any]:
+    out = dict(row)
+    out["ts"] = timeutil.format_ts(row["ts"])
+    for key in ("payload", "attachments"):
+        if out.get(key):
+            try:
+                out[key] = json.loads(out[key])
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return out
 
 
 def get_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:
