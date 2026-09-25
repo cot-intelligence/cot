@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { lensFor } from '../../../lib/analysisPreview';
-import { ComingSoonBanner, Composer, CUSTOM_VERDICT, FindingList, LensRow, Section } from './parts';
+import { Composer, CUSTOM_VERDICT, FindingList, LensRow, Section, SoonChip } from './parts';
 
 /** Analysis tab on a session page: run a lens on this session. */
 export function SessionAnalysisTab({ eventCount }: { eventCount: number }) {
@@ -9,8 +9,14 @@ export function SessionAnalysisTab({ eventCount }: { eventCount: number }) {
 
   return (
     <div className="space-y-8">
-      <ComingSoonBanner />
-      <div className="space-y-2">
+      <div className="space-y-2.5">
+        <div className="flex items-center gap-3">
+          <p className="font-sans text-sm text-fg/75">Have an LLM read this session through a lens you choose.</p>
+          <SoonChip label="Coming soon" />
+          <a href="#/analysis" className="ml-auto font-sans text-xs font-medium text-fg/60 hover:text-fg">
+            All analyses →
+          </a>
+        </div>
         <Composer
           stats={[
             // Illustrative only; the real figure comes from the digest.
@@ -20,17 +26,11 @@ export function SessionAnalysisTab({ eventCount }: { eventCount: number }) {
           ]}>
           <LensRow lensKey={lensKey} onChange={setLensKey} />
         </Composer>
-        <a
-          href="#/analysis"
-          className="inline-block font-mono text-[0.6rem] font-bold uppercase tracking-widest text-fg/45 hover:text-fg">
-          All analyses →
-        </a>
       </div>
-      <Section n={1} title={`Example output · ${lensKey === 'custom' ? 'Custom lens' : lens.name}`}>
+      <Section title={`Example output: ${lensKey === 'custom' ? 'Custom lens' : lens.name}`}>
         <FindingList verdict={lensKey === 'custom' ? CUSTOM_VERDICT : lens.verdict} findings={lens.findings} />
-        <p className="font-mono text-[0.6rem] leading-relaxed text-fg/40">
-          Sample data. Runs are saved to the Analysis library, and evidence chips will jump to that moment in the
-          Timeline.
+        <p className="font-sans text-xs text-fg/55">
+          Sample data. Runs will be saved to the Analysis library, and evidence links will jump to the Timeline.
         </p>
       </Section>
     </div>

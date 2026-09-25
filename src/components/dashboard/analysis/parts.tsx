@@ -3,7 +3,12 @@ import { LENSES, type AnalysisFinding, type FindingSeverity } from '../../../lib
 
 // Shared building blocks for the Analysis design preview. The feature is not
 // built yet: runs are sample data and anything that would call a model is
-// disabled behind "Coming soon".
+// disabled behind "Soon".
+//
+// Visual rules for this area: prose (summaries, details, fixes) is sans at
+// reading size; mono is for labels, ids, numbers and controls. Vermilion marks
+// problems and the one primary action only. Controls are rounded, containers
+// are square, matching the rest of the dashboard.
 
 export const SEVERITY_STYLE: Record<FindingSeverity, string> = {
   critical: 'bg-vermilion text-cream border-vermilion',
@@ -11,41 +16,23 @@ export const SEVERITY_STYLE: Record<FindingSeverity, string> = {
   info: 'border-cobalt/60 text-cobalt',
 };
 
+const SEVERITY_RANK: FindingSeverity[] = ['critical', 'warn', 'info'];
+
+export function worstSeverity(findings: AnalysisFinding[]): FindingSeverity {
+  return SEVERITY_RANK.find((s) => findings.some((f) => f.severity === s)) ?? 'info';
+}
+
 export function SoonChip({ label = 'Soon' }: { label?: string }) {
   return <span className="chip text-vermilion ring-vermilion/50">{label}</span>;
 }
 
-export function ComingSoonBanner({ children }: { children?: ReactNode }) {
+/** Section heading: one mono label with a hairline, the dashboard's section signature. */
+export function Section({ title, aside, children }: { title: string; aside?: ReactNode; children: ReactNode }) {
   return (
-    <div className="flex flex-wrap items-center gap-3 border border-vermilion/40 bg-vermilion/[0.06] px-4 py-3">
-      <SoonChip label="Coming soon" />
-      <p className="min-w-0 flex-1 font-mono text-[0.68rem] leading-relaxed text-fg/70">
-        {children ??
-          'Agentic analysis is in development. This is a preview of how it will look, with sample output. Nothing is analyzed and no model is called.'}
-      </p>
-    </div>
-  );
-}
-
-export function Section({
-  n,
-  title,
-  aside,
-  children,
-}: {
-  n: number;
-  title: string;
-  aside?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <section className="space-y-3.5">
-      <div className="flex items-center gap-2.5">
-        <span className="font-mono text-[0.6rem] font-bold tabular-nums text-vermilion">
-          {String(n).padStart(2, '0')}
-        </span>
-        <h3 className="font-mono text-[0.62rem] font-bold uppercase tracking-[0.2em] text-fg/65">{title}</h3>
-        <span className="ml-1 h-px flex-1 bg-fg/10" />
+    <section className="space-y-3">
+      <div className="flex min-h-7 items-center gap-3">
+        <h3 className="font-mono text-[0.65rem] font-bold uppercase tracking-[0.16em] text-fg/70">{title}</h3>
+        <span className="h-px flex-1 bg-fg/10" />
         {aside}
       </div>
       {children}
@@ -64,19 +51,19 @@ export function Composer({
   runLabel?: string;
 }) {
   return (
-    <div className="border border-line/15 bg-surface/40">
+    <div className="border border-line/15 bg-surface/60">
       <div className="divide-y divide-line/[0.08]">{children}</div>
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-line/10 bg-panel/60 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-line/10 bg-panel/60 px-4 py-2.5">
         {stats.map(([name, value]) => (
-          <span key={name} className="font-mono text-[0.6rem] text-fg/45">
-            {name} <span className="font-bold tabular-nums text-fg/80">{value}</span>
+          <span key={name} className="font-sans text-xs text-fg/60">
+            {name} <span className="font-mono font-bold tabular-nums text-fg/85">{value}</span>
           </span>
         ))}
         <button
           type="button"
           disabled
           title="Coming soon"
-          className="btn-primary ml-auto !py-1.5 disabled:cursor-not-allowed">
+          className="btn-primary ml-auto active:scale-[0.98] disabled:cursor-not-allowed">
           {runLabel}
           <span className="chip text-cream ring-cream/40">Soon</span>
         </button>
@@ -88,16 +75,14 @@ export function Composer({
 /** A labeled line inside a Composer; the label column keeps rows aligned. */
 export function ComposerRow({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex flex-col gap-1.5 px-3 py-2.5 sm:flex-row sm:items-start sm:gap-3">
-      <span className="shrink-0 pt-1.5 font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/40 sm:w-16">
-        {label}
-      </span>
+    <div className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-start sm:gap-4">
+      <span className="shrink-0 pt-1.5 font-sans text-xs font-medium text-fg/60 sm:w-16">{label}</span>
       <div className="min-w-0 flex-1">{children}</div>
     </div>
   );
 }
 
-/** Small single-choice pills. */
+/** Small single-choice pills. Selection is neutral: vermilion is kept for problems. */
 export function Pills<T extends string>({
   label,
   options,
@@ -112,7 +97,7 @@ export function Pills<T extends string>({
   display?: (v: T) => string;
 }) {
   return (
-    <div className="flex flex-wrap gap-1" role="radiogroup" aria-label={label}>
+    <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={label}>
       {options.map((o) => {
         const active = o === value;
         return (
@@ -122,10 +107,10 @@ export function Pills<T extends string>({
             role="radio"
             aria-checked={active}
             onClick={() => onChange(o)}
-            className={`rounded-[4px] border px-2 py-1 font-mono text-[0.62rem] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion/50 ${
+            className={`rounded-[4px] border px-2.5 py-1 font-mono text-[0.65rem] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion/50 active:scale-[0.98] ${
               active
-                ? 'border-vermilion/60 bg-vermilion/[0.08] text-vermilion'
-                : 'border-line/15 text-fg/60 hover:border-line/30 hover:text-fg'
+                ? 'border-fg bg-fg text-bg'
+                : 'border-line/20 text-fg/65 hover:border-line/40 hover:text-fg'
             }`}>
             {display ? display(o) : o}
           </button>
@@ -137,7 +122,7 @@ export function Pills<T extends string>({
 
 const LENS_KEYS = [...LENSES.map((l) => l.key), 'custom'];
 
-/** Lens row for a Composer: pills, then the chosen lens's one-line description (or the custom prompt). */
+/** Lens row for a Composer: pills, then the chosen lens's description (or the custom prompt). */
 export function LensRow({ lensKey, onChange }: { lensKey: string; onChange: (key: string) => void }) {
   const lens = LENSES.find((l) => l.key === lensKey);
   return (
@@ -147,41 +132,58 @@ export function LensRow({ lensKey, onChange }: { lensKey: string; onChange: (key
         options={LENS_KEYS}
         value={lensKey}
         onChange={onChange}
-        display={(k) => LENSES.find((l) => l.key === k)?.name ?? 'Custom…'}
+        display={(k) => LENSES.find((l) => l.key === k)?.name ?? 'Custom'}
       />
       {lens ? (
-        <p className="mt-1.5 font-mono text-[0.6rem] leading-relaxed text-fg/45">{lens.blurb}</p>
+        <p className="mt-2 font-sans text-[13px] leading-relaxed text-fg/65">{lens.blurb}</p>
       ) : (
-        <input
-          type="text"
-          placeholder="Ask anything, e.g. Did the agent follow our testing conventions?"
-          className="mt-1.5 w-full border border-line/15 bg-panel px-2.5 py-1.5 font-mono text-[0.65rem] text-fg placeholder:text-fg/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion/50"
-        />
+        <label className="mt-2 block">
+          <span className="sr-only">Your question</span>
+          <input
+            type="text"
+            placeholder="e.g. Did the agent follow our testing conventions?"
+            className="w-full rounded-[4px] border border-line/20 bg-bg px-3 py-2 font-sans text-[13px] text-fg placeholder:text-fg/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion/50"
+          />
+        </label>
       )}
     </ComposerRow>
   );
 }
 
-export function SeverityTag({ severity }: { severity: FindingSeverity }) {
+/** `fixed` gives every tag the same width so a column of them lines up. */
+export function SeverityTag({ severity, fixed = false }: { severity: FindingSeverity; fixed?: boolean }) {
   return (
     <span
-      className={`shrink-0 border px-1.5 py-0.5 font-mono text-[0.5rem] font-bold uppercase tracking-widest ${SEVERITY_STYLE[severity]}`}>
+      className={`inline-block shrink-0 border px-1.5 py-0.5 text-center font-mono text-[0.55rem] font-bold uppercase tracking-widest ${
+        fixed ? 'w-[4.75rem]' : ''
+      } ${SEVERITY_STYLE[severity]}`}>
       {severity}
     </span>
   );
 }
 
+/** Links to the turns (or sessions) behind a finding. Real results jump to the Timeline. */
 export function EvidenceChips({ label = 'Evidence', items }: { label?: string; items: string[] }) {
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      <span className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/35">{label}</span>
-      {items.map((t) => (
-        <span
-          key={t}
-          className="border border-line/15 bg-panel px-1.5 py-0.5 font-mono text-[0.58rem] font-bold tabular-nums text-fg/60">
-          {t}
-        </span>
-      ))}
+      <span className="mr-0.5 font-sans text-xs text-fg/55">{label}</span>
+      {items.map((t) =>
+        t.startsWith('+') ? (
+          <span key={t} className="font-mono text-[0.62rem] tabular-nums text-fg/55">
+            {t}
+          </span>
+        ) : (
+          <span
+            key={t}
+            title="Will jump to this moment in the Timeline"
+            className="inline-flex cursor-default items-center gap-1 rounded-[4px] border border-line/20 bg-panel px-1.5 py-0.5 font-mono text-[0.62rem] font-bold tabular-nums text-fg/75 transition-colors hover:border-line/40 hover:text-fg">
+            {t}
+            <span aria-hidden="true" className="text-fg/40">
+              ↗
+            </span>
+          </span>
+        ),
+      )}
     </div>
   );
 }
@@ -189,23 +191,24 @@ export function EvidenceChips({ label = 'Evidence', items }: { label?: string; i
 /** Verdict first, then findings that each cite the turns behind them. */
 export function FindingList({ verdict, findings }: { verdict: string; findings: AnalysisFinding[] }) {
   return (
-    <div className="space-y-px bg-fg/10">
-      <div className="bg-bg px-4 py-4">
-        <p className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">Summary</p>
-        <p className="mt-2 max-w-3xl font-mono text-[0.78rem] leading-relaxed text-fg/85">{verdict}</p>
-      </div>
-      {findings.map((f) => (
-        <div key={f.title} className="bg-bg px-4 py-3">
-          <div className="flex items-start gap-2.5">
-            <SeverityTag severity={f.severity} />
-            <p className="min-w-0 flex-1 font-mono text-xs font-bold text-fg">{f.title}</p>
-          </div>
-          <p className="mt-2 max-w-3xl break-words font-mono text-[0.68rem] leading-relaxed text-fg/70">{f.detail}</p>
-          <div className="mt-2.5">
-            <EvidenceChips items={f.turns} />
-          </div>
-        </div>
-      ))}
+    <div className="border border-line/15 bg-bg">
+      <p className="max-w-[68ch] px-5 py-4 font-sans text-[15px] leading-relaxed text-fg/90">{verdict}</p>
+      <ul className="divide-y divide-line/[0.08] border-t border-line/10">
+        {findings.map((f) => (
+          <li key={f.title} className="px-5 py-4">
+            <div className="flex items-start gap-3">
+              <SeverityTag severity={f.severity} />
+              <p className="min-w-0 flex-1 font-sans text-sm font-semibold leading-snug text-fg">{f.title}</p>
+            </div>
+            <p className="mt-1.5 max-w-[68ch] break-words font-sans text-[13px] leading-relaxed text-fg/75">
+              {f.detail}
+            </p>
+            <div className="mt-3">
+              <EvidenceChips items={f.turns} />
+            </div>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

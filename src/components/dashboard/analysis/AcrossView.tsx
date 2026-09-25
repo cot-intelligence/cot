@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { ACROSS_REPORT, type Improvement, type ImprovementArea } from '../../../lib/analysisPreview';
+import { Icon } from '../../ui/icons';
 import { PageHeader } from '../../ui/PageHeader';
-import { ComingSoonBanner, Composer, ComposerRow, EvidenceChips, Pills, Section, SoonChip } from './parts';
+import { Composer, ComposerRow, EvidenceChips, Pills, Section, SoonChip } from './parts';
 
 const RANGES = ['7 days', '30 days', '90 days', 'All time'] as const;
 const SCOPES = ['All sessions', 'Bookmarked only'] as const;
@@ -24,27 +25,25 @@ export function AcrossView() {
   const [range, setRange] = useState<(typeof RANGES)[number]>('30 days');
   const [scope, setScope] = useState<(typeof SCOPES)[number]>('All sessions');
   const [focus, setFocus] = useState<(typeof FOCUSES)[number]>('Everything');
+  const [openTitle, setOpenTitle] = useState<string | null>(ACROSS_REPORT.improvements[0].title);
   const r = ACROSS_REPORT;
   const shown = focus === 'Everything' ? r.improvements : r.improvements.filter((i) => i.area === focus);
 
   return (
     <div className="space-y-8">
       <PageHeader
-        eyebrow="Agentic analysis"
         title="Across all sessions"
-        description="Reads many sessions at once and finds the habits that repeat, so you fix the cause once instead of noticing it session by session."
+        description="Finds the habits that repeat across your sessions, so you fix the cause once."
         actions={<SoonChip label="Coming soon" />}
       />
-      <ComingSoonBanner />
 
       <div className="space-y-2">
         <Composer
-          runLabel="Run across sessions"
+          runLabel="Run report"
           stats={[
             ['Sessions', scope === 'Bookmarked only' ? '9' : String(r.sessions)],
             ['Projects', String(r.projects)],
             ['Est. cost', scope === 'Bookmarked only' ? '~$0.60' : '~$2.40'],
-            ['Model', 'Your API key'],
           ]}>
           <ComposerRow label="Range">
             <Pills label="Time range" options={RANGES} value={range} onChange={setRange} />
@@ -56,48 +55,44 @@ export function AcrossView() {
             <Pills label="Focus" options={FOCUSES} value={focus} onChange={setFocus} />
           </ComposerRow>
         </Composer>
-        <p className="font-mono text-[0.6rem] leading-relaxed text-fg/40">
-          Each session is condensed on your machine first and its notes are cached, so re-running only pays for new
-          sessions.
+        <p className="font-sans text-xs leading-relaxed text-fg/55">
+          Sessions are condensed on your machine first and their notes are cached, so a re-run only pays for new ones.
         </p>
       </div>
 
       <Section
-        n={1}
         title="Sample report"
-        aside={<span className="font-mono text-[0.58rem] text-fg/40">Last run {r.lastRun}</span>}>
-        <div className="grid grid-cols-2 gap-px bg-fg/10 sm:grid-cols-4">
+        aside={<span className="font-sans text-xs text-fg/55">Last run {r.lastRun}</span>}>
+        <dl className="grid grid-cols-2 gap-y-4 border border-line/15 bg-bg px-5 py-4 sm:grid-cols-4">
           {r.stats.map(([label, value]) => (
-            <div key={label} className="bg-bg px-4 py-3">
-              <p className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">{label}</p>
-              <p className="mt-1 font-mono text-xl font-bold tabular-nums text-fg">{value}</p>
+            <div key={label}>
+              <dt className="font-sans text-xs text-fg/60">{label}</dt>
+              <dd className="mt-1 font-mono text-xl font-bold tabular-nums text-fg">{value}</dd>
             </div>
           ))}
-        </div>
+        </dl>
 
-        <div className="space-y-px bg-fg/10">
-          <div className="bg-bg px-4 py-3">
-            <p className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">
-              What to improve, most impact first
-            </p>
-          </div>
+        <ol className="divide-y divide-line/[0.08] border border-line/15 bg-bg">
           {shown.map((imp) => (
-            <ImprovementRow key={imp.title} imp={imp} rank={r.improvements.indexOf(imp) + 1} total={r.sessions} />
+            <ImprovementRow
+              key={imp.title}
+              imp={imp}
+              rank={r.improvements.indexOf(imp) + 1}
+              total={r.sessions}
+              open={openTitle === imp.title}
+              onToggle={() => setOpenTitle(openTitle === imp.title ? null : imp.title)}
+            />
           ))}
-          {!shown.length && (
-            <p className="bg-bg px-4 py-4 font-mono text-[0.68rem] text-fg/45">Nothing found for this focus.</p>
-          )}
-        </div>
+          {!shown.length && <li className="px-5 py-5 font-sans text-[13px] text-fg/60">Nothing found for this focus.</li>}
+        </ol>
       </Section>
 
-      <Section n={2} title="What's working">
-        <ul className="space-y-px bg-fg/10">
+      <Section title="What's working">
+        <ul className="space-y-2.5">
           {r.strengths.map((s) => (
-            <li key={s} className="flex items-start gap-3 bg-bg px-4 py-3">
-              <span className="mt-0.5 font-mono text-[0.6rem] font-bold text-olive" aria-hidden="true">
-                ✓
-              </span>
-              <span className="font-mono text-[0.68rem] leading-relaxed text-fg/75">{s}</span>
+            <li key={s} className="flex items-start gap-3">
+              <Icon name="check" className="mt-0.5 h-4 w-4 shrink-0 text-olive" />
+              <span className="max-w-[68ch] font-sans text-[13px] leading-relaxed text-fg/80">{s}</span>
             </li>
           ))}
         </ul>
@@ -106,39 +101,61 @@ export function AcrossView() {
   );
 }
 
-function ImprovementRow({ imp, rank, total }: { imp: Improvement; rank: number; total: number }) {
+function ImprovementRow({
+  imp,
+  rank,
+  total,
+  open,
+  onToggle,
+}: {
+  imp: Improvement;
+  rank: number;
+  total: number;
+  open: boolean;
+  onToggle: () => void;
+}) {
   const extra = Math.max(0, imp.seenIn - imp.examples.length);
   return (
-    <div className="bg-bg px-4 py-4">
-      <div className="flex flex-wrap items-start gap-x-3 gap-y-2">
-        <span className="font-mono text-sm font-bold tabular-nums text-fg/30">{String(rank).padStart(2, '0')}</span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="font-mono text-xs font-bold text-fg">{imp.title}</p>
-            <span
-              className={`border px-1.5 py-0.5 font-mono text-[0.5rem] font-bold uppercase tracking-widest ${IMPACT_STYLE[imp.impact]}`}>
-              {imp.impact}
+    <li>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={onToggle}
+        className="flex w-full items-center gap-4 px-5 py-3.5 text-left transition-colors hover:bg-fg/[0.03] focus-visible:bg-fg/[0.03] focus-visible:outline-none">
+        <span className="w-5 shrink-0 font-mono text-xs font-bold tabular-nums text-fg/45">{rank}</span>
+        <span className="min-w-0 flex-1">
+          <span className="block font-sans text-sm font-semibold leading-snug text-fg">{imp.title}</span>
+          <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-sans text-xs text-fg/60">
+            <span>{imp.area}</span>
+            <span className="font-mono tabular-nums">
+              {imp.seenIn} of {total} sessions
             </span>
-            <span className="chip text-fg/55 ring-line/20">{imp.area}</span>
+            <span className="font-mono">{TREND_LABEL[imp.trend]}</span>
+          </span>
+        </span>
+        {/* Share of sessions affected; no background track, the number carries the scale. */}
+        <span className="hidden w-24 shrink-0 sm:block" aria-hidden="true">
+          <span className="block h-1 bg-fg/60" style={{ width: `${Math.max(6, (imp.seenIn / total) * 100)}%` }} />
+        </span>
+        <span
+          className={`w-16 shrink-0 border px-1.5 py-0.5 text-center font-mono text-[0.55rem] font-bold uppercase tracking-widest ${IMPACT_STYLE[imp.impact]}`}>
+          {imp.impact}
+        </span>
+        <Icon
+          name="chevron-down"
+          className={`h-4 w-4 shrink-0 text-fg/50 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+        />
+      </button>
+      {open && (
+        <div className="space-y-3 pb-5 pl-14 pr-5">
+          <p className="max-w-[68ch] font-sans text-[13px] leading-relaxed text-fg/75">{imp.detail}</p>
+          <div className="max-w-[68ch] border-l-2 border-olive bg-olive/[0.12] px-3.5 py-2.5">
+            <p className="font-sans text-xs font-semibold text-olive">Try this</p>
+            <p className="mt-0.5 font-sans text-[13px] leading-relaxed text-fg/85">{imp.fix}</p>
           </div>
-          <div className="mt-2 flex items-center gap-3">
-            <div className="h-1 w-32 bg-fg/10" aria-hidden="true">
-              <div className="h-full bg-vermilion" style={{ width: `${(imp.seenIn / total) * 100}%` }} />
-            </div>
-            <span className="font-mono text-[0.6rem] tabular-nums text-fg/50">
-              in {imp.seenIn} of {total} sessions · {TREND_LABEL[imp.trend]}
-            </span>
-          </div>
-          <p className="mt-2.5 max-w-3xl font-mono text-[0.68rem] leading-relaxed text-fg/70">{imp.detail}</p>
-          <div className="mt-2.5 max-w-3xl border-l-2 border-olive/60 bg-olive/[0.06] px-3 py-2">
-            <p className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-olive">Try this</p>
-            <p className="mt-1 font-mono text-[0.68rem] leading-relaxed text-fg/80">{imp.fix}</p>
-          </div>
-          <div className="mt-2.5">
-            <EvidenceChips label="Seen in" items={extra ? [...imp.examples, `+${extra} more`] : imp.examples} />
-          </div>
+          <EvidenceChips label="Seen in" items={extra ? [...imp.examples, `+${extra} more`] : imp.examples} />
         </div>
-      </div>
-    </div>
+      )}
+    </li>
   );
 }

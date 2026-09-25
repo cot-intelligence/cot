@@ -1,19 +1,13 @@
 import { useState } from 'react';
-import {
-  RUN_GROUPS,
-  SAMPLE_RUNS,
-  lensFor,
-  severityCounts,
-  type SampleRun,
-} from '../../../lib/analysisPreview';
+import { RUN_GROUPS, SAMPLE_RUNS, lensFor, type SampleRun } from '../../../lib/analysisPreview';
 import { Icon } from '../../ui/icons';
-import { Section, SoonChip } from './parts';
+import { Section, SeverityTag, worstSeverity } from './parts';
 
 /**
  * The Analysis library, shown under the composer on the Analysis home page:
  * the entry to the cross-session report and every saved run, grouped by day.
  */
-export function AnalysisLibrary({ startAt }: { startAt: number }) {
+export function AnalysisLibrary() {
   const [q, setQ] = useState('');
   const needle = q.trim().toLowerCase();
   const runs = needle
@@ -27,54 +21,58 @@ export function AnalysisLibrary({ startAt }: { startAt: number }) {
 
   return (
     <>
-      <Section n={startAt} title="Across all sessions">
-        <a
-          href="#/analysis/across"
-          className="focus-ring group flex items-center gap-4 border border-line/15 bg-surface/40 px-4 py-3.5 transition-colors hover:border-line/30 hover:bg-surface">
-          <Icon name="layers" className="h-5 w-5 shrink-0 text-vermilion" />
-          <span className="min-w-0 flex-1">
-            <span className="flex items-center gap-2">
-              <span className="font-mono text-xs font-bold text-fg">What to improve across every session</span>
-              <SoonChip />
-            </span>
-            <span className="mt-1 block font-mono text-[0.62rem] leading-relaxed text-fg/50">
-              Reads all your sessions in a time range and ranks the habits worth changing, with a fix for each.
-            </span>
+      <a
+        href="#/analysis/across"
+        className="focus-ring group flex items-center gap-4 border border-line/15 bg-bg px-5 py-4 transition-colors hover:border-line/30 hover:bg-surface">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[5px] border border-line/15 bg-panel">
+          <Icon name="layers" className="h-4 w-4 text-fg/75" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block font-sans text-sm font-semibold text-fg">Across all sessions</span>
+          <span className="mt-0.5 block font-sans text-[13px] leading-snug text-fg/65">
+            Find the habits that repeat across your sessions, ranked, with a fix for each.
           </span>
-          <span className="font-mono text-[0.6rem] font-bold uppercase tracking-widest text-fg/40 group-hover:text-fg">
-            Set up →
-          </span>
-        </a>
-      </Section>
+        </span>
+        <span className="font-sans text-lg text-fg/55 transition-transform group-hover:translate-x-0.5 group-hover:text-fg">
+          →
+        </span>
+      </a>
 
       <Section
-        n={startAt + 1}
-        title={`Your analyses · ${SAMPLE_RUNS.length}`}
+        title="Saved analyses"
         aside={
-          <input
-            type="search"
-            placeholder="Search analyses…"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            className="w-48 border border-line/15 bg-bg px-2.5 py-1 font-mono text-[0.65rem] text-fg placeholder:text-fg/30 focus:border-vermilion focus:outline-none"
-          />
+          <label className="flex items-center gap-2 rounded-[4px] border border-line/20 bg-bg px-2.5 py-1 focus-within:border-line/40">
+            <Icon name="search" className="h-3 w-3 shrink-0 text-fg/50" />
+            <input
+              type="search"
+              aria-label="Search saved analyses"
+              placeholder="Search"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              className="w-32 bg-transparent font-sans text-xs text-fg placeholder:text-fg/45 focus:outline-none sm:w-44"
+            />
+          </label>
         }>
-        <div className="border border-line/15">
+        <div className="border border-line/15 bg-bg">
           {RUN_GROUPS.map((group) => {
             const inGroup = runs.filter((r) => r.group === group);
             if (!inGroup.length) return null;
             return (
               <div key={group}>
-                <p className="border-b border-line/[0.08] bg-panel px-4 py-1.5 font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/40">
+                <p className="border-b border-line/[0.08] bg-panel/70 px-5 py-1.5 font-sans text-xs font-medium text-fg/60">
                   {group}
                 </p>
-                {inGroup.map((run) => (
-                  <RunRow key={run.id} run={run} />
-                ))}
+                <ul className="divide-y divide-line/[0.07]">
+                  {inGroup.map((run) => (
+                    <RunRow key={run.id} run={run} />
+                  ))}
+                </ul>
               </div>
             );
           })}
-          {!runs.length && <p className="p-6 font-mono text-xs text-fg/40">No analyses match “{q}”.</p>}
+          {!runs.length && (
+            <p className="px-5 py-6 font-sans text-[13px] text-fg/60">No saved analyses match “{q}”.</p>
+          )}
         </div>
       </Section>
     </>
@@ -83,28 +81,28 @@ export function AnalysisLibrary({ startAt }: { startAt: number }) {
 
 function RunRow({ run }: { run: SampleRun }) {
   const lens = lensFor(run.lensKey);
-  const counts = severityCounts(lens.findings);
   return (
-    <a
-      href={`#/analysis/${run.id}`}
-      className="focus-ring block border-b border-line/[0.06] px-4 py-2.5 transition-colors last:border-b-0 hover:bg-fg/[0.03]">
-      <span className="flex items-center gap-3">
-        <span className="min-w-0 flex-1 truncate font-mono text-[0.68rem] font-bold text-fg">
-          {run.customQuestion ? 'Custom lens' : lens.name}
+    <li>
+      <a
+        href={`#/analysis/${run.id}`}
+        title={`Session ${run.sessionShortId}`}
+        className="focus-ring group flex items-center gap-4 px-5 py-3 transition-colors hover:bg-fg/[0.03]">
+        <span className="min-w-0 flex-1">
+          <span className="block truncate font-sans text-sm font-medium text-fg">
+            {run.customQuestion ?? run.sessionTitle}
+          </span>
+          <span className="mt-0.5 block truncate font-mono text-[0.62rem] text-fg/55">
+            {run.customQuestion ? 'Custom lens' : lens.name}
+          </span>
         </span>
-        <span className="flex shrink-0 items-center gap-2 font-mono text-[0.58rem] tabular-nums">
-          {counts.critical > 0 && <span className="font-bold text-vermilion">{counts.critical} critical</span>}
-          {counts.warn > 0 && <span className="text-vermilion/80">{counts.warn} warn</span>}
-          {counts.info > 0 && <span className="text-cobalt">{counts.info} info</span>}
+        <span className="flex shrink-0 items-center gap-2.5">
+          <SeverityTag severity={worstSeverity(lens.findings)} fixed />
+          <span className="hidden font-mono text-[0.62rem] tabular-nums text-fg/60 sm:inline">
+            {lens.findings.length} findings
+          </span>
         </span>
-        <span className="hidden w-16 shrink-0 font-mono text-[0.58rem] tabular-nums text-fg/40 sm:inline">
-          {run.sessionShortId}
-        </span>
-        <span className="w-12 shrink-0 text-right font-mono text-[0.58rem] tabular-nums text-fg/40">{run.when}</span>
-      </span>
-      <span className="mt-0.5 block truncate font-mono text-[0.65rem] text-fg/60">
-        {run.customQuestion ?? run.sessionTitle}
-      </span>
-    </a>
+        <span className="w-12 shrink-0 text-right font-mono text-[0.62rem] tabular-nums text-fg/55">{run.when}</span>
+      </a>
+    </li>
   );
 }

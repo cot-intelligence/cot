@@ -6,7 +6,7 @@ import { sourceLabel } from '../../../lib/sourceLabels';
 import { Icon } from '../../ui/icons';
 import { PageHeader } from '../../ui/PageHeader';
 import { AnalysisLibrary } from './AnalysisLibrary';
-import { ComingSoonBanner, Composer, ComposerRow, LensRow, Pills, SoonChip } from './parts';
+import { Composer, ComposerRow, LensRow, Pills, SoonChip } from './parts';
 
 type PickerFilter = 'All' | 'Bookmarked';
 
@@ -45,17 +45,15 @@ export function AnalysisHome() {
   return (
     <div className="space-y-8">
       <PageHeader
-        eyebrow="Agentic analysis"
         title="Analysis"
-        description="Have an LLM read a session through a lens you choose. Every finding points at the moments behind it, and every run is saved below."
+        description="Have an LLM read a session through a lens you choose. Each finding links to the moments behind it."
         actions={<SoonChip label="Coming soon" />}
       />
-      <ComingSoonBanner />
 
       <Composer
         stats={[
           // Illustrative only; the real figure comes from the digest.
-          ['Digest', current ? `~${Math.max(4, Math.round(current.event_count / 14))}k tokens` : '—'],
+          ['Digest', current ? `~${Math.max(4, Math.round(current.event_count / 14))}k tokens` : '...'],
           ['Est. cost', '~$0.35'],
           ['Model', 'Your API key'],
         ]}>
@@ -77,15 +75,25 @@ export function AnalysisHome() {
         <LensRow lensKey={lensKey} onChange={setLensKey} />
       </Composer>
 
-      <AnalysisLibrary startAt={1} />
+      <AnalysisLibrary />
+
+      <p className="font-sans text-xs text-fg/55">
+        Preview with sample runs. Nothing is analyzed and no model is called yet.
+      </p>
     </div>
   );
 }
 
-function sessionMeta(s: SessionSummary): string {
-  return `${s.id.slice(0, 8)} · ${sourceLabel(s.source)} · ${s.event_count} events · ${formatRelative(
-    s.last_activity ?? s.started_at,
-  )}`;
+/** Session id, agent, size and recency as spaced columns rather than a dot-joined string. */
+function SessionMeta({ s }: { s: SessionSummary }) {
+  return (
+    <span className="flex shrink-0 items-center gap-3 font-mono text-[0.6rem] tabular-nums text-fg/55">
+      <span>{s.id.slice(0, 8)}</span>
+      <span>{sourceLabel(s.source)}</span>
+      <span>{s.event_count} events</span>
+      <span className="w-14 text-right">{formatRelative(s.last_activity ?? s.started_at)}</span>
+    </span>
+  );
 }
 
 /** A one-line session field that opens a searchable list, bookmarked sessions first. */
@@ -136,40 +144,39 @@ function SessionCombo({
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
-        className="flex w-full items-center gap-2 rounded-[4px] border border-line/15 bg-bg px-2.5 py-1.5 text-left transition-colors hover:border-line/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion/50">
-        {current?.bookmarked && <Icon name="bookmark-filled" className="h-3 w-3 shrink-0 text-vermilion" />}
-        <span className="min-w-0 flex-1 truncate font-mono text-[0.7rem] text-fg/85">
-          {current ? current.title?.trim() || current.id : 'Loading sessions…'}
+        className="flex w-full items-center gap-2.5 rounded-[4px] border border-line/20 bg-bg px-3 py-2 text-left transition-colors hover:border-line/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion/50">
+        {current?.bookmarked && <Icon name="bookmark-filled" className="h-3.5 w-3.5 shrink-0 text-fg/70" />}
+        <span className="min-w-0 flex-1 truncate font-sans text-[13px] text-fg">
+          {current ? current.title?.trim() || current.id : 'Loading sessions...'}
         </span>
         {current && (
-          <span className="hidden shrink-0 font-mono text-[0.58rem] tabular-nums text-fg/40 lg:inline">
-            {sessionMeta(current)}
+          <span className="hidden lg:inline">
+            <SessionMeta s={current} />
           </span>
         )}
-        <Icon name="chevron-down" className={`h-3.5 w-3.5 shrink-0 text-fg/40 transition-transform ${open ? 'rotate-180' : ''}`} />
+        <Icon
+          name="chevron-down"
+          className={`h-3.5 w-3.5 shrink-0 text-fg/55 transition-transform ${open ? 'rotate-180' : ''}`}
+        />
       </button>
 
       {open && (
-        <div className="absolute inset-x-0 top-full z-30 mt-1 border border-line/15 bg-bg shadow-soft-lg">
+        <div className="absolute inset-x-0 top-full z-30 mt-1 border border-line/20 bg-bg shadow-soft-lg">
           <div className="flex items-center gap-2 border-b border-line/10 p-2">
+            <Icon name="search" className="ml-1 h-3.5 w-3.5 shrink-0 text-fg/50" />
             <input
               type="search"
               autoFocus
-              placeholder="Search by title, id or path…"
+              aria-label="Search sessions"
+              placeholder="Search by title, id or path"
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              className="min-w-0 flex-1 bg-transparent px-1 py-1 font-mono text-[0.68rem] text-fg placeholder:text-fg/30 focus:outline-none"
+              className="min-w-0 flex-1 bg-transparent py-1 font-sans text-[13px] text-fg placeholder:text-fg/45 focus:outline-none"
             />
             <Pills label="Which sessions" options={['All', 'Bookmarked'] as const} value={filter} onChange={setFilter} />
           </div>
-          <div className="scroll-thin max-h-64 overflow-y-auto" role="listbox" aria-label="Sessions">
-            <PickerGroup
-              label="Bookmarked"
-              sessions={bookmarked}
-              pickedId={pickedId}
-              onPick={onPick}
-              empty="No bookmarked sessions yet. Bookmark one from its session page."
-            />
+          <div className="scroll-thin max-h-72 overflow-y-auto" role="listbox" aria-label="Sessions">
+            <PickerGroup label="Bookmarked" sessions={bookmarked} pickedId={pickedId} onPick={onPick} showEmpty />
             {filter === 'All' && <PickerGroup label="Recent" sessions={others} pickedId={pickedId} onPick={onPick} />}
           </div>
         </div>
@@ -183,21 +190,29 @@ function PickerGroup({
   sessions,
   pickedId,
   onPick,
-  empty,
+  showEmpty = false,
 }: {
   label: string;
   sessions: SessionSummary[];
   pickedId?: string;
   onPick: (s: SessionSummary) => void;
-  empty?: string;
+  showEmpty?: boolean;
 }) {
-  if (!sessions.length && !empty) return null;
+  if (!sessions.length && !showEmpty) return null;
   return (
     <div>
-      <p className="sticky top-0 z-10 border-b border-line/[0.06] bg-panel px-3 py-1 font-mono text-[0.52rem] font-bold uppercase tracking-widest text-fg/40">
-        {label} <span className="font-normal tabular-nums text-fg/30">{sessions.length}</span>
+      <p className="sticky top-0 z-10 flex items-center gap-2 border-b border-line/[0.08] bg-panel px-3 py-1.5 font-sans text-xs font-medium text-fg/65">
+        {label}
+        <span className="font-mono text-[0.6rem] tabular-nums text-fg/50">{sessions.length}</span>
       </p>
-      {!sessions.length && <p className="px-3 py-2.5 font-mono text-[0.62rem] text-fg/40">{empty}</p>}
+      {!sessions.length && (
+        <div className="flex items-center gap-3 px-3 py-3">
+          <Icon name="bookmark" className="h-4 w-4 shrink-0 text-fg/45" />
+          <p className="font-sans text-[13px] leading-snug text-fg/65">
+            No bookmarked sessions yet. Bookmark one from its session page and it shows up here first.
+          </p>
+        </div>
+      )}
       {sessions.map((s) => {
         const active = s.id === pickedId;
         return (
@@ -207,14 +222,14 @@ function PickerGroup({
             role="option"
             aria-selected={active}
             onClick={() => onPick(s)}
-            className={`relative flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors focus-visible:bg-surface focus-visible:outline-none ${
-              active ? 'bg-surface' : 'hover:bg-fg/[0.03]'
+            className={`relative flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors focus-visible:bg-surface focus-visible:outline-none ${
+              active ? 'bg-surface' : 'hover:bg-fg/[0.04]'
             }`}>
-            {active && <span className="absolute inset-y-0 left-0 w-0.5 bg-vermilion" aria-hidden="true" />}
-            {s.bookmarked && <Icon name="bookmark-filled" className="h-3 w-3 shrink-0 text-vermilion" />}
-            <span className="min-w-0 flex-1 truncate font-mono text-[0.68rem] text-fg/85">{s.title?.trim() || s.id}</span>
-            <span className="hidden shrink-0 font-mono text-[0.55rem] tabular-nums text-fg/35 sm:inline">
-              {sessionMeta(s)}
+            {active && <span className="absolute inset-y-0 left-0 w-0.5 bg-fg" aria-hidden="true" />}
+            {s.bookmarked && <Icon name="bookmark-filled" className="h-3.5 w-3.5 shrink-0 text-fg/70" />}
+            <span className="min-w-0 flex-1 truncate font-sans text-[13px] text-fg/90">{s.title?.trim() || s.id}</span>
+            <span className="hidden sm:inline">
+              <SessionMeta s={s} />
             </span>
           </button>
         );

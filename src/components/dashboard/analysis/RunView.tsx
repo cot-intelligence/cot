@@ -1,72 +1,80 @@
 import { lensFor, severityCounts, type SampleRun } from '../../../lib/analysisPreview';
 import { PageHeader } from '../../ui/PageHeader';
-import { ComingSoonBanner, CUSTOM_VERDICT, FindingList, Section, SoonChip } from './parts';
+import { CUSTOM_VERDICT, FindingList, Section, SoonChip } from './parts';
+
+const SEVERITY_TEXT = {
+  critical: 'font-bold text-vermilion',
+  warn: 'text-vermilion',
+  info: 'text-cobalt',
+} as const;
 
 /** A saved run, opened from the library. */
 export function RunView({ run }: { run: SampleRun }) {
   const lens = lensFor(run.lensKey);
   const counts = severityCounts(lens.findings);
-  const stats: [string, string, boolean?][] = [
-    ['Findings', String(lens.findings.length)],
-    ['Critical', String(counts.critical), counts.critical > 0],
-    ['Digest', '~62k tokens'],
-    ['Cost', '$0.31'],
-  ];
+  const when = run.group === 'Today' ? run.when : `${run.group}, ${run.when}`;
 
   return (
     <div className="space-y-8">
       <PageHeader
-        eyebrow={`${run.customQuestion ? 'Custom lens' : lens.name} · ${run.group === 'Today' ? run.when : `${run.group}, ${run.when}`}`}
         title={run.customQuestion ?? run.sessionTitle}
         description={
-          <span className="font-mono text-[0.7rem]">
-            Session {run.sessionShortId}
-            {run.customQuestion ? ` · ${run.sessionTitle}` : ''}
+          <span className="flex flex-wrap items-center gap-x-5 gap-y-1 font-sans text-[13px]">
+            <span>
+              <span className="text-fg/55">Lens </span>
+              <span className="font-medium text-fg/85">{run.customQuestion ? 'Custom' : lens.name}</span>
+            </span>
+            <span>
+              <span className="text-fg/55">Session </span>
+              <span className="font-mono text-xs text-fg/85">{run.sessionShortId}</span>
+            </span>
+            <span className="text-fg/55">{when}</span>
           </span>
         }
         actions={
           <>
-            <button type="button" disabled className="btn disabled:cursor-not-allowed">
+            <button type="button" disabled title="Coming soon" className="btn disabled:cursor-not-allowed">
               Re-run
             </button>
-            <button type="button" disabled className="btn disabled:cursor-not-allowed">
+            <button type="button" disabled title="Coming soon" className="btn disabled:cursor-not-allowed">
               Export
             </button>
             <SoonChip label="Coming soon" />
           </>
         }
       />
-      <ComingSoonBanner>
-        This is a sample saved run. Once the feature ships, every analysis you run is kept here so you can come back to
-        it, re-run it after new work, or compare runs.
-      </ComingSoonBanner>
 
-      <div className="grid grid-cols-2 gap-px bg-fg/10 sm:grid-cols-4">
-        {stats.map(([label, value, accent]) => (
-          <div key={label} className="bg-bg px-4 py-3">
-            <p className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">{label}</p>
-            <p className={`mt-1 font-mono text-xl font-bold tabular-nums ${accent ? 'text-vermilion' : 'text-fg'}`}>
-              {value}
-            </p>
-          </div>
-        ))}
-      </div>
-
-      <Section n={1} title="Result">
+      <Section
+        title="Result"
+        aside={
+          <span className="flex items-center gap-3 font-mono text-[0.65rem] tabular-nums">
+            {(['critical', 'warn', 'info'] as const).map(
+              (s) =>
+                counts[s] > 0 && (
+                  <span key={s} className={SEVERITY_TEXT[s]}>
+                    {counts[s]} {s}
+                  </span>
+                ),
+            )}
+          </span>
+        }>
         <FindingList verdict={run.customQuestion ? CUSTOM_VERDICT : lens.verdict} findings={lens.findings} />
       </Section>
 
-      <Section n={2} title="Ask a follow-up">
-        <div className="flex items-center gap-3 border border-line/15 bg-panel px-3 py-2.5">
+      <Section title="Ask a follow-up">
+        <div className="flex items-center gap-3 rounded-[4px] border border-line/20 bg-bg px-3 py-2">
           <input
             type="text"
             disabled
+            aria-label="Follow-up question"
             placeholder="e.g. Show me every turn where the agent ignored an instruction"
-            className="min-w-0 flex-1 bg-transparent font-mono text-[0.7rem] text-fg placeholder:text-fg/35 focus:outline-none disabled:cursor-not-allowed"
+            className="min-w-0 flex-1 bg-transparent font-sans text-[13px] text-fg placeholder:text-fg/45 focus:outline-none disabled:cursor-not-allowed"
           />
           <SoonChip />
         </div>
       </Section>
+
+      <p className="font-sans text-xs text-fg/55">Sample run. Nothing was analyzed and no model was called.</p>
     </div>
   );
 }
