@@ -11,9 +11,9 @@ export function SessionAnalysisTab({ eventCount }: { eventCount: number }) {
     <div className="space-y-8">
       <div className="space-y-2.5">
         <div className="flex items-center gap-3">
-          <p className="font-sans text-sm text-fg/75">Have an LLM read this session through a lens you choose.</p>
+          <p className="font-mono text-xs text-fg/75">Have an LLM read this session through a lens you choose.</p>
           <SoonChip label="Coming soon" />
-          <a href="#/analysis" className="ml-auto font-sans text-xs font-medium text-fg/60 hover:text-fg">
+          <a href="#/analysis" className="ml-auto font-mono text-[0.68rem] font-bold text-fg/60 hover:text-fg">
             All analyses →
           </a>
         </div>
@@ -29,7 +29,7 @@ export function SessionAnalysisTab({ eventCount }: { eventCount: number }) {
       </div>
       <Section title={`Example output: ${lensKey === 'custom' ? 'Custom lens' : lens.name}`}>
         <FindingList verdict={lensKey === 'custom' ? CUSTOM_VERDICT : lens.verdict} findings={lens.findings} />
-        <p className="font-sans text-xs text-fg/55">
+        <p className="font-mono text-[0.68rem] text-fg/55">
           Sample data. Runs will be saved to the Analysis library, and evidence links will jump to the Timeline.
         </p>
       </Section>

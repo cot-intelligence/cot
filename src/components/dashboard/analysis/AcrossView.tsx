@@ -55,18 +55,18 @@ export function AcrossView() {
             <Pills label="Focus" options={FOCUSES} value={focus} onChange={setFocus} />
           </ComposerRow>
         </Composer>
-        <p className="font-sans text-xs leading-relaxed text-fg/55">
+        <p className="font-mono text-[0.68rem] leading-relaxed text-fg/55">
           Sessions are condensed on your machine first and their notes are cached, so a re-run only pays for new ones.
         </p>
       </div>
 
       <Section
         title="Sample report"
-        aside={<span className="font-sans text-xs text-fg/55">Last run {r.lastRun}</span>}>
+        aside={<span className="font-mono text-[0.68rem] text-fg/55">Last run {r.lastRun}</span>}>
         <dl className="grid grid-cols-2 gap-y-4 border border-line/15 bg-bg px-5 py-4 sm:grid-cols-4">
           {r.stats.map(([label, value]) => (
             <div key={label}>
-              <dt className="font-sans text-xs text-fg/60">{label}</dt>
+              <dt className="font-mono text-[0.6rem] font-bold uppercase tracking-[0.14em] text-fg/55">{label}</dt>
               <dd className="mt-1 font-mono text-xl font-bold tabular-nums text-fg">{value}</dd>
             </div>
           ))}
@@ -83,7 +83,7 @@ export function AcrossView() {
               onToggle={() => setOpenTitle(openTitle === imp.title ? null : imp.title)}
             />
           ))}
-          {!shown.length && <li className="px-5 py-5 font-sans text-[13px] text-fg/60">Nothing found for this focus.</li>}
+          {!shown.length && <li className="px-5 py-5 font-mono text-xs text-fg/60">Nothing found for this focus.</li>}
         </ol>
       </Section>
 
@@ -92,7 +92,7 @@ export function AcrossView() {
           {r.strengths.map((s) => (
             <li key={s} className="flex items-start gap-3">
               <Icon name="check" className="mt-0.5 h-4 w-4 shrink-0 text-olive" />
-              <span className="max-w-[68ch] font-sans text-[13px] leading-relaxed text-fg/80">{s}</span>
+              <span className="max-w-[68ch] font-mono text-xs leading-relaxed text-fg/80">{s}</span>
             </li>
           ))}
         </ul>
@@ -124,8 +124,8 @@ function ImprovementRow({
         className="flex w-full items-center gap-4 px-5 py-3.5 text-left transition-colors hover:bg-fg/[0.03] focus-visible:bg-fg/[0.03] focus-visible:outline-none">
         <span className="w-5 shrink-0 font-mono text-xs font-bold tabular-nums text-fg/45">{rank}</span>
         <span className="min-w-0 flex-1">
-          <span className="block font-sans text-sm font-semibold leading-snug text-fg">{imp.title}</span>
-          <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-sans text-xs text-fg/60">
+          <span className="block font-mono text-[0.78rem] font-bold leading-snug text-fg">{imp.title}</span>
+          <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[0.68rem] text-fg/60">
             <span>{imp.area}</span>
             <span className="font-mono tabular-nums">
               {imp.seenIn} of {total} sessions
@@ -148,10 +148,10 @@ function ImprovementRow({
       </button>
       {open && (
         <div className="space-y-3 pb-5 pl-14 pr-5">
-          <p className="max-w-[68ch] font-sans text-[13px] leading-relaxed text-fg/75">{imp.detail}</p>
+          <p className="max-w-[68ch] font-mono text-xs leading-relaxed text-fg/75">{imp.detail}</p>
           <div className="max-w-[68ch] border-l-2 border-olive bg-olive/[0.12] px-3.5 py-2.5">
-            <p className="font-sans text-xs font-semibold text-olive">Try this</p>
-            <p className="mt-0.5 font-sans text-[13px] leading-relaxed text-fg/85">{imp.fix}</p>
+            <p className="font-mono text-[0.6rem] font-bold uppercase tracking-[0.14em] text-olive">Try this</p>
+            <p className="mt-0.5 font-mono text-xs leading-relaxed text-fg/85">{imp.fix}</p>
           </div>
           <EvidenceChips label="Seen in" items={extra ? [...imp.examples, `+${extra} more`] : imp.examples} />
         </div>

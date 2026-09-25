@@ -19,7 +19,7 @@ export function AnalysisView({ runId }: { runId?: string }) {
         {activeId && (
           <a
             href="#/analysis"
-            className="mb-5 inline-block font-sans text-xs font-medium text-fg/60 transition-colors hover:text-fg">
+            className="mb-5 inline-block font-mono text-[0.68rem] font-bold text-fg/60 transition-colors hover:text-fg">
             ← All analyses
           </a>
         )}

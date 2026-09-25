@@ -5,10 +5,10 @@ import { LENSES, type AnalysisFinding, type FindingSeverity } from '../../../lib
 // built yet: runs are sample data and anything that would call a model is
 // disabled behind "Soon".
 //
-// Visual rules for this area: prose (summaries, details, fixes) is sans at
-// reading size; mono is for labels, ids, numbers and controls. Vermilion marks
-// problems and the one primary action only. Controls are rounded, containers
-// are square, matching the rest of the dashboard.
+// Visual rules for this area: mono throughout like the rest of the dashboard,
+// with prose (summaries, details, fixes) a step larger and looser than labels.
+// Vermilion marks problems and the one primary action only. Controls are
+// rounded, containers are square.
 
 export const SEVERITY_STYLE: Record<FindingSeverity, string> = {
   critical: 'bg-vermilion text-cream border-vermilion',
@@ -55,7 +55,7 @@ export function Composer({
       <div className="divide-y divide-line/[0.08]">{children}</div>
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-line/10 bg-panel/60 px-4 py-2.5">
         {stats.map(([name, value]) => (
-          <span key={name} className="font-sans text-xs text-fg/60">
+          <span key={name} className="font-mono text-[0.68rem] text-fg/60">
             {name} <span className="font-mono font-bold tabular-nums text-fg/85">{value}</span>
           </span>
         ))}
@@ -76,7 +76,7 @@ export function Composer({
 export function ComposerRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-start sm:gap-4">
-      <span className="shrink-0 pt-1.5 font-sans text-xs font-medium text-fg/60 sm:w-16">{label}</span>
+      <span className="shrink-0 pt-2 font-mono text-[0.6rem] font-bold uppercase tracking-[0.14em] text-fg/55 sm:w-20">{label}</span>
       <div className="min-w-0 flex-1">{children}</div>
     </div>
   );
@@ -135,14 +135,14 @@ export function LensRow({ lensKey, onChange }: { lensKey: string; onChange: (key
         display={(k) => LENSES.find((l) => l.key === k)?.name ?? 'Custom'}
       />
       {lens ? (
-        <p className="mt-2 font-sans text-[13px] leading-relaxed text-fg/65">{lens.blurb}</p>
+        <p className="mt-2 font-mono text-xs leading-relaxed text-fg/65">{lens.blurb}</p>
       ) : (
         <label className="mt-2 block">
           <span className="sr-only">Your question</span>
           <input
             type="text"
             placeholder="e.g. Did the agent follow our testing conventions?"
-            className="w-full rounded-[4px] border border-line/20 bg-bg px-3 py-2 font-sans text-[13px] text-fg placeholder:text-fg/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion/50"
+            className="w-full rounded-[4px] border border-line/20 bg-bg px-3 py-2 font-mono text-xs text-fg placeholder:text-fg/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion/50"
           />
         </label>
       )}
@@ -166,7 +166,7 @@ export function SeverityTag({ severity, fixed = false }: { severity: FindingSeve
 export function EvidenceChips({ label = 'Evidence', items }: { label?: string; items: string[] }) {
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      <span className="mr-0.5 font-sans text-xs text-fg/55">{label}</span>
+      <span className="mr-0.5 font-mono text-[0.58rem] font-bold uppercase tracking-[0.14em] text-fg/50">{label}</span>
       {items.map((t) =>
         t.startsWith('+') ? (
           <span key={t} className="font-mono text-[0.62rem] tabular-nums text-fg/55">
@@ -192,15 +192,15 @@ export function EvidenceChips({ label = 'Evidence', items }: { label?: string; i
 export function FindingList({ verdict, findings }: { verdict: string; findings: AnalysisFinding[] }) {
   return (
     <div className="border border-line/15 bg-bg">
-      <p className="max-w-[68ch] px-5 py-4 font-sans text-[15px] leading-relaxed text-fg/90">{verdict}</p>
+      <p className="max-w-[68ch] px-5 py-4 font-mono text-[0.82rem] leading-relaxed text-fg/90">{verdict}</p>
       <ul className="divide-y divide-line/[0.08] border-t border-line/10">
         {findings.map((f) => (
           <li key={f.title} className="px-5 py-4">
             <div className="flex items-start gap-3">
               <SeverityTag severity={f.severity} />
-              <p className="min-w-0 flex-1 font-sans text-sm font-semibold leading-snug text-fg">{f.title}</p>
+              <p className="min-w-0 flex-1 font-mono text-[0.78rem] font-bold leading-snug text-fg">{f.title}</p>
             </div>
-            <p className="mt-1.5 max-w-[68ch] break-words font-sans text-[13px] leading-relaxed text-fg/75">
+            <p className="mt-1.5 max-w-[68ch] break-words font-mono text-xs leading-relaxed text-fg/75">
               {f.detail}
             </p>
             <div className="mt-3">

@@ -77,7 +77,7 @@ export function AnalysisHome() {
 
       <AnalysisLibrary />
 
-      <p className="font-sans text-xs text-fg/55">
+      <p className="font-mono text-[0.68rem] text-fg/55">
         Preview with sample runs. Nothing is analyzed and no model is called yet.
       </p>
     </div>
@@ -146,7 +146,7 @@ function SessionCombo({
         onClick={() => setOpen(!open)}
         className="flex w-full items-center gap-2.5 rounded-[4px] border border-line/20 bg-bg px-3 py-2 text-left transition-colors hover:border-line/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion/50">
         {current?.bookmarked && <Icon name="bookmark-filled" className="h-3.5 w-3.5 shrink-0 text-fg/70" />}
-        <span className="min-w-0 flex-1 truncate font-sans text-[13px] text-fg">
+        <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg">
           {current ? current.title?.trim() || current.id : 'Loading sessions...'}
         </span>
         {current && (
@@ -171,7 +171,7 @@ function SessionCombo({
               placeholder="Search by title, id or path"
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              className="min-w-0 flex-1 bg-transparent py-1 font-sans text-[13px] text-fg placeholder:text-fg/45 focus:outline-none"
+              className="min-w-0 flex-1 bg-transparent py-1 font-mono text-xs text-fg placeholder:text-fg/45 focus:outline-none"
             />
             <Pills label="Which sessions" options={['All', 'Bookmarked'] as const} value={filter} onChange={setFilter} />
           </div>
@@ -201,14 +201,14 @@ function PickerGroup({
   if (!sessions.length && !showEmpty) return null;
   return (
     <div>
-      <p className="sticky top-0 z-10 flex items-center gap-2 border-b border-line/[0.08] bg-panel px-3 py-1.5 font-sans text-xs font-medium text-fg/65">
+      <p className="sticky top-0 z-10 flex items-center gap-2 border-b border-line/[0.08] bg-panel px-3 py-1.5 font-mono text-[0.6rem] font-bold uppercase tracking-[0.14em] text-fg/55">
         {label}
         <span className="font-mono text-[0.6rem] tabular-nums text-fg/50">{sessions.length}</span>
       </p>
       {!sessions.length && (
         <div className="flex items-center gap-3 px-3 py-3">
           <Icon name="bookmark" className="h-4 w-4 shrink-0 text-fg/45" />
-          <p className="font-sans text-[13px] leading-snug text-fg/65">
+          <p className="font-mono text-xs leading-snug text-fg/65">
             No bookmarked sessions yet. Bookmark one from its session page and it shows up here first.
           </p>
         </div>
@@ -227,7 +227,7 @@ function PickerGroup({
             }`}>
             {active && <span className="absolute inset-y-0 left-0 w-0.5 bg-fg" aria-hidden="true" />}
             {s.bookmarked && <Icon name="bookmark-filled" className="h-3.5 w-3.5 shrink-0 text-fg/70" />}
-            <span className="min-w-0 flex-1 truncate font-sans text-[13px] text-fg/90">{s.title?.trim() || s.id}</span>
+            <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg/90">{s.title?.trim() || s.id}</span>
             <span className="hidden sm:inline">
               <SessionMeta s={s} />
             </span>

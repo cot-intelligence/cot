@@ -28,12 +28,12 @@ export function AnalysisLibrary() {
           <Icon name="layers" className="h-4 w-4 text-fg/75" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block font-sans text-sm font-semibold text-fg">Across all sessions</span>
-          <span className="mt-0.5 block font-sans text-[13px] leading-snug text-fg/65">
+          <span className="block font-mono text-[0.78rem] font-bold text-fg">Across all sessions</span>
+          <span className="mt-0.5 block font-mono text-xs leading-snug text-fg/65">
             Find the habits that repeat across your sessions, ranked, with a fix for each.
           </span>
         </span>
-        <span className="font-sans text-lg text-fg/55 transition-transform group-hover:translate-x-0.5 group-hover:text-fg">
+        <span className="font-mono text-base text-fg/55 transition-transform group-hover:translate-x-0.5 group-hover:text-fg">
           →
         </span>
       </a>
@@ -49,7 +49,7 @@ export function AnalysisLibrary() {
               placeholder="Search"
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              className="w-32 bg-transparent font-sans text-xs text-fg placeholder:text-fg/45 focus:outline-none sm:w-44"
+              className="w-32 bg-transparent font-mono text-[0.68rem] text-fg placeholder:text-fg/45 focus:outline-none sm:w-44"
             />
           </label>
         }>
@@ -59,7 +59,7 @@ export function AnalysisLibrary() {
             if (!inGroup.length) return null;
             return (
               <div key={group}>
-                <p className="border-b border-line/[0.08] bg-panel/70 px-5 py-1.5 font-sans text-xs font-medium text-fg/60">
+                <p className="border-b border-line/[0.08] bg-panel/70 px-5 py-1.5 font-mono text-[0.6rem] font-bold uppercase tracking-[0.14em] text-fg/55">
                   {group}
                 </p>
                 <ul className="divide-y divide-line/[0.07]">
@@ -71,7 +71,7 @@ export function AnalysisLibrary() {
             );
           })}
           {!runs.length && (
-            <p className="px-5 py-6 font-sans text-[13px] text-fg/60">No saved analyses match “{q}”.</p>
+            <p className="px-5 py-6 font-mono text-xs text-fg/60">No saved analyses match “{q}”.</p>
           )}
         </div>
       </Section>
@@ -88,7 +88,7 @@ function RunRow({ run }: { run: SampleRun }) {
         title={`Session ${run.sessionShortId}`}
         className="focus-ring group flex items-center gap-4 px-5 py-3 transition-colors hover:bg-fg/[0.03]">
         <span className="min-w-0 flex-1">
-          <span className="block truncate font-sans text-sm font-medium text-fg">
+          <span className="block truncate font-mono text-[0.75rem] font-bold text-fg">
             {run.customQuestion ?? run.sessionTitle}
           </span>
           <span className="mt-0.5 block truncate font-mono text-[0.62rem] text-fg/55">

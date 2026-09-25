@@ -19,7 +19,7 @@ export function RunView({ run }: { run: SampleRun }) {
       <PageHeader
         title={run.customQuestion ?? run.sessionTitle}
         description={
-          <span className="flex flex-wrap items-center gap-x-5 gap-y-1 font-sans text-[13px]">
+          <span className="flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-xs">
             <span>
               <span className="text-fg/55">Lens </span>
               <span className="font-medium text-fg/85">{run.customQuestion ? 'Custom' : lens.name}</span>
@@ -68,13 +68,13 @@ export function RunView({ run }: { run: SampleRun }) {
             disabled
             aria-label="Follow-up question"
             placeholder="e.g. Show me every turn where the agent ignored an instruction"
-            className="min-w-0 flex-1 bg-transparent font-sans text-[13px] text-fg placeholder:text-fg/45 focus:outline-none disabled:cursor-not-allowed"
+            className="min-w-0 flex-1 bg-transparent font-mono text-xs text-fg placeholder:text-fg/45 focus:outline-none disabled:cursor-not-allowed"
           />
           <SoonChip />
         </div>
       </Section>
 
-      <p className="font-sans text-xs text-fg/55">Sample run. Nothing was analyzed and no model was called.</p>
+      <p className="font-mono text-[0.68rem] text-fg/55">Sample run. Nothing was analyzed and no model was called.</p>
     </div>
   );
 }
