@@ -467,6 +467,169 @@ export async function getMetricsHistory(
   return data.items;
 }
 
+// --- Activity (shell + web) ---
+
+export type ActivityCategory = 'shell' | 'web';
+
+export interface ActivityRef {
+  session_id: string;
+  event_id: number;
+  ts: string | null;
+}
+
+export interface ActivityError {
+  exit_code: number | null;
+  message: string | null;
+}
+
+export interface ActivityRisk {
+  severity: 'critical' | 'warn';
+  label: string;
+}
+
+export interface ActivityGroup {
+  /** Program (shell: `git`, `pytest`, `Grep`) or domain (web). */
+  key: string;
+  runs: number;
+  failed: number;
+  /** Runs made with sudo / doas / su (locally or over ssh). */
+  elevated: number;
+  total_ms: number;
+  last: ActivityRef;
+  verbs?: { key: string; runs: number }[];
+  /** Wrappers this program's runs went through (rtk, sudo, timeout, env…). */
+  via?: { key: string; runs: number }[];
+  /** Shell: set for Grep/Glob search tools rather than shell programs. */
+  tool?: string | null;
+  /** Web: localhost / file:// rather than the internet. */
+  local?: boolean;
+}
+
+export interface ActivityFailure {
+  command: string;
+  program?: string | null;
+  runs: number;
+  failed: number;
+  last_error: ActivityError | null;
+  last: ActivityRef | null;
+}
+
+/** One entry in "Worth a look": an anomaly, a repeated failure or a risky command. */
+export interface ActivityAttention {
+  kind: 'loop' | 'failure_spike' | 'failing' | 'risky' | 'first_seen' | 'slow';
+  severity: 'critical' | 'warn' | 'info';
+  title: string;
+  detail: string | null;
+  /** The command (or domain) it is about; null for grouped entries. */
+  subject: string | null;
+  program?: string | null;
+  /** Grouped "first time" entries list every name. */
+  names?: string[];
+  ref: ActivityRef;
+}
+
+export interface ActivitySummary {
+  category: ActivityCategory;
+  days: number;
+  summary: {
+    runs: number;
+    failed: number;
+    fail_rate: number;
+    total_ms: number;
+    sessions: number;
+    groups: number;
+    risky: number;
+    elevated: number;
+    local?: number;
+  };
+  groups: ActivityGroup[];
+  /** Commands that failed at least twice in the window. */
+  failing: ActivityFailure[];
+  /** One-off failures, most recent first. */
+  recent_failures: ActivityFailure[];
+  slowest: (ActivityRef & { command: string; duration_ms: number; failed: boolean })[];
+  risky: (ActivityRef & { command: string; risk: ActivityRisk })[];
+  projects: { cwd: string; runs: number }[];
+  sources: { source: string; runs: number }[];
+  searches?: { query: string; runs: number }[];
+  /** Wrapper counts for the window; `env` covers FOO=1 and env FOO=1. */
+  via: { key: string; runs: number }[];
+  /** Ranked: anomalies against the history before the window, repeated failures, risky commands. */
+  attention: ActivityAttention[];
+}
+
+export interface ActivityItem {
+  event_id: number;
+  session_id: string;
+  ts: string | null;
+  source: string;
+  cwd: string | null;
+  duration_ms: number | null;
+  failed: boolean;
+  error: ActivityError | null;
+  /** Full command or URL, credentials masked. */
+  target: string;
+  tool: string | null;
+  // shell
+  program?: string;
+  verb?: string | null;
+  /** Command from the statement that does the work (setup like `cd … &&` dropped). */
+  core?: string;
+  risk?: ActivityRisk | null;
+  /** Ran with sudo / doas / su. */
+  elevated?: boolean;
+  /** Wrappers anywhere in the chain: rtk, rtk proxy, sudo, timeout, nohup, env… */
+  via?: string[];
+  /** Names (never values) of variables set inline. */
+  env_names?: string[];
+  /** Exit 1 from grep/rg/diff: the agent logged an error, but it means "no match". */
+  no_match?: boolean;
+  // web
+  key?: string;
+  kind?: 'fetch' | 'search';
+  local?: boolean;
+}
+
+export interface ActivityFilters {
+  days: number;
+  project?: string;
+  source?: string;
+}
+
+function activityParams(category: ActivityCategory, f: ActivityFilters): URLSearchParams {
+  const params = new URLSearchParams({ category, days: String(f.days) });
+  if (f.project) params.set('project', f.project);
+  if (f.source) params.set('source', f.source);
+  return params;
+}
+
+export async function getActivity(category: ActivityCategory, f: ActivityFilters): Promise<ActivitySummary> {
+  return json<ActivitySummary>(await fetch(`/v1/activity?${activityParams(category, f)}`));
+}
+
+export async function getActivityLog(
+  category: ActivityCategory,
+  f: ActivityFilters & {
+    q?: string;
+    group?: string;
+    failed?: boolean;
+    risky?: boolean;
+    via?: string;
+    offset?: number;
+    limit?: number;
+  },
+): Promise<{ total: number; items: ActivityItem[] }> {
+  const params = activityParams(category, f);
+  if (f.q) params.set('q', f.q);
+  if (f.group) params.set('group', f.group);
+  if (f.failed) params.set('failed', 'true');
+  if (f.risky) params.set('risky', 'true');
+  if (f.via) params.set('via', f.via);
+  if (f.offset) params.set('offset', String(f.offset));
+  if (f.limit) params.set('limit', String(f.limit));
+  return json(await fetch(`/v1/activity/log?${params}`));
+}
+
 export type InsightPillar = 'usability' | 'cost' | 'security';
 export type InsightSeverity = 'info' | 'warn' | 'critical';
 export type InsightStatus = 'active' | 'resolved' | 'dismissed';

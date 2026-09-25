@@ -34,7 +34,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import __version__, ai_insights, db, insights, store
+from . import __version__, activity, ai_insights, db, insights, store
 
 app = FastAPI(title="cot collector", version=__version__)
 
@@ -1098,6 +1098,51 @@ def get_metrics_history(category: str = "shell", limit: int = 200) -> dict[str, 
         raise HTTPException(status_code=400, detail="category must be 'shell' or 'web'")
     limit = max(1, min(limit, 500))
     return {"items": db.metrics_history(category, limit)}
+
+
+@app.get("/v1/activity")
+def get_activity(
+    category: str = "shell",
+    days: int = Query(7),
+    project: str | None = None,
+    source: str | None = None,
+) -> dict[str, Any]:
+    """Activity page rollup: top programs/domains, failing, slowest, risky."""
+    if category not in ("shell", "web"):
+        raise HTTPException(status_code=400, detail="category must be 'shell' or 'web'")
+    return activity.summarize(category, max(0, days), project or None, source or None)
+
+
+@app.get("/v1/activity/log")
+def get_activity_log(
+    category: str = "shell",
+    days: int = Query(7),
+    project: str | None = None,
+    source: str | None = None,
+    q: str | None = None,
+    group: str | None = None,
+    failed: bool = False,
+    risky: bool = False,
+    via: str | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Every command or request in the window, filterable, newest first."""
+    if category not in ("shell", "web"):
+        raise HTTPException(status_code=400, detail="category must be 'shell' or 'web'")
+    return activity.log(
+        category,
+        max(0, days),
+        project=project or None,
+        source=source or None,
+        q=q,
+        group=group or None,
+        failed_only=failed,
+        risky_only=risky,
+        via=via or None,
+        offset=offset,
+        limit=limit,
+    )
 
 
 @app.get("/v1/insights")

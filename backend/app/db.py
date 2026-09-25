@@ -2683,6 +2683,67 @@ def metrics_history(category: str, limit: int = 200) -> list[dict[str, Any]]:
     ]
 
 
+def activity_rows(
+    category: str,
+    since: str | None,
+    project: str | None = None,
+    source: str | None = None,
+) -> list[dict[str, Any]]:
+    """Every finished shell command or web request in a window, newest first.
+
+    Unlike :func:`metrics_history` this has no row cap: the Activity page
+    aggregates over the whole window. Error text is pulled from the payload
+    only for failed rows, so the large payload column is read rarely.
+    """
+    if category not in ("shell", "web"):
+        return []
+    clauses = [
+        "e.category = ?",
+        "e.target IS NOT NULL AND e.target != ''",
+        "e.phase IN ('end', 'instant')",
+    ]
+    params: list[Any] = [category]
+    if since:
+        clauses.append("e.ts >= ?")
+        params.append(since)
+    if project:
+        clauses.append("s.cwd = ?")
+        params.append(project)
+    if source:
+        clauses.append("e.source = ?")
+        params.append(source)
+    with store.read() as conn:
+        rows = conn.execute(
+            "SELECT e.id, e.session_id, e.target, e.title, e.ts, e.source, e.duration_ms, e.status, s.cwd,"
+            " CASE WHEN e.status = 'error' AND json_valid(e.payload)"
+            # Claude reports `error`, Cursor `error_message`.
+            " THEN COALESCE(json_extract(e.payload, '$.error'), json_extract(e.payload, '$.error_message'))"
+            " END AS error,"
+            # target is clipped at 120 chars; the full shell command is in detail.
+            " CASE WHEN e.category = 'shell' AND e.target LIKE '%…' AND json_valid(e.detail)"
+            " THEN json_extract(e.detail, '$.command') END AS full_command"
+            " FROM events e LEFT JOIN sessions s ON s.id = e.session_id"
+            f" WHERE {' AND '.join(clauses)}"
+            " ORDER BY e.ts DESC",
+            params,
+        ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "session_id": r["session_id"],
+            "target": r["full_command"] if isinstance(r["full_command"], str) else r["target"],
+            "title": r["title"],
+            "ts": timeutil.format_ts(r["ts"]),
+            "source": r["source"],
+            "duration_ms": r["duration_ms"],
+            "status": r["status"],
+            "cwd": r["cwd"],
+            "error": r["error"],
+        }
+        for r in rows
+    ]
+
+
 def connections() -> list[dict[str, Any]]:
     """Per-source ingest activity — which agents are wired up and sending.
 
