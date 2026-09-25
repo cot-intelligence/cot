@@ -1,3 +1,5 @@
+import type { ReactElement } from 'react';
+
 interface IconProps {
   name: IconName;
   className?: string;
@@ -46,7 +48,7 @@ export type IconName =
   | 'check'
   | 'square';
 
-const PATHS: Record<IconName, JSX.Element> = {
+const PATHS: Record<IconName, ReactElement> = {
   check: (
     <>
       <rect x="3" y="3" width="18" height="18" rx="2" />
