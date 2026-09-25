@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lensFor, runFor } from '../../lib/analysisPreview';
 import { getSettings, updateSettings, type Store } from '../../lib/api';
 import { setDocumentTitle } from '../../lib/documentTitle';
 import { sessionHref } from '../../lib/sessionStore';
@@ -6,6 +7,7 @@ import { usePeek } from '../../lib/usePeek';
 import { readNavCollapsed, readSidebarOpen, writeNavCollapsed, writeSidebarOpen } from '../../lib/settings';
 import { ThemeToggle } from '../ui/ThemeToggle';
 import { MetricsSkeleton } from '../ui/Skeleton';
+import { AnalysisView } from './AnalysisView';
 import { AppSidebar, type NavKey } from './AppSidebar';
 import { CommandPalette, type PaletteCommand, type PaletteScope } from './CommandPalette';
 import { DashboardHome } from './DashboardHome';
@@ -32,6 +34,7 @@ type DashboardRoute =
   | { view: 'overview' }
   | { view: 'metrics-history'; tab?: MetricsHistoryTab }
   | { view: 'replay' }
+  | { view: 'analysis'; runId?: string }
   | { view: 'replay-session'; sessionId: string; focusEventId?: number; focusQuery?: string }
   | { view: 'settings' };
 
@@ -45,6 +48,9 @@ function parseHash(): DashboardRoute {
   // Legacy #/metrics and #/insights merged into the unified Overview page.
   if (hash === 'overview' || hash === 'metrics' || hash === 'insights') return { view: 'overview' };
   if (hash === 'replay') return { view: 'replay' };
+  // #/analysis, or #/analysis/<runId> to open a past run.
+  const analysisMatch = hash.match(/^analysis(?:\/([^?]+))?$/);
+  if (analysisMatch) return { view: 'analysis', runId: analysisMatch[1] };
   // #/session/<id> optionally followed by ?e=<eventId>[&q=<search>] to focus
   // one event and highlight the search that found it.
   // #/replay/<id> is the same page for a Session Replay import.
@@ -147,6 +153,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
     else if (route.view === 'overview') setDocumentTitle('Overview');
     else if (route.view === 'metrics-history') setDocumentTitle('Activity History');
     else if (route.view === 'replay') setDocumentTitle('Session Replay');
+    else if (route.view === 'analysis') setDocumentTitle('Analysis');
   }, [route.view]);
 
   const selectSession = useCallback((id: string, eventId?: number, query?: string, store: Store = 'main') => {
@@ -182,13 +189,20 @@ export function Dashboard({ onSetup }: DashboardProps) {
     window.location.hash = '#/replay';
   }, []);
 
+  const goAnalysis = useCallback(() => {
+    setRoute({ view: 'analysis' });
+    window.location.hash = '#/analysis';
+  }, []);
+
   const selectedId = route.view === 'session' ? route.sessionId : null;
   const replayId = route.view === 'replay-session' ? route.sessionId : null;
   const onSettings = route.view === 'settings';
   const onOverview = route.view === 'overview';
   const onMetricsHistory = route.view === 'metrics-history';
   const onReplay = route.view === 'replay' || replayId !== null;
-  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay;
+  const onAnalysis = route.view === 'analysis';
+  const analysisRun = route.view === 'analysis' ? runFor(route.runId) : undefined;
+  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay && !onAnalysis;
 
   // Navigation entries shown in the palette, marked active for the current view.
   const paletteCommands = useMemo<PaletteCommand[]>(
@@ -226,6 +240,14 @@ export function Dashboard({ onSetup }: DashboardProps) {
         run: goReplay,
       },
       {
+        id: 'nav-analysis',
+        label: 'Go to Analysis',
+        icon: 'brain',
+        keywords: 'analysis agentic llm lens persona coach debugger cost security manager',
+        active: onAnalysis,
+        run: goAnalysis,
+      },
+      {
         id: 'nav-settings',
         label: 'Go to Settings',
         icon: 'settings',
@@ -240,11 +262,13 @@ export function Dashboard({ onSetup }: DashboardProps) {
       onOverview,
       onMetricsHistory,
       onReplay,
+      onAnalysis,
       onSettings,
       goSessions,
       goOverview,
       goMetricsHistory,
       goReplay,
+      goAnalysis,
       goSettings,
     ],
   );
@@ -268,7 +292,9 @@ export function Dashboard({ onSetup }: DashboardProps) {
         ? 'history'
         : onReplay
           ? 'replay'
-          : 'sessions';
+          : onAnalysis
+            ? 'analysis'
+            : 'sessions';
 
   const crumbs: { label: string; href?: string }[] = selectedId
     ? [{ label: 'Sessions', href: '#/sessions' }, { label: shortSession(selectedId) }]
@@ -276,6 +302,10 @@ export function Dashboard({ onSetup }: DashboardProps) {
       ? [{ label: 'Session Replay', href: '#/replay' }, { label: shortSession(replayId) }]
       : route.view === 'replay'
         ? [{ label: 'Session Replay' }]
+        : onAnalysis
+          ? analysisRun
+            ? [{ label: 'Analysis', href: '#/analysis' }, { label: lensFor(analysisRun.lensKey).name }]
+            : [{ label: 'Analysis' }]
         : onMetricsHistory
       ? [{ label: 'Overview', href: '#/overview' }, { label: 'Activity history' }]
       : [{ label: onSettings ? 'Settings' : onOverview ? 'Overview' : 'Sessions' }];
@@ -284,6 +314,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
     <div className="relative flex h-screen">
       <AppSidebar
         active={activeNav}
+        activeRunId={route.view === 'analysis' ? route.runId : undefined}
         collapsed={navCollapsed}
         onToggleCollapsed={toggleNav}
         onSearch={() => setPaletteOpen(true)}
@@ -330,6 +361,10 @@ export function Dashboard({ onSetup }: DashboardProps) {
                   initialTab={route.view === 'metrics-history' ? route.tab : undefined}
                 />
               </Suspense>
+            </main>
+          ) : route.view === 'analysis' ? (
+            <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+              <AnalysisView runId={route.runId} />
             </main>
           ) : route.view === 'replay' ? (
             <main className="flex min-w-0 flex-1 flex-col">

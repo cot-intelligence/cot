@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import type { SessionDetail } from '../../../lib/api';
 import { sessionRuns } from '../../../lib/sessionView';
+import { AnalysisPanel } from '../analysis/AnalysisPanel';
 import { InsightsTab } from './tabs/InsightsTab';
 import { TimelineTab } from './tabs/TimelineTab';
 
@@ -12,9 +13,11 @@ interface SessionTabsProps {
   focusQuery?: string;
 }
 
-const TABS = [
+const TABS: { key: string; label: string; soon?: boolean }[] = [
   { key: 'timeline', label: 'Timeline' },
   { key: 'insights', label: 'Insights' },
+  // Design preview; the feature is not built yet.
+  { key: 'analysis', label: 'Analysis', soon: true },
 ];
 
 export function SessionTabs({ detail, activeTab, onTabChange, focusEventId, focusQuery }: SessionTabsProps) {
@@ -32,6 +35,7 @@ export function SessionTabs({ detail, activeTab, onTabChange, focusEventId, focu
           onClick={() => onTabChange(tab.key)}
           className="seg-item">
           {tab.label}
+          {tab.soon && <span className="ml-1.5 text-vermilion">Soon</span>}
         </button>
       ))}
     </div>
@@ -39,14 +43,18 @@ export function SessionTabs({ detail, activeTab, onTabChange, focusEventId, focu
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {activeTab === 'insights' ? (
+      {activeTab === 'insights' || activeTab === 'analysis' ? (
         <>
           <div className="shrink-0 border-y border-line/10 px-6 py-2.5 sm:px-8">
             <div className="mx-auto flex max-w-7xl items-center">{tabs}</div>
           </div>
           <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-6 py-6 sm:px-8">
             <div className="mx-auto max-w-7xl">
-              <InsightsTab detail={detail} />
+              {activeTab === 'analysis' ? (
+                <AnalysisPanel sessionEvents={detail.summary.event_count} />
+              ) : (
+                <InsightsTab detail={detail} />
+              )}
             </div>
           </div>
         </>
