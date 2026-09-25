@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 import shlex
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
@@ -56,6 +56,12 @@ _ELEVATED = re.compile(r"(?:^|[\s;&|('\"])(?:sudo|doas|pkexec)\s|\bsu\s+(?:-c|-|
 _HEREDOC = re.compile(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
 # Credentials that show up in commands but not in the Insights secret list.
 _COMMAND_SECRETS = [
+    # FOO_TOKEN=… / API_KEY=… / DB_PASSWORD=…: the name says what the value is.
+    re.compile(
+        r"(\b[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIALS?|AUTH(?![A-Za-z]))"
+        r"[A-Za-z0-9_]*=)('[^']*'|\"[^\"]*\"|[^\s;&|]+)",
+        re.IGNORECASE,
+    ),
     re.compile(r"(\bsshpass\s+-p\s*)('[^']*'|\"[^\"]*\"|\S+)"),
     re.compile(r"(--password[=\s]+)('[^']*'|\"[^\"]*\"|\S+)"),
     re.compile(r"(://[^/\s:@]+:)([^@\s/]+)(?=@)"),
@@ -75,6 +81,10 @@ class ParsedCommand:
     """Its subcommand when it has one worth grouping by (``status``, ``run build``)."""
     core: str
     """The command from the working statement on, with setup (``cd … &&``) dropped."""
+    wrappers: tuple[str, ...] = ()
+    """Wrappers anywhere in the chain, in first-seen order (``rtk``, ``sudo``, ``env``…)."""
+    env: tuple[str, ...] = ()
+    """Names (never values) of variables set inline, e.g. ``FOO`` for ``FOO=1 make``."""
 
 
 def _split_top_level(command: str) -> list[tuple[str, str]]:
@@ -172,7 +182,17 @@ def _tokens(text: str) -> list[str]:
         return [t for t in text.split() if not t.startswith("#")]
 
 
-def _program_and_args(tokens: list[str]) -> tuple[str, list[str]]:
+@dataclass
+class _Resolved:
+    program: str = ""
+    args: list[str] = field(default_factory=list)
+    wrappers: list[str] = field(default_factory=list)
+    env: list[str] = field(default_factory=list)
+
+
+def _program_and_args(tokens: list[str]) -> _Resolved:
+    """The program a statement runs, and what it was wrapped in on the way."""
+    out = _Resolved()
     # A subshell `( … )` or `time (…)` only adds a paren to the next token.
     tokens = [t.lstrip("(") for t in tokens]
     tokens = [t for t in tokens if t]
@@ -180,11 +200,13 @@ def _program_and_args(tokens: list[str]) -> tuple[str, list[str]]:
     while i < len(tokens) and tokens[i] in _CONTROL_PREFIX:
         i += 1
     while i < len(tokens) and _ASSIGNMENT.match(tokens[i]):
+        name, value = tokens[i].split("=", 1)
         # `IDS=$(sqlite3 …)` runs sqlite3: the work is inside the substitution.
-        inner = tokens[i].split("=$(", 1)
-        if len(inner) == 2 and inner[1]:
-            return _program_and_args([inner[1], *tokens[i + 1 :]])
-        value = tokens[i].split("=", 1)[1]
+        if value.startswith("$(") and len(value) > 2:
+            inner = _program_and_args([value[2:], *tokens[i + 1 :]])
+            inner.env = [name, *inner.env]
+            return inner
+        out.env.append(name)
         i += 1
         if value.startswith("(") and not value.endswith(")"):
             # Array assignment `A=(x y z)`: its items are not commands.
@@ -195,17 +217,23 @@ def _program_and_args(tokens: list[str]) -> tuple[str, list[str]]:
         wrapper = tokens[i]
         i += 1
         if wrapper == "rtk" and i < len(tokens) and tokens[i] == "proxy":
-            i += 1  # `rtk proxy <cmd>` runs <cmd> unfiltered
+            wrapper = "rtk proxy"  # runs <cmd> with rtk's output filtering bypassed
+            i += 1
+        out.wrappers.append(wrapper)
         if wrapper in _WRAPPERS_WITH_ARG and i < len(tokens) and not tokens[i].startswith("-"):
             i += 1  # the duration / priority
         while i < len(tokens) and (tokens[i].startswith("-") or _ASSIGNMENT.match(tokens[i])):
-            i += 1  # wrapper flags (`sudo -E`) and `env FOO=1`
+            if _ASSIGNMENT.match(tokens[i]):
+                out.env.append(tokens[i].split("=", 1)[0])  # `env FOO=1 cmd`
+            i += 1  # wrapper flags (`sudo -E`)
     if i >= len(tokens) or tokens[i] == "…":
-        return "", []
+        return out
     program = tokens[i].rsplit("/", 1)[-1] or tokens[i]
     if not _PROGRAM_NAME.match(program):
-        return "", []  # a flag, a variable, a fragment: not something to group by
-    return program, tokens[i + 1 :]
+        return out  # a flag, a variable, a fragment: not something to group by
+    out.program = program
+    out.args = tokens[i + 1 :]
+    return out
 
 
 def _verb(program: str, args: list[str]) -> str | None:
@@ -235,14 +263,16 @@ def parse_command(command: str) -> ParsedCommand:
     if not text:
         return ParsedCommand(program="", verb=None, core="")
     pieces = _split_top_level(text)
+    resolved = [_program_and_args(_tokens(piece)) for _sep, piece in pieces]
+    # Wrappers and variables count wherever they appear in the chain.
+    wrappers = tuple(dict.fromkeys(w for r in resolved for w in r.wrappers))
+    env = tuple(dict.fromkeys(e for r in resolved for e in r.env))
     # Statements start at a non-pipe separator; a pipe continues the statement.
     # Prefer the first real program, then an echo/printf, then setup like `cd`.
     best: tuple[int, int] | None = None  # (tier, index); lower tier wins
-    for idx, (sep, piece) in enumerate(pieces):
-        if sep == "|":
-            continue
-        program, _ = _program_and_args(_tokens(piece))
-        if not program or program in _CONTROL:
+    for idx, (sep, _piece) in enumerate(pieces):
+        program = resolved[idx].program
+        if sep == "|" or not program or program in _CONTROL:
             continue
         tier = 2 if program in _SETUP else 1 if program in _OUTPUT else 0
         if best is None or tier < best[0]:
@@ -251,13 +281,13 @@ def parse_command(command: str) -> ParsedCommand:
             break
     if best is None:
         # Only assignments / control flow survived (often a clipped command).
-        return ParsedCommand(program="(script)", verb=None, core=text)
+        return ParsedCommand(program="(script)", verb=None, core=text, wrappers=wrappers, env=env)
     chosen = best[1]
-    program, args = _program_and_args(_tokens(pieces[chosen][1]))
     core = " ".join(
         (f"{sep} {piece}" if sep and j > chosen else piece) for j, (sep, piece) in enumerate(pieces) if j >= chosen
     )
-    return ParsedCommand(program=program, verb=_verb(program, args), core=core)
+    r = resolved[chosen]
+    return ParsedCommand(program=r.program, verb=_verb(r.program, r.args), core=core, wrappers=wrappers, env=env)
 
 
 def mask_secrets(text: str) -> str:
@@ -398,6 +428,11 @@ def _parse_row(row: dict[str, Any], category: str) -> dict[str, Any]:
         # doas/su still run as root and belong under the same flag.
         risk = {"severity": "warn", "label": "privilege escalation"}
     no_match = bool(error) and error.get("exit_code") == 1 and parsed.program in _EXIT_1_IS_ANSWER
+    via = [w for w in parsed.wrappers if w != "env"]
+    if parsed.env or "env" in parsed.wrappers:
+        via.append("env")  # `FOO=1 cmd` and `env FOO=1 cmd` are the same thing
+    if elevated and "sudo" not in via:
+        via.append("sudo")  # as root in any form: `ssh h 'sudo …'`, doas, su -c
     return {
         **base,
         "target": mask_secrets(command),
@@ -407,6 +442,8 @@ def _parse_row(row: dict[str, Any], category: str) -> dict[str, Any]:
         "tool": None,
         "risk": risk,
         "elevated": elevated,
+        "via": via,
+        "env_names": list(parsed.env),
         # A search that found nothing: recorded as an error by the agent, but not a failure.
         "no_match": no_match,
     }
@@ -432,6 +469,7 @@ def summarize(category: str, days: int, project: str | None = None, source: str 
 
     groups: dict[str, dict[str, Any]] = {}
     verbs: dict[str, Counter[str]] = defaultdict(Counter)
+    group_via: dict[str, Counter[str]] = defaultdict(Counter)
     for it in items:  # newest first
         if category == "web" and it["kind"] == "search":
             continue  # searches get their own list; groups are domains
@@ -450,9 +488,11 @@ def summarize(category: str, days: int, project: str | None = None, source: str 
         g["total_ms"] += it["duration_ms"] or 0
         if category == "shell" and it["verb"]:
             verbs[key][it["verb"]] += 1
+        group_via[key].update(it.get("via") or [])
     top = sorted(groups.values(), key=lambda g: g["runs"], reverse=True)
     for g in top:
         g["verbs"] = [{"key": v, "runs": c} for v, c in verbs[g["key"]].most_common(4)]
+        g["via"] = [{"key": v, "runs": c} for v, c in group_via[g["key"]].most_common()]
 
     # The same command failing more than once is the signal. One-off failures
     # are listed separately, most recent first.
@@ -522,6 +562,8 @@ def summarize(category: str, days: int, project: str | None = None, source: str 
         "risky": risky[:20],
         "projects": [{"cwd": c, "runs": n} for c, n in projects.most_common(40)],
         "sources": [{"source": s, "runs": n} for s, n in sources.most_common()],
+        # What commands ran through (rtk, sudo, timeout, env vars…), for the log's Via filter.
+        "via": [{"key": k, "runs": n} for k, n in Counter(v for it in items for v in it.get("via") or []).most_common()],
     }
     result["attention"] = worth_a_look(find_anomalies(category, items, baseline, days), failing, risky)
     if category == "web":
@@ -539,6 +581,7 @@ _SENSITIVE_PROGRAMS = {
     "sudo", "su", "chmod", "chown", "security", "keychain", "gpg", "openssl", "aws", "gcloud",
     "az", "kubectl", "terraform", "dd", "mkfs", "diskutil", "launchctl", "crontab", "nmap",
 }
+_ELEVATING_WRAPPERS = {"sudo"}
 _LOOP_MIN_RUNS = 5
 _LOOP_WINDOW_S = 15 * 60
 # Below this much history, "first time" says more about cot than about the agent.
@@ -671,6 +714,39 @@ def find_anomalies(
                 "ref": _ref(plain[0][2]),
             })
 
+        # 2b. First time through a wrapper. What is routine differs per person
+        # (rtk everywhere for some, never for others), so only change is news.
+        if category == "shell":
+            base_via = Counter(v for it in base_runs for v in it.get("via") or [])
+            new_via: dict[str, dict[str, Any]] = {}
+            for it in sorted(runs_only, key=lambda it: _epoch(it["ts"])):
+                for v in it.get("via") or []:
+                    if not base_via.get(v) and v not in new_via:
+                        new_via[v] = it
+            for v in [v for v in new_via if v in _ELEVATING_WRAPPERS]:
+                it = new_via.pop(v)
+                found.append({
+                    "kind": "first_seen",
+                    "severity": "warn",
+                    "title": f"First time running commands with {v}",
+                    "detail": "Agents had not run anything as root before this range.",
+                    "subject": it.get("core") or it["target"],
+                    "ref": _ref(it),
+                })
+            if new_via:
+                names = list(new_via)
+                shown = ", ".join("env vars" if n == "env" else n for n in names[:3])
+                found.append({
+                    "kind": "first_seen",
+                    "severity": "info",
+                    "title": f"First time running commands through {shown}"
+                    + (f" +{len(names) - 3}" if len(names) > 3 else ""),
+                    "detail": "Wrappers no agent had used before this range.",
+                    "subject": new_via[names[0]].get("core") or new_via[names[0]]["target"],
+                    "names": names,
+                    "ref": _ref(new_via[names[0]]),
+                })
+
         # 3. Failure spike: failing far more often than this program usually does.
         base_fail = Counter(key_of(it) for it in base_runs if it["failed"])
         win_fail = Counter(key_of(it) for it in runs_only if it["failed"])
@@ -797,6 +873,7 @@ def log(
     group: str | None = None,
     failed_only: bool = False,
     risky_only: bool = False,
+    via: str | None = None,
     offset: int = 0,
     limit: int = 50,
 ) -> dict[str, Any]:
@@ -809,6 +886,7 @@ def log(
         if (not group or it[group_key] == group)
         and (not failed_only or it["failed"])
         and (not risky_only or it.get("risk"))
+        and (not via or via in (it.get("via") or []))
         and (not needle or needle in it["target"].lower())
     ]
     return {"total": len(out), "items": out[offset : offset + limit]}

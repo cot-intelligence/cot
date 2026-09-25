@@ -497,6 +497,8 @@ export interface ActivityGroup {
   total_ms: number;
   last: ActivityRef;
   verbs?: { key: string; runs: number }[];
+  /** Wrappers this program's runs went through (rtk, sudo, timeout, env…). */
+  via?: { key: string; runs: number }[];
   /** Shell: set for Grep/Glob search tools rather than shell programs. */
   tool?: string | null;
   /** Web: localhost / file:// rather than the internet. */
@@ -550,6 +552,8 @@ export interface ActivitySummary {
   projects: { cwd: string; runs: number }[];
   sources: { source: string; runs: number }[];
   searches?: { query: string; runs: number }[];
+  /** Wrapper counts for the window; `env` covers FOO=1 and env FOO=1. */
+  via: { key: string; runs: number }[];
   /** Ranked: anomalies against the history before the window, repeated failures, risky commands. */
   attention: ActivityAttention[];
 }
@@ -574,6 +578,10 @@ export interface ActivityItem {
   risk?: ActivityRisk | null;
   /** Ran with sudo / doas / su. */
   elevated?: boolean;
+  /** Wrappers anywhere in the chain: rtk, rtk proxy, sudo, timeout, nohup, env… */
+  via?: string[];
+  /** Names (never values) of variables set inline. */
+  env_names?: string[];
   /** Exit 1 from grep/rg/diff: the agent logged an error, but it means "no match". */
   no_match?: boolean;
   // web
@@ -606,6 +614,7 @@ export async function getActivityLog(
     group?: string;
     failed?: boolean;
     risky?: boolean;
+    via?: string;
     offset?: number;
     limit?: number;
   },
@@ -615,6 +624,7 @@ export async function getActivityLog(
   if (f.group) params.set('group', f.group);
   if (f.failed) params.set('failed', 'true');
   if (f.risky) params.set('risky', 'true');
+  if (f.via) params.set('via', f.via);
   if (f.offset) params.set('offset', String(f.offset));
   if (f.limit) params.set('limit', String(f.limit));
   return json(await fetch(`/v1/activity/log?${params}`));

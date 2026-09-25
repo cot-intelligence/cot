@@ -1123,6 +1123,7 @@ def get_activity_log(
     group: str | None = None,
     failed: bool = False,
     risky: bool = False,
+    via: str | None = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
@@ -1138,6 +1139,7 @@ def get_activity_log(
         group=group or None,
         failed_only=failed,
         risky_only=risky,
+        via=via or None,
         offset=offset,
         limit=limit,
     )

@@ -60,6 +60,15 @@ def test_comment_lines_are_skipped() -> None:
     assert parse_command("# check the build\nnpm run build").program == "npm"
 
 
+def test_credential_named_variables_are_masked_but_others_are_not() -> None:
+    masked = activity.mask_secrets("DB_PASSWORD='p@ss' api_key=abc123 AWS_PROFILE=dev PORT=8080 make")
+    assert "p@ss" not in masked and "abc123" not in masked
+    assert "AWS_PROFILE=dev" in masked and "PORT=8080" in masked
+    author = 'GIT_AUTHOR_NAME="Ada" GIT_AUTHOR_EMAIL=a@b.c BASIC_AUTH=u:p git commit'
+    masked = activity.mask_secrets(author)
+    assert 'GIT_AUTHOR_NAME="Ada"' in masked and "a@b.c" in masked and "u:p" not in masked
+
+
 def test_command_credentials_are_masked() -> None:
     masked = activity.mask_secrets("sshpass -p 'hunter22' ssh a@b && curl https://u:s3cret@host/x --password p4ss")
     assert "hunter22" not in masked and "s3cret" not in masked and "p4ss" not in masked
@@ -342,3 +351,65 @@ def test_quoted_remote_sudo_is_still_flagged(fresh_db) -> None:
         "shell",
     )
     assert item["elevated"] and item["risk"] == {"severity": "warn", "label": "privilege escalation"}
+
+
+# --- wrappers ("via") ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("command", "wrappers", "env"),
+    [
+        ("cd /repo && rtk git status | head", ("rtk",), ()),
+        ("rtk proxy npx vitest run", ("rtk proxy",), ()),
+        ("GITHUB_TOKEN=ghp_x FOO=1 timeout 30 nice -n 5 make", ("timeout", "nice"), ("GITHUB_TOKEN", "FOO")),
+        ("env AWS_PROFILE=dev aws s3 ls", ("env",), ("AWS_PROFILE",)),
+        ("nohup python3 -m http.server & ; caffeinate -i pytest", ("nohup", "caffeinate"), ()),
+        ("rtk read a.ts; sudo -E rtk git push", ("rtk", "sudo"), ()),
+        ("git status", (), ()),
+    ],
+)
+def test_wrappers_and_env_names_are_recorded(command: str, wrappers: tuple, env: tuple) -> None:
+    parsed = parse_command(command)
+    assert parsed.wrappers == wrappers
+    assert parsed.env == env
+
+
+def test_env_values_are_never_kept() -> None:
+    item = activity._parse_row(
+        {"id": 1, "target": "GITHUB_TOKEN=supersecretvalue gh pr list", "title": "Shell command", "status": "ok"},
+        "shell",
+    )
+    assert item["env_names"] == ["GITHUB_TOKEN"] and item["via"] == ["env"]
+    assert "supersecretvalue" not in repr(item)  # not in names, not in the displayed command
+    assert item["target"] == "GITHUB_TOKEN=****** gh pr list"
+
+
+def test_via_counts_and_log_filter(seeded) -> None:
+    out = activity.summarize("shell", 7)
+    via = {v["key"]: v["runs"] for v in out["via"]}
+    assert via == {"rtk": 1}  # `cd /repo && rtk git status`
+    git = next(g for g in out["groups"] if g["key"] == "git")
+    assert git["via"] == [{"key": "rtk", "runs": 1}]
+    assert activity.log("shell", 7, via="rtk")["total"] == 1
+
+
+def test_first_time_wrappers(baseline) -> None:
+    window = [
+        _run("lsof", core="sudo lsof -i", hours_ago=3) | {"via": ["sudo"]},
+        _run("make", core="nohup make serve", hours_ago=2) | {"via": ["nohup"]},
+    ]
+    found = [a for a in activity.find_anomalies("shell", window, baseline, 7) if a["kind"] == "first_seen"]
+    titles = [a["title"] for a in found]
+    assert "First time running commands with sudo" in titles
+    assert "First time running commands through nohup" in titles
+    # rtk everywhere in the baseline is not news
+    routine = [_run("git", core="rtk git status", hours_ago=1) | {"via": ["rtk"]}]
+    base = [b | {"via": ["rtk"]} for b in baseline]
+    assert not [a for a in activity.find_anomalies("shell", routine, base, 7) if "through" in a["title"]]
+
+
+def test_via_sudo_means_as_root_in_any_form() -> None:
+    item = activity._parse_row(
+        {"id": 1, "target": "ssh host 'sudo systemctl restart x'", "title": "Shell command", "status": "ok"}, "shell"
+    )
+    assert "sudo" in item["via"]

@@ -4,6 +4,7 @@ import { activateOnKey } from '../../../lib/a11y';
 import { getActivityLog, type ActivityCategory, type ActivityFilters, type ActivityItem } from '../../../lib/api';
 import { formatDuration, formatRelative, formatDateTime } from '../../../lib/categoryMeta';
 import { Icon } from '../../ui/icons';
+import { Select } from '../../ui/Select';
 import { sourceLabel } from '../../../lib/sourceLabels';
 import { CommandText, FailMark, RiskTag } from './parts';
 
@@ -19,7 +20,15 @@ interface ActivityLogProps {
   onClearGroup: () => void;
   status: LogStatus;
   onStatus: (s: LogStatus) => void;
+  /** Wrapper counts for the window, for the Via filter (shell only). */
+  viaOptions?: { key: string; runs: number }[];
   onSelect: (sessionId: string, eventId?: number) => void;
+}
+
+export function viaLabel(key: string): string {
+  if (key === 'env') return 'env vars';
+  if (key === 'sudo') return 'sudo (as root)';
+  return key;
 }
 
 function useDebounced<T>(value: T, ms: number): T {
@@ -31,13 +40,26 @@ function useDebounced<T>(value: T, ms: number): T {
   return v;
 }
 
-export function ActivityLog({ category, filters, group, onClearGroup, status, onStatus, onSelect }: ActivityLogProps) {
+export function ActivityLog({
+  category,
+  filters,
+  group,
+  onClearGroup,
+  status,
+  onStatus,
+  viaOptions = [],
+  onSelect,
+}: ActivityLogProps) {
   const [q, setQ] = useState('');
+  const [via, setVia] = useState('');
   const query = useDebounced(q.trim(), 250);
-  useEffect(() => setQ(''), [category]);
+  useEffect(() => {
+    setQ('');
+    setVia('');
+  }, [category]);
 
   const log = useInfiniteQuery({
-    queryKey: ['activityLog', category, filters, group, status, query],
+    queryKey: ['activityLog', category, filters, group, status, query, via],
     queryFn: ({ pageParam }) =>
       getActivityLog(category, {
         ...filters,
@@ -45,6 +67,7 @@ export function ActivityLog({ category, filters, group, onClearGroup, status, on
         group: group ?? undefined,
         failed: status === 'failed',
         risky: status === 'risky',
+        via: via || undefined,
         offset: pageParam,
         limit: PAGE,
       }),
@@ -88,6 +111,19 @@ export function ActivityLog({ category, filters, group, onClearGroup, status, on
             </button>
           ))}
         </div>
+        {category === 'shell' && viaOptions.length > 0 && (
+          <Select
+            className="min-w-[13rem]"
+            aria-label="Ran through"
+            value={via}
+            onChange={setVia}
+            options={[
+              { value: '', label: 'Via: any' },
+              ...viaOptions.map((v) => ({ value: v.key, label: `Via ${viaLabel(v.key)} (${v.runs.toLocaleString()})` })),
+              ...(via && !viaOptions.some((v) => v.key === via) ? [{ value: via, label: `Via ${viaLabel(via)}` }] : []),
+            ]}
+          />
+        )}
         {group && (
           <span className="inline-flex items-center gap-1.5 rounded-[4px] border border-fg/30 bg-surface py-1 pl-2.5 pr-1 font-mono text-[0.65rem] font-bold text-fg">
             {group}
@@ -121,7 +157,7 @@ export function ActivityLog({ category, filters, group, onClearGroup, status, on
         <div className="px-4 py-14 text-center">
           <Icon name={category === 'shell' ? 'terminal' : 'globe'} className="mx-auto mb-3 h-7 w-7 text-fg/20" />
           <p className="font-mono text-xs text-fg/55">
-            {query || group || status !== 'all'
+            {query || group || via || status !== 'all'
               ? `No ${noun} match these filters.`
               : `No ${noun} in this time range. Try a longer range.`}
           </p>
@@ -162,8 +198,15 @@ function LogRow({
   const isSearch = category === 'web' && item.kind === 'search';
   // Project and agent live in the tooltip: both have filters above, and a
   // logo on every row was the noisiest thing on the page.
-  const tip = [item.target, `${sourceLabel(item.source)} in ${item.cwd ?? 'unknown project'}`,
-    item.ts ? formatDateTime(item.ts) : ''].filter(Boolean).join('\n');
+  const tip = [
+    item.target,
+    `${sourceLabel(item.source)} in ${item.cwd ?? 'unknown project'}`,
+    item.via?.length ? `Via ${item.via.map(viaLabel).join(', ')}` : '',
+    item.env_names?.length ? `Sets ${item.env_names.join(', ')}` : '',
+    item.ts ? formatDateTime(item.ts) : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
   return (
     <li
       role="button"

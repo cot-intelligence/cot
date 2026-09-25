@@ -15,7 +15,7 @@ import { FadeIn } from '../ui/FadeIn';
 import { Icon } from '../ui/icons';
 import { PageHeader } from '../ui/PageHeader';
 import { Select } from '../ui/Select';
-import { ActivityLog, type LogStatus } from './activity/ActivityLog';
+import { ActivityLog, viaLabel, type LogStatus } from './activity/ActivityLog';
 import { CommandText, Grid, Section, Stat, shortPath } from './activity/parts';
 
 interface MetricsHistoryViewProps {
@@ -169,6 +169,7 @@ export function MetricsHistoryView({ onSelect, onBack, initialTab = 'shell' }: M
                   onClearGroup={() => setGroup(null)}
                   status={status}
                   onStatus={setStatus}
+                  viaOptions={shell ? data?.via : undefined}
                   onSelect={onSelect}
                 />
               </Section>
@@ -347,7 +348,7 @@ function MostUsed({
                   aria-pressed={on}
                   onClick={pick}
                   onKeyDown={(e) => activateOnKey(e, pick)}
-                  title={g.verbs?.length ? g.verbs.map((v) => `${g.key} ${v.key}: ${v.runs}`).join('\n') : undefined}
+                  title={groupTip(g) || undefined}
                   className={`grid cursor-pointer grid-cols-[minmax(0,10rem)_minmax(0,1fr)_3.5rem_4.5rem] items-center gap-4 px-4 py-2 transition-colors hover:bg-surface/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-vermilion ${
                     on ? 'bg-surface' : ''
                   }`}>
@@ -376,6 +377,15 @@ function MostUsed({
       </div>
     </Section>
   );
+}
+
+/** Hover text for a Most used row: its subcommands and what it ran through. */
+function groupTip(g: ActivitySummary['groups'][number]): string {
+  const lines = (g.verbs ?? []).map((v) => `${g.key} ${v.key}: ${v.runs}`);
+  if (g.via?.length) {
+    lines.push('', 'Ran through:', ...g.via.map((v) => `  ${viaLabel(v.key)}: ${v.runs} of ${g.runs}`));
+  }
+  return lines.join('\n');
 }
 
 function TabBtn({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
