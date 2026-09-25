@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import __version__, ai_insights, db, insights, store
+from . import __version__, activity, ai_insights, db, insights, store
 
 app = FastAPI(title="cot collector", version=__version__)
 
@@ -167,6 +168,21 @@ async def _enforce_local_origin(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def _select_store(request: Request, call_next):
+    """``?store=replay`` runs the request against the Session Replay DB, so the
+    session page, export and search work unchanged on imported sessions while
+    they stay out of the traced sessions and every aggregate."""
+    name = request.query_params.get("store")
+    if name is None:
+        return await call_next(request)
+    if name != "replay":
+        return JSONResponse({"detail": "store must be 'replay'"}, status_code=400)
+    await asyncio.to_thread(db.ensure_replay_store)
+    with store.use(store.replay_path()):
+        return await call_next(request)
+
+
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts())
 
 _cors_kwargs: dict[str, Any] = {"allow_methods": ["*"], "allow_headers": ["*"]}
@@ -190,7 +206,10 @@ _BRIDGE_DIR = _bridge_dir()
 
 @app.on_event("startup")
 async def _startup() -> None:
-    db.init_db()
+    db.init_db(build_search_index=False)
+    # A first-time search index build can take longer than the desktop app waits
+    # for /health; search scans until it lands.
+    threading.Thread(target=db.ensure_search_index, name="search-index", daemon=True).start()
     # Opt-in telemetry runs in the background so it never blocks request handling
     # and degrades silently when offline/air-gapped.
     asyncio.create_task(_telemetry_loop())
@@ -1081,6 +1100,51 @@ def get_metrics_history(category: str = "shell", limit: int = 200) -> dict[str, 
     return {"items": db.metrics_history(category, limit)}
 
 
+@app.get("/v1/activity")
+def get_activity(
+    category: str = "shell",
+    days: int = Query(7),
+    project: str | None = None,
+    source: str | None = None,
+) -> dict[str, Any]:
+    """Activity page rollup: top programs/domains, failing, slowest, risky."""
+    if category not in ("shell", "web"):
+        raise HTTPException(status_code=400, detail="category must be 'shell' or 'web'")
+    return activity.summarize(category, max(0, days), project or None, source or None)
+
+
+@app.get("/v1/activity/log")
+def get_activity_log(
+    category: str = "shell",
+    days: int = Query(7),
+    project: str | None = None,
+    source: str | None = None,
+    q: str | None = None,
+    group: str | None = None,
+    failed: bool = False,
+    risky: bool = False,
+    via: str | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Every command or request in the window, filterable, newest first."""
+    if category not in ("shell", "web"):
+        raise HTTPException(status_code=400, detail="category must be 'shell' or 'web'")
+    return activity.log(
+        category,
+        max(0, days),
+        project=project or None,
+        source=source or None,
+        q=q,
+        group=group or None,
+        failed_only=failed,
+        risky_only=risky,
+        via=via or None,
+        offset=offset,
+        limit=limit,
+    )
+
+
 @app.get("/v1/insights")
 def get_insights(
     days: int = Query(30),
@@ -1171,11 +1235,11 @@ def get_session_insights(session_id: str) -> dict[str, Any]:
 
 
 @app.get("/v1/search")
-def search(q: str = "", limit: int = 40) -> dict[str, Any]:
+def search(q: str = "", limit: int = 40, session_id: str | None = None) -> dict[str, Any]:
     q = q.strip()
     if len(q) < 2:
         return {"results": []}
-    return {"results": db.search(q, max(1, min(limit, 100)))}
+    return {"results": db.search(q, max(1, min(limit, 100)), session_id=session_id or None)}
 
 
 class ExportRequest(BaseModel):
@@ -1252,12 +1316,78 @@ def get_event_detail(session_id: str, event_id: int) -> dict[str, Any]:
     return detail
 
 
+# The largest real export seen was ~41MB; leave room without accepting anything.
+_REPLAY_IMPORT_MAX_BYTES = 200 * 1024 * 1024
+
+
+@app.post("/v1/replay/import")
+async def import_replay_session(request: Request) -> dict[str, Any]:
+    """Import a session export (the request body) into Session Replay."""
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > _REPLAY_IMPORT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="The file is larger than 200 MB.")
+    raw = await request.body()
+    if len(raw) > _REPLAY_IMPORT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="The file is larger than 200 MB.")
+    try:
+        data = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="The file isn't valid JSON.") from None
+    await asyncio.to_thread(db.ensure_replay_store)
+
+    def _import() -> dict[str, Any]:
+        with store.use(store.replay_path()):
+            return db.import_session_export(data)
+
+    try:
+        return await asyncio.to_thread(_import)
+    except db.ExportFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.delete("/v1/sessions/{session_id}")
+def delete_session(session_id: str) -> dict[str, Any]:
+    """Delete a Session Replay import. Traced sessions can't be deleted here."""
+    if not db.delete_imported_session(session_id):
+        raise HTTPException(status_code=404, detail="No imported session with this id")
+    return {"deleted": session_id}
+
+
+@app.get("/v1/sessions/{session_id}/export")
+def export_session(session_id: str) -> Response:
+    """The whole session as a downloadable JSON file."""
+    data = db.export_session(session_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    day = datetime.now().strftime("%Y%m%d")
+    filename = f"cot-session-{session_id[:8]}-{day}.json"
+    return Response(
+        content=json.dumps(data, indent=2, ensure_ascii=False, default=str),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/v1/sessions/{session_id}")
 def get_session(session_id: str) -> dict[str, Any]:
     session = db.get_session_detail(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
+
+
+class DashboardFiles(StaticFiles):
+    """Hashed bundles under /assets never change; everything else (index.html)
+    must be revalidated, or a webview's heuristic cache keeps loading an old
+    page whose bundles are gone after an upgrade: a blank window."""
+
+    async def get_response(self, path: str, scope):  # type: ignore[no-untyped-def]
+        response = await super().get_response(path, scope)
+        if path.startswith("assets/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 # Serve the built dashboard so the whole app runs from one container. Mounted
@@ -1267,4 +1397,4 @@ _STATIC_DIR = Path(
     os.environ.get("COT_STATIC_DIR", str(Path(__file__).resolve().parent.parent / "static"))
 )
 if _STATIC_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="dashboard")
+    app.mount("/", DashboardFiles(directory=str(_STATIC_DIR), html=True), name="dashboard")

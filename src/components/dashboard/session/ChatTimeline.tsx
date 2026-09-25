@@ -15,9 +15,14 @@ import {
 import { useFullEventDetail } from '../../../lib/useFullEventDetail';
 import { MarkdownContent } from '../../ui/MarkdownContent';
 import { AttachmentTags } from './AttachmentTags';
+import { AgentMark } from '../../ui/AgentMark';
+import { AGENTS } from '../../../lib/agents';
+import { displayValue, prettyJson } from '../../../lib/json';
+import { revealSearchHits } from '../../../lib/searchHighlight';
 
 export interface ChatTimelineHandle {
-  scrollToAndExpand: (key: string) => void;
+  /** With `query`, also pulse the card and scroll the query's first match into view. */
+  scrollToAndExpand: (key: string, query?: string) => void;
 }
 
 interface ChatTimelineProps {
@@ -100,7 +105,7 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
     }, [items, runs, keyFor]);
 
     useImperativeHandle(ref, () => ({
-      scrollToAndExpand(key: string) {
+      scrollToAndExpand(key: string, query?: string) {
         setForceExpanded((prev) => {
           const next = new Set(prev);
           next.add(key);
@@ -114,6 +119,7 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
         for (const ms of [80, 200, 400]) {
           window.setTimeout(() => el.scrollIntoView({ block: 'start' }), ms);
         }
+        if (query != null) revealSearchHits(el, query);
       },
     }), []);
 
@@ -130,14 +136,27 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
     const renderEvent = (item: TimelineItem, withRef = true) => {
       const itemKey = keyFor(item);
       const itemSessionId = eventSessionId(item, sessionId);
-      const isConvo = isConversationCategory(item.category);
-      return isConvo ? (
+      const cardRef = withRef ? (el: HTMLDivElement | null) => setCardRef(itemKey, el) : undefined;
+      if (item.category === 'thought') {
+        return (
+          <ThoughtCard
+            key={itemKey}
+            item={item}
+            sessionId={itemSessionId}
+            eventKey={itemKey}
+            forceOpen={forceExpanded.has(itemKey)}
+            expansionRequest={expansionRequest}
+            ref={cardRef}
+          />
+        );
+      }
+      return isConversationCategory(item.category) ? (
         <ConversationCard
           key={itemKey}
           item={item}
           sessionId={itemSessionId}
           eventKey={itemKey}
-          ref={withRef ? (el) => setCardRef(itemKey, el) : undefined}
+          ref={cardRef}
         />
       ) : (
         <ActionCard
@@ -147,7 +166,7 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
           eventKey={itemKey}
           forceOpen={forceExpanded.has(itemKey)}
           expansionRequest={expansionRequest}
-          ref={withRef ? (el) => setCardRef(itemKey, el) : undefined}
+          ref={cardRef}
         />
       );
     };
@@ -170,6 +189,7 @@ export const ChatTimeline = forwardRef<ChatTimelineHandle, ChatTimelineProps>(
                 estimate={estimateRowHeight(seg.item)}
                 refKeys={[keyFor(seg.item)]}
                 setCardRef={setCardRef}
+                className={isUserMessage(seg.item) ? 'pb-2 pt-6' : ''}
               >
                 {renderEvent(seg.item, false)}
               </LazyRow>
@@ -315,66 +335,157 @@ function SubagentResultCard({ item, sessionId }: { item: TimelineItem; sessionId
 /* Conversation cards — always expanded, chat-bubble style             */
 /* ------------------------------------------------------------------ */
 
-const ConversationCard = forwardRef<HTMLDivElement, { item: TimelineItem; sessionId: string; eventKey: string }>(
-  function ConversationCard({ item, sessionId, eventKey: itemEventKey }, ref) {
-    const meta = getCategoryMeta(item.category);
-    const isPrompt = item.category === 'prompt' || item.category === 'question';
-    const provenance = item.provenance ? PROVENANCE_META[item.provenance] : null;
+function isUserMessage(item: TimelineItem): boolean {
+  return item.category === 'prompt' || item.category === 'question';
+}
 
+function agentName(item: TimelineItem): string {
+  return AGENTS.find((a) => a.id === item.source)?.name ?? 'Agent';
+}
+
+function SparkIcon({ className = '' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 16 16" fill="currentColor" className={className} aria-hidden="true">
+      <path d="M8 0.5c.4 3.6 1.9 5.6 7.5 7.5-5.6 1.9-7.1 3.9-7.5 7.5-.4-3.6-1.9-5.6-7.5-7.5C6.1 6.1 7.6 4.1 8 .5Z" />
+    </svg>
+  );
+}
+
+function AgentAvatar({ item }: { item: TimelineItem }) {
+  return (
+    <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-bg text-fg ring-1 ring-line/15">
+      <AgentMark id={item.source} className="h-3.5 w-3.5" />
+    </span>
+  );
+}
+
+function CardMeta({ item }: { item: TimelineItem }) {
+  const provenance = item.provenance ? PROVENANCE_META[item.provenance] : null;
+  return (
+    <>
+      {provenance && (
+        <span className={`rounded px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest ${provenance.pillClass}`}>
+          {provenance.label}
+        </span>
+      )}
+      <span className="font-mono text-[0.55rem] tabular-nums text-fg/35" title={formatDateTime(item.start_ts || item.ts)}>
+        {formatClock(item.start_ts || item.ts)}
+      </span>
+      {item.duration_ms != null && item.duration_ms > 0 && (
+        <span className="font-mono text-[0.55rem] tabular-nums text-fg/30">{formatDuration(item.duration_ms)}</span>
+      )}
+      {item.status === 'interrupted' && (
+        <span className="rounded border border-vermilion/50 px-1 py-0.5 font-mono text-[0.5rem] font-bold uppercase text-vermilion">
+          Stopped
+        </span>
+      )}
+    </>
+  );
+}
+
+/**
+ * The user's messages are cobalt bubbles on the right; the agent's replies are
+ * raised cards, each headed by the agent's own mark.
+ */
+const ConversationCard = forwardRef<
+  HTMLDivElement,
+  { item: TimelineItem; sessionId: string; eventKey: string }
+>(function ConversationCard({ item, sessionId, eventKey: itemEventKey }, ref) {
+  const provenance = item.provenance ? PROVENANCE_META[item.provenance] : null;
+
+  if (isUserMessage(item)) {
     return (
-      <div
-        ref={ref}
-        data-event-key={itemEventKey}
-        className={`scroll-mt-4 rounded-lg px-4 py-3 ${provenance?.accent ?? ''} ${
-          isPrompt
-            ? 'border border-fg/10 bg-surface'
-            : 'bg-transparent'
-        }`}
-      >
-        {/* Sender line */}
-        <div className="mb-2 flex items-center gap-2">
-          <span className={`h-2 w-2 rounded-full ${meta.dot}`} />
-          <span className={`font-mono text-[0.58rem] font-bold uppercase tracking-widest ${meta.color}`}>
-            {isPrompt ? 'User' : item.category === 'thought' ? 'Thinking' : 'Agent'}
-          </span>
-          {provenance && (
-            <span className={`rounded px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest ${provenance.pillClass}`}>
-              {provenance.label}
-            </span>
+      <div ref={ref} data-event-key={itemEventKey} className="flex scroll-mt-4 flex-col items-end">
+        <div className={`bubble-user min-w-0 max-w-[85%] rounded-2xl rounded-br-md px-4 py-3 ${provenance?.accent ?? ''}`}>
+          {item.attachments && item.attachments.length > 0 && (
+            <div className="mb-2">
+              <AttachmentTags attachments={item.attachments} />
+            </div>
           )}
-          <span
-            className="font-mono text-[0.5rem] tabular-nums text-fg/30"
-            title={formatDateTime(item.start_ts || item.ts)}
-          >
-            {formatClock(item.start_ts || item.ts)}
-          </span>
-          {item.duration_ms != null && item.duration_ms > 0 && (
-            <span className="font-mono text-[0.5rem] tabular-nums text-fg/25">
-              {formatDuration(item.duration_ms)}
-            </span>
-          )}
-          {item.status === 'interrupted' && (
-            <span className="rounded border border-vermilion/50 px-1 py-0.5 font-mono text-[0.5rem] font-bold uppercase text-vermilion">
-              Stopped
-            </span>
-          )}
-        </div>
-
-        {/* Attachments */}
-        {item.attachments && item.attachments.length > 0 && (
-          <div className="mb-2">
-            <AttachmentTags attachments={item.attachments} />
-          </div>
-        )}
-
-        {/* Body — always shown */}
-        <div className={item.category === 'thought' ? 'text-fg/60' : ''}>
           <CardBody item={item} sessionId={sessionId} />
+        </div>
+        <div className="mt-1 flex items-center gap-2 pr-1">
+          <CardMeta item={item} />
         </div>
       </div>
     );
-  },
-);
+  }
+
+  return (
+    <div
+      ref={ref}
+      data-event-key={itemEventKey}
+      className={`card-agent scroll-mt-4 rounded-2xl rounded-tl-md px-5 py-4 ${provenance?.accent ?? ''}`}
+    >
+      <div className="mb-2.5 flex items-center gap-2">
+        <AgentAvatar item={item} />
+        <span className="font-sans text-[0.78rem] font-semibold text-fg">{agentName(item)}</span>
+        {item.model && <span className="font-mono text-[0.55rem] text-fg/35">{item.model}</span>}
+        <CardMeta item={item} />
+      </div>
+      {item.attachments && item.attachments.length > 0 && (
+        <div className="mb-2">
+          <AttachmentTags attachments={item.attachments} />
+        </div>
+      )}
+      <CardBody item={item} sessionId={sessionId} />
+    </div>
+  );
+});
+
+/** Thinking is the agent's working, not its answer: collapsed to a faded
+ *  two-line preview until opened. */
+const ThoughtCard = forwardRef<HTMLDivElement, {
+  item: TimelineItem;
+  sessionId: string;
+  eventKey: string;
+  forceOpen?: boolean;
+  expansionRequest: ExpansionRequest;
+}>(function ThoughtCard({ item, sessionId, eventKey: itemEventKey, forceOpen, expansionRequest }, ref) {
+  const [expanded, setExpanded] = useState(false);
+  const open = expanded || forceOpen;
+  const preview = (item.detail ?? '').replace(/\s+/g, ' ').trim();
+
+  useEffect(() => {
+    setExpanded(expansionRequest.open);
+  }, [expansionRequest]);
+
+  // Collapsed, the whole block opens it; once open, only the header closes it,
+  // so selecting text in the body doesn't collapse it.
+  return (
+    <div
+      ref={ref}
+      data-event-key={itemEventKey}
+      onClick={open ? undefined : () => setExpanded(true)}
+      className={`group scroll-mt-4 rounded-xl px-3 py-2 transition-colors ${
+        open ? '' : 'cursor-pointer hover:bg-fg/[0.03]'
+      }`}
+    >
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center gap-2 text-left"
+        aria-expanded={open}
+      >
+        <SparkIcon className="h-3 w-3 text-fg/40" />
+        <span className="font-serif text-[0.95rem] italic text-fg/60 transition-colors group-hover:text-fg/85">
+          Thinking
+        </span>
+        <CardMeta item={item} />
+        <span className={`ml-auto text-[0.55rem] text-fg/30 transition-transform ${open ? 'rotate-90' : ''}`}>▸</span>
+      </button>
+      {open ? (
+        <div className="mt-2 border-l border-dashed border-line/20 pl-3 text-fg/60">
+          <CardBody item={item} sessionId={sessionId} />
+        </div>
+      ) : (
+        preview && (
+          <p className="fade-bottom mt-1 line-clamp-2 text-[0.82rem] leading-relaxed text-fg/45">{preview}</p>
+        )
+      )}
+    </div>
+  );
+});
 
 /* ------------------------------------------------------------------ */
 /* Lazy mount — long sessions have thousands of markdown bodies; parsing  */
@@ -420,6 +531,7 @@ const ACTION_ROW_HEIGHT = 38;
 
 function estimateRowHeight(item: TimelineItem): number {
   if (!isConversationCategory(item.category)) return ACTION_ROW_HEIGHT;
+  if (item.category === 'thought') return 72;
   const detail = item.detail ?? '';
   const lines = detail.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / 90)), 0);
   return 56 + Math.min(lines * 22, 640);
@@ -430,11 +542,13 @@ function LazyRow({
   estimate,
   refKeys,
   setCardRef,
+  className = '',
   children,
 }: {
   estimate: number;
   refKeys: string[];
   setCardRef: (key: string, el: HTMLDivElement | null) => void;
+  className?: string;
   children: React.ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -456,7 +570,7 @@ function LazyRow({
   }, [shown]);
 
   return (
-    <div ref={ref} className="scroll-mt-4" style={shown ? undefined : { height: estimate }}>
+    <div ref={ref} className={`scroll-mt-4 ${className}`} style={shown ? undefined : { height: estimate }}>
       {shown ? children : null}
     </div>
   );
@@ -489,7 +603,9 @@ const ActionCard = forwardRef<HTMLDivElement, {
       <div
         ref={ref}
         data-event-key={itemEventKey}
-        className={`group scroll-mt-4 rounded-lg border border-line/5 transition-colors hover:border-line/15 ${provenance?.accent ?? ''}`}
+        className={`group scroll-mt-4 rounded-lg border transition-colors ${
+          open ? 'border-line/10 bg-surface/60' : 'border-transparent hover:border-line/10 hover:bg-fg/[0.025]'
+        } ${provenance?.accent ?? ''}`}
       >
         <button
           type="button"
@@ -574,14 +690,18 @@ function CardBody({ item, sessionId }: { item: TimelineItem; sessionId: string }
 
   const d = parseDetail(resolvedItem);
   const message = conversationMessage(resolvedItem, d);
-  if (message) return <MarkdownContent content={message} />;
+  if (message) {
+    // A reply that is entirely JSON (structured output) reads as a code block.
+    const json = prettyJson(message);
+    return json ? <JsonBlock>{json}</JsonBlock> : <MarkdownContent content={message} />;
+  }
 
   if (d.edits && d.edits.length) {
     return (
       <div className="space-y-3">
         {d.edits.map((e, i) => <DiffBlock key={i} edit={e} index={i} total={d.edits!.length} />)}
         {d.output != null && d.output !== '' && (
-          <CodePane label="Result">{typeof d.output === 'string' ? d.output : JSON.stringify(d.output, null, 2)}</CodePane>
+          <CodePane label="Result">{displayValue(d.output)}</CodePane>
         )}
       </div>
     );
@@ -594,7 +714,7 @@ function CardBody({ item, sessionId }: { item: TimelineItem; sessionId: string }
           <span className="select-none text-vermilion">$ </span>{d.command}
         </pre>
         {d.output != null && d.output !== '' && (
-          <CodePane label="Output">{typeof d.output === 'string' ? d.output : JSON.stringify(d.output, null, 2)}</CodePane>
+          <CodePane label="Output">{displayValue(d.output)}</CodePane>
         )}
       </div>
     );
@@ -602,8 +722,8 @@ function CardBody({ item, sessionId }: { item: TimelineItem; sessionId: string }
   if (d.input != null || d.output != null) {
     return (
       <div className="flex flex-col gap-2 lg:flex-row">
-        {d.input != null && <CodePane label="Input">{typeof d.input === 'string' ? d.input : JSON.stringify(d.input, null, 2)}</CodePane>}
-        {d.output != null && <CodePane label="Output">{typeof d.output === 'string' ? d.output : JSON.stringify(d.output, null, 2)}</CodePane>}
+        {d.input != null && <CodePane label="Input">{displayValue(d.input)}</CodePane>}
+        {d.output != null && <CodePane label="Output">{displayValue(d.output)}</CodePane>}
       </div>
     );
   }
@@ -618,6 +738,14 @@ function CardBody({ item, sessionId }: { item: TimelineItem; sessionId: string }
 }
 
 /* ------------------------------------------------------------------ */
+
+function JsonBlock({ children }: { children: string }) {
+  return (
+    <pre className="scroll-thin max-h-[28rem] overflow-auto whitespace-pre-wrap break-words rounded-md bg-panel p-3 font-mono text-[0.8rem] leading-relaxed text-fg/90">
+      {children}
+    </pre>
+  );
+}
 
 function CodePane({ label, children }: { label: string; children: string }) {
   return (
