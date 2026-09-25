@@ -997,7 +997,7 @@ async function ingest(source: AgentId, payload: Record<string, unknown>) {
 
 /** Full realistic session for demo + automated tests. */
 export async function sendTestEvent(source: AgentId): Promise<string> {
-  const sid = `sess_${Math.random().toString(16).slice(2, 9)}`;
+  const sid = `sess_${crypto.randomUUID().replace(/-/g, '').slice(0, 7)}`;
   const cwd = '/Users/dev/cot-demo';
   const ts = () => new Date().toISOString();
 

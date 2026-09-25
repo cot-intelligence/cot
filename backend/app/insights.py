@@ -136,7 +136,9 @@ def rule(*, id: str, pillar: str, tier: int, aggregate_only: bool = False):
 
 
 def _fingerprint(rule_id: str, subject: str) -> str:
-    return hashlib.sha1(f"{rule_id}|{subject}".encode("utf-8")).hexdigest()
+    return hashlib.sha1(
+        f"{rule_id}|{subject}".encode("utf-8"), usedforsecurity=False
+    ).hexdigest()
 
 
 def _finding(
