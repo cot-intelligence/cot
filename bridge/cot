@@ -1402,7 +1402,13 @@ def _log_launch(body: dict) -> None:
         pass
 
 
-AGENTS = ("claude", "cursor", "codex")
+AGENTS = ("claude", "cursor", "codex", "opencode")
+OPENCODE_EVENTS = (
+    "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+    "PostToolUseFailure", "afterAgentResponse", "afterAgentThought",
+    "OpenCodeUsage", "PermissionRequest", "PostCompact", "Stop",
+)
+OPENCODE_PLUGIN_MARKER = 'id: "cot.observability"'
 
 # Where each agent reads its hook config, and whether it is a Cursor-style file
 # (a top-level "version" alongside "hooks") vs. a Claude/Codex-style file.
@@ -1410,6 +1416,7 @@ _CONFIG_TARGETS = {
     "claude": (Path.home() / ".claude" / "settings.json", False),
     "cursor": (Path.home() / ".cursor" / "hooks.json", True),
     "codex": (Path.home() / ".codex" / "hooks.json", False),
+    "opencode": (Path.home() / ".config" / "opencode" / "plugins" / "cot.js", False),
 }
 
 
@@ -1616,6 +1623,28 @@ def _backup_config(agent: str, path: Path, action: str) -> dict | None:
 
 
 def _agent_hook_status(agent: str) -> dict:
+    if agent == "opencode":
+        path = _CONFIG_TARGETS[agent][0]
+        try:
+            content = path.read_text()
+        except OSError:
+            content = ""
+        installed = OPENCODE_PLUGIN_MARKER in content
+        expected = list(OPENCODE_EVENTS)
+        return {
+            "agent": agent,
+            "config_path": str(path),
+            "config_exists": path.exists(),
+            "valid_json": None,
+            "error": None,
+            "installed": installed,
+            "expected_hooks": expected,
+            "installed_hooks": expected if installed else [],
+            "missing_hooks": [] if installed else expected,
+            "backup_count": len(_backup_entries(agent)),
+            "latest_backup": _latest_backup(agent),
+            "warnings": [] if installed else ["plugin_missing"],
+        }
     path, _ = _CONFIG_TARGETS[agent]
     expected = _template_events(_hook_templates()[agent])
     config, err = _read_json_file(path)
@@ -1691,6 +1720,28 @@ def _hooks_installed(agent: str) -> bool:
 
 
 def _install_agent(agent: str, action: str = "install") -> dict:
+    if agent == "opencode":
+        path = _CONFIG_TARGETS[agent][0]
+        try:
+            current = path.read_text()
+        except FileNotFoundError:
+            current = None
+        if current is not None and OPENCODE_PLUGIN_MARKER not in current:
+            raise ValueError(f"{path} exists and is not cot's plugin; move it before installing")
+        req = urllib.request.Request(f"{COT_ENDPOINT}/opencode-plugin.js")
+        with urllib.request.urlopen(req, timeout=10) as response:
+            plugin = response.read().decode("utf-8")
+        if OPENCODE_PLUGIN_MARKER not in plugin:
+            raise ValueError("collector returned an invalid OpenCode plugin")
+        changed = current != plugin
+        backup = None
+        if changed:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            backup = _backup_config(agent, path, action)
+            path.write_text(plugin)
+        status = _agent_hook_status(agent)
+        status.update({"changed": changed, "backup_created": backup, "status": "ok"})
+        return status
     path, cursor_style = _CONFIG_TARGETS[agent]
     template = _hook_templates()[agent]
 
@@ -1721,6 +1772,21 @@ def _install_agent(agent: str, action: str = "install") -> dict:
 
 
 def _uninstall_agent(agent: str, action: str = "uninstall") -> dict:
+    if agent == "opencode":
+        path = _CONFIG_TARGETS[agent][0]
+        try:
+            content = path.read_text()
+        except FileNotFoundError:
+            content = None
+        if content is not None and OPENCODE_PLUGIN_MARKER not in content:
+            return {"agent": agent, "config_path": str(path), "changed": False,
+                    "backup_created": None, "status": "error", "error": "plugin file is not owned by cot"}
+        backup = None
+        if content is not None:
+            backup = _backup_config(agent, path, action)
+            path.unlink()
+        return {"agent": agent, "config_path": str(path), "changed": content is not None,
+                "backup_created": backup, "status": "ok"}
     path, _ = _CONFIG_TARGETS[agent]
     config, err = _read_json_file(path)
     if err == "missing":
@@ -1767,8 +1833,8 @@ def _write_hook_status() -> None:
     """Record installed hook status where the collector can read it.
 
     The collector runs in Docker with ~/.cot mounted, so it cannot inspect
-    ~/.claude, ~/.cursor, or ~/.codex directly. This manifest is the bridge's
-    small, content-free handoff to the dashboard.
+    agent config directories directly. This manifest is the bridge's small,
+    content-free handoff to the dashboard.
     """
     status = {
         "updated_at": _now_z(),
@@ -1796,7 +1862,7 @@ def _cmd_install(args: list[str]) -> int:
                 print(f"cot: backup saved -> {result['backup_created']['backup_path']}")
             elif not result.get("changed"):
                 print(f"cot: {agent} hooks already up to date")
-        except OSError as exc:
+        except (OSError, ValueError, urllib.error.URLError) as exc:
             results.append(
                 {
                     "agent": agent,
@@ -1839,8 +1905,13 @@ def _cmd_install(args: list[str]) -> int:
     if "codex" in agents:
         print("cot: run /hooks in Codex to review and trust the new hooks.")
 
+    if not status_written or any(r["status"] != "ok" for r in results):
+        return 1
+
     # Auto-import historical transcripts after hook setup.
     if os.environ.get("COT_SKIP_IMPORT") in ("1", "true", "yes"):
+        return 0
+    if all(agent == "opencode" for agent in agents):
         return 0
     print("cot: importing historical transcripts…")
     try:
@@ -1849,6 +1920,8 @@ def _cmd_install(args: list[str]) -> int:
         offsets = _import_offsets_load()
         total = 0
         for agent in agents:
+            if agent == "opencode":
+                continue  # Live plugin only; no historical OpenCode parser yet.
             count = _import_agent(agent, None, offsets, origins, verbose=False)
             total += count
         _import_offsets_save(offsets)
@@ -2160,7 +2233,7 @@ def _confirm_purge(assume_yes: bool) -> bool:
         return False
     print("cot purge will remove:")
     print(f"  - Docker collector container: {_container_name()}")
-    print("  - cot hooks from Claude, Cursor, and Codex")
+    print("  - cot hooks from Claude, Cursor, Codex, and OpenCode")
     print(f"  - local cot state, bridge, and trace DB: {STATE_DIR}")
     answer = input("Type 'purge' to continue: ").strip()
     return answer == "purge"
@@ -3917,8 +3990,8 @@ def main() -> int:
     if len(sys.argv) < 3 or sys.argv[1] != "hook":
         print(
             "Usage:\n"
-            "  cot hook <claude|cursor|codex>   # reads a hook payload from stdin\n"
-            "  cot install [claude cursor codex]  # wire up agent hook configs\n"
+            "  cot hook <claude|cursor|codex|opencode>   # reads a hook payload from stdin\n"
+            "  cot install [claude cursor codex opencode]  # wire up agent integrations\n"
             "  cot import [--agent X] [--since]   # import historical transcripts\n"
             "  cot reimport                       # wipe + re-import all transcripts\n"
             "  cot recover-questions              # fill AskQuestion answers from transcripts\n"

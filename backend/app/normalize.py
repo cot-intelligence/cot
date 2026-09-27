@@ -1,4 +1,4 @@
-"""Translate raw Claude Code / Cursor / Codex hook payloads into a common shape + category."""
+"""Translate agent hook payloads into a common shape and category."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from .tool_classification import (
     subagent_label as _subagent_label,
 )
 
-Source = str  # 'claude' | 'cursor' | 'codex'
+Source = str  # 'claude' | 'cursor' | 'codex' | 'opencode'
 LifecycleBoundary = Literal["session_start", "turn_end", "session_end"]
 APPROVAL_REVIEW_PREFIX = "The following is the Codex agent history"
 
@@ -66,7 +66,7 @@ def lifecycle_boundary(source: Source, hook: str) -> LifecycleBoundary | None:
     if hook in ("SessionEnd", "sessionEnd"):
         return "session_end"
     if hook in ("Stop", "stop"):
-        return "turn_end" if source == "claude" else "session_end"
+        return "turn_end" if source in ("claude", "opencode") else "session_end"
     return None
 
 
@@ -155,6 +155,16 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
             "title": "Environment context",
             "target": body.get("cwd"),
             "detail": str(body.get("environment_context") or ""),
+            "status": "ok",
+            "duration_ms": duration_ms,
+        }
+
+    if hook == "OpenCodeUsage":
+        return {
+            "category": "lifecycle",
+            "title": "Model usage",
+            "target": body.get("model"),
+            "detail": _json_detail(body.get("usage") or {}),
             "status": "ok",
             "duration_ms": duration_ms,
         }
@@ -412,8 +422,8 @@ def normalize(source: Source, body: dict[str, Any] | None) -> dict[str, Any]:
             cwd = roots[0]
         tool = _cursor_tool(hook, body)
     else:
-        # Claude Code and Codex both ride Claude-Code-style stdin payloads.
-        if source != "codex":
+        # Claude Code, Codex, and OpenCode use the same bridge payload shape.
+        if source not in ("codex", "opencode"):
             source = "claude"
         session_id = body.get("session_id") or "unknown"
         cwd = body.get("cwd")

@@ -2015,6 +2015,15 @@ def record_event(
                 (norm["cwd"], sid),
             )
 
+        if norm["source"] == "opencode" and raw.get("parent_session_id"):
+            parent = str(raw["parent_session_id"])
+            if parent != sid:
+                conn.execute(
+                    "UPDATE sessions SET parent_session_id = ?,"
+                    " subagent_label = COALESCE(subagent_label, ?) WHERE id = ?",
+                    (parent, raw.get("session_title"), sid),
+                )
+
         # Imported events carry historical timestamps; ensure the session's
         # started_at reflects the earliest event we've seen.
         if origin == "import":

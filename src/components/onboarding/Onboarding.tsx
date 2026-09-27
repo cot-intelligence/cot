@@ -22,13 +22,13 @@ function readSavedAgents(): AgentId[] {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) {
       const legacy = window.localStorage.getItem('cot.onboarding.agent');
-      if (legacy === 'claude' || legacy === 'cursor' || legacy === 'codex') return [legacy];
+      if (legacy === 'claude' || legacy === 'cursor' || legacy === 'codex' || legacy === 'opencode') return [legacy];
       return [];
     }
     const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed)) {
       return parsed.filter(
-        (x): x is AgentId => x === 'claude' || x === 'cursor' || x === 'codex',
+        (x): x is AgentId => x === 'claude' || x === 'cursor' || x === 'codex' || x === 'opencode',
       );
     }
   } catch {
@@ -37,7 +37,7 @@ function readSavedAgents(): AgentId[] {
   return [];
 }
 
-const AGENT_IDS: AgentId[] = ['claude', 'cursor', 'codex'];
+const AGENT_IDS: AgentId[] = ['claude', 'cursor', 'codex', 'opencode'];
 
 interface OnboardingProps {
   onComplete: (agents: AgentId[], origin: { x: number; y: number }) => void;

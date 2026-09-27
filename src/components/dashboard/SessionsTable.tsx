@@ -110,7 +110,7 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
   };
 
   const sourceOptions = useMemo(() => {
-    const set = new Set<string>(['claude', 'cursor', 'codex']);
+    const set = new Set<string>(['claude', 'cursor', 'codex', 'opencode']);
     sessions.forEach((s) => set.add(s.source));
     return Array.from(set);
   }, [sessions]);
@@ -467,4 +467,3 @@ function groupOf(
   const cwd = s.cwd || '(unknown path)';
   return { key: cwd, label: basename(cwd), title: cwd };
 }
-
