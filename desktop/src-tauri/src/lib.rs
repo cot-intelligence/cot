@@ -40,37 +40,36 @@ const CHROME_SCRIPT: &str = r#"
 
   var init = function () {
     var style = document.createElement('style');
+    // Selectors follow the Signal Forest shell (AppSidebar.tsx): aside.side holds the
+    // sidebar, .side-top its first row, and the page header is .main > header.
     style.textContent =
-      '.cot-mac-brand{padding-left:' + CLEAR + 'px!important}' +
-      '.cot-mac-brand .rail-label{display:none!important}' +
-      // The top row is the titlebar: no breadcrumb, and the rail's divider
+      // Expanded sidebar: its top row starts after the traffic lights.
+      '.cot-mac-rail:not([data-rail="true"]) .cot-mac-brand{padding-left:' + CLEAR + 'px!important}' +
+      // Icon rail (60px): the logo drops below the traffic lights instead.
+      '.cot-mac-rail[data-rail="true"] .cot-mac-brand{margin-top:28px}' +
+      // The top row is the titlebar: no breadcrumb, and the sidebar's divider
       // starts below it so nothing runs between the traffic lights.
       '.cot-mac-header nav[aria-label="Breadcrumb"]{visibility:hidden}' +
-      '.cot-mac-rail{border-right-color:transparent!important}' +
-      '.cot-mac-rail::after{content:"";position:absolute;top:56px;bottom:0;right:0;width:1px;' +
-      'background:rgb(var(--line)/0.1);pointer-events:none}';
+      '.cot-mac-rail:not([data-rail="true"]){position:relative;border-right-color:transparent!important}' +
+      '.cot-mac-rail:not([data-rail="true"])::after{content:"";position:absolute;top:56px;bottom:0;right:0;width:1px;' +
+      'background:var(--v-line);pointer-events:none}';
     document.head.appendChild(style);
 
     var mark = function () {
-      var nav = document.querySelector('nav[aria-label="Primary"]');
-      var brand = nav && nav.firstElementChild;
-      var railWidth = 0;
+      var side = document.querySelector('aside.side');
+      var brand = side && side.querySelector('.side-top');
       if (brand) {
-        nav.classList.add('cot-mac-rail');
+        side.classList.add('cot-mac-rail');
         brand.classList.add('cot-mac-brand');
         brand.setAttribute('data-tauri-drag-region', '');
-        // The rail's layout box, not the nav, which widens over the page on hover.
-        railWidth = nav.parentElement.getBoundingClientRect().width;
       }
-      var header = null;
-      var headers = document.querySelectorAll('header');
-      for (var i = 0; i < headers.length; i++) {
-        if (headers[i].getBoundingClientRect().top <= 1) { header = headers[i]; break; }
-      }
+      var header = document.querySelector('.main > header');
       if (header) {
         header.classList.add('cot-mac-header');
         header.setAttribute('data-tauri-drag-region', '');
-        var overhang = Math.max(0, CLEAR - railWidth);
+        // Only when the header itself reaches under the traffic lights (no sidebar beside it).
+        var left = header.getBoundingClientRect().left;
+        var overhang = Math.max(0, CLEAR - left);
         header.style.paddingLeft = overhang ? (overhang + HEADER_PAD) + 'px' : '';
       }
     };
@@ -81,9 +80,9 @@ const CHROME_SCRIPT: &str = r#"
       queued = true;
       requestAnimationFrame(function () { queued = false; mark(); });
     };
-    // Routes swap the header out and the rail collapses by class, so watch both.
+    // Routes swap the header out and the sidebar collapses to the rail via data-rail, so watch both.
     new MutationObserver(schedule).observe(document.body, {
-      childList: true, subtree: true, attributes: true, attributeFilter: ['class']
+      childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'data-rail']
     });
     window.addEventListener('resize', schedule);
     document.addEventListener('transitionend', schedule);
