@@ -359,7 +359,7 @@
 /* Timeline */
 .vf .tl { list-style: none; margin: 0; padding: 0; position: relative; }
 .vf .tl::before { content: ''; position: absolute; left: 15px; top: 8px; bottom: 8px; width: 1px; background: var(--v-line); }
-.vf .tl-i { position: relative; display: grid; grid-template-columns: 32px 1fr auto; gap: 12px; padding: 8px 0; align-items: start; }
+.vf .tl-i { scroll-margin-top: 16px; position: relative; display: grid; grid-template-columns: 32px 1fr auto; gap: 12px; padding: 8px 0; align-items: start; }
 .vf .tl-ic { width: 31px; height: 31px; border-radius: 8px; display: grid; place-items: center; background: var(--v-surface); border: 1px solid var(--v-line); color: var(--v-dim); position: relative; z-index: 1; }
 .vf .tl-i[data-cat='prompt'] .tl-ic { color: var(--v-fg); border-color: var(--v-mute); }
 .vf .tl-i[data-cat='shell'] .tl-ic { color: var(--v-amber); }
@@ -402,6 +402,9 @@
 @media (min-width: 901px) {
   .vf.app[data-rail='true'] { grid-template-columns: 60px 1fr; background: var(--v-rail); }
   .vf .side[data-rail='true'] { background: none; border-right: 0; overflow: visible; align-items: center; position: relative; z-index: 5; }
+  /* The whole rail reads as "expand"; its links and buttons stay ordinary pointers. */
+  .vf .side[data-rail='true'] { cursor: e-resize; }
+  .vf .side[data-rail='true'] :is(a, button) { cursor: pointer; }
   .vf .side[data-rail='true'] .side-top { height: 56px; padding: 0; justify-content: center; }
   .vf .side[data-rail='true'] .side-nav { overflow: visible; display: grid; gap: 10px; padding-top: 4px; }
   .vf .side[data-rail='true'] .nav-g { padding: 0; display: grid; gap: 6px; justify-items: center; }

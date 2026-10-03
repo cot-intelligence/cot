@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getSessionDetail, sessionExportUrl, setSessionBookmarked, type ComponentEntry, type SessionDetail, type Store, type TimelineItem } from '../../lib/api';
 import { setDocumentTitle } from '../../lib/documentTitle';
@@ -20,6 +20,8 @@ interface SessionDetailViewProps {
   focusQuery?: string;
   /** `replay` for a Session Replay import; everything on the page reads that DB. */
   store?: Store;
+  /** Changes on every navigation, so following the same event reference again re-runs the jump. */
+  focusNonce?: number;
 }
 
 type Tab = 'timeline' | 'files' | 'findings' | 'map';
@@ -28,14 +30,20 @@ const TEXT_KINDS = new Set(['prompt', 'response', 'thought', 'question', 'plan',
 
 /** Markup mirrors the demo's session page (demo-variants/src/variants/forest/pages-a.tsx, SessionPage),
  *  with the real app's event detail, map, insights, links, bookmark and export kept inside it. */
-export function SessionDetailView({ sessionId, focusEventId, focusQuery, store = 'main' }: SessionDetailViewProps) {
+export function SessionDetailView({ sessionId, focusEventId, focusQuery, store = 'main', focusNonce }: SessionDetailViewProps) {
   const [tab, setTab] = useState<Tab>('timeline');
   const [cat, setCat] = useState<string | null>(null);
   const [open, setOpen] = useState<number | null>(focusEventId ?? null);
   const [shown, setShown] = useState(PAGE);
   const queryClient = useQueryClient();
   const key = store === 'main' ? ['sessionDetail', sessionId] : ['sessionDetail', store, sessionId];
-  const { data: detail } = useQuery({ queryKey: key, queryFn: () => getSessionDetail(sessionId, store), refetchInterval: store === 'main' ? 15000 : false });
+  // Only a live session changes, so only a live one refetches: a finished trace can be large,
+  // and re-reading it every 15s holds up whatever the collector is asked next.
+  const { data: detail } = useQuery({
+    queryKey: key,
+    queryFn: () => getSessionDetail(sessionId, store),
+    refetchInterval: (q) => (store === 'main' && q.state.data?.summary.status === 'active' ? 15000 : false),
+  });
 
   useEffect(() => {
     setTab('timeline');
@@ -56,13 +64,51 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   }, [events]);
   const list = cat ? events.filter((e) => e.category === cat) : events;
 
-  // Jump to the focused event (from search or a finding) once it's on the page.
+  // Every jump to an event (Map, a reference inside an event, search, a finding's evidence, a
+  // link from elsewhere) goes through here: show the timeline unfiltered, page far enough to
+  // include the row, open it, and once it has rendered scroll to it and pulse it once.
+  const [reveal, setReveal] = useState<{ id: number; at: number } | null>(null);
+  const revealEvent = useCallback(
+    (eventId: number) => {
+      const i = events.findIndex((e) => e.id === eventId || e.end_id === eventId);
+      if (i < 0) return;
+      const rowId = events[i].id; // a span's end half points at its start row
+      setTab('timeline');
+      setCat(null);
+      setOpen(rowId);
+      setShown((n) => Math.max(n, i + 20));
+      setReveal({ id: rowId, at: Date.now() });
+    },
+    [events],
+  );
   useEffect(() => {
-    if (focusEventId == null || !events.length) return;
-    const i = events.findIndex((e) => e.id === focusEventId || e.end_id === focusEventId);
-    if (i >= shown) setShown(i + 20);
-    requestAnimationFrame(() => document.querySelector(`[data-ev="${events[i]?.id ?? focusEventId}"]`)?.scrollIntoView({ block: 'center' }));
-  }, [focusEventId, events.length]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!reveal || tab !== 'timeline') return;
+    let tries = 0;
+    let raf = 0;
+    const seek = () => {
+      const el = document.querySelector<HTMLElement>(`[data-ev="${reveal.id}"]`);
+      if (!el) {
+        if (++tries < 30) raf = requestAnimationFrame(seek);
+        return;
+      }
+      // Centre a row that fits; a tall one (an open event with its detail) starts at the top so its header shows.
+      const tall = el.getBoundingClientRect().height > window.innerHeight * 0.6;
+      el.scrollIntoView({ block: tall ? 'start' : 'center' });
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      el.animate(
+        [{ backgroundColor: 'color-mix(in srgb, var(--v-hot) 14%, transparent)' }, { backgroundColor: 'transparent' }],
+        { duration: reduce ? 600 : 1400, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' },
+      );
+      setReveal(null);
+    };
+    raf = requestAnimationFrame(seek);
+    return () => cancelAnimationFrame(raf);
+  }, [reveal, tab, shown, cat]);
+
+  // A link that names an event (search, a finding, Key moments, Activity) lands on it.
+  useEffect(() => {
+    if (focusEventId != null && events.length) revealEvent(focusEventId);
+  }, [focusEventId, focusNonce, events.length > 0]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!detail) {
     return (
@@ -154,7 +200,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
                 <div className="card-b">
                   <ol className="tl">
                     {list.slice(0, shown).map((e) => (
-                      <TraceRow key={e.id} e={e} live={s.status === 'active'} open={open === e.id} focusQuery={e.id === focusEventId ? focusQuery : undefined} onToggle={() => setOpen((o) => (o === e.id ? null : e.id))} sessionId={sessionId} onJump={(id) => { setCat(null); setOpen(id); requestAnimationFrame(() => document.querySelector(`[data-ev="${id}"]`)?.scrollIntoView({ block: 'center' })); }} />
+                      <TraceRow key={e.id} e={e} live={s.status === 'active'} open={open === e.id} focusQuery={e.id === focusEventId ? focusQuery : undefined} onToggle={() => setOpen((o) => (o === e.id ? null : e.id))} sessionId={sessionId} onJump={revealEvent} />
                     ))}
                   </ol>
                   {list.length === 0 && <div className="empty">No events{cat ? ' of this kind' : ''}.</div>}
@@ -200,7 +246,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
 
           {tab === 'map' && (
             <div className="card"><div className="card-b" style={{ overflowX: 'auto' }}>
-              <ActivityMap items={events} sessionId={sessionId} activeKey={null} onJump={(it) => { setTab('timeline'); setCat(null); setOpen(it.id); requestAnimationFrame(() => document.querySelector(`[data-ev="${it.id}"]`)?.scrollIntoView({ block: 'center' })); }} />
+              <ActivityMap items={events} sessionId={sessionId} activeKey={null} onJump={(it) => revealEvent(it.id)} />
             </div></div>
           )}
         </div>

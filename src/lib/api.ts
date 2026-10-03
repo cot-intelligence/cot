@@ -857,6 +857,8 @@ export interface SessionPage {
   sessions: SessionSummary[];
   total: number;
   has_more: boolean;
+  /** Older collector: only its newest 500 sessions were searched, so there may be more. */
+  capped?: boolean;
 }
 
 /** One page of the sessions list, filtered and sorted by the collector, plus the total. */
@@ -873,15 +875,46 @@ export async function getSessionsPage(f: SessionPageQuery): Promise<SessionPage>
   if (f.order === 'asc') params.set('order', 'asc');
   if (f.archived) params.set('archived', 'true');
   if (f.bookmarked) params.set('bookmarked', 'true');
-  return json<SessionPage>(await fetch(`/v1/sessions?${params.toString()}`));
+  const page = await json<Partial<SessionPage> & { sessions: SessionSummary[] }>(await fetch(`/v1/sessions?${params.toString()}`));
+  if (typeof page.total === 'number') return page as SessionPage;
+  return legacySessionsPage(f);
+}
+
+const LEGACY_LIMIT = 500;
+
+/** Collectors from before server-side paging ignore offset/project/ids/sort and send no total:
+ *  take their newest 500 and page, filter and sort them here instead. */
+async function legacySessionsPage(f: SessionPageQuery): Promise<SessionPage> {
+  const all = await getSessions({ limit: LEGACY_LIMIT, status: f.status, source: f.source, q: f.q, archived: f.archived, bookmarked: f.bookmarked });
+  const projectOf = (cwd: string | null) => cwd?.split('/').filter(Boolean).pop() ?? '';
+  const ids = f.ids ? new Set(f.ids) : null;
+  const q = f.q?.toLowerCase();
+  const rows = all.filter(
+    (s) =>
+      (!f.project || projectOf(s.cwd) === f.project) &&
+      (!ids || ids.has(s.id)) &&
+      // Old collectors don't search titles; match them here too.
+      (!q || s.id.toLowerCase().includes(q) || (s.cwd ?? '').toLowerCase().includes(q) || (s.title ?? '').toLowerCase().includes(q)),
+  );
+  const val = (s: SessionSummary) =>
+    f.sort === 'events' ? s.event_count : f.sort === 'duration' ? s.duration_seconds ?? 0 : f.sort === 'cost' ? s.cost_usd : new Date(s.last_activity ?? s.started_at).getTime();
+  rows.sort((a, b) => (f.order === 'asc' ? val(a) - val(b) : val(b) - val(a)));
+  const offset = f.offset ?? 0;
+  const limit = f.limit ?? 20;
+  return { sessions: rows.slice(offset, offset + limit), total: rows.length, has_more: offset + limit < rows.length, capped: all.length >= LEGACY_LIMIT && rows.length === all.length };
 }
 
 /** Every project name with its session count, for the Sessions project filter. */
 export async function getSessionProjects(archived = false): Promise<{ project: string; sessions: number }[]> {
-  const data = await json<{ projects: { project: string; sessions: number }[] }>(
-    await fetch(`/v1/sessions/projects${archived ? '?archived=true' : ''}`),
-  );
-  return data.projects;
+  const res = await fetch(`/v1/sessions/projects${archived ? '?archived=true' : ''}`);
+  if (res.ok) return (await json<{ projects: { project: string; sessions: number }[] }>(res)).projects;
+  // Older collectors have no project list (the request falls through to a session lookup): count from the recent sessions.
+  const counts = new Map<string, number>();
+  for (const x of await getSessions({ limit: LEGACY_LIMIT, archived })) {
+    const name = x.cwd?.split('/').filter(Boolean).pop();
+    if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return [...counts].map(([project, sessions]) => ({ project, sessions })).sort((a, b) => a.project.localeCompare(b.project));
 }
 
 export async function getSessionDetail(id: string, store: Store = 'main'): Promise<SessionDetail> {

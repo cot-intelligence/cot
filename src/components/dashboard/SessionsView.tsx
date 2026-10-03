@@ -173,7 +173,7 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
             options={[{ value: '', label: 'All sessions' }, { value: 'bookmarked', label: 'Bookmarked' }, { value: 'archived', label: 'Archived' }]}
           />
           {any && <button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={clear}>Clear</button>}
-          <span className="mono faint" style={{ marginLeft: 'auto', fontSize: 12 }}>{data ? `${fmt.n(total)} session${total === 1 ? '' : 's'}` : '…'}</span>
+          <span className="mono faint" style={{ marginLeft: 'auto', fontSize: 12 }}>{data ? `${fmt.n(total)}${data.capped ? '+' : ''} session${total === 1 ? '' : 's'}` : '…'}</span>
         </div>
         <div className="card" style={{ overflow: 'hidden' }}>
           <div style={{ overflowX: 'auto' }}>

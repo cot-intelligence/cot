@@ -61,7 +61,10 @@ function FindingRow({ finding, sessionId }: { finding: ActionableInsight; sessio
   const store = useSessionStore();
   const focusEvent = (eventId: number | null) => {
     const base = sessionHref(sessionId, store);
-    window.location.hash = eventId != null ? `${base}?e=${eventId}` : base;
+    const next = eventId != null ? `${base}?e=${eventId}` : base;
+    // Same link as the current one: no hashchange would fire, so announce it ourselves.
+    if (window.location.hash === next) window.dispatchEvent(new HashChangeEvent('hashchange'));
+    else window.location.hash = next;
   };
   return (
     <div className="min-w-0 bg-surface px-4 py-3">

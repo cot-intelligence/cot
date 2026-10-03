@@ -37,11 +37,11 @@ interface DashboardProps {
 
 type DashboardRoute =
   | { view: 'list' }
-  | { view: 'session'; sessionId: string; focusEventId?: number; focusQuery?: string }
+  | { view: 'session'; sessionId: string; focusEventId?: number; focusQuery?: string; focusNonce?: number }
   | { view: 'overview' }
   | { view: 'metrics-history'; tab?: MetricsHistoryTab }
   | { view: 'replay' }
-  | { view: 'replay-session'; sessionId: string; focusEventId?: number; focusQuery?: string }
+  | { view: 'replay-session'; sessionId: string; focusEventId?: number; focusQuery?: string; focusNonce?: number }
   | { view: 'settings' }
   | { view: 'findings'; pillar?: InsightPillar }
   | { view: 'governance' };
@@ -71,6 +71,8 @@ function parseHash(): DashboardRoute {
       sessionId: decodeURIComponent(match[2]),
       focusEventId: match[3] ? Number(match[3]) : undefined,
       focusQuery: match[4] ? decodeURIComponent(match[4]) : undefined,
+      // A fresh token per navigation, so following the same reference twice still jumps.
+      focusNonce: Date.now(),
     };
   }
   return { view: 'list' };
@@ -176,7 +178,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
 
   const selectSession = useCallback((id: string, eventId?: number, query?: string, store: Store = 'main') => {
     const view = store === 'replay' ? 'replay-session' : 'session';
-    setRoute({ view, sessionId: id, focusEventId: eventId, focusQuery: query });
+    setRoute({ view, sessionId: id, focusEventId: eventId, focusQuery: query, focusNonce: Date.now() });
     const base = sessionHref(id, store);
     const q = query ? `&q=${encodeURIComponent(query)}` : '';
     window.location.hash = eventId != null ? `${base}?e=${eventId}${q}` : base;
@@ -433,6 +435,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
                 store="replay"
                 focusEventId={route.view === 'replay-session' ? route.focusEventId : undefined}
                 focusQuery={route.view === 'replay-session' ? route.focusQuery : undefined}
+                focusNonce={route.view === 'replay-session' ? route.focusNonce : undefined}
               />
             </main>
           ) : onOverview ? (
@@ -443,9 +446,10 @@ export function Dashboard({ onSetup }: DashboardProps) {
             </main>
           ) : selectedId ? (
             <>
-              {/* The demo's trace page has no side list; it appears only when "Session list: Open" is set in Settings. */}
+              {/* The demo's trace page has no side list; it appears only when "Session list: Open" is set in Settings,
+                  and only from xl, so beside the nav it never squeezes the trace below a readable width. */}
               {sidebarOpen && (
-                <div className="relative z-20 hidden w-80 shrink-0 border-r border-line/10 md:block">
+                <div className="relative z-20 hidden w-80 shrink-0 border-r border-line/10 xl:block">
                   <SessionList selectedId={selectedId} onSelect={selectSession} collapsed={false} peeking={false} onToggle={toggleSidebar} />
                 </div>
               )}
@@ -454,6 +458,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
                   sessionId={selectedId}
                   focusEventId={route.view === 'session' ? route.focusEventId : undefined}
                   focusQuery={route.view === 'session' ? route.focusQuery : undefined}
+                  focusNonce={route.view === 'session' ? route.focusNonce : undefined}
                 />
               </main>
             </>

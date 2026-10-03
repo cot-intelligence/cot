@@ -50,7 +50,11 @@ export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, on
 
   return (
     <>
-      <aside className="side" data-open={mobileOpen} data-rail={rail} aria-label="Workspace navigation" {...warm}>
+      <aside className="side" data-open={mobileOpen} data-rail={rail} aria-label="Workspace navigation" {...warm}
+        onClick={rail ? (e) => {
+          // Collapsed rail: a click on empty space expands it; links and buttons keep their own job.
+          if (!(e.target as Element).closest('a, button, input, select, textarea')) onToggleCollapsed();
+        } : undefined}>
         <div className="side-top">
           {rail ? (
             <button type="button" className="rail-logo" onClick={onToggleCollapsed} aria-label="Expand sidebar" data-tip="Expand sidebar">
