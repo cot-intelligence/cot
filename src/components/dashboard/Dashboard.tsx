@@ -22,6 +22,7 @@ import { SessionList } from './SessionList';
 import { SettingsView } from './SettingsView';
 import { FindingsView } from './FindingsView';
 import { GovernanceView } from './GovernanceView';
+import { ExtensionDetailView } from './ExtensionsView';
 
 // Code-split: recharts (~heavy) only loads when the Overview tab is opened.
 const OverviewView = lazy(() =>
@@ -39,25 +40,48 @@ type DashboardRoute =
   | { view: 'list' }
   | { view: 'session'; sessionId: string; focusEventId?: number; focusQuery?: string; focusNonce?: number }
   | { view: 'overview' }
-  | { view: 'metrics-history'; tab?: MetricsHistoryTab }
+  | { view: 'metrics-history'; tab?: MetricsHistoryTab; group?: string; installed?: boolean }
   | { view: 'replay' }
   | { view: 'replay-session'; sessionId: string; focusEventId?: number; focusQuery?: string; focusNonce?: number }
   | { view: 'settings' }
   | { view: 'findings'; pillar?: InsightPillar }
-  | { view: 'governance' };
+  | { view: 'governance' }
+  | { view: 'extension'; key: string };
 
-type MetricsHistoryTab = 'shell' | 'web';
+type MetricsHistoryTab = 'shell' | 'web' | 'mcp' | 'skill' | 'plugin';
+const ACTIVITY_LABEL: Record<MetricsHistoryTab, string> = { shell: 'Shell', web: 'Web', mcp: 'MCP', skill: 'Skills', plugin: 'Plugins' };
+const ACTIVITY_TABS = Object.keys(ACTIVITY_LABEL) as MetricsHistoryTab[];
+
+/** The installed list for an extension kind: Activity → MCP / Skills → Installed, or Activity → Plugins. */
+function installedHref(kind: string): string {
+  return kind === 'plugin' ? '#/metrics-history?tab=plugin' : `#/metrics-history?tab=${kind}&view=installed`;
+}
 
 function parseHash(): DashboardRoute {
   const hash = window.location.hash.replace(/^#\/?/, '');
   if (hash === 'settings') return { view: 'settings' };
   if (hash === 'governance') return { view: 'governance' };
+  const extPage = hash.match(/^extensions\/(.+)$/);
+  if (extPage) return { view: 'extension', key: decodeURIComponent(extPage[1]) };
+  // The old Extensions list now lives in Activity (MCP / Skills → Installed, Plugins).
+  if (/^extensions(\?.*)?$/.test(hash)) return { view: 'metrics-history', tab: 'mcp', installed: true };
   const findingsMatch = hash.match(/^findings(?:\?pillar=(security|cost|usability))?$/);
   if (findingsMatch) return { view: 'findings', pillar: findingsMatch[1] as InsightPillar | undefined };
   // The workspace opens on the Overview.
   if (hash === '') return { view: 'overview' };
-  const historyMatch = hash.match(/^metrics-history(?:\?tab=(shell|web))?$/);
-  if (historyMatch) return { view: 'metrics-history', tab: historyMatch[1] as MetricsHistoryTab | undefined };
+  // #/metrics-history?tab=mcp[&group=<server>][&view=installed]: a tab, optionally with the log
+  // narrowed to one group, or the tab's installed list.
+  const historyMatch = hash.match(/^metrics-history(?:\?(.*))?$/);
+  if (historyMatch) {
+    const q = new URLSearchParams(historyMatch[1] ?? '');
+    const tab = q.get('tab') as MetricsHistoryTab | null;
+    return {
+      view: 'metrics-history',
+      tab: tab && ACTIVITY_TABS.includes(tab) ? tab : undefined,
+      group: q.get('group') ?? undefined,
+      installed: q.get('view') === 'installed' || tab === 'plugin',
+    };
+  }
   // Legacy #/metrics and #/insights merged into the unified Overview page.
   if (hash === 'overview' || hash === 'metrics' || hash === 'insights') return { view: 'overview' };
   if (hash === 'replay') return { view: 'replay' };
@@ -170,11 +194,12 @@ export function Dashboard({ onSetup }: DashboardProps) {
     if (route.view === 'list') setDocumentTitle('Sessions');
     else if (route.view === 'settings') setDocumentTitle('Settings');
     else if (route.view === 'overview') setDocumentTitle('Overview');
-    else if (route.view === 'metrics-history') setDocumentTitle('Activity');
+    else if (route.view === 'metrics-history') setDocumentTitle(`Activity · ${ACTIVITY_LABEL[route.tab ?? 'shell']}`);
     else if (route.view === 'replay') setDocumentTitle('Session Replay');
     else if (route.view === 'findings') setDocumentTitle('Findings');
     else if (route.view === 'governance') setDocumentTitle('Governance');
-  }, [route.view]);
+    else if (route.view === 'extension') setDocumentTitle(route.key.split(':').slice(1).join(':'));
+  }, [route.view, route.view === 'metrics-history' ? route.tab : undefined]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectSession = useCallback((id: string, eventId?: number, query?: string, store: Store = 'main') => {
     const view = store === 'replay' ? 'replay-session' : 'session';
@@ -201,7 +226,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
 
   const goMetricsHistory = useCallback((tab: MetricsHistoryTab = 'shell') => {
     setRoute({ view: 'metrics-history', tab });
-    window.location.hash = tab === 'web' ? '#/metrics-history?tab=web' : '#/metrics-history';
+    window.location.hash = tab === 'shell' ? '#/metrics-history' : `#/metrics-history?tab=${tab}`;
   }, []);
 
   const goFindings = useCallback((pillar?: InsightPillar) => {
@@ -212,6 +237,10 @@ export function Dashboard({ onSetup }: DashboardProps) {
   const goGovernance = useCallback(() => {
     setRoute({ view: 'governance' });
     window.location.hash = '#/governance';
+  }, []);
+
+  const goInstalled = useCallback((kind: 'mcp' | 'skill' | 'plugin') => {
+    window.location.hash = installedHref(kind);
   }, []);
 
   const goReplay = useCallback(() => {
@@ -227,7 +256,10 @@ export function Dashboard({ onSetup }: DashboardProps) {
   const onReplay = route.view === 'replay' || replayId !== null;
   const onFindings = route.view === 'findings';
   const onGovernance = route.view === 'governance';
-  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay && !onFindings && !onGovernance;
+  const extensionKey = route.view === 'extension' ? route.key : null;
+  const extensionKind = extensionKey ? (extensionKey.split(':')[0] as 'mcp' | 'skill' | 'plugin') : null;
+  const onExtensions = !!extensionKey;
+  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay && !onFindings && !onGovernance && !onExtensions;
 
   // Counts for the navigation: sessions traced, and findings that still need a look.
   const { data: stats } = usePolling<Stats>(['stats'], () => getStats(), 15000);
@@ -266,7 +298,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
         id: 'nav-metrics-history',
         label: 'Go to Activity',
         icon: 'terminal',
-        keywords: 'shell commands urls web history bash activity',
+        keywords: 'shell commands urls web history bash activity mcp calls skills plugins',
         active: onMetricsHistory,
         run: goMetricsHistory,
       },
@@ -285,6 +317,14 @@ export function Dashboard({ onSetup }: DashboardProps) {
         keywords: 'findings insights security cost usability rules triage dismiss',
         active: onFindings,
         run: () => goFindings(),
+      },
+      {
+        id: 'nav-installed',
+        label: 'Go to installed MCP servers, skills and plugins',
+        icon: 'plug',
+        keywords: 'extensions plugins skills mcp servers installed usage scope security scan',
+        active: onMetricsHistory && route.view === 'metrics-history' && !!route.installed,
+        run: () => goInstalled('mcp'),
       },
       {
         id: 'nav-governance',
@@ -312,8 +352,11 @@ export function Dashboard({ onSetup }: DashboardProps) {
       onSettings,
       onFindings,
       onGovernance,
+      onExtensions,
       goFindings,
       goGovernance,
+      goInstalled,
+      route,
       goSessions,
       goOverview,
       goMetricsHistory,
@@ -335,14 +378,16 @@ export function Dashboard({ onSetup }: DashboardProps) {
 
   const activeNav: NavKey = onFindings
     ? 'findings'
-    : onGovernance
+    : extensionKind
+      ? (`activity-${extensionKind}` as NavKey)
+      : onGovernance
       ? 'governance'
       : onSettings
     ? 'settings'
     : onOverview
       ? 'overview'
       : onMetricsHistory
-        ? 'history'
+        ? (`activity-${route.view === 'metrics-history' ? route.tab ?? 'shell' : 'shell'}` as NavKey)
         : onReplay
           ? 'replay'
           : 'sessions';
@@ -355,8 +400,14 @@ export function Dashboard({ onSetup }: DashboardProps) {
       ? [{ label: 'Session Replay', href: '#/replay' }, { label: shortSession(replayId) }]
       : route.view === 'replay'
         ? [{ label: 'Session Replay' }]
+        : extensionKey
+          ? [
+              { label: 'Activity', href: '#/metrics-history' },
+              { label: ACTIVITY_LABEL[extensionKind!], href: installedHref(extensionKind!) },
+              { label: extensionKey.split(':').slice(1).join(':') },
+            ]
         : onMetricsHistory
-      ? [{ label: 'Activity' }]
+      ? [{ label: 'Activity', href: '#/metrics-history' }, { label: ACTIVITY_LABEL[route.view === 'metrics-history' ? route.tab ?? 'shell' : 'shell'] }]
       : [{ label: onFindings ? 'Findings' : onGovernance ? 'Governance' : onSettings ? 'Settings' : onOverview ? 'Overview' : 'Sessions' }];
   const trail = [{ label: 'Local workspace', href: '#/overview' }, ...crumbs];
 
@@ -410,6 +461,10 @@ export function Dashboard({ onSetup }: DashboardProps) {
             <main className="flex min-w-0 flex-1 flex-col">
               <FindingsView onSelect={selectSession} initialPillar={route.view === 'findings' ? route.pillar : undefined} />
             </main>
+          ) : onExtensions ? (
+            <main className="flex min-w-0 flex-1 flex-col">
+              <ExtensionDetailView extKey={extensionKey!} onSelect={selectSession} />
+            </main>
           ) : onGovernance ? (
             <main className="flex min-w-0 flex-1 flex-col">
               <GovernanceView onRunOnboarding={onSetup} onSelect={(id) => selectSession(id)} />
@@ -421,6 +476,8 @@ export function Dashboard({ onSetup }: DashboardProps) {
                   onSelect={selectSession}
                   onBack={goOverview}
                   initialTab={route.view === 'metrics-history' ? route.tab : undefined}
+                  initialGroup={route.view === 'metrics-history' ? route.group : undefined}
+                  installed={route.view === 'metrics-history' && !!route.installed}
                 />
               </Suspense>
             </main>

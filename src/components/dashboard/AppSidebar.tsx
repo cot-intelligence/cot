@@ -5,18 +5,30 @@ import { usePolling } from '../../lib/usePolling';
 import { Icon } from '../forest/icons';
 import { Wordmark } from '../forest/ui';
 
-export type NavKey = 'sessions' | 'overview' | 'history' | 'replay' | 'findings' | 'governance' | 'settings';
+export type ActivityTab = 'shell' | 'web' | 'mcp' | 'skill' | 'plugin';
+export type NavKey =
+  | 'sessions' | 'overview' | 'replay' | 'findings' | 'governance' | 'settings'
+  | `activity-${ActivityTab}`;
 
 // Markup and classes follow the demo's sidebar (demo-variants/src/variants/forest/App.tsx) one to one;
-// Session Replay is the one entry the demo doesn't have.
+// Session Replay and the Activity section (one entry per Activity tab) are additions.
 const NAV: { group: string; items: { key: NavKey; label: string; href: string; icon: string }[] }[] = [
   {
     group: 'Monitor',
     items: [
       { key: 'overview', label: 'Overview', href: '#/overview', icon: 'overview' },
       { key: 'sessions', label: 'Sessions', href: '#/sessions', icon: 'sessions' },
-      { key: 'history', label: 'Activity', href: '#/metrics-history', icon: 'activity' },
       { key: 'replay', label: 'Session Replay', href: '#/replay', icon: 'replay' },
+    ],
+  },
+  {
+    group: 'Activity',
+    items: [
+      { key: 'activity-shell', label: 'Shell', href: '#/metrics-history', icon: 'shell' },
+      { key: 'activity-web', label: 'Web', href: '#/metrics-history?tab=web', icon: 'globe' },
+      { key: 'activity-mcp', label: 'MCP', href: '#/metrics-history?tab=mcp', icon: 'plug' },
+      { key: 'activity-skill', label: 'Skills', href: '#/metrics-history?tab=skill', icon: 'layers' },
+      { key: 'activity-plugin', label: 'Plugins', href: '#/metrics-history?tab=plugin', icon: 'puzzle' },
     ],
   },
   {

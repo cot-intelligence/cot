@@ -24,6 +24,15 @@ interface ActivityLogProps {
   onSelect: (sessionId: string, eventId?: number) => void;
 }
 
+const NOUN: Record<ActivityCategory, string> = { shell: 'commands', web: 'requests', mcp: 'calls', skill: 'loads' };
+const PLACEHOLDER: Record<ActivityCategory, string> = {
+  shell: 'Filter commands',
+  web: 'Filter URLs and searches',
+  mcp: 'Filter servers and tools',
+  skill: 'Filter skills',
+};
+const COLUMN: Record<ActivityCategory, string> = { shell: 'Command', web: 'Request', mcp: 'Call', skill: 'Skill' };
+
 export function viaLabel(key: string): string {
   if (key === 'env') return 'env vars';
   if (key === 'sudo') return 'sudo (as root)';
@@ -78,7 +87,7 @@ export function ActivityLog({
 
   const items = log.data?.pages.flatMap((p) => p.items) ?? [];
   const total = log.data?.pages[0]?.total ?? 0;
-  const noun = category === 'shell' ? 'commands' : 'requests';
+  const noun = NOUN[category];
 
   const filtered = !!(query || group || via || status !== 'all');
 
@@ -89,16 +98,16 @@ export function ActivityLog({
       <div className="toolbar" style={{ padding: '0 20px', marginBottom: 12 }}>
         <label className="vfield" style={{ flex: '1 1 260px' }}>
           <FIcon name="search" size={15} />
-          <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder={category === 'shell' ? 'Filter commands' : 'Filter URLs and searches'} aria-label={`Filter ${noun}`} style={{ width: '100%' }} />
+          <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder={PLACEHOLDER[category]} aria-label={`Filter ${noun}`} style={{ width: '100%' }} />
         </label>
-        {category === 'shell' && viaOptions.length > 0 && (
+        {(category === 'shell' || category === 'skill') && viaOptions.length > 0 && (
           <Dropdown
-            label="Ran through"
+            label={category === 'skill' ? 'Loaded via' : 'Ran through'}
             value={via}
             onChange={setVia}
             options={[
               { value: '', label: 'Via: any' },
-              ...viaOptions.map((v) => ({ value: v.key, label: `Via ${viaLabel(v.key)}`, meta: v.runs.toLocaleString() })),
+              ...viaOptions.map((v) => ({ value: v.key, label: `Via ${category === 'skill' ? v.key : viaLabel(v.key)}`, meta: v.runs.toLocaleString() })),
               ...(via && !viaOptions.some((v) => v.key === via) ? [{ value: via, label: `Via ${viaLabel(via)}` }] : []),
             ]}
           />
@@ -123,7 +132,7 @@ export function ActivityLog({
           <div className="empty">{filtered ? `No ${noun} match these filters.` : `No ${noun} in this time range. Try a longer range.`}</div>
         ) : (
           <table className="t">
-            <thead><tr><th>Time</th><th>{category === 'shell' ? 'Command' : 'Request'}</th><th>Project</th><th>Agent</th><th className="num">Took</th><th>Result</th></tr></thead>
+            <thead><tr><th>Time</th><th>{COLUMN[category]}</th><th>Project</th><th>Agent</th><th className="num">Took</th><th>Result</th></tr></thead>
             <tbody>
               {items.map((i) => (
                 <tr
@@ -132,12 +141,13 @@ export function ActivityLog({
                   tabIndex={0}
                   onClick={() => onSelect(i.session_id, i.event_id)}
                   onKeyDown={(e) => e.key === 'Enter' && onSelect(i.session_id, i.event_id)}
-                  title={[i.target, i.via?.length ? `Via ${i.via.map(viaLabel).join(', ')}` : '', i.env_names?.length ? `Sets ${i.env_names.join(', ')}` : '', i.error?.message ?? ''].filter(Boolean).join('\n')}
+                  title={[i.path ?? i.target, i.via?.length ? `Via ${i.via.map(viaLabel).join(', ')}` : '', i.env_names?.length ? `Sets ${i.env_names.join(', ')}` : '', i.error?.message ?? ''].filter(Boolean).join('\n')}
                   style={i.risk ? { background: 'color-mix(in srgb, var(--v-alert) 7%, transparent)' } : undefined}>
                   <td className="mono dim" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>{i.ts ? fmt.dayTime(i.ts) : ''}</td>
                   <td className="mono" style={{ fontSize: 12, maxWidth: 420 }}>
                     <span className="truncate" style={{ display: 'block' }}>
                       {category === 'web' && <FIcon name={i.kind === 'search' ? 'search' : 'globe'} size={12} style={{ display: 'inline', verticalAlign: -1, marginRight: 6, color: 'var(--v-faint)' }} />}
+                      {category === 'skill' && i.via?.[0] && <span className="dim" style={{ marginRight: 6 }}>{i.via[0]}</span>}
                       {i.tool && category === 'shell' && <span className="dim" style={{ marginRight: 6 }}>{i.tool}</span>}
                       {category === 'shell' ? i.core || i.target : i.target}
                     </span>

@@ -469,9 +469,9 @@ export async function getMetricsHistory(
   return data.items;
 }
 
-// --- Activity (shell + web) ---
+// --- Activity (shell, web, MCP calls, skill loads) ---
 
-export type ActivityCategory = 'shell' | 'web';
+export type ActivityCategory = 'shell' | 'web' | 'mcp' | 'skill';
 
 export interface ActivityRef {
   session_id: string;
@@ -505,6 +505,12 @@ export interface ActivityGroup {
   tool?: string | null;
   /** Web: localhost / file:// rather than the internet. */
   local?: boolean;
+  /** MCP / skills: the extension this group is, for linking to its details page. */
+  ext_key?: string;
+  plugin?: string | null;
+  installed?: boolean;
+  /** Set when no config lists it but its source is known, e.g. "Claude app built-in". */
+  origin?: string | null;
 }
 
 export interface ActivityFailure {
@@ -543,6 +549,10 @@ export interface ActivitySummary {
     risky: number;
     elevated: number;
     local?: number;
+    /** MCP: distinct server + tool pairs called. */
+    tools?: number;
+    /** Skills: loads you started with a /command. */
+    slash?: number;
   };
   groups: ActivityGroup[];
   /** Commands that failed at least twice in the window. */
@@ -558,6 +568,8 @@ export interface ActivitySummary {
   via: { key: string; runs: number }[];
   /** Ranked: anomalies against the history before the window, repeated failures, risky commands. */
   attention: ActivityAttention[];
+  /** MCP / skills: plugins whose servers or skills ran in the window, for the plugin filter. */
+  plugins?: { key: string; label: string; runs: number }[];
 }
 
 export interface ActivityItem {
@@ -590,18 +602,25 @@ export interface ActivityItem {
   key?: string;
   kind?: 'fetch' | 'search';
   local?: boolean;
+  // MCP / skills
+  ext_key?: string;
+  plugin?: string | null;
+  path?: string | null;
 }
 
 export interface ActivityFilters {
   days: number;
   project?: string;
   source?: string;
+  /** MCP / skills: only the servers or skills this plugin ships. */
+  plugin?: string;
 }
 
 function activityParams(category: ActivityCategory, f: ActivityFilters): URLSearchParams {
   const params = new URLSearchParams({ category, days: String(f.days) });
   if (f.project) params.set('project', f.project);
   if (f.source) params.set('source', f.source);
+  if (f.plugin) params.set('plugin', f.plugin);
   return params;
 }
 
@@ -1458,4 +1477,200 @@ export async function getTasks(): Promise<{ running: TaskRunning[]; recent: Task
     })),
     recent: [],
   };
+}
+
+// --- Extensions (plugins, skills, MCP servers) ------------------------------
+
+export type ExtensionKind = 'plugin' | 'skill' | 'mcp';
+export type ExtensionScope = 'user' | 'project' | 'local' | 'plugin' | 'builtin' | 'managed' | 'desktop';
+export type RiskLevel = 'ok' | 'low' | 'medium' | 'high' | 'critical' | null;
+
+export interface ExtensionUsage {
+  sessions: number;
+  calls: number;
+  errors: number;
+  error_rate: number;
+  p50_ms: number | null;
+  first_used: string | null;
+  last_used: string | null;
+  agents: Record<string, number>;
+  projects: number;
+  trend: number[];
+  recent_calls: number;
+}
+
+export interface ExtensionRisk {
+  level: RiskLevel;
+  findings: number;
+  verdict: 'approved' | 'review' | 'rejected' | null;
+  score: number | null;
+  scanned: boolean;
+}
+
+export interface PluginContents {
+  skills: string[];
+  mcp_servers: string[];
+  commands: number;
+  agents: number;
+  hooks: number;
+}
+
+export interface ExtensionItem {
+  key: string;
+  kind: ExtensionKind;
+  name: string;
+  display_name: string;
+  description: string | null;
+  version: string | null;
+  marketplace: string | null;
+  plugin: string | null;
+  installed: boolean;
+  origin: string | null;
+  enabled: boolean | null;
+  agents: string[];
+  scopes: ExtensionScope[];
+  projects: string[];
+  transport: string | null;
+  contents: PluginContents | null;
+  native_usage: { count: number | null; last_used: string | null } | null;
+  usage: ExtensionUsage;
+  risk: ExtensionRisk;
+}
+
+export interface ExtensionKindSummary {
+  installed: number;
+  used: number;
+  used_30d: number;
+  unused: number;
+  project_scoped: number;
+  not_installed: number;
+  flagged: number;
+}
+
+export interface ScanProgress {
+  running: boolean;
+  done: number;
+  total: number;
+}
+
+export interface ExtensionsResponse {
+  generated_at: string;
+  summary: Record<ExtensionKind, ExtensionKindSummary>;
+  projects: string[];
+  items: ExtensionItem[];
+  scan: ScanProgress;
+}
+
+export interface ExtensionInstall {
+  agent: string;
+  scope: ExtensionScope;
+  path: string | null;
+  project: string | null;
+  enabled: boolean | null;
+  plugin: string | null;
+  config_file: string | null;
+}
+
+export interface McpConfigSummary {
+  transport: string;
+  command?: string | null;
+  command_path?: string | null;
+  args: string[];
+  url_host?: string | null;
+  url_scheme?: string | null;
+  env_keys: string[];
+  header_keys: string[];
+  cwd?: string | null;
+}
+
+export interface ConfigRisk {
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  rule: string;
+  title: string;
+  detail: string;
+  agent?: string;
+  scope?: string;
+  project?: string | null;
+}
+
+export interface SecurityFinding {
+  perspective: string;
+  rule: string;
+  severity: 'info' | 'low' | 'medium' | 'high' | 'critical';
+  title: string;
+  detail: string;
+  file: string | null;
+  line: number | null;
+  excerpt: string | null;
+}
+
+export interface SecurityReport {
+  score: number;
+  grade: string;
+  verdict: 'approved' | 'review' | 'rejected';
+  perspectives: { id: string; label: string; description: string; status: 'pass' | 'warn' | 'fail' | 'skipped'; score: number | null }[];
+  findings: SecurityFinding[];
+  digest: string;
+  scanned_at: string;
+}
+
+export interface ExtensionDetail extends Omit<ExtensionItem, 'usage' | 'transport'> {
+  author: string | null;
+  license: string | null;
+  homepage: string | null;
+  repository: string | null;
+  category?: string | null;
+  keywords?: string[] | null;
+  allowed_tools?: string[] | null;
+  installed_at?: string | null;
+  updated_at?: string | null;
+  git_sha?: string | null;
+  files?: number;
+  size_bytes?: number;
+  paths: string[];
+  shadows: { agent: string; project: string; overrides: string | null }[] | null;
+  installs: ExtensionInstall[];
+  mcp?: McpConfigSummary | null;
+  risks?: ConfigRisk[];
+  usage: ExtensionUsage;
+  tools: { tool: string; calls: number; errors: number; p50_ms: number | null }[];
+  projects_used: { path: string; sessions: number; installed_here: boolean }[];
+  sessions: { id: string; source: string; cwd: string | null; uses: number; last_used: string | null; first_event_id: number }[];
+  children: ExtensionItem[];
+  security: SecurityReport | null;
+  mcp_tools_known: { tool: string; description: string | null }[] | null;
+}
+
+export interface SessionExtension {
+  key: string;
+  kind: ExtensionKind;
+  name: string;
+  display_name: string;
+  installed: boolean;
+  scopes: ExtensionScope[];
+  plugin: string | null;
+  calls: number;
+  errors: number;
+  tools: string[];
+}
+
+export async function getExtensions(refresh = false): Promise<ExtensionsResponse> {
+  return json<ExtensionsResponse>(await fetch(`/v1/extensions${refresh ? '?refresh=true' : ''}`));
+}
+
+export async function getExtensionDetail(key: string): Promise<ExtensionDetail> {
+  return json<ExtensionDetail>(await fetch(`/v1/extensions/detail?key=${encodeURIComponent(key)}`));
+}
+
+export async function scanExtension(key: string): Promise<SecurityReport> {
+  return json<SecurityReport>(await fetch(`/v1/extensions/scan?key=${encodeURIComponent(key)}`, { method: 'POST' }));
+}
+
+export async function scanAllExtensions(): Promise<ScanProgress> {
+  return json<ScanProgress>(await fetch('/v1/extensions/scan-all', { method: 'POST' }));
+}
+
+export async function getSessionExtensions(id: string): Promise<SessionExtension[]> {
+  const r = await json<{ extensions: SessionExtension[] }>(await fetch(`/v1/sessions/${encodeURIComponent(id)}/extensions`));
+  return r.extensions;
 }

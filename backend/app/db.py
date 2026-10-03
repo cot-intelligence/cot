@@ -113,6 +113,26 @@ CREATE INDEX IF NOT EXISTS idx_events_session_agg ON events(
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_archived_source ON sessions(archived, source);
 
+-- One row per event that used an MCP server or loaded a skill, derived from
+-- events by extension_usage.sync() so the Extensions view never scans the
+-- payload-heavy events table. Names are what the event said, and they resolve to
+-- installed extensions at read time, since installs change.
+CREATE TABLE IF NOT EXISTS extension_uses (
+    event_id    INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    source      TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    name        TEXT,
+    tool        TEXT,
+    path        TEXT,
+    via         TEXT NOT NULL,
+    phase       TEXT,
+    status      TEXT,
+    duration_ms INTEGER,
+    ts          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_extension_uses_session ON extension_uses(session_id);
+
 CREATE TABLE IF NOT EXISTS raw_ingest_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     source      TEXT NOT NULL,
