@@ -76,7 +76,7 @@ function MemoryCitationCard({ citation, raw }: { citation: MemoryCitation; raw: 
 
   if (!hasParsedContent) {
     return (
-      <pre className="scroll-thin overflow-auto rounded-md border border-line/15 bg-panel p-3 font-mono text-[0.72rem] leading-relaxed text-fg/70">
+      <pre className="scroll-thin overflow-auto rounded-md border border-line/10 bg-panel p-3 font-mono text-code leading-relaxed text-fg/70">
         {raw}
       </pre>
     );
@@ -85,10 +85,10 @@ function MemoryCitationCard({ citation, raw }: { citation: MemoryCitation; raw: 
   return (
     <aside className="rounded-md border border-cobalt/20 bg-cobalt/[0.04] p-3">
       <div className="mb-2 flex items-center justify-between gap-3">
-        <span className="font-mono text-[0.58rem] font-bold uppercase tracking-widest text-cobalt">
+        <span className="font-mono text-label font-semibold uppercase tracking-label text-cobalt">
           Memory citations
         </span>
-        <span className="font-mono text-[0.55rem] tabular-nums text-fg/35">
+        <span className="font-mono text-label tabular-nums text-fg/40">
           {entries.length} source{entries.length === 1 ? '' : 's'}
         </span>
       </div>
@@ -98,15 +98,15 @@ function MemoryCitationCard({ citation, raw }: { citation: MemoryCitation; raw: 
           {entries.map((entry, index) => (
             <li key={`${entry.source}-${entry.lines}-${index}`} className="min-w-0">
               <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                <span className="truncate font-mono text-[0.72rem] font-bold text-fg/80">
+                <span className="truncate font-mono text-code font-semibold text-fg/80">
                   {entry.source}
                 </span>
-                <span className="shrink-0 font-mono text-[0.58rem] uppercase tracking-widest text-fg/35">
+                <span className="shrink-0 font-mono text-label uppercase tracking-label text-fg/40">
                   Lines {entry.lines}
                 </span>
               </div>
               {entry.note && (
-                <p className="mt-0.5 font-mono text-[0.68rem] leading-relaxed text-fg/55">
+                <p className="mt-0.5 font-mono text-data leading-relaxed text-fg/60">
                   {entry.note}
                 </p>
               )}
@@ -117,7 +117,7 @@ function MemoryCitationCard({ citation, raw }: { citation: MemoryCitation; raw: 
 
       {rolloutIds.length > 0 && (
         <div className="mt-3 border-t border-cobalt/15 pt-2">
-          <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/35">
+          <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/40">
             Rollouts
           </span>
           <div className="mt-1 flex flex-wrap gap-1.5">
@@ -125,7 +125,7 @@ function MemoryCitationCard({ citation, raw }: { citation: MemoryCitation; raw: 
               <span
                 key={id}
                 title={id}
-                className="rounded border border-line/15 bg-bg/50 px-1.5 py-0.5 font-mono text-[0.58rem] text-fg/55">
+                className="rounded border border-line/10 bg-bg/50 px-1.5 py-0.5 font-mono text-label text-fg/60">
                 {id.slice(0, 8)}
               </span>
             ))}
@@ -151,7 +151,7 @@ function MarkdownSegment({ content }: { content: string }) {
           </a>
         ),
         pre: ({ children }) => (
-          <pre className="scroll-thin overflow-auto rounded-md bg-panel p-3 font-mono text-[0.8rem] leading-relaxed text-fg/90">
+          <pre className="scroll-thin overflow-auto rounded-md bg-panel p-3 font-mono text-small leading-relaxed text-fg/90">
             {children}
           </pre>
         ),
@@ -183,12 +183,12 @@ function MarkdownSegment({ content }: { content: string }) {
           </div>
         ),
         th: ({ children }) => (
-          <th className="border border-line/15 bg-panel px-2 py-1.5 text-left font-bold text-fg">
+          <th className="border rounded-control border-line/10 bg-panel px-2 py-1.5 text-left font-semibold text-fg">
             {children}
           </th>
         ),
         td: ({ children }) => (
-          <td className="border border-line/15 px-2 py-1.5 text-fg/85">{children}</td>
+          <td className="border rounded-control border-line/10 px-2 py-1.5 text-fg/85">{children}</td>
         ),
       }}>
       {content}

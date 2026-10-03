@@ -118,14 +118,15 @@ export function buildChartSeries(m: Metrics): { line: ChartSeries[]; dist: Chart
   return { line, dist };
 }
 
-// Brand palette — lifted straight from the website's Tailwind config.
-const VERMILION = '#FF4500';
-const COBALT = '#2B5CE6';
-const OLIVE_LIGHT = '#3A4D39';
-const OLIVE_DARK = '#7DB87A';
-const CREAM = '#F4F0EA';
-const SURFACE = '#FBFAF7';
-const INK = '#111111';
+// Signal Forest brand palette (website/.tastemaker/style-lock.md). The card is
+// a brand moment, so the accent follows the card's own theme, not the app's:
+// forest green on light, lime on dark. Set at the start of each draw.
+let HOT = '#0F5B3E';
+let COBALT = '#2B5CE6';
+const OLIVE_LIGHT = '#4E8C6F';
+const OLIVE_DARK = '#8FD3A6';
+const MONO = "'Geist Mono', ${MONO}";
+const SANS = "'Geist', system-ui, sans-serif";
 
 interface Palette {
   dark: boolean;
@@ -139,41 +140,41 @@ interface Palette {
   grid: string;
   bracket: string;
   crossInk: string;
-  glowV: number;
-  glowC: number;
+  hot: string;
+  cobalt: string;
 }
 
 function palette(theme: CardTheme): Palette {
   return theme === 'dark'
     ? {
         dark: true,
-        bg: '#141517',
-        surface: '#0C0D0E',
-        fg: CREAM,
-        sub: 'rgba(244,240,234,0.55)',
-        faint: 'rgba(244,240,234,0.42)',
-        hair: 'rgba(244,240,234,0.16)',
-        cardLine: 'rgba(244,240,234,0.14)',
-        grid: 'rgba(244,240,234,0.045)',
-        bracket: 'rgba(244,240,234,0.3)',
-        crossInk: 'rgba(244,240,234,0.3)',
-        glowV: 0.26,
-        glowC: 0.3,
+        bg: '#0A1612',
+        surface: '#13261F',
+        fg: '#E9F0EA',
+        sub: 'rgba(233,240,234,0.6)',
+        faint: 'rgba(233,240,234,0.45)',
+        hair: 'rgba(233,240,234,0.16)',
+        cardLine: 'rgba(233,240,234,0.1)',
+        grid: 'rgba(233,240,234,0.035)',
+        bracket: 'rgba(233,240,234,0.3)',
+        crossInk: 'rgba(233,240,234,0.3)',
+        hot: '#C8F169',
+        cobalt: '#7FA2F5',
       }
     : {
         dark: false,
-        bg: CREAM,
-        surface: SURFACE,
-        fg: INK,
-        sub: 'rgba(17,17,17,0.55)',
-        faint: 'rgba(17,17,17,0.5)',
-        hair: 'rgba(17,17,17,0.16)',
-        cardLine: 'rgba(17,17,17,0.12)',
-        grid: 'rgba(17,17,17,0.04)',
-        bracket: 'rgba(17,17,17,0.28)',
-        crossInk: 'rgba(17,17,17,0.25)',
-        glowV: 0.2,
-        glowC: 0.16,
+        bg: '#F5F6F3',
+        surface: '#FFFFFF',
+        fg: '#0C1A14',
+        sub: 'rgba(12,26,20,0.6)',
+        faint: 'rgba(12,26,20,0.5)',
+        hair: 'rgba(12,26,20,0.16)',
+        cardLine: 'rgba(12,26,20,0.1)',
+        grid: 'rgba(12,26,20,0.035)',
+        bracket: 'rgba(12,26,20,0.28)',
+        crossInk: 'rgba(12,26,20,0.25)',
+        hot: '#0F5B3E',
+        cobalt: '#2B5CE6',
       };
 }
 
@@ -188,7 +189,7 @@ function ls(ctx: CanvasRenderingContext2D, px: number) {
 function fitMono(ctx: CanvasRenderingContext2D, t: string, start: number, maxW: number, min = 14) {
   let px = start;
   while (px > min) {
-    ctx.font = `800 ${px}px 'JetBrains Mono', monospace`;
+    ctx.font = `800 ${px}px ${MONO}`;
     if (ctx.measureText(t).width <= maxW) break;
     px -= 1;
   }
@@ -243,7 +244,7 @@ function chartLabel(
   accent: string,
   P: Palette,
 ) {
-  ctx.font = `700 11px 'JetBrains Mono', monospace`;
+  ctx.font = `700 11px ${MONO}`;
   ls(ctx, 2.5);
   ctx.textAlign = 'left';
   ctx.fillStyle = P.sub;
@@ -266,7 +267,7 @@ function axisTickIndices(n: number, maxTicks = 5): number[] {
 }
 
 function fitLabel(ctx: CanvasRenderingContext2D, text: string, maxW: number, px = 8): string {
-  ctx.font = `700 ${px}px 'JetBrains Mono', monospace`;
+  ctx.font = `700 ${px}px ${MONO}`;
   let s = text;
   while (s.length > 1 && ctx.measureText(s).width > maxW) s = s.slice(0, -1);
   if (s !== text && s.length > 1) s = `${s.slice(0, -1)}…`;
@@ -280,7 +281,7 @@ function drawAxisLabels(
   P: Palette,
 ) {
   if (!positions.length) return;
-  ctx.font = `700 8px 'JetBrains Mono', monospace`;
+  ctx.font = `700 8px ${MONO}`;
   ctx.fillStyle = P.faint;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
@@ -411,7 +412,7 @@ function donutChart(
 ) {
   const total = items.reduce((n, it) => n + it.value, 0) || 1;
   const colors = [
-    VERMILION,
+    HOT,
     COBALT,
     P.dark ? OLIVE_DARK : OLIVE_LIGHT,
     P.dark ? 'rgba(244,240,234,0.5)' : 'rgba(17,17,17,0.5)',
@@ -440,10 +441,10 @@ function donutChart(
   // Centre: count + unit.
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.font = `800 22px 'JetBrains Mono', monospace`;
+  ctx.font = `800 22px ${MONO}`;
   ctx.fillStyle = P.fg;
   ctx.fillText(String(items.length), cx, cy - 4);
-  ctx.font = `700 8px 'JetBrains Mono', monospace`;
+  ctx.font = `700 8px ${MONO}`;
   ls(ctx, 2);
   ctx.fillStyle = P.faint;
   ctx.fillText(unit.toUpperCase(), cx, cy + 12);
@@ -459,7 +460,7 @@ function donutChart(
     const ly = slot.y + rowH * (i + 0.5) + 4;
     ctx.fillStyle = colors[i % colors.length];
     ctx.fillRect(lx, ly - 9, 9, 9);
-    ctx.font = `700 11px 'JetBrains Mono', monospace`;
+    ctx.font = `700 11px ${MONO}`;
     ctx.textAlign = 'right';
     ctx.fillStyle = P.faint;
     const pct = `${Math.round((it.value / total) * 100)}%`;
@@ -486,7 +487,7 @@ function gridDims(n: number): [number, number] {
 
 /**
  * Draw the share card onto `canvas` at high resolution. Resolves once web
- * fonts are ready so JetBrains Mono / Newsreader render in the export too.
+ * fonts are ready so Geist / Newsreader render in the export too.
  */
 export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions): Promise<void> {
   if (document.fonts?.ready) {
@@ -505,19 +506,11 @@ export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions
   ctx.clearRect(0, 0, CARD_W, CARD_H);
 
   const P = palette(opts.theme);
+  HOT = P.hot;
+  COBALT = P.cobalt;
 
-  // ── Background + colour pops in opposite corners ──
+  // ── Flat background (no colour glows) ──
   ctx.fillStyle = P.bg;
-  ctx.fillRect(0, 0, CARD_W, CARD_H);
-  const popV = ctx.createRadialGradient(40, 40, 0, 40, 40, 560);
-  popV.addColorStop(0, `rgba(255,69,0,${P.glowV})`);
-  popV.addColorStop(1, 'rgba(255,69,0,0)');
-  ctx.fillStyle = popV;
-  ctx.fillRect(0, 0, CARD_W, CARD_H);
-  const popC = ctx.createRadialGradient(CARD_W - 40, CARD_H - 40, 0, CARD_W - 40, CARD_H - 40, 560);
-  popC.addColorStop(0, `rgba(43,92,230,${P.glowC})`);
-  popC.addColorStop(1, 'rgba(43,92,230,0)');
-  ctx.fillStyle = popC;
   ctx.fillRect(0, 0, CARD_W, CARD_H);
 
   // Faint grid texture.
@@ -544,8 +537,8 @@ export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions
   bracket(ctx, cR, CM, -1, 1, 26, 2, P.bracket);
   bracket(ctx, CM, cB, 1, -1, 26, 2, P.bracket);
   bracket(ctx, cR, cB, -1, -1, 26, 2, P.bracket);
-  cross(ctx, CARD_W / 2, CM, 6, 1.5, 'rgba(255,69,0,0.6)');
-  cross(ctx, CARD_W / 2, cB, 6, 1.5, 'rgba(43,92,230,0.6)');
+  cross(ctx, CARD_W / 2, CM, 6, 1.5, P.hot);
+  cross(ctx, CARD_W / 2, cB, 6, 1.5, P.cobalt);
   ctx.strokeStyle = P.bracket;
   ctx.lineWidth = 1;
   for (let tx = CM + 60; tx < cR - 60; tx += 40) {
@@ -570,20 +563,20 @@ export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions
   const { lead, accent } = accentWords(opts.title);
   const handle = opts.handle.trim();
 
-  ctx.font = `italic 800 40px 'Newsreader', serif`;
+  ctx.font = `italic 700 40px 'Newsreader', serif`;
   ctx.fillStyle = P.fg;
   ctx.fillText('cot', x0, y0 + 38);
   const cw = ctx.measureText('cot').width;
-  ctx.fillStyle = VERMILION;
+  ctx.fillStyle = HOT;
   ctx.fillText('.', x0 + cw + 2, y0 + 38);
-  ctx.font = `italic 400 18px 'Newsreader', serif`;
+  ctx.font = `400 17px ${SANS}`;
   ctx.fillStyle = P.sub;
   ctx.fillText('Every session, fully traced.', x0 + cw + 24, y0 + 36);
 
-  ctx.font = `700 12px 'JetBrains Mono', monospace`;
+  ctx.font = `700 12px ${MONO}`;
   ls(ctx, 2.5);
   ctx.textAlign = 'right';
-  ctx.fillStyle = VERMILION;
+  ctx.fillStyle = HOT;
   ctx.fillText('COT.RUN', x1, y0 + 34);
   ctx.textAlign = 'left';
   ls(ctx, 0);
@@ -597,11 +590,8 @@ export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions
   const topH = 226;
   const chartsTop = rowTop + topH + 26;
 
-  // ── Neo-brutalist title card with background design ──
+  // ── Title card with a quiet background texture ──
   const card = { x: x0, y: rowTop, w: leftW, h: topH };
-  const SH = 9;
-  ctx.fillStyle = VERMILION;
-  ctx.fillRect(card.x + SH, card.y + SH, card.w, card.h);
   ctx.fillStyle = P.surface;
   ctx.fillRect(card.x, card.y, card.w, card.h);
 
@@ -615,7 +605,7 @@ export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions
       ctx.fillRect(dx, dy, 1.5, 1.5);
     }
   }
-  ctx.strokeStyle = 'rgba(255,69,0,0.12)';
+  ctx.strokeStyle = P.dark ? 'rgba(200,241,105,0.12)' : 'rgba(15,91,62,0.1)';
   ctx.lineWidth = 2;
   for (let rr = 52; rr <= 300; rr += 42) {
     ctx.beginPath();
@@ -624,27 +614,27 @@ export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions
   }
   ctx.restore();
 
-  ctx.strokeStyle = P.fg;
-  ctx.lineWidth = 3;
-  ctx.strokeRect(card.x + 1.5, card.y + 1.5, card.w - 3, card.h - 3);
+  ctx.strokeStyle = P.hair;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(card.x + 0.5, card.y + 0.5, card.w - 1, card.h - 1);
 
   const cp = 30;
   const cx = card.x + cp;
   const cInnerW = card.w - cp * 2;
 
-  ctx.fillStyle = VERMILION;
+  ctx.fillStyle = HOT;
   ctx.fillRect(cx, card.y + 27, 7, 7);
-  ctx.font = `700 11px 'JetBrains Mono', monospace`;
+  ctx.font = `700 11px ${MONO}`;
   ls(ctx, 2);
   ctx.fillStyle = P.faint;
   ctx.fillText('TRACED WITH COT', cx + 15, card.y + 34);
   ls(ctx, 0);
 
   let hpx = 50;
-  ctx.font = `800 ${hpx}px 'Newsreader', serif`;
+  ctx.font = `600 ${hpx}px ${SANS}`;
   while (hpx > 26 && ctx.measureText(lead).width > cInnerW) {
     hpx -= 1;
-    ctx.font = `800 ${hpx}px 'Newsreader', serif`;
+    ctx.font = `600 ${hpx}px ${SANS}`;
   }
   const lineH = hpx * 0.98;
   const regionTop = 46;
@@ -654,13 +644,13 @@ export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions
   const hb = card.y + capTop + hpx * 0.74;
   ctx.fillStyle = P.fg;
   ctx.fillText(lead, cx, hb);
-  ctx.font = `italic 800 ${hpx}px 'Newsreader', serif`;
-  ctx.fillStyle = VERMILION;
+  ctx.font = `600 ${hpx}px ${SANS}`;
+  ctx.fillStyle = HOT;
   ctx.fillText(accent, cx, hb + lineH);
 
   ctx.fillStyle = P.cardLine;
   ctx.fillRect(cx, card.y + card.h - 44, cInnerW, 1);
-  ctx.font = `700 12px 'JetBrains Mono', monospace`;
+  ctx.font = `700 12px ${MONO}`;
   ls(ctx, 2);
   ctx.fillStyle = P.faint;
   ctx.fillText((handle || '@you').toUpperCase(), cx, card.y + card.h - 22);
@@ -693,13 +683,13 @@ export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions
     const gx = metrics.x + c * cellW;
     const gy = metrics.y + r * cellH;
     const px = gx + 20;
-    ctx.font = `700 11px 'JetBrains Mono', monospace`;
+    ctx.font = `700 11px ${MONO}`;
     ls(ctx, 1.5);
     ctx.fillStyle = P.faint;
     ctx.fillText(s.label.toUpperCase(), px, gy + 32);
     ls(ctx, 0);
     const vpx = fitMono(ctx, s.value, Math.min(cellH * 0.4, 56), cellW - 40, 22);
-    ctx.font = `800 ${vpx}px 'JetBrains Mono', monospace`;
+    ctx.font = `800 ${vpx}px ${MONO}`;
     ctx.fillStyle = P.fg;
     ctx.fillText(s.value, px, gy + cellH - 24);
   });
@@ -721,10 +711,10 @@ export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions
   const plotTop = labelY + 22;
   const plotH = left.y + left.h - plotTop;
 
-  // Bottom-left: vermilion line (sequential series).
+  // Bottom-left: hot line (sequential series).
   const lineS = opts.lineSeries;
-  chartLabel(ctx, left.x, labelY, left.x + left.w, lineS.label.toUpperCase(), 'LINE', VERMILION, P);
-  lineChart(ctx, left.x, plotTop, left.w, plotH, lineS.data ?? [0], VERMILION, P, lineS.labels);
+  chartLabel(ctx, left.x, labelY, left.x + left.w, lineS.label.toUpperCase(), 'LINE', HOT, P);
+  lineChart(ctx, left.x, plotTop, left.w, plotH, lineS.data ?? [0], HOT, P, lineS.labels);
 
   // Bottom-right: a distribution — bars or a donut.
   const distS = opts.distSeries;
@@ -741,14 +731,14 @@ export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions
       plotH,
       distS.data ?? [],
       COBALT,
-      'rgba(43,92,230,0.45)',
+      P.dark ? 'rgba(127,162,245,0.45)' : 'rgba(43,92,230,0.45)',
       P,
       distS.labels,
     );
   }
 
-  cross(ctx, x0, chartsTop - 13, 4, 1, 'rgba(255,69,0,0.7)');
-  cross(ctx, x1, chartsTop - 13, 4, 1, 'rgba(43,92,230,0.7)');
+  cross(ctx, x0, chartsTop - 13, 4, 1, P.hot);
+  cross(ctx, x1, chartsTop - 13, 4, 1, P.cobalt);
 }
 
 /** Compose the share copy from the headline + selected stats + cot tagline. */

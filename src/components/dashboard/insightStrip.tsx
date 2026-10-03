@@ -2,16 +2,11 @@ import { useState } from 'react';
 import type { ActionableInsight, InsightSeverity, InsightStatus } from '../../lib/api';
 import { formatRelative } from '../../lib/categoryMeta';
 import { Icon } from '../ui/icons';
+import { TONE } from '../ui/tone';
 
 export function SeverityBadge({ severity }: { severity: InsightSeverity }) {
-  const styles: Record<InsightSeverity, string> = {
-    critical: 'bg-vermilion text-cream border-vermilion',
-    warn: 'border-vermilion/60 text-vermilion',
-    info: 'border-cobalt/60 text-cobalt',
-  };
   return (
-    <span
-      className={`shrink-0 border px-1.5 py-0.5 font-mono text-[0.5rem] font-bold uppercase tracking-widest ${styles[severity]}`}>
+    <span className={`chip shrink-0 ${TONE[severity]}`}>
       {severity}
     </span>
   );
@@ -53,17 +48,17 @@ export function FindingGroup({
   // Items are severity-sorted, so the first item carries the group's max severity.
   const severity = group.items[0].severity;
   return (
-    <div className="min-w-0 bg-bg">
+    <div className="min-w-0 bg-surface">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center gap-2.5 px-4 py-3 text-left"
         title={open ? 'Collapse group' : 'Expand group'}>
         <SeverityBadge severity={severity} />
-        <span className="min-w-0 flex-1 truncate font-mono text-xs font-bold text-fg transition-colors hover:text-vermilion">
+        <span className="min-w-0 flex-1 truncate font-mono text-xs font-semibold text-fg transition-colors hover:text-hot">
           {group.title}
         </span>
-        <span className="shrink-0 border border-fg/20 px-1.5 py-0.5 font-mono text-[0.55rem] font-bold tabular-nums text-fg/55">
+        <span className="shrink-0 border rounded-chip border-line/[0.16] px-1.5 py-0.5 font-mono text-label font-semibold tabular-nums text-fg/60">
           {group.items.length}
         </span>
         <Icon
@@ -72,7 +67,7 @@ export function FindingGroup({
         />
       </button>
       {open && (
-        <div className="grid grid-cols-[minmax(0,1fr)] gap-px border-t border-fg/10 bg-fg/10">
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-px border-t border-line/10 bg-fg/10">
           {group.items.map((f) => (
             <FindingCard
               key={f.fingerprint}
@@ -102,7 +97,7 @@ export function FindingCard({
   const compact = finding.tier === 2;
   const [expanded, setExpanded] = useState(!compact);
   return (
-    <div className="min-w-0 bg-bg px-4 py-3">
+    <div className="min-w-0 bg-surface px-4 py-3">
       <div className="flex items-start gap-2.5">
         <SeverityBadge severity={finding.severity} />
         <button
@@ -110,18 +105,18 @@ export function FindingCard({
           onClick={() => setExpanded((e) => !e)}
           className="min-w-0 flex-1 text-left"
           title={expanded ? 'Collapse' : 'Expand'}>
-          <p className="font-mono text-xs font-bold text-fg transition-colors hover:text-vermilion">
+          <p className="font-mono text-xs font-semibold text-fg transition-colors hover:text-hot">
             {finding.title}
           </p>
           {view === 'resolved' && finding.resolved_at && (
-            <p className="mt-0.5 font-mono text-[0.55rem] uppercase tracking-widest text-olive">
+            <p className="mt-0.5 font-mono text-label uppercase tracking-label text-olive">
               <Icon name="check" className="mr-1 inline h-2.5 w-2.5" />
               fixed {formatRelative(finding.resolved_at)}
             </p>
           )}
         </button>
         {finding.first_seen && view === 'active' && (
-          <span className="hidden shrink-0 font-mono text-[0.55rem] text-fg/35 sm:inline">
+          <span className="hidden shrink-0 font-mono text-label text-fg/40 sm:inline">
             since {formatRelative(finding.first_seen)}
           </span>
         )}
@@ -130,17 +125,17 @@ export function FindingCard({
             type="button"
             onClick={() => onLifecycle(finding.fingerprint, view === 'dismissed' ? 'restore' : 'dismiss')}
             title={view === 'dismissed' ? 'Restore this finding' : 'Dismiss this finding'}
-            className="shrink-0 border border-fg/20 px-1.5 py-0.5 font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/45 transition-colors hover:border-fg/50 hover:text-fg focus-visible:border-vermilion focus-visible:outline-none">
+            className="shrink-0 border rounded-chip border-line/[0.16] px-1.5 py-0.5 font-mono text-label font-semibold uppercase tracking-label text-fg/60 transition-colors hover:border-line/25 hover:text-fg focus-visible:border-hot focus-visible:outline-none">
             {view === 'dismissed' ? 'Restore' : '×'}
           </button>
         )}
       </div>
       {expanded && (
         <div className="mt-2 space-y-2 pl-0.5">
-          <p className="break-words font-mono text-[0.68rem] leading-relaxed text-fg/70">
+          <p className="break-words font-mono text-data leading-relaxed text-fg/70">
             {finding.detail}
           </p>
-          <p className="border-l-[3px] border-vermilion pl-2.5 font-mono text-[0.68rem] font-bold leading-relaxed text-fg/85">
+          <p className="rounded-cell bg-hot/[0.06] px-3 py-2 font-mono text-data font-semibold leading-relaxed text-fg/85">
             {finding.recommendation}
           </p>
           {finding.evidence.length > 0 && (
@@ -153,12 +148,12 @@ export function FindingCard({
                     className="group flex w-full items-center gap-2 text-left">
                     <Icon
                       name="chevron-right"
-                      className="h-2.5 w-2.5 shrink-0 text-fg/25 transition-colors group-hover:text-vermilion"
+                      className="h-2.5 w-2.5 shrink-0 text-fg/40 transition-colors group-hover:text-hot"
                     />
-                    <span className="min-w-0 flex-1 truncate font-mono text-[0.62rem] text-fg/55 transition-colors group-hover:text-vermilion">
+                    <span className="min-w-0 flex-1 truncate font-mono text-label text-fg/60 transition-colors group-hover:text-hot">
                       {ev.label}
                     </span>
-                    <span className="flex shrink-0 items-center gap-2 font-mono text-[0.55rem] text-fg/35">
+                    <span className="flex shrink-0 items-center gap-2 font-mono text-label text-fg/40">
                       {ev.value && <span>{ev.value}</span>}
                       <span>{ev.session_id.slice(0, 8)}</span>
                     </span>
@@ -194,7 +189,7 @@ export function InsightStrip({
     );
   }
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)] gap-px bg-fg/10">
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-px bg-line/10">
       {groups.map((g) =>
         g.items.length === 1 ? (
           <FindingCard

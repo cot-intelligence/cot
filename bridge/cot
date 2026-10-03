@@ -3481,9 +3481,16 @@ def _fetch_session_origins() -> dict[str, str]:
 
 
 def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
-                  origins: dict[str, str], *, verbose: bool = True) -> int:
-    """Import transcripts for one agent. Returns count of events posted."""
+                  origins: dict[str, str], *, verbose: bool = True,
+                  skip_active_s: float = 0, held_back: list[str] | None = None) -> int:
+    """Import transcripts for one agent. Returns count of events posted.
+
+    ``skip_active_s`` holds back transcripts written to within that many seconds
+    (a session that's still running): their offsets stay put, so a later pass
+    imports them whole once they've gone quiet. Held-back paths are appended to
+    ``held_back``."""
     transcripts = _discover_transcripts(agent)
+    now_ts = time.time()
     if verbose and not transcripts:
         print(f"cot import: no {agent} transcripts found", file=sys.stderr)
         return 0
@@ -3526,6 +3533,15 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
         )
         if origins.get(sid) == "hook" and not is_cursor_subagent and not hook_supplement:
             continue
+
+        if skip_active_s:
+            try:
+                if now_ts - path.stat().st_mtime < skip_active_s:
+                    if held_back is not None:
+                        held_back.append(str(path))
+                    continue
+            except OSError:
+                pass
 
         # Apply --since filter on file mtime as a cheap pre-filter
         if since:
@@ -3608,6 +3624,9 @@ def _cmd_import(args: list[str]) -> int:
     parser.add_argument("--since", help="Only import transcripts modified after YYYY-MM-DD")
     parser.add_argument("--report", action="store_true",
                         help="Print an ingestion quality/coverage report when done")
+    parser.add_argument("--skip-active", type=float, default=0, metavar="MINUTES",
+                        help="Leave transcripts written to in the last MINUTES for a later run "
+                             "(sessions still in progress)")
     parsed = parser.parse_args(args)
 
     agents = parsed.agent or ["claude", "cursor", "codex"]
@@ -3615,10 +3634,14 @@ def _cmd_import(args: list[str]) -> int:
     origins = _fetch_session_origins()
     offsets = _import_offsets_load()
     total = 0
+    held_back: list[str] = []
 
     for agent in agents:
-        count = _import_agent(agent, parsed.since, offsets, origins)
+        count = _import_agent(agent, parsed.since, offsets, origins,
+                              skip_active_s=max(0.0, parsed.skip_active) * 60, held_back=held_back)
         total += count
+    if held_back:
+        print(f"cot import: held back {len(held_back)} in-progress transcript(s) for the next run")
 
     _import_offsets_save(offsets)
     _write_import_parser_version()

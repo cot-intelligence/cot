@@ -113,6 +113,26 @@ CREATE INDEX IF NOT EXISTS idx_events_session_agg ON events(
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_archived_source ON sessions(archived, source);
 
+-- One row per event that used an MCP server or loaded a skill, derived from
+-- events by extension_usage.sync() so the Extensions view never scans the
+-- payload-heavy events table. Names are what the event said, and they resolve to
+-- installed extensions at read time, since installs change.
+CREATE TABLE IF NOT EXISTS extension_uses (
+    event_id    INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    source      TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    name        TEXT,
+    tool        TEXT,
+    path        TEXT,
+    via         TEXT NOT NULL,
+    phase       TEXT,
+    status      TEXT,
+    duration_ms INTEGER,
+    ts          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_extension_uses_session ON extension_uses(session_id);
+
 CREATE TABLE IF NOT EXISTS raw_ingest_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     source      TEXT NOT NULL,
@@ -331,6 +351,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # Every session from one imported file points at that file's root
         # session, so Session Replay lists (and deletes) one row per import.
         ("import_root_id", "TEXT"),
+        # Context the person typed when importing: why this trace is here.
+        ("import_note", "TEXT"),
     ):
         _add_column_if_missing(conn, "sessions", name, col_def, session_cols)
     if "parent_session_id" in session_cols:
@@ -2288,6 +2310,7 @@ def _import_fields(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "imported_from": row["imported_from"],
         "imported_at": timeutil.format_ts(row["imported_at"]),
+        "import_note": row["import_note"] if "import_note" in row.keys() else None,
     }
 
 
@@ -2869,7 +2892,7 @@ def export_sessions(
         rows = conn.execute(
             f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
             f" s.status, s.archived, s.bookmarked, s.created_at,"
-            f" s.imported_from, s.imported_at,"
+            f" s.imported_from, s.imported_at, s.import_note,"
             f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
             f" e.i, e.o, e.cr, e.cw,"
             f" (SELECT fp.detail FROM events fp"
@@ -3024,6 +3047,53 @@ def list_sessions(
     archived: bool = False,
     bookmarked: bool = False,
 ) -> list[dict[str, Any]]:
+    return list_sessions_page(
+        limit, status=status, source=source, q=q, archived=archived, bookmarked=bookmarked
+    )[0]
+
+
+def list_session_projects(archived: bool = False) -> list[dict[str, Any]]:
+    """Every project name in the sessions list (last cwd segment) with its session count."""
+    with store.read() as conn:
+        rows = conn.execute(
+            "SELECT cwd, COUNT(*) AS n FROM sessions"
+            " WHERE archived = ? AND parent_session_id IS NULL"
+            " AND (import_root_id IS NULL OR import_root_id = id)"
+            " GROUP BY cwd",
+            (1 if archived else 0,),
+        ).fetchall()
+    counts: dict[str, int] = {}
+    for r in rows:
+        name = next((p for p in reversed((r["cwd"] or "").split("/")) if p), None)
+        if name:
+            counts[name] = counts.get(name, 0) + r["n"]
+    return [{"project": k, "sessions": v} for k, v in sorted(counts.items(), key=lambda kv: kv[0].lower())]
+
+
+SESSION_SORTS = ("recent", "events", "duration", "cost")
+
+
+def list_sessions_page(
+    limit: int = 50,
+    offset: int = 0,
+    status: str | None = None,
+    source: str | None = None,
+    q: str | None = None,
+    archived: bool = False,
+    bookmarked: bool = False,
+    project: str | None = None,
+    ids: list[str] | None = None,
+    sort: str = "recent",
+    desc: bool = True,
+) -> tuple[list[dict[str, Any]], int]:
+    """One page of the sessions list and the total number of matching sessions.
+
+    ``project`` matches the last segment of the working directory, the way the
+    dashboard names projects. ``ids`` limits the list to those sessions (the
+    "with findings" filter). Recency and event-count sorts page in SQL; duration,
+    spend and the recency-derived status filter need the computed summaries, so
+    those sort the whole match in Python before slicing.
+    """
     clauses: list[str] = ["s.archived = ?"]
     params: list[Any] = [1 if archived else 0]
     if bookmarked:
@@ -3036,46 +3106,74 @@ def list_sessions(
         clauses.append("s.source = ?")
         params.append(source)
     if q:
-        clauses.append("(s.id LIKE ? OR s.cwd LIKE ?)")
-        params.extend([f"%{q}%", f"%{q}%"])
+        # The title is the first prompt, so search it along with the id and path.
+        clauses.append(
+            "(s.id LIKE ? OR s.cwd LIKE ? OR (SELECT fp.detail FROM events fp"
+            " WHERE fp.session_id = s.id AND fp.category = 'prompt'"
+            " ORDER BY fp.id ASC LIMIT 1) LIKE ?)"
+        )
+        params.extend([f"%{q}%"] * 3)
+    if project:
+        clauses.append("(s.cwd = ? OR s.cwd LIKE ? OR s.cwd LIKE ?)")
+        params.extend([project, f"%/{project}", f"%/{project}/"])
+    if ids is not None:
+        if not ids:
+            return [], 0
+        clauses.append(f"s.id IN ({','.join('?' * len(ids))})")
+        params.extend(ids)
     where = f"WHERE {' AND '.join(clauses)}"
-    params.append(limit)
+    sort = sort if sort in SESSION_SORTS else "recent"
+    direction = "DESC" if desc else "ASC"
+    recency = "COALESCE(s.ended_at, e.last_ts, s.started_at)"
+    joined = (
+        " FROM sessions s"
+        " JOIN ("
+        "   SELECT session_id,"
+        "     COUNT(*) AS event_count,"
+        "     SUM(CASE WHEN tool IS NOT NULL THEN 1 ELSE 0 END) AS tool_count,"
+        "     MIN(ts) AS first_ts,"
+        "     MAX(ts) AS last_ts,"
+        "     COALESCE(SUM(input_tokens),0) AS i,"
+        "     COALESCE(SUM(output_tokens),0) AS o,"
+        "     COALESCE(SUM(cache_read_tokens),0) AS cr,"
+        "     COALESCE(SUM(cache_write_tokens),0) AS cw"
+        "   FROM events"
+        "   GROUP BY session_id"
+        "   HAVING SUM(CASE WHEN category IS NOT NULL AND category != 'lifecycle' THEN 1 ELSE 0 END) > 0"
+        " ) e ON e.session_id = s.id"
+        f" {where}"
+    )
+    select = (
+        "SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
+        " s.status, s.archived, s.bookmarked, s.created_at,"
+        " s.imported_from, s.imported_at, s.import_note,"
+        " e.event_count, e.tool_count, e.first_ts, e.last_ts,"
+        " e.i, e.o, e.cr, e.cw,"
+        " (SELECT fp.detail FROM events fp"
+        "  WHERE fp.session_id = s.id AND fp.category = 'prompt'"
+        "  ORDER BY fp.id ASC LIMIT 1) AS prompt_detail"
+    )
+    in_sql = sort in ("recent", "events") and not status
+    order = f"e.event_count {direction}, {recency} DESC" if sort == "events" else f"{recency} {direction}"
     with store.read() as conn:
-        rows = conn.execute(
-            f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
-            f" s.status, s.archived, s.bookmarked, s.created_at,"
-            f" s.imported_from, s.imported_at,"
-            f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
-            f" e.i, e.o, e.cr, e.cw,"
-            f" (SELECT fp.detail FROM events fp"
-            f"  WHERE fp.session_id = s.id AND fp.category = 'prompt'"
-            f"  ORDER BY fp.id ASC LIMIT 1) AS prompt_detail"
-            f" FROM sessions s"
-            f" JOIN ("
-            f"   SELECT session_id,"
-            f"     COUNT(*) AS event_count,"
-            f"     SUM(CASE WHEN tool IS NOT NULL THEN 1 ELSE 0 END) AS tool_count,"
-            f"     MIN(ts) AS first_ts,"
-            f"     MAX(ts) AS last_ts,"
-            f"     COALESCE(SUM(input_tokens),0) AS i,"
-            f"     COALESCE(SUM(output_tokens),0) AS o,"
-            f"     COALESCE(SUM(cache_read_tokens),0) AS cr,"
-            f"     COALESCE(SUM(cache_write_tokens),0) AS cw"
-            f"   FROM events"
-            f"   GROUP BY session_id"
-            f"   HAVING SUM(CASE WHEN category IS NOT NULL AND category != 'lifecycle' THEN 1 ELSE 0 END) > 0"
-            f" ) e ON e.session_id = s.id"
-            f" {where}"
-            f" ORDER BY COALESCE(s.ended_at, e.last_ts, s.started_at) DESC"
-            f" LIMIT ?",
-            params,
-        ).fetchall()
+        if in_sql:
+            total = conn.execute(f"SELECT COUNT(*){joined}", params).fetchone()[0]
+            rows = conn.execute(
+                f"{select}{joined} ORDER BY {order}, s.id LIMIT ? OFFSET ?",
+                [*params, limit, max(0, offset)],
+            ).fetchall()
+            return _batched_session_summaries(conn, rows), total
+        rows = conn.execute(f"{select}{joined} ORDER BY {order}, s.id", params).fetchall()
         summaries = _batched_session_summaries(conn, rows)
     # "active"/"completed" is recency-derived (see timeutil.live_status), so the status
     # filter is applied here rather than in SQL.
     if status:
-        summaries = [s for s in summaries if s["status"] == status]
-    return summaries
+        summaries = [x for x in summaries if x["status"] == status]
+    if sort in ("duration", "cost"):
+        field = "duration_seconds" if sort == "duration" else "cost_usd"
+        summaries.sort(key=lambda x: x.get(field) or 0, reverse=desc)
+    start = max(0, offset)
+    return summaries[start : start + limit], len(summaries)
 
 
 def _snippet(text: str, query: str, before: int = 60, after: int = 140) -> str:
@@ -3579,6 +3677,22 @@ def delete_imported_session(session_id: str) -> bool:
             return False
         conn.execute("DELETE FROM sessions WHERE import_root_id = ?", (session_id,))
     return True
+
+
+IMPORT_NOTE_MAX = 2000
+
+
+def set_import_note(session_id: str, note: str | None) -> bool:
+    """Set (or clear, with an empty note) the context on a Session Replay import.
+
+    Only import roots qualify, the same rule as delete."""
+    text = (note or "").strip()[:IMPORT_NOTE_MAX] or None
+    with store.write() as conn:
+        cur = conn.execute(
+            "UPDATE sessions SET import_note = ? WHERE id = ? AND import_root_id = id",
+            (text, session_id),
+        )
+    return cur.rowcount > 0
 
 
 _replay_ready: set[str] = set()

@@ -1,9 +1,14 @@
+import type { ReactElement } from 'react';
+
 interface IconProps {
   name: IconName;
   className?: string;
 }
 
 export type IconName =
+  | 'sidebar'
+  | 'eye'
+  | 'eye-off'
   | 'agent'
   | 'file'
   | 'edit'
@@ -46,7 +51,7 @@ export type IconName =
   | 'check'
   | 'square';
 
-const PATHS: Record<IconName, JSX.Element> = {
+const PATHS: Record<IconName, ReactElement> = {
   check: (
     <>
       <rect x="3" y="3" width="18" height="18" rx="2" />
@@ -244,6 +249,24 @@ const PATHS: Record<IconName, JSX.Element> = {
       <circle cx="6" cy="12" r="3" />
       <circle cx="18" cy="19" r="3" />
       <path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4" />
+    </>
+  ),
+  eye: (
+    <>
+      <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" />
+      <circle cx="12" cy="12" r="3" />
+    </>
+  ),
+  'eye-off': (
+    <>
+      <path d="M3 3l18 18M10.6 5.6A9.8 9.8 0 0 1 12 5.5C18 5.5 21.5 12 21.5 12a17 17 0 0 1-3.1 3.9M6.6 6.6C3.9 8.4 2.5 12 2.5 12S6 18.5 12 18.5c1.7 0 3.2-.5 4.5-1.2" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+    </>
+  ),
+  sidebar: (
+    <>
+      <rect x="4" y="5" width="16" height="14" rx="2" />
+      <path d="M9.5 5v14" />
     </>
   ),
   settings: (

@@ -154,7 +154,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-ink/40 px-4 pt-[12vh] backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 px-4 pt-[12vh] backdrop-blur-sm"
       onClick={onClose}>
       <div
         role="dialog"
@@ -162,11 +162,11 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
         aria-label="Search and navigate"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={onKeyDown}
-        className="w-full max-w-2xl overflow-hidden rounded-lg border border-fg/15 bg-bg shadow-soft-lg">
-        <div className="flex items-center gap-2.5 border-b border-fg/10 px-4 py-3">
-          <Icon name="search" className="h-4 w-4 shrink-0 text-fg/45" />
+        className="w-full max-w-2xl overflow-hidden rounded-card border border-line/10 bg-surface shadow-soft-lg">
+        <div className="flex items-center gap-2.5 border-b border-line/10 px-4 py-3">
+          <Icon name="search" className="h-4 w-4 shrink-0 text-fg/60" />
           {activeScope && (
-            <span className="flex shrink-0 items-center gap-1 rounded border border-vermilion/30 bg-vermilion/10 px-1.5 py-0.5 font-mono text-[0.6rem] font-bold uppercase tracking-widest text-vermilion">
+            <span className="flex shrink-0 items-center gap-1 rounded border border-hot/30 bg-hot/10 px-1.5 py-0.5 font-mono text-label font-semibold uppercase tracking-label text-hot">
               <Icon name="event" className="h-3 w-3" />
               {activeScope.label}
             </span>
@@ -178,9 +178,9 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
             placeholder={
               activeScope ? 'Search in this session…' : 'Search prompts, responses, files, commands…'
             }
-            className="min-w-0 flex-1 bg-transparent font-mono text-sm text-fg placeholder:text-fg/35 focus:outline-none"
+            className="min-w-0 flex-1 bg-transparent font-mono text-sm text-fg placeholder:text-fg/40 focus:outline-none"
           />
-          <kbd className="shrink-0 rounded border border-fg/15 px-1.5 py-0.5 font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">
+          <kbd className="shrink-0 rounded border border-line/10 px-1.5 py-0.5 font-mono text-label uppercase tracking-label text-fg/40">
             Esc
           </kbd>
         </div>
@@ -200,7 +200,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
             return (
               <Fragment key={item.kind === 'command' ? item.command.id : `${item.result.session_id}-${item.result.event_id}`}>
                 {header && (
-                  <li className="px-4 pb-1 pt-2 font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/30">
+                  <li className="px-4 pb-1 pt-2 font-mono text-label font-semibold uppercase tracking-label text-fg/40">
                     {header}
                   </li>
                 )}
@@ -210,19 +210,17 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
                     data-idx={i}
                     onClick={() => choose(item)}
                     onMouseMove={() => setActive(i)}
-                    className={`flex w-full items-center gap-3 border-l-2 px-4 py-2.5 text-left transition-colors ${
-                      i === active
-                        ? 'border-l-vermilion bg-surface'
-                        : 'border-l-transparent hover:bg-surface'
+                    className={`flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${
+                      i === active ? 'bg-fg/[0.06]' : 'hover:bg-fg/[0.04]'
                     }`}>
                     {item.kind === 'command' ? (
                       <>
-                        <Icon name={item.command.icon} className="h-4 w-4 shrink-0 text-fg/45" />
+                        <Icon name={item.command.icon} className="h-4 w-4 shrink-0 text-fg/60" />
                         <span className="flex-1 truncate font-mono text-sm text-fg/85">
                           {highlight(item.command.label, term)}
                         </span>
                         {item.command.active && (
-                          <span className="shrink-0 font-mono text-[0.55rem] uppercase tracking-widest text-fg/30">
+                          <span className="shrink-0 font-mono text-label uppercase tracking-label text-fg/40">
                             Current
                           </span>
                         )}
@@ -237,21 +235,21 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
                             <span className="min-w-0 flex-1 space-y-1">
                               <span className="flex items-center gap-2">
                                 <span
-                                  className={`font-mono text-[0.58rem] font-bold uppercase tracking-widest ${meta.color}`}>
+                                  className={`font-mono text-label font-semibold uppercase tracking-label ${meta.color}`}>
                                   {meta.label}
                                 </span>
                                 {r.target && (
-                                  <span className="truncate font-mono text-[0.62rem] text-fg/50">
+                                  <span className="truncate font-mono text-label text-fg/60">
                                     {r.target}
                                   </span>
                                 )}
                                 {r.model && (
-                                  <span className="ml-auto shrink-0 font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">
+                                  <span className="ml-auto shrink-0 font-mono text-label uppercase tracking-label text-fg/40">
                                     {formatModel(r.model)}
                                   </span>
                                 )}
                                 <span
-                                  className={`shrink-0 font-mono text-[0.55rem] text-fg/35 ${
+                                  className={`shrink-0 font-mono text-label text-fg/40 ${
                                     r.model ? '' : 'ml-auto'
                                   }`}>
                                   {formatRelative(r.ts)}
@@ -260,7 +258,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
                               <span className="block truncate font-mono text-xs text-fg/85">
                                 {highlight(r.snippet, term)}
                               </span>
-                              <span className="block truncate font-mono text-[0.55rem] text-fg/35">
+                              <span className="block truncate font-mono text-label text-fg/40">
                                 {r.cwd || r.session_id}
                               </span>
                             </span>
@@ -280,7 +278,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
             </li>
           )}
           {term.length < 2 && !cmdMatches.length && (
-            <li className="px-4 py-10 text-center font-mono text-xs text-fg/35">
+            <li className="px-4 py-10 text-center font-mono text-xs text-fg/40">
               {activeScope
                 ? 'Type to search this session — ⌫ to search everything.'
                 : 'Type at least 2 characters to search across all sessions.'}
@@ -291,7 +289,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
           )}
         </ul>
 
-        <div className="flex items-center gap-4 border-t border-fg/10 px-4 py-2 font-mono text-[0.55rem] uppercase tracking-widest text-fg/35">
+        <div className="flex items-center gap-4 border-t border-line/10 px-4 py-2 font-mono text-label uppercase tracking-label text-fg/40">
           <span>↑↓ navigate</span>
           <span>↵ open</span>
           {activeScope && <span>⌫ search all</span>}

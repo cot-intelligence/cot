@@ -258,32 +258,32 @@ const SubagentGroup = forwardRef<HTMLDivElement, {
           onClick={() => setExpanded((v) => !v)}
           className="flex w-full items-center gap-2 rounded-lg border border-cobalt/20 bg-cobalt/[0.03] px-3.5 py-2 text-left transition-colors hover:bg-cobalt/[0.06]"
         >
-          <span className={`shrink-0 text-[0.55rem] text-cobalt/50 transition-transform ${open ? 'rotate-90' : ''}`}>
+          <span className={`shrink-0 text-label text-cobalt/50 transition-transform ${open ? 'rotate-90' : ''}`}>
             ▸
           </span>
           <span className="h-2 w-2 shrink-0 rounded-full bg-cobalt" />
-          <span className="font-mono text-[0.58rem] font-bold uppercase tracking-widest text-cobalt">
+          <span className="font-mono text-label font-semibold uppercase tracking-label text-cobalt">
             {run.kind === 'review' ? 'Review' : 'Subagent'}
           </span>
-          <span className="min-w-0 flex-1 truncate font-mono text-[0.7rem] font-bold text-fg">
+          <span className="min-w-0 flex-1 truncate font-mono text-data font-semibold text-fg">
             {run.label}
           </span>
           {run.durationMs != null && run.durationMs > 0 && (
-            <span className="shrink-0 font-mono text-[0.5rem] tabular-nums text-fg/30">
+            <span className="shrink-0 font-mono text-label tabular-nums text-fg/40">
               {formatDuration(run.durationMs)}
             </span>
           )}
           {run.status === 'success' && (
-            <span className="shrink-0 rounded bg-emerald-500/15 px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase text-emerald-600">
+            <span className="shrink-0 rounded bg-emerald-500/15 px-1 py-0.5 font-mono text-label font-semibold uppercase text-emerald-600">
               OK
             </span>
           )}
           {run.status && run.status !== 'success' && (
-            <span className="shrink-0 rounded bg-vermilion/15 px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase text-vermilion">
+            <span className="shrink-0 chip bg-alert/[0.14] text-alert ring-alert/[0.32]">
               {run.status}
             </span>
           )}
-          <span className="shrink-0 font-mono text-[0.5rem] tabular-nums text-fg/25">
+          <span className="shrink-0 font-mono text-label tabular-nums text-fg/40">
             {formatClock(run.start)}
           </span>
         </button>
@@ -309,7 +309,7 @@ function SubagentResultCard({ item, sessionId }: { item: TimelineItem; sessionId
 
   if (!message && loading) {
     return (
-      <p className="rounded-md bg-panel px-3 py-2 font-mono text-[0.62rem] uppercase tracking-widest text-fg/35">
+      <p className="rounded-md bg-panel px-3 py-2 font-mono text-label uppercase tracking-label text-fg/40">
         Loading subagent response...
       </p>
     );
@@ -364,18 +364,18 @@ function CardMeta({ item }: { item: TimelineItem }) {
   return (
     <>
       {provenance && (
-        <span className={`rounded px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest ${provenance.pillClass}`}>
+        <span className={`rounded px-1 py-0.5 font-mono text-label font-semibold uppercase tracking-label ${provenance.pillClass}`}>
           {provenance.label}
         </span>
       )}
-      <span className="font-mono text-[0.55rem] tabular-nums text-fg/35" title={formatDateTime(item.start_ts || item.ts)}>
+      <span className="font-mono text-label tabular-nums text-fg/40" title={formatDateTime(item.start_ts || item.ts)}>
         {formatClock(item.start_ts || item.ts)}
       </span>
       {item.duration_ms != null && item.duration_ms > 0 && (
-        <span className="font-mono text-[0.55rem] tabular-nums text-fg/30">{formatDuration(item.duration_ms)}</span>
+        <span className="font-mono text-label tabular-nums text-fg/40">{formatDuration(item.duration_ms)}</span>
       )}
       {item.status === 'interrupted' && (
-        <span className="rounded border border-vermilion/50 px-1 py-0.5 font-mono text-[0.5rem] font-bold uppercase text-vermilion">
+        <span className="chip bg-amber/[0.14] text-amber ring-amber/[0.32]">
           Stopped
         </span>
       )}
@@ -419,8 +419,8 @@ const ConversationCard = forwardRef<
     >
       <div className="mb-2.5 flex items-center gap-2">
         <AgentAvatar item={item} />
-        <span className="font-sans text-[0.78rem] font-semibold text-fg">{agentName(item)}</span>
-        {item.model && <span className="font-mono text-[0.55rem] text-fg/35">{item.model}</span>}
+        <span className="font-sans text-code font-semibold text-fg">{agentName(item)}</span>
+        {item.model && <span className="font-mono text-label text-fg/40">{item.model}</span>}
         <CardMeta item={item} />
       </div>
       {item.attachments && item.attachments.length > 0 && (
@@ -468,19 +468,19 @@ const ThoughtCard = forwardRef<HTMLDivElement, {
         aria-expanded={open}
       >
         <SparkIcon className="h-3 w-3 text-fg/40" />
-        <span className="font-serif text-[0.95rem] italic text-fg/60 transition-colors group-hover:text-fg/85">
+        <span className="text-body text-fg/60 transition-colors group-hover:text-fg/85">
           Thinking
         </span>
         <CardMeta item={item} />
-        <span className={`ml-auto text-[0.55rem] text-fg/30 transition-transform ${open ? 'rotate-90' : ''}`}>▸</span>
+        <span className={`ml-auto text-label text-fg/40 transition-transform ${open ? 'rotate-90' : ''}`}>▸</span>
       </button>
       {open ? (
-        <div className="mt-2 border-l border-dashed border-line/20 pl-3 text-fg/60">
+        <div className="mt-2 border-l border-dashed border-line/[0.16] pl-3 text-fg/60">
           <CardBody item={item} sessionId={sessionId} />
         </div>
       ) : (
         preview && (
-          <p className="fade-bottom mt-1 line-clamp-2 text-[0.82rem] leading-relaxed text-fg/45">{preview}</p>
+          <p className="fade-bottom mt-1 line-clamp-2 text-small leading-relaxed text-fg/60">{preview}</p>
         )
       )}
     </div>
@@ -613,44 +613,44 @@ const ActionCard = forwardRef<HTMLDivElement, {
           className="flex w-full items-center gap-2 px-3.5 py-2 text-left"
         >
           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${meta.dot}`} />
-          <span className={`shrink-0 font-mono text-[0.55rem] font-bold uppercase tracking-widest ${meta.color}`}>
+          <span className={`shrink-0 font-mono text-label font-semibold uppercase tracking-label ${meta.color}`}>
             {meta.label}
           </span>
           {provenance && (
-            <span className={`shrink-0 rounded px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase tracking-widest ${provenance.pillClass}`}>
+            <span className={`shrink-0 rounded px-1 py-0.5 font-mono text-label font-semibold uppercase tracking-label ${provenance.pillClass}`}>
               {provenance.label}
             </span>
           )}
-          <span className="min-w-0 flex-1 truncate font-mono text-[0.78rem] font-bold text-fg/80">
+          <span className="min-w-0 flex-1 truncate font-mono text-code font-semibold text-fg/80">
             {item.title}
           </span>
           {showTarget && (
-            <span className="hidden max-w-48 shrink-0 truncate font-mono text-[0.58rem] text-fg/35 sm:block">
+            <span className="hidden max-w-48 shrink-0 truncate font-mono text-label text-fg/40 sm:block">
               {item.target}
             </span>
           )}
           {item.duration_ms != null && item.duration_ms > 0 && (
-            <span className="shrink-0 font-mono text-[0.52rem] tabular-nums text-fg/30">
+            <span className="shrink-0 font-mono text-label tabular-nums text-fg/40">
               {formatDuration(item.duration_ms)}
             </span>
           )}
           <span
-            className="shrink-0 font-mono text-[0.52rem] tabular-nums text-fg/25"
+            className="shrink-0 font-mono text-label tabular-nums text-fg/40"
             title={formatDateTime(item.start_ts || item.ts)}
           >
             {formatClock(item.start_ts || item.ts)}
           </span>
           {isError && (
-            <span className="shrink-0 rounded bg-vermilion px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase text-cream">
+            <span className="shrink-0 chip bg-alert/[0.14] text-alert ring-alert/[0.32]">
               {item.status}
             </span>
           )}
           {item.status === 'interrupted' && (
-            <span className="shrink-0 rounded border border-vermilion/50 px-1 py-0.5 font-mono text-[0.48rem] font-bold uppercase text-vermilion">
+            <span className="shrink-0 chip bg-amber/[0.14] text-amber ring-amber/[0.32]">
               Stopped
             </span>
           )}
-          <span className={`shrink-0 text-[0.55rem] text-fg/25 transition-transform ${open ? 'rotate-90' : ''}`}>
+          <span className={`shrink-0 text-label text-fg/40 transition-transform ${open ? 'rotate-90' : ''}`}>
             ▸
           </span>
         </button>
@@ -658,7 +658,7 @@ const ActionCard = forwardRef<HTMLDivElement, {
         {open && (
           <div className="border-t border-line/10 px-3.5 py-3">
             {showTarget && (
-              <p className="mb-2 break-all font-mono text-xs text-fg/45 sm:hidden">{item.target}</p>
+              <p className="mb-2 break-all font-mono text-xs text-fg/60 sm:hidden">{item.target}</p>
             )}
             {item.attachments && item.attachments.length > 0 && (
               <div className="mb-3">
@@ -710,8 +710,8 @@ function CardBody({ item, sessionId }: { item: TimelineItem; sessionId: string }
   if (d.command != null) {
     return (
       <div className="space-y-2">
-        <pre className="scroll-thin max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-panel p-3 font-mono text-[0.8rem] text-fg">
-          <span className="select-none text-vermilion">$ </span>{d.command}
+        <pre className="scroll-thin max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-panel p-3 font-mono text-small text-fg">
+          <span className="select-none text-hot">$ </span>{d.command}
         </pre>
         {d.output != null && d.output !== '' && (
           <CodePane label="Output">{displayValue(d.output)}</CodePane>
@@ -728,10 +728,10 @@ function CardBody({ item, sessionId }: { item: TimelineItem; sessionId: string }
     );
   }
   if (d.text) return <MarkdownContent content={d.text} />;
-  if (loading) return <p className="font-mono text-[0.62rem] uppercase tracking-widest text-fg/35">Loading…</p>;
+  if (loading) return <p className="font-mono text-label uppercase tracking-label text-fg/40">Loading…</p>;
 
   return (
-    <pre className="scroll-thin max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-panel p-3 font-mono text-[0.8rem] leading-relaxed text-fg/80">
+    <pre className="scroll-thin max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-panel p-3 font-mono text-small leading-relaxed text-fg/80">
       {d.raw || 'No detail captured.'}
     </pre>
   );
@@ -741,7 +741,7 @@ function CardBody({ item, sessionId }: { item: TimelineItem; sessionId: string }
 
 function JsonBlock({ children }: { children: string }) {
   return (
-    <pre className="scroll-thin max-h-[28rem] overflow-auto whitespace-pre-wrap break-words rounded-md bg-panel p-3 font-mono text-[0.8rem] leading-relaxed text-fg/90">
+    <pre className="scroll-thin max-h-[28rem] overflow-auto whitespace-pre-wrap break-words rounded-md bg-panel p-3 font-mono text-small leading-relaxed text-fg/90">
       {children}
     </pre>
   );
@@ -750,8 +750,8 @@ function JsonBlock({ children }: { children: string }) {
 function CodePane({ label, children }: { label: string; children: string }) {
   return (
     <div className="min-w-0 flex-1">
-      <span className="font-mono text-[0.6rem] font-bold uppercase tracking-widest text-fg/40">{label}</span>
-      <pre className="scroll-thin mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-panel p-3 font-mono text-[0.8rem] leading-relaxed text-fg/90">
+      <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/40">{label}</span>
+      <pre className="scroll-thin mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-panel p-3 font-mono text-small leading-relaxed text-fg/90">
         {children || '—'}
       </pre>
     </div>
@@ -762,18 +762,18 @@ function DiffBlock({ edit, index, total }: { edit: EditChunk; index: number; tot
   return (
     <div className="space-y-1">
       {total > 1 && (
-        <span className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/35">Edit {index + 1} of {total}</span>
+        <span className="font-mono text-label uppercase tracking-label text-fg/40">Edit {index + 1} of {total}</span>
       )}
       <div className="flex flex-col gap-2 lg:flex-row">
         <div className="min-w-0 flex-1">
-          <span className="font-mono text-[0.6rem] font-bold uppercase tracking-widest text-vermilion">Before</span>
-          <pre className="scroll-thin mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-panel p-3 font-mono text-[0.8rem] leading-relaxed text-fg/90 ring-1 ring-inset ring-vermilion/30">
+          <span className="font-mono text-label font-semibold uppercase tracking-label text-alert">Before</span>
+          <pre className="scroll-thin mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-panel p-3 font-mono text-small leading-relaxed text-fg/90 ring-1 ring-inset ring-alert/30">
             {edit.oldText || '—'}
           </pre>
         </div>
         <div className="min-w-0 flex-1">
-          <span className="font-mono text-[0.6rem] font-bold uppercase tracking-widest text-olive">After</span>
-          <pre className="scroll-thin mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-panel p-3 font-mono text-[0.8rem] leading-relaxed text-fg/90 ring-1 ring-inset ring-olive/30">
+          <span className="font-mono text-label font-semibold uppercase tracking-label text-olive">After</span>
+          <pre className="scroll-thin mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-panel p-3 font-mono text-small leading-relaxed text-fg/90 ring-1 ring-inset ring-olive/30">
             {edit.newText || '—'}
           </pre>
         </div>
@@ -786,21 +786,21 @@ function QuestionCards({ questions }: { questions: NonNullable<TimelineItem['que
   return (
     <div className="space-y-2">
       {questions.map((q, i) => (
-        <div key={i} className="rounded-md border border-line/15 bg-panel p-3">
+        <div key={i} className="rounded-md border border-line/10 bg-panel p-3">
           {q.header && (
-            <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-vermilion">{q.header}</span>
+            <span className="font-mono text-label font-semibold uppercase tracking-label text-hot">{q.header}</span>
           )}
-          <p className="mt-1 font-mono text-[0.82rem] font-bold text-fg">{q.question}</p>
+          <p className="mt-1 font-mono text-small font-semibold text-fg">{q.question}</p>
           {q.options && q.options.length > 0 && (
-            <p className="mt-1 font-mono text-[0.66rem] text-fg/40">{q.options.join(' · ')}</p>
+            <p className="mt-1 font-mono text-data text-fg/40">{q.options.join(' · ')}</p>
           )}
           <div className="mt-2 flex items-start gap-1.5">
             {q.answer ? (
-              <span className="font-mono text-[0.78rem] font-bold text-cobalt">{q.answer}</span>
+              <span className="font-mono text-code font-semibold text-cobalt">{q.answer}</span>
             ) : q.skipped ? (
-              <span className="font-mono text-[0.72rem] font-bold uppercase tracking-widest text-fg/40">skipped</span>
+              <span className="font-mono text-code font-semibold uppercase tracking-label text-fg/40">skipped</span>
             ) : (
-              <span className="font-mono text-[0.72rem] italic text-fg/35">no recorded answer</span>
+              <span className="font-mono text-code italic text-fg/40">no recorded answer</span>
             )}
           </div>
         </div>
@@ -822,15 +822,15 @@ function PlanBody({ item }: { item: TimelineItem }) {
 
   return (
     <div className="space-y-3">
-      {overview && <p className="font-mono text-[0.82rem] leading-relaxed text-fg/80">{overview}</p>}
+      {overview && <p className="font-mono text-small leading-relaxed text-fg/80">{overview}</p>}
       {todos.length > 0 && (
         <ul className="space-y-1">
           {todos.map((t, i) => {
             const done = t.status === 'completed' || t.status === 'done';
             return (
-              <li key={t.id ?? i} className="flex items-start gap-2 font-mono text-[0.8rem]">
-                <span className={`mt-0.5 ${done ? 'text-olive' : 'text-fg/35'}`}>{done ? '✓' : '○'}</span>
-                <span className={done ? 'text-fg/45 line-through' : 'text-fg/85'}>{t.content ?? t.id}</span>
+              <li key={t.id ?? i} className="flex items-start gap-2 font-mono text-small">
+                <span className={`mt-0.5 ${done ? 'text-olive' : 'text-fg/40'}`}>{done ? '✓' : '○'}</span>
+                <span className={done ? 'text-fg/60 line-through' : 'text-fg/85'}>{t.content ?? t.id}</span>
               </li>
             );
           })}
