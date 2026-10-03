@@ -8,6 +8,9 @@ import { buildInsights } from '../../../../lib/sessionInsights';
 import { parentTimelineItems } from '../../../../lib/sessionView';
 import { CHART_COLORS, type Datum } from '../../chartConstants';
 import { AreaTrend, DonutChart, HBars } from '../../chartTheme';
+import { TONE } from '../../../ui/tone';
+
+const CARD_GRID = 'overflow-hidden rounded-card border border-line/10 bg-line/10';
 
 interface InsightsTabProps {
   detail: SessionDetail;
@@ -19,8 +22,8 @@ function Section({ n, title, children }: { n: string; title: string; children: R
   return (
     <section className="space-y-3.5">
       <div className="flex items-center gap-2.5">
-        <span className="font-mono text-[0.6rem] font-bold tabular-nums text-vermilion">{n}</span>
-        <h3 className="font-mono text-[0.62rem] font-bold uppercase tracking-[0.2em] text-fg/65">
+        <span className="font-mono text-label font-semibold tabular-nums text-hot">{n}</span>
+        <h3 className="font-mono text-label font-semibold uppercase tracking-label text-fg/65">
           {title}
         </h3>
         <span className="ml-1 h-px flex-1 bg-fg/10" />
@@ -31,14 +34,14 @@ function Section({ n, title, children }: { n: string; title: string; children: R
 }
 
 function Grid({ cols, children }: { cols: string; children: React.ReactNode }) {
-  return <div className={`grid gap-px bg-fg/10 ${cols}`}>{children}</div>;
+  return <div className={`grid gap-px ${CARD_GRID} ${cols}`}>{children}</div>;
 }
 
 function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
   return (
-    <div className="bg-bg px-4 py-3">
-      <p className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">{label}</p>
-      <p className={`mt-1 font-mono text-xl font-bold tabular-nums ${accent ? 'text-vermilion' : 'text-fg'}`}>
+    <div className="bg-surface px-4 py-3">
+      <p className="font-mono text-label uppercase tracking-label text-fg/40">{label}</p>
+      <p className={`mt-1 font-mono text-xl font-semibold tabular-nums ${accent ? 'text-hot' : 'text-fg'}`}>
         {value}
       </p>
     </div>
@@ -47,39 +50,36 @@ function Stat({ label, value, accent }: { label: string; value: string; accent?:
 
 function ChartBox({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="bg-bg p-4">
-      <p className="mb-3 font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">{label}</p>
+    <div className="bg-surface p-4">
+      <p className="mb-3 font-mono text-label uppercase tracking-label text-fg/40">{label}</p>
       {children}
     </div>
   );
 }
 
 function FindingRow({ finding, sessionId }: { finding: ActionableInsight; sessionId: string }) {
-  const severityStyle =
-    finding.severity === 'critical'
-      ? 'bg-vermilion text-cream border-vermilion'
-      : finding.severity === 'warn'
-        ? 'border-vermilion/60 text-vermilion'
-        : 'border-cobalt/60 text-cobalt';
   const store = useSessionStore();
   const focusEvent = (eventId: number | null) => {
     const base = sessionHref(sessionId, store);
-    window.location.hash = eventId != null ? `${base}?e=${eventId}` : base;
+    const next = eventId != null ? `${base}?e=${eventId}` : base;
+    // Same link as the current one: no hashchange would fire, so announce it ourselves.
+    if (window.location.hash === next) window.dispatchEvent(new HashChangeEvent('hashchange'));
+    else window.location.hash = next;
   };
   return (
-    <div className="min-w-0 bg-bg px-4 py-3">
+    <div className="min-w-0 bg-surface px-4 py-3">
       <div className="flex items-start gap-2.5">
         <span
-          className={`shrink-0 border px-1.5 py-0.5 font-mono text-[0.5rem] font-bold uppercase tracking-widest ${severityStyle}`}>
+          className={`chip shrink-0 ${TONE[finding.severity]}`}>
           {finding.severity}
         </span>
-        <p className="min-w-0 flex-1 font-mono text-xs font-bold text-fg">{finding.title}</p>
+        <p className="min-w-0 flex-1 font-mono text-xs font-semibold text-fg">{finding.title}</p>
       </div>
       <div className="mt-2 space-y-2">
-        <p className="break-words font-mono text-[0.68rem] leading-relaxed text-fg/70">
+        <p className="break-words font-mono text-data leading-relaxed text-fg/70">
           {finding.detail}
         </p>
-        <p className="border-l-[3px] border-vermilion pl-2.5 font-mono text-[0.68rem] font-bold leading-relaxed text-fg/85">
+        <p className="rounded-cell bg-hot/[0.06] px-3 py-2 font-mono text-data font-semibold leading-relaxed text-fg/85">
           {finding.recommendation}
         </p>
         {finding.evidence.length > 0 && (
@@ -90,11 +90,11 @@ function FindingRow({ finding, sessionId }: { finding: ActionableInsight; sessio
                   type="button"
                   onClick={() => focusEvent(ev.event_id)}
                   className="group flex w-full items-center gap-2 text-left">
-                  <span className="min-w-0 flex-1 truncate font-mono text-[0.62rem] text-fg/55 transition-colors group-hover:text-vermilion">
+                  <span className="min-w-0 flex-1 truncate font-mono text-label text-fg/60 transition-colors group-hover:text-hot">
                     {ev.label}
                   </span>
                   {ev.value && (
-                    <span className="shrink-0 font-mono text-[0.55rem] text-fg/35">{ev.value}</span>
+                    <span className="shrink-0 font-mono text-label text-fg/40">{ev.value}</span>
                   )}
                 </button>
               </li>
@@ -219,7 +219,7 @@ export function InsightsTab({ detail }: InsightsTabProps) {
       {findings !== null && (
         <Section n="00" title="Findings">
           {findings.length ? (
-            <div className="grid grid-cols-[minmax(0,1fr)] gap-px bg-fg/10">
+            <div className="grid grid-cols-[minmax(0,1fr)] gap-px bg-line/10">
               {findings.map((f) => (
                 <FindingRow key={f.fingerprint} finding={f} sessionId={s.id} />
               ))}
@@ -232,7 +232,7 @@ export function InsightsTab({ detail }: InsightsTabProps) {
 
       <Section n="01" title="Activity">
         {computed.activity.length ? (
-          <div className="bg-bg p-4">
+          <div className="bg-surface p-4">
             <AreaTrend data={computed.activity} />
           </div>
         ) : (
@@ -255,7 +255,7 @@ export function InsightsTab({ detail }: InsightsTabProps) {
                   {modelData.map((d, i) => (
                     <div
                       key={d.name}
-                      className="flex items-center justify-between gap-2 font-mono text-[0.62rem]">
+                      className="flex items-center justify-between gap-2 font-mono text-label">
                       <span className="flex min-w-0 items-center gap-1.5">
                         <span
                           className="h-2 w-2 shrink-0"
@@ -263,7 +263,7 @@ export function InsightsTab({ detail }: InsightsTabProps) {
                         />
                         <span className="truncate text-fg/70">{d.name}</span>
                       </span>
-                      <span className="shrink-0 tabular-nums text-fg/45">{compact(d.value)}</span>
+                      <span className="shrink-0 tabular-nums text-fg/60">{compact(d.value)}</span>
                     </div>
                   ))}
                 </div>
@@ -286,8 +286,8 @@ export function InsightsTab({ detail }: InsightsTabProps) {
       </Section>
 
       <Section n="04" title="Files">
-        <div className="bg-bg p-4">
-          <p className="mb-3 font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">
+        <div className="bg-surface p-4">
+          <p className="mb-3 font-mono text-label uppercase tracking-label text-fg/40">
             Files touched — {files.length}
           </p>
           {files.length ? (
@@ -296,11 +296,11 @@ export function InsightsTab({ detail }: InsightsTabProps) {
                 <li
                   key={`${f.kind}-${f.path}`}
                   title={f.path}
-                  className={`max-w-full truncate border px-2 py-1 font-mono text-[0.58rem] ${
-                    f.kind === 'edit' ? 'border-vermilion/30 text-vermilion' : 'border-fg/15 text-fg/55'
+                  className={`max-w-full truncate border px-2 py-1 font-mono text-label ${
+                    f.kind === 'edit' ? 'border-hot/30 text-hot' : 'border-line/15 text-fg/60'
                   }`}>
                   {f.path.split('/').slice(-1)[0]}
-                  <span className="ml-1 text-fg/30">{f.count}</span>
+                  <span className="ml-1 text-fg/40">{f.count}</span>
                 </li>
               ))}
             </ul>
@@ -331,12 +331,12 @@ export function InsightsTab({ detail }: InsightsTabProps) {
                   {computed.longest.map((e) => {
                     const meta = getCategoryMeta(e.category);
                     return (
-                      <li key={e.id} className="flex items-center justify-between gap-2 font-mono text-[0.62rem]">
+                      <li key={e.id} className="flex items-center justify-between gap-2 font-mono text-label">
                         <span className="flex min-w-0 items-center gap-1.5">
                           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${meta.dot}`} />
                           <span className="truncate text-fg/70">{e.title}</span>
                         </span>
-                        <span className="shrink-0 tabular-nums text-fg/45">
+                        <span className="shrink-0 tabular-nums text-fg/60">
                           {formatDuration(e.duration_ms)}
                         </span>
                       </li>
@@ -351,8 +351,8 @@ export function InsightsTab({ detail }: InsightsTabProps) {
               {computed.errors.length ? (
                 <ul className="space-y-1.5">
                   {computed.errors.slice(0, 8).map((e) => (
-                    <li key={e.id} className="flex items-center gap-2 font-mono text-[0.62rem] text-fg/65">
-                      <span className="rounded bg-vermilion px-1 py-0.5 text-[0.5rem] font-bold uppercase text-cream">
+                    <li key={e.id} className="flex items-center gap-2 font-mono text-label text-fg/65">
+                      <span className="rounded bg-hot px-1 py-0.5 text-label font-semibold uppercase text-on-hot">
                         {e.status}
                       </span>
                       <span className="truncate">{e.title}</span>
@@ -368,18 +368,18 @@ export function InsightsTab({ detail }: InsightsTabProps) {
       )}
 
       {insights.length > 0 && (
-        <div className="space-y-3 border-t border-fg/10 pt-5">
+        <div className="space-y-3 border-t border-line/10 pt-5">
           <button
             type="button"
             onClick={() => setOpen(!open)}
-            className="font-mono text-[0.6rem] uppercase tracking-widest text-fg/45 hover:text-fg">
+            className="font-mono text-label uppercase tracking-label text-fg/60 hover:text-fg">
             {open ? 'Hide notes' : `Show narrative notes (${insights.length})`}
           </button>
           {open && (
             <ul className="space-y-2">
               {insights.map((ins, i) => (
-                <li key={i} className="border-l-2 border-fg/20 pl-3">
-                  <p className="font-mono text-xs font-bold text-fg">{ins.title}</p>
+                <li key={i} className="rounded-cell bg-fg/[0.03] px-3 py-1.5">
+                  <p className="font-mono text-xs font-semibold text-fg">{ins.title}</p>
                   <p className="font-sans text-xs leading-relaxed text-fg/60">{ins.detail}</p>
                 </li>
               ))}

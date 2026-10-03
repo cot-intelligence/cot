@@ -5,20 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>cot.</title>
     <meta name="description" content="Connect your agent to cot. Trace Claude and Cursor sessions with hooks — self-hosted." />
-    <link rel="icon" type="image/svg+xml" href="/favicon-vermilion.svg" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.svg" />
-    <meta name="theme-color" content="#0b0e11" />
+    <meta name="theme-color" content="#f5f6f3" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0a1612" media="(prefers-color-scheme: dark)" />
     <script defer src="/stats/script.js" data-website-id="f2dbacec-6230-416b-9682-53eedf073984" data-host-url="/stats"></script>
     <script>
       // Apply the theme before paint to avoid a flash: a saved light/dark
-      // choice wins, otherwise follow the OS setting.
+      // choice wins, 'system' follows the OS, and nothing saved means light.
       (function () {
         var t;
         try {
           t = localStorage.getItem('cot.theme');
         } catch (e) {}
-        if (t !== 'light' && t !== 'dark') {
+        if (t === 'system') {
           t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        } else if (t !== 'dark') {
+          t = 'light';
         }
         document.documentElement.setAttribute('data-theme', t);
       })();

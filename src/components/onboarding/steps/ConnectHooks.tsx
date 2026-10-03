@@ -89,31 +89,31 @@ export function ConnectHooks({ agents: agentIds, onBack, onContinue, autoSkip }:
     <FadeIn className="space-y-10">
       <header className="space-y-3">
         <div className="flex items-center justify-between gap-4">
-          <span className="inline-block border border-fg bg-fg px-3 py-1 font-mono text-[0.6rem] font-bold uppercase tracking-widest text-bg">
-            HOOK_SETUP
+          <span className="font-mono text-small text-hot">
+            hook setup
           </span>
           <button
             type="button"
             onClick={onBack}
-            className="inline-flex items-center gap-2 font-mono text-[0.65rem] font-bold uppercase tracking-widest text-fg/45 transition-colors hover:text-cobalt">
+            className="inline-flex items-center gap-2 font-mono text-data font-semibold uppercase tracking-label text-fg/60 transition-colors hover:text-cobalt">
             <span>←</span>
             Change agents
           </button>
         </div>
-        <h1 className="text-4xl font-extrabold uppercase leading-[0.95] tracking-tight text-fg sm:text-5xl">
+        <h1 className="text-[2.25rem] font-semibold leading-[1.05] tracking-display text-fg sm:text-[2.75rem]">
           {allConnected ? (
             <>
               All{' '}
-              <span className="font-serif lowercase italic text-olive">connected</span>
+              <span className="text-olive">connected</span>
             </>
           ) : (
             <>
               Wire up{' '}
-              <span className="font-serif lowercase italic text-vermilion">hooks</span>
+              <span className="text-hot">hooks</span>
             </>
           )}
         </h1>
-        <p className="max-w-md font-mono text-xs leading-relaxed text-fg/55">
+        <p className="max-w-md text-lead text-fg/60">
           {allConnected
             ? 'All your agents are configured and sending events.'
             : 'One command connects your agents to the local collector — the installer wires up the hooks for you.'}
@@ -132,15 +132,15 @@ export function ConnectHooks({ agents: agentIds, onBack, onContinue, autoSkip }:
               onClick={() => setExpanded(isExpanded ? null : info.id)}
               className={`inline-flex items-center gap-2 border px-3 py-1.5 transition-colors ${
                 isExpanded
-                  ? 'border-fg/40 bg-fg/5'
+                  ? 'border-line/40 bg-fg/5'
                   : info.state === 'installed'
                     ? 'border-olive/40 bg-olive/5 hover:border-olive/60'
                     : info.state === 'checking'
-                      ? 'border-fg/20 bg-fg/3 hover:border-fg/30'
-                      : 'border-vermilion/30 bg-vermilion/5 hover:border-vermilion/50'
+                      ? 'border-line/[0.16] bg-fg/3 hover:border-line/30'
+                      : 'border-hot/30 bg-hot/5 hover:border-hot/50'
               }`}>
               <AgentMark id={info.id} className="h-4 w-4 shrink-0" variant="25d" />
-              <span className="font-mono text-[0.65rem] font-bold text-fg">
+              <span className="font-mono text-data font-semibold text-fg">
                 {agent.product}
               </span>
               <AgentBadge state={info.state} />
@@ -151,7 +151,7 @@ export function ConnectHooks({ agents: agentIds, onBack, onContinue, autoSkip }:
 
       {/* Expanded detail panel */}
       {expanded && (
-        <div className="border border-fg/15 bg-surface">
+        <div className="overflow-hidden rounded-card border border-line/10 bg-surface">
           <div className="px-5 py-4 space-y-4">
             <StatusDetail
               info={agentStates.find((a) => a.id === expanded)!}
@@ -165,10 +165,10 @@ export function ConnectHooks({ agents: agentIds, onBack, onContinue, autoSkip }:
       {!allConnected && installCmd && (
         <div className="space-y-3">
           <div className="space-y-1">
-            <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-vermilion">
+            <span className="font-mono text-label font-semibold uppercase tracking-label text-hot">
               INSTALL
             </span>
-            <p className="font-mono text-[0.7rem] leading-relaxed text-fg/50">
+            <p className="font-mono text-data leading-relaxed text-fg/60">
               Run this once — it configures hooks for all selected agents.
             </p>
           </div>
@@ -176,8 +176,8 @@ export function ConnectHooks({ agents: agentIds, onBack, onContinue, autoSkip }:
         </div>
       )}
 
-      <div className="flex items-center justify-between gap-4 border-t border-fg/10 pt-6">
-        <span className="font-mono text-[0.65rem] uppercase tracking-widest text-fg/30">
+      <div className="flex items-center justify-between gap-4 border-t border-line/10 pt-6">
+        <span className="font-mono text-data uppercase tracking-label text-fg/40">
           {advancing
             ? 'All hooks verified'
             : allConnected
@@ -187,18 +187,14 @@ export function ConnectHooks({ agents: agentIds, onBack, onContinue, autoSkip }:
         <button
           type="button"
           onClick={onContinue}
-          className={`group relative inline-flex items-center gap-3 overflow-hidden px-7 py-3.5 font-mono text-xs font-bold uppercase tracking-widest ${
-            advancing
-              ? 'bg-ink text-cream'
-              : 'border border-fg bg-fg text-bg transition-opacity hover:opacity-90'
-          }`}>
+          className="group btn-primary relative overflow-hidden px-5 py-2.5 text-body">
           {advancing && (
             <>
               <span
-                className="absolute inset-y-0 left-0 bg-vermilion"
-                style={{ animation: `btn-reveal ${AUTO_ADVANCE_MS}ms cubic-bezier(0.4, 0, 0.2, 1) forwards` }}
+                className="absolute inset-0 origin-left bg-on-hot/15"
+                style={{ animation: `btn-reveal ${AUTO_ADVANCE_MS}ms linear forwards` }}
               />
-              <style>{`@keyframes btn-reveal { from { width: 0% } to { width: 100% } }`}</style>
+              <style>{`@keyframes btn-reveal { from { transform: scaleX(0) } to { transform: scaleX(1) } }`}</style>
             </>
           )}
           <span className="relative z-10">
@@ -215,7 +211,7 @@ export function ConnectHooks({ agents: agentIds, onBack, onContinue, autoSkip }:
 function AgentBadge({ state }: { state: HookState }) {
   if (state === 'installed') {
     return (
-      <span className="inline-flex items-center gap-1.5 border border-olive/50 px-2 py-0.5 font-mono text-[0.55rem] font-bold uppercase tracking-widest text-olive">
+      <span className="chip bg-olive/[0.14] text-olive ring-olive/[0.32]">
         <span className="h-1.5 w-1.5 rounded-full bg-olive" />
         Connected
       </span>
@@ -223,15 +219,15 @@ function AgentBadge({ state }: { state: HookState }) {
   }
   if (state === 'checking') {
     return (
-      <span className="inline-flex items-center gap-1.5 border border-fg/20 px-2 py-0.5 font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/40">
+      <span className="chip bg-cobalt/[0.14] text-cobalt ring-cobalt/[0.32]">
         <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cobalt" />
         Checking
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1.5 border border-vermilion/40 px-2 py-0.5 font-mono text-[0.55rem] font-bold uppercase tracking-widest text-vermilion">
-      <span className="h-1.5 w-1.5 rounded-full bg-vermilion" />
+    <span className="chip bg-fg/[0.06] text-fg/60 ring-line/[0.16]">
+      <span className="h-1.5 w-1.5 rounded-full bg-fg/40" />
       Not connected
     </span>
   );
@@ -240,8 +236,8 @@ function AgentBadge({ state }: { state: HookState }) {
 function StatusDetail({ info, product }: { info: AgentHookInfo; product: string }) {
   if (info.state === 'installed') {
     return (
-      <p className="font-mono text-[0.7rem] leading-relaxed text-fg/60">
-        <span className="font-bold text-fg">{product}</span> is connected and
+      <p className="font-mono text-data leading-relaxed text-fg/60">
+        <span className="font-semibold text-fg">{product}</span> is connected and
         streaming events.
         {info.status?.events ? ` ${info.status.events} events received.` : ''}
       </p>
@@ -249,14 +245,14 @@ function StatusDetail({ info, product }: { info: AgentHookInfo; product: string 
   }
   if (info.state === 'checking') {
     return (
-      <p className="font-mono text-[0.7rem] text-fg/50">
+      <p className="font-mono text-data text-fg/60">
         Checking whether {product} hooks are installed…
       </p>
     );
   }
   return (
-    <p className="font-mono text-[0.7rem] leading-relaxed text-fg/60">
-      <span className="font-bold text-fg">{product}</span> is not connected.
+    <p className="font-mono text-data leading-relaxed text-fg/60">
+      <span className="font-semibold text-fg">{product}</span> is not connected.
       {info.status?.missing_labels?.length
         ? ` Missing ${info.status.missing_labels.slice(0, 3).join(', ')}${info.status.missing_labels.length > 3 ? ` +${info.status.missing_labels.length - 3}` : ''}.`
         : ' Run the installer to set up hooks.'}
@@ -279,20 +275,20 @@ function ManualSteps({
     <div className="space-y-4">
       {status && (status.health === 'missing_hooks' || status.health === 'not_installed') && (
         <div className="space-y-1">
-          <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-vermilion">
+          <span className="font-mono text-label font-semibold uppercase tracking-label text-hot">
             REPAIR
           </span>
           <a
             href={status.repair_url}
             download={`cot-repair-${agentId}.sh`}
-            className="inline-flex border border-vermilion px-3 py-1.5 font-mono text-[0.6rem] font-bold uppercase tracking-widest text-vermilion transition-colors hover:bg-vermilion hover:text-cream">
+            className="btn">
             Download repair script
           </a>
         </div>
       )}
       {shellStep?.command && (
         <div className="space-y-1">
-          <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/40">
+          <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/40">
             INSTALL
           </span>
           <ShellCommand command={shellStep.command} />
@@ -303,7 +299,7 @@ function ManualSteps({
           step.code &&
           step.filename && (
             <div key={step.title} className="space-y-1">
-              <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/40">
+              <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/40">
                 HOOK CONFIG
               </span>
               <CodeBlock filename={step.filename} code={step.code} />

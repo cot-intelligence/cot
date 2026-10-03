@@ -10,11 +10,12 @@ const DARK_QUERY = '(prefers-color-scheme: dark)';
 function readPreference(): ThemePreference {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved === 'light' || saved === 'dark') return saved;
+    if (saved === 'light' || saved === 'dark' || saved === 'system') return saved;
   } catch {
     /* storage unavailable */
   }
-  return 'system';
+  // Light is the default; following the OS is an explicit choice in Settings.
+  return 'light';
 }
 
 function systemTheme(): Theme {
@@ -43,8 +44,7 @@ window.matchMedia?.(DARK_QUERY).addEventListener('change', () => {
 function setPreference(next: ThemePreference): void {
   preference = next;
   try {
-    if (next === 'system') localStorage.removeItem(STORAGE_KEY);
-    else localStorage.setItem(STORAGE_KEY, next);
+    localStorage.setItem(STORAGE_KEY, next);
   } catch {
     /* storage unavailable — theme still applies for the session */
   }

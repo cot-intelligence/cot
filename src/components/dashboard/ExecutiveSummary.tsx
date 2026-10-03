@@ -51,32 +51,32 @@ export function ExecutiveSummary({
   const sessions = metrics.totals.sessions;
 
   return (
-    <div className="border border-fg/15 bg-panel/40">
+    <div className="rounded-card border border-line/10 bg-panel/40">
       {aiAnalysis?.result?.summary && (
-        <div className="border-b border-fg/10 px-4 py-3.5">
-          <p className="font-serif text-sm italic leading-relaxed text-fg/85">
+        <div className="border-b border-line/10 px-4 py-3.5">
+          <p className="text-body leading-relaxed text-fg/85">
             {aiAnalysis.result.summary}
           </p>
-          <p className="mt-1.5 font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">
+          <p className="mt-1.5 font-mono text-label uppercase tracking-label text-fg/40">
             AI · {aiAnalysis.provider}/{aiAnalysis.model} · {formatRelative(aiAnalysis.created_at)}
           </p>
         </div>
       )}
       <div className="px-4 py-3.5">
         {active.length ? (
-          <p className="font-mono text-xs font-bold text-fg">
+          <p className="font-mono text-xs font-semibold text-fg">
             {active.length} active {active.length === 1 ? 'finding' : 'findings'} across{' '}
             {sessions} {sessions === 1 ? 'session' : 'sessions'}
-            <span className="font-normal text-fg/55">
+            <span className="font-normal text-fg/60">
               {' — '}
-              {criticals ? <span className="font-bold text-vermilion">{criticals} critical</span> : null}
+              {criticals ? <span className="font-semibold text-alert">{criticals} critical</span> : null}
               {criticals && warns ? ', ' : null}
               {warns ? `${warns} warn` : null}
               {!criticals && !warns ? 'informational only' : null}
             </span>
           </p>
         ) : (
-          <p className="font-mono text-xs font-bold text-olive">
+          <p className="font-mono text-xs font-semibold text-olive">
             All clear — no active findings across {sessions}{' '}
             {sessions === 1 ? 'session' : 'sessions'}.
           </p>
@@ -92,18 +92,18 @@ export function ExecutiveSummary({
                   className="group flex w-full items-start gap-2.5 py-2 text-left">
                   <SeverityBadge severity={f.severity} />
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate font-mono text-xs font-bold text-fg transition-colors group-hover:text-vermilion">
+                    <span className="block truncate font-mono text-xs font-semibold text-fg transition-colors group-hover:text-hot">
                       {f.title}
                     </span>
-                    <span className="block truncate font-mono text-[0.62rem] text-fg/55">
+                    <span className="block truncate font-mono text-label text-fg/60">
                       {f.recommendation}
                     </span>
                   </span>
-                  <span className="hidden shrink-0 items-center gap-1.5 font-mono text-[0.55rem] uppercase tracking-widest text-fg/35 sm:flex">
+                  <span className="hidden shrink-0 items-center gap-1.5 font-mono text-label uppercase tracking-label text-fg/40 sm:flex">
                     {PILLAR_LABELS[f.pillar]}
                     <Icon
                       name="chevron-right"
-                      className="h-2.5 w-2.5 transition-colors group-hover:text-vermilion"
+                      className="h-2.5 w-2.5 transition-colors group-hover:text-hot"
                     />
                   </span>
                 </button>

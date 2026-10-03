@@ -51,13 +51,13 @@ export function Select({
         aria-expanded={open}
         aria-controls={listId}
         onClick={() => setOpen(!open)}
-        className={`flex w-full items-center justify-between gap-2 border bg-surface px-2.5 py-1.5 font-mono text-[0.6rem] font-bold uppercase tracking-widest transition-colors focus-visible:outline-none ${
-          open ? 'border-vermilion text-fg' : 'border-fg/20 text-fg hover:border-fg/35'
+        className={`flex w-full items-center justify-between gap-2 rounded-control border bg-panel px-2.5 py-1.5 text-small font-medium text-fg transition-colors duration-150 ${
+          open ? 'border-hot/75' : 'border-line/10 hover:border-line/[0.16]'
         }`}>
         <span className="truncate">{selected?.label}</span>
         <Icon
           name="chevron-down"
-          className={`h-3 w-3 shrink-0 text-fg/45 transition-transform ${open ? 'rotate-180' : ''}`}
+          className={`h-3 w-3 shrink-0 text-fg/60 transition-transform duration-200 ease-out ${open ? 'rotate-180' : ''}`}
         />
       </button>
 
@@ -66,7 +66,7 @@ export function Select({
           id={listId}
           role="listbox"
           aria-label={ariaLabel}
-          className="absolute left-0 right-0 z-20 mt-1 max-h-48 overflow-y-auto scroll-thin border border-line/15 bg-surface py-1 shadow-soft">
+          className="scroll-thin absolute left-0 right-0 z-20 mt-1 max-h-60 overflow-y-auto rounded-cell border border-line/10 bg-surface p-1 shadow-soft-md">
           {options.map((opt) => {
             const active = opt.value === value;
             return (
@@ -77,10 +77,8 @@ export function Select({
                     onChange(opt.value);
                     setOpen(false);
                   }}
-                  className={`flex w-full px-2.5 py-2 text-left font-mono text-[0.6rem] font-bold uppercase tracking-widest transition-colors ${
-                    active
-                      ? 'bg-panel text-fg'
-                      : 'text-fg/70 hover:bg-panel/60 hover:text-fg'
+                  className={`flex w-full rounded-control px-2.5 py-1.5 text-left text-small transition-colors duration-100 ${
+                    active ? 'bg-fg/[0.07] font-medium text-fg' : 'text-fg/70 hover:bg-fg/[0.07] hover:text-fg'
                   }`}>
                   {opt.label}
                 </button>
