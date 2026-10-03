@@ -27,7 +27,7 @@ step() { printf '\n\033[1m› %s\033[0m\n' "$1"; }
 
 step "Building dashboard (vite)"
 cd "${REPO_ROOT}"
-[ -d node_modules ] || npm ci
+"${REPO_ROOT}/scripts/ensure-node-deps.sh" "${REPO_ROOT}"
 npm run build
 
 step "Freezing collector (pyinstaller)"
