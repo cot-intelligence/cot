@@ -1,7 +1,7 @@
 //! Traffic-light placement for the chromeless macOS window.
 //!
-//! The dashboard renders under the titlebar, so the window buttons have to sit
-//! on the shell header's row instead of in the top 28pt AppKit gives them.
+//! The dashboard renders under a transparent titlebar, with a themed 36px bar
+//! drawn by the page; the window buttons are centred on that bar.
 //! Tauri's `traffic_light_position` only moves them sideways and keeps
 //! AppKit's vertical offset, which drifts with the button size of each macOS
 //! release. This centres them on the row directly, as TitleBar.swift did.
@@ -10,11 +10,11 @@ use objc2_app_kit::{NSWindow, NSWindowButton};
 use objc2_foundation::NSPoint;
 use tauri::WebviewWindow;
 
-/// The shell header is `h-14` (56px) with its controls vertically centred, so
-/// its row's centre is 28px from the top of the window.
-pub const ROW_CENTER_Y: f64 = 28.0;
+/// The dashboard sits below a 36px themed titlebar (CHROME_SCRIPT in lib.rs),
+/// so the buttons centre on that bar: 18px from the top of the window.
+pub const ROW_CENTER_Y: f64 = 18.0;
 /// Left edge of the close button.
-pub const LEADING: f64 = 20.0;
+pub const LEADING: f64 = 14.0;
 
 /// Re-centre the buttons. AppKit lays the titlebar out again on resize, focus
 /// and full-screen changes, so call this after each of those.

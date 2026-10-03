@@ -36,75 +36,63 @@ const MAIN_WINDOW: &str = "main";
 const CHROME_SCRIPT: &str = r#"
 (function () {
   if (location.hostname !== '127.0.0.1' && location.hostname !== 'localhost') return;
-  // CLEAR: where content may start beside the traffic lights; LIGHTS: where they end.
-  var CLEAR = 92, LIGHTS = 80, HEADER_PAD = 24;
+  // A themed titlebar: a TITLE-px strip across the top that holds the traffic lights
+  // (chrome::ROW_CENTER_Y centres them on it), shows the page title, and drags the window.
+  // The dashboard is laid out below it, so nothing in the app sits under the lights.
+  var TITLE = 36;
 
   var init = function () {
     var style = document.createElement('style');
-    // Selectors follow the Signal Forest shell (AppSidebar.tsx): aside.side holds the
-    // sidebar, .side-top its first row, and the page header is .main > header.
     style.textContent =
-      // Expanded sidebar: its top row starts after the traffic lights.
-      '.cot-mac-rail:not([data-rail="true"]) .cot-mac-brand{padding-left:' + CLEAR + 'px!important}' +
-      // Icon rail (60px): the logo drops below the traffic lights, and a blurred plate in the
-      // rail's colour sits behind the lights, covering the content frame's corner they overhang.
-      // A real element on <body> (WebKit doesn't draw a fixed ::before inside the sidebar).
-      '.cot-mac-rail[data-rail="true"] .cot-mac-brand{margin-top:28px}' +
-      '#cot-mac-lights{position:fixed;top:0;left:0;width:' + (LIGHTS + 10) + 'px;height:40px;z-index:45;pointer-events:none;' +
-      'background:rgba(228,232,225,0.72);background:color-mix(in srgb,var(--v-rail) 72%,transparent);' +
-      '-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);' +
-      'border-bottom-right-radius:12px;display:none}' +
-      '#cot-mac-lights[data-on]{display:block}' +
-      // The top row is the titlebar: no breadcrumb, and the sidebar's divider
-      // starts below it so nothing runs between the traffic lights.
-      '.cot-mac-header nav[aria-label="Breadcrumb"]{visibility:hidden}' +
-      '.cot-mac-rail:not([data-rail="true"]){position:relative;border-right-color:transparent!important}' +
-      '.cot-mac-rail:not([data-rail="true"])::after{content:"";position:absolute;top:56px;bottom:0;right:0;width:1px;' +
-      'background:var(--v-line);pointer-events:none}';
+      '#cot-titlebar{position:fixed;top:0;left:0;right:0;height:' + TITLE + 'px;z-index:40;' +
+      'display:flex;align-items:center;justify-content:center;user-select:none;-webkit-user-select:none;cursor:default}' +
+      '#cot-titlebar span{pointer-events:none;font:500 12px/16px Geist,ui-sans-serif,system-ui,sans-serif;' +
+      'letter-spacing:0;max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+      // Everything moves down by the bar; full-height surfaces lose its height.
+      'body{padding-top:' + TITLE + 'px;box-sizing:border-box}' +
+      '.vf{min-height:calc(100vh - ' + TITLE + 'px)!important}' +
+      '.vf.app{height:calc(100vh - ' + TITLE + 'px)!important}' +
+      '.vf.onb{min-height:calc(100vh - ' + TITLE + 'px)!important}' +
+      // The side panel keeps its 8px inset below the bar; dimmed backdrops still cover it, as sheets do.
+      '.vf .drawer{top:' + (TITLE + 8) + 'px!important}';
     document.head.appendChild(style);
 
-    var mark = function () {
-      var side = document.querySelector('aside.side');
-      var brand = side && side.querySelector('.side-top');
-      var plate = document.getElementById('cot-mac-lights');
-      if (!plate) {
-        plate = document.createElement('div');
-        plate.id = 'cot-mac-lights';
-        plate.setAttribute('aria-hidden', 'true');
-        document.body.appendChild(plate);
-      }
-      // Only over the icon rail on desktop widths; the expanded sidebar already clears the lights.
-      var railOn = !!side && side.getAttribute('data-rail') === 'true' && window.innerWidth > 900;
-      if (railOn) plate.setAttribute('data-on', ''); else plate.removeAttribute('data-on');
-      if (brand) {
-        side.classList.add('cot-mac-rail');
-        brand.classList.add('cot-mac-brand');
-        brand.setAttribute('data-tauri-drag-region', '');
-      }
-      var header = document.querySelector('.main > header');
-      if (header) {
-        header.classList.add('cot-mac-header');
-        header.setAttribute('data-tauri-drag-region', '');
-        // Only when the header itself reaches under the traffic lights (no sidebar beside it).
-        var left = header.getBoundingClientRect().left;
-        var overhang = Math.max(0, LIGHTS - left);
-        header.style.paddingLeft = overhang ? (overhang + HEADER_PAD) + 'px' : '';
-      }
+    var bar = document.createElement('div');
+    bar.id = 'cot-titlebar';
+    bar.setAttribute('data-tauri-drag-region', '');
+    var label = document.createElement('span');
+    bar.appendChild(label);
+    document.body.appendChild(bar);
+
+    // The bar lives outside the dashboard's .vf root, so it reads the theme from it.
+    var paint = function () {
+      var root = document.querySelector('.vf');
+      var cs = root ? getComputedStyle(root) : null;
+      var v = function (name, fallback) { return (cs && cs.getPropertyValue(name).trim()) || fallback; };
+      var rail = !!document.querySelector('.vf.app[data-rail="true"]');
+      bar.style.background = v('--v-rail', '#e4e8e1');
+      // Over the icon rail the bar flows into the rail and the framed page; over the expanded
+      // sidebar it closes with a hairline, like a native titlebar.
+      bar.style.borderBottom = rail ? '0' : '1px solid ' + v('--v-line', 'rgba(12,26,20,0.1)');
+      bar.style.boxSizing = 'border-box';
+      label.style.color = v('--v-dim', 'rgba(12,26,20,0.6)');
+      var title = (document.title || 'cot').replace(/^cot\.?\s*[—-]\s*/, '');
+      // Only on a real change: writing it re-triggers the observer below.
+      if (label.textContent !== (title || 'cot')) label.textContent = title || 'cot';
     };
 
     var queued = false;
     var schedule = function () {
       if (queued) return;
       queued = true;
-      requestAnimationFrame(function () { queued = false; mark(); });
+      requestAnimationFrame(function () { queued = false; paint(); });
     };
-    // Routes swap the header out and the sidebar collapses to the rail via data-rail, so watch both.
-    new MutationObserver(schedule).observe(document.body, {
-      childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'data-rail']
+    // Theme, sidebar mode and route changes all repaint; the <title> changes per page.
+    new MutationObserver(schedule).observe(document.documentElement, {
+      childList: true, subtree: true, characterData: true,
+      attributes: true, attributeFilter: ['class', 'data-rail', 'data-theme']
     });
-    window.addEventListener('resize', schedule);
-    document.addEventListener('transitionend', schedule);
-    mark();
+    paint();
   };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
