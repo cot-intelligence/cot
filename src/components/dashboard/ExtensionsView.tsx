@@ -106,6 +106,9 @@ export function ExtensionsView({ kind, days, agent: pageAgent, showKpis }: Exten
   const now = new Date().toISOString();
 
   const openKey = setOpen;
+  // Fetch details on hover/focus, so the install list is usually there before the panel opens.
+  const prefetch = (key: string) =>
+    void queryClient.prefetchQuery({ queryKey: ['extensionDetail', key], queryFn: () => getExtensionDetail(key), staleTime: 30_000 });
 
   // A running "scan all" reports progress through the list payload; poll it until done.
   useEffect(() => {
@@ -118,6 +121,8 @@ export function ExtensionsView({ kind, days, agent: pageAgent, showKpis }: Exten
   }, [data, scanning]);
 
   const items = useMemo(() => (data?.items ?? []).filter((i) => i.kind === kind), [data, kind]);
+  // The clicked row feeds the side panel, so it opens fully drawn.
+  const openItem = open ? items.find((i) => i.key === open) ?? null : null;
   const rows = useMemo(() => {
     const needle = q.trim().toLowerCase();
     const out = items.filter((i) => {
@@ -270,7 +275,7 @@ export function ExtensionsView({ kind, days, agent: pageAgent, showKpis }: Exten
             </thead>
             <tbody>
               {rows.slice(0, shown).map((i) => (
-                <tr key={i.key} className="click" data-sel={open === i.key} tabIndex={0} onClick={() => openKey(i.key)} onKeyDown={(e) => e.key === 'Enter' && openKey(i.key)}>
+                <tr key={i.key} className="click" data-sel={open === i.key} tabIndex={0} onClick={() => openKey(i.key)} onKeyDown={(e) => e.key === 'Enter' && openKey(i.key)} onPointerEnter={() => prefetch(i.key)} onFocus={() => prefetch(i.key)}>
                   <td style={{ maxWidth: 420 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                       <span className="dim" style={{ display: 'inline-flex' }} title={KIND_LABEL[i.kind]}><Icon name={KIND_ICON[i.kind]} size={15} /></span>
@@ -316,7 +321,7 @@ export function ExtensionsView({ kind, days, agent: pageAgent, showKpis }: Exten
           )}
         </div>
       </section>
-      <ExtensionDrawer extKey={open} onClose={() => openKey(null)} />
+      <ExtensionDrawer item={openItem} days={days} onClose={() => openKey(null)} />
     </>
   );
 }
@@ -391,20 +396,29 @@ function subtitle(d: ExtensionDetail): string {
 }
 
 /** The side panel: enough to recognise the extension and judge it at a glance. Everything else is on the details page. */
-function ExtensionDrawer({ extKey, onClose }: { extKey: string | null; onClose: () => void }) {
-  const { d, failed } = useExtensionDetail(extKey);
+function itemSubtitle(i: ExtensionItem): string {
+  return `${KIND_LABEL[i.kind]}${i.marketplace ? ` · ${i.marketplace}` : ''}${i.version ? ` · v${i.version}` : ''}`;
+}
+
+/**
+ * The side panel. It opens fully drawn from the row that was clicked (name, description, numbers
+ * for the same range, risk, contents), so nothing pops in while it slides; only the install list
+ * and top tools come from the details request, behind placeholders of the same size.
+ */
+function ExtensionDrawer({ item, days, onClose }: { item: ExtensionItem | null; days: number; onClose: () => void }) {
+  const { d, failed } = useExtensionDetail(item?.key ?? null);
   const now = new Date().toISOString();
 
   return (
     <AnimatePresence>
-      {extKey && (
+      {item && (
         <>
           <motion.div className="scrim" onClick={onClose} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }} />
           <motion.aside
             className="drawer"
             role="dialog"
             aria-modal="true"
-            aria-label={d?.display_name ?? 'Extension'}
+            aria-label={item.display_name}
             initial={{ transform: 'translateX(105%)' }}
             animate={{ transform: 'translateX(0%)' }}
             exit={{ transform: 'translateX(105%)', transition: { duration: 0.2, ease: EASE_OUT } }}
@@ -412,20 +426,18 @@ function ExtensionDrawer({ extKey, onClose }: { extKey: string | null; onClose: 
             onKeyDown={(e) => e.key === 'Escape' && onClose()}>
             <div className="drawer-h">
               <div style={{ flex: 1, minWidth: 0 }}>
-                <span className="mono faint" style={{ fontSize: 11 }}>{d ? subtitle(d) : extKey}</span>
-                <h2 style={{ margin: '4px 0 0', fontSize: 17, lineHeight: '24px', fontWeight: 600, letterSpacing: '-0.01em', overflowWrap: 'anywhere' }}>{d?.display_name ?? extKey.split(':').slice(1).join(':')}</h2>
+                <span className="mono faint" style={{ fontSize: 11 }}>{itemSubtitle(item)}</span>
+                <h2 style={{ margin: '4px 0 0', fontSize: 17, lineHeight: '24px', fontWeight: 600, letterSpacing: '-0.01em', overflowWrap: 'anywhere' }}>{item.display_name}</h2>
               </div>
               <button type="button" className="iconbtn" onClick={onClose} aria-label="Close" autoFocus><Icon name="close" /></button>
             </div>
             <div className="drawer-b">
               <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-                {failed && <p className="dim" style={{ margin: 0 }}>Couldn't load this extension.</p>}
-                {!d && !failed && <p className="dim" style={{ margin: 0 }}>Loading…</p>}
-                {d && <PeekBody d={d} now={now} />}
+                <PeekBody item={item} d={d} failed={failed} days={days} now={now} />
               </div>
             </div>
             <div style={{ padding: 16, borderTop: '1px solid var(--v-line)', display: 'flex', gap: 8 }}>
-              <a className="vbtn vbtn-primary" style={{ flex: 1, justifyContent: 'center' }} href={extensionPageHref(extKey)}>
+              <a className="vbtn vbtn-primary" style={{ flex: 1, justifyContent: 'center' }} href={extensionPageHref(item.key)}>
                 Open details <Icon name="arrow" size={15} />
               </a>
             </div>
@@ -436,27 +448,49 @@ function ExtensionDrawer({ extKey, onClose }: { extKey: string | null; onClose: 
   );
 }
 
-function PeekBody({ d, now }: { d: ExtensionDetail; now: string }) {
-  const u = d.usage;
-  const trend30 = u.trend.slice(-30);
-  const risk = d.risk;
-  const topTools = d.tools.slice(0, 3);
+/** A grey bar the size of the line that will replace it. */
+function Line({ w }: { w: number | string }) {
+  return <span className="sk" style={{ display: 'block', height: 20, width: w }} />;
+}
+
+function PeekBody({ item, d, failed, days, now }: { item: ExtensionItem; d: ExtensionDetail | null; failed: boolean; days: number; now: string }) {
+  const u = item.usage;
+  const range = days === 0 ? 'all time' : days === 1 ? '24h' : `${days}d`;
+  const trendDays = days > 0 && days <= 7 ? 7 : 30;
+  const trend = u.trend.length ? u.trend : new Array(trendDays).fill(0);
+  const risk = item.risk;
+  const c = item.contents;
+  const v = { fontSize: 22 };
+  // Rows the install list will take, so the placeholder holds the same height.
+  const installRows = Math.min(3, Math.max(1, item.agents.length));
   return (
     <>
-      {d.description && (
-        <p className="dim" style={{ margin: 0, overflowWrap: 'anywhere', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{d.description}</p>
+      {item.description && (
+        <p className="dim" style={{ margin: 0, overflowWrap: 'anywhere', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{item.description}</p>
       )}
-      <UsageKpis d={d} now={now} compact />
-      <Section title="Last 30 days" aside={Object.entries(u.agents).map(([a, n]) => `${agentLabel(a)} ${n}`).join(' · ') || undefined}>
-        <Spark values={trend30} width={300} height={32} fluid />
+      <div className="kpis" style={{ gridTemplateColumns: 'repeat(3, 1fr)', flexShrink: 0 }}>
+        <div className="kpi"><span className="label">Sessions · {range}</span><span className="v" style={v}>{fmt.n(u.sessions)}</span><span className="d">{u.projects ? `${u.projects} project${u.projects === 1 ? '' : 's'}` : ' '}</span></div>
+        <div className="kpi">
+          <span className="label">{item.kind === 'mcp' ? 'Calls' : 'Uses'} · {range}</span>
+          <span className="v" style={v}>{fmt.n(u.calls)}</span>
+          <span className="d">{u.errors ? <span style={{ color: 'var(--v-alert)' }}>{u.errors} failed · {fmt.pct(u.error_rate)}</span> : u.p50_ms != null ? `p50 ${fmt.ms(u.p50_ms)}` : ' '}</span>
+        </div>
+        <div className="kpi"><span className="label">Last used</span><span className="v" style={v}>{u.last_used ? fmt.ago(u.last_used, now) : '—'}</span><span className="d">{u.first_used ? `since ${fmt.day(u.first_used)}` : 'never'}</span></div>
+      </div>
+      <Section title={`Last ${trendDays} days`} aside={Object.entries(u.agents).map(([a, n]) => `${agentLabel(a)} ${n}`).join(' · ') || undefined}>
+        <Spark values={trend} width={300} height={32} fluid />
       </Section>
-      <Section title="Installed" aside={d.installed && d.installs.length > 3 ? `${d.installs.length} places` : undefined}>
-        {!d.installed ? (
-          <span className="dim" style={{ fontSize: 13 }}>{d.origin ?? 'Not in any config cot can read'}</span>
+      <Section title="Installed" aside={d && d.installed && d.installs.length > 3 ? `${d.installs.length} places` : undefined}>
+        {!item.installed ? (
+          <span className="dim" style={{ fontSize: 13 }}>{item.origin ?? 'Not in any config cot can read'}</span>
+        ) : !d ? (
+          failed ? <span className="dim" style={{ fontSize: 13 }}>Couldn't load where it's installed.</span> : (
+            <div style={{ display: 'grid', gap: 6 }} aria-busy="true">{Array.from({ length: installRows }, (_, n) => <Line key={n} w={`${70 - n * 12}%`} />)}</div>
+          )
         ) : (
           <div style={{ display: 'grid', gap: 6 }}>
             {d.installs.slice(0, 3).map((i, n) => (
-              <div key={n} style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0 }}>
+              <div key={n} style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0, minHeight: 20 }}>
                 <Agent id={i.agent} />
                 <ScopeChip scope={i.scope} />
                 {i.project && <span className="mono truncate" style={{ fontSize: 12 }}>{project(i.project)}</span>}
@@ -468,7 +502,7 @@ function PeekBody({ d, now }: { d: ExtensionDetail; now: string }) {
           </div>
         )}
       </Section>
-      {(d.installed || risk.scanned) && (
+      {(item.installed || risk.scanned) && (
         <Section title="Risk">
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 13 }}>
             {risk.scanned ? <RiskChip level={risk.level} scanned /> : <span className="dim">Not scanned yet</span>}
@@ -477,30 +511,32 @@ function PeekBody({ d, now }: { d: ExtensionDetail; now: string }) {
           </div>
         </Section>
       )}
-      {topTools.length > 0 && (
-        <Section title="Top tools" aside={d.tools.length > 3 ? `of ${d.tools.length}` : undefined}>
+      {item.kind === 'mcp' && u.calls > 0 && (
+        <Section title="Top tools" aside={d && d.tools.length > 3 ? `of ${d.tools.length} · all time` : 'all time'}>
           <div style={{ display: 'grid', gap: 4 }}>
-            {topTools.map((t) => (
-              <div key={t.tool} style={{ display: 'flex', gap: 8, fontSize: 13 }}>
-                <span className="mono truncate" style={{ fontSize: 12 }}>{t.tool}</span>
-                <span className="mono faint" style={{ marginLeft: 'auto', fontSize: 11, whiteSpace: 'nowrap' }}>{fmt.n(t.calls)}{t.errors ? ` · ${t.errors} failed` : ''}</span>
-              </div>
-            ))}
+            {!d
+              ? Array.from({ length: 3 }, (_, n) => <Line key={n} w={`${80 - n * 15}%`} />)
+              : d.tools.slice(0, 3).map((t) => (
+                  <div key={t.tool} style={{ display: 'flex', gap: 8, fontSize: 13, minHeight: 20, alignItems: 'center' }}>
+                    <span className="mono truncate" style={{ fontSize: 12 }}>{t.tool}</span>
+                    <span className="mono faint" style={{ marginLeft: 'auto', fontSize: 11, whiteSpace: 'nowrap' }}>{fmt.n(t.calls)}{t.errors ? ` · ${t.errors} failed` : ''}</span>
+                  </div>
+                ))}
           </div>
         </Section>
       )}
-      {d.children.length > 0 && (
+      {c && (c.skills.length || c.mcp_servers.length || c.commands || c.hooks) ? (
         <Section title="Ships with">
           <span className="dim" style={{ fontSize: 13 }}>
             {[
-              countOf(d.children.filter((c) => c.kind === 'skill').length, 'skill'),
-              countOf(d.children.filter((c) => c.kind === 'mcp').length, 'MCP server'),
-              d.contents?.commands ? countOf(d.contents.commands, 'command') : null,
-              d.contents?.hooks ? countOf(d.contents.hooks, 'hook') : null,
+              countOf(c.skills.length, 'skill'),
+              countOf(c.mcp_servers.length, 'MCP server'),
+              countOf(c.commands, 'command'),
+              countOf(c.hooks, 'hook'),
             ].filter(Boolean).join(' · ')}
           </span>
         </Section>
-      )}
+      ) : null}
     </>
   );
 }
