@@ -1,12 +1,13 @@
 import { motion } from 'framer-motion';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getSessionDetail, sessionExportUrl, setSessionBookmarked, type ComponentEntry, type SessionDetail, type Store, type TimelineItem } from '../../lib/api';
+import { getSessionDetail, getSessionExtensions, sessionExportUrl, setSessionBookmarked, type ComponentEntry, type SessionDetail, type Store, type TimelineItem } from '../../lib/api';
 import { setDocumentTitle } from '../../lib/documentTitle';
 import { sessionHref, SessionStoreContext } from '../../lib/sessionStore';
 import { categoryLabel, fmt, modelLabel, project } from '../forest/format';
 import { CATEGORY_ICON, Icon } from '../forest/icons';
 import { Agent } from '../forest/ui';
+import { extensionPageHref, SCOPE_LABEL } from './ExtensionsView';
 import { ActivityMap } from './session/ActivityMap';
 import { AttachmentTags } from './session/AttachmentTags';
 import { EventDetailPanel } from './session/EventDetailPanel';
@@ -43,6 +44,14 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
     queryKey: key,
     queryFn: () => getSessionDetail(sessionId, store),
     refetchInterval: (q) => (store === 'main' && q.state.data?.summary.status === 'active' ? 15000 : false),
+  });
+
+  // Which plugins, skills and MCP servers this session (and its subagents) used.
+  const { data: used } = useQuery({
+    queryKey: ['sessionExtensions', sessionId],
+    queryFn: () => getSessionExtensions(sessionId),
+    enabled: store === 'main',
+    refetchInterval: store === 'main' && detail?.summary.status === 'active' ? 30000 : false,
   });
 
   useEffect(() => {
@@ -165,6 +174,24 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10, fontSize: 12 }} className="dim">
                   {parents.map((p) => <a key={p.session_id} href={sessionHref(p.session_id, store)} className="vchip c-info">{p.type === 'subagent' ? 'parent' : 'reviewed'} · {p.session_id.slice(0, 8)}</a>)}
                   {subagents.map((p) => <a key={p.session_id} href={sessionHref(p.session_id, store)} className="vchip c-dim">subagent · {p.label || p.session_id.slice(0, 8)}</a>)}
+                </div>
+              )}
+              {used && used.length > 0 && (
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 10 }}>
+                  <span className="label" style={{ marginRight: 2 }}>Extensions</span>
+                  {used.map((x) => (
+                    <a
+                      key={x.key}
+                      href={extensionPageHref(x.key)}
+                      aria-label={`${x.display_name}, ${x.calls} use${x.calls === 1 ? '' : 's'}`}
+                      className={`vchip ${x.installed ? (x.kind === 'mcp' ? 'c-info' : 'c-fg') : 'c-dim'}`}
+                      title={`${x.kind === 'mcp' ? 'MCP server' : 'Skill'} · ${x.calls} use${x.calls === 1 ? '' : 's'}${x.errors ? ` · ${x.errors} failed` : ''}${x.scopes.length ? ` · ${x.scopes.map((sc) => SCOPE_LABEL[sc]).join(', ')}` : ''}${x.tools.length ? `\n${x.tools.join(', ')}` : ''}`}
+                      style={{ textTransform: 'none', letterSpacing: 0 }}>
+                      <Icon name={x.kind === 'mcp' ? 'plug' : 'layers'} size={11} />
+                      {x.display_name}
+                      <span style={{ opacity: 0.7 }}>{x.calls}</span>
+                    </a>
+                  ))}
                 </div>
               )}
             </div>

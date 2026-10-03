@@ -1,4 +1,4 @@
-import { motion } from 'framer-motion';
+import { motion, useReducedMotion } from 'framer-motion';
 import { useRef } from 'react';
 import { getHealth, type Health } from '../../lib/api';
 import { usePolling } from '../../lib/usePolling';
@@ -7,18 +7,30 @@ import { Wordmark } from '../forest/ui';
 import { WorkspaceAvatar } from '../forest/avatars';
 import { usePrefs } from '../../lib/prefs';
 
-export type NavKey = 'sessions' | 'overview' | 'history' | 'replay' | 'findings' | 'governance' | 'settings';
+export type ActivityTab = 'shell' | 'web' | 'mcp' | 'skill' | 'plugin';
+export type NavKey =
+  | 'sessions' | 'overview' | 'replay' | 'findings' | 'governance' | 'settings'
+  | `activity-${ActivityTab}`;
 
 // Markup and classes follow the demo's sidebar (demo-variants/src/variants/forest/App.tsx) one to one;
-// Session Replay is the one entry the demo doesn't have.
+// Session Replay and the Activity section (one entry per Activity tab) are additions.
 const NAV: { group: string; items: { key: NavKey; label: string; href: string; icon: string }[] }[] = [
   {
     group: 'Monitor',
     items: [
       { key: 'overview', label: 'Overview', href: '#/overview', icon: 'overview' },
       { key: 'sessions', label: 'Sessions', href: '#/sessions', icon: 'sessions' },
-      { key: 'history', label: 'Activity', href: '#/metrics-history', icon: 'activity' },
       { key: 'replay', label: 'Session Replay', href: '#/replay', icon: 'replay' },
+    ],
+  },
+  {
+    group: 'Activity',
+    items: [
+      { key: 'activity-shell', label: 'Shell', href: '#/metrics-history', icon: 'shell' },
+      { key: 'activity-web', label: 'Web', href: '#/metrics-history?tab=web', icon: 'globe' },
+      { key: 'activity-mcp', label: 'MCP', href: '#/metrics-history?tab=mcp', icon: 'plug' },
+      { key: 'activity-skill', label: 'Skills', href: '#/metrics-history?tab=skill', icon: 'layers' },
+      { key: 'activity-plugin', label: 'Plugins', href: '#/metrics-history?tab=plugin', icon: 'puzzle' },
     ],
   },
   {
@@ -42,11 +54,15 @@ interface AppSidebarProps {
   counts: { sessions?: number; findings?: number; projects?: number; agents?: number };
 }
 
-const PILL = { type: 'spring', duration: 0.3, bounce: 0 } as const;
+// The active pill slides between entries. Navigation happens many times a day, so it is quick,
+// and it jumps without sliding when the OS asks for reduced motion.
+const PILL = { type: 'spring', duration: 0.22, bounce: 0 } as const;
+const PILL_INSTANT = { duration: 0 } as const;
 
 export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, onToggleCollapsed, onSearch, counts }: AppSidebarProps) {
   const { data: health, error } = usePolling<Health>(['health'], () => getHealth(), 15000);
   const warm = useWarmTips();
+  const pill = useReducedMotion() ? PILL_INSTANT : PILL;
   const ws = 'Local workspace';
   const { avatar } = usePrefs();
   const foot = error ? 'Collector offline' : `Collector on :31337${health ? ` · v${health.version}` : ''}`;
@@ -89,7 +105,7 @@ export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, on
                     onClick={onMobileClose}
                     aria-label={rail ? (badge ? `${it.label}, ${counts.findings} open` : it.label) : undefined}
                     data-tip={rail ? it.label : undefined}>
-                    {on && <motion.span layoutId="vf-pill" className="pill" transition={PILL} />}
+                    {on && <motion.span layoutId="vf-pill" className="pill" transition={pill} />}
                     <Icon name={it.icon} />
                     {rail ? (
                       badge && <span className="badge" aria-hidden="true" />
@@ -109,7 +125,7 @@ export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, on
         {rail ? (
           <div className="rail-foot">
             <a href="#/settings" className="nav-i" aria-current={active === 'settings' ? 'page' : undefined} aria-label="Settings" data-tip="Settings">
-              {active === 'settings' && <motion.span layoutId="vf-pill" className="pill" transition={PILL} />}
+              {active === 'settings' && <motion.span layoutId="vf-pill" className="pill" transition={pill} />}
               <Icon name="sliders" />
             </a>
             <span className="rail-btn" tabIndex={0} data-tip={foot} aria-label={foot}>
@@ -123,26 +139,31 @@ export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, on
           <>
             <div className="nav-g" style={{ marginTop: 'auto', paddingBottom: 8 }}>
               <a href="#/settings" className="nav-i" aria-current={active === 'settings' ? 'page' : undefined} onClick={onMobileClose}>
-                {active === 'settings' && <motion.span layoutId="vf-pill" className="pill" transition={PILL} />}
+                {active === 'settings' && <motion.span layoutId="vf-pill" className="pill" transition={pill} />}
                 <Icon name="sliders" />
                 <span>Settings</span>
               </a>
-            </div>
-            <div className="side-foot" style={{ marginTop: 0 }} role="status">
-              <span className="live" style={error ? { background: 'var(--v-alert)' } : undefined} />
-              <span>{foot}</span>
             </div>
           </>
         )}
             {/* Workspace sits at the bottom in both states, like the rail's avatar. */}
         {!rail && (
-          <button type="button" className="ws" onClick={onSearch} aria-label={`Workspace: ${ws}`}>
-            <WorkspaceAvatar id={avatar} name={ws} />
+          <button type="button" className="ws" onClick={onSearch} aria-label={`Workspace: ${ws}. ${foot}`} title={foot}>
+            {/* The chosen mark, with the collector status riding on its corner like presence. Outside
+                the mark itself, which clips its artwork. */}
+            <span className="av-slot">
+              <WorkspaceAvatar id={avatar} name={ws} />
+              <span className="live" data-off={error || undefined} aria-hidden="true" />
+            </span>
             <span style={{ display: 'grid', minWidth: 0 }}>
               <b className="truncate" style={{ fontWeight: 600, fontSize: 13 }}>{ws}</b>
-              <span className="mono faint truncate" style={{ fontSize: 11 }}>
-                {counts.projects != null ? `${counts.projects} projects` : '…'}
-                {counts.agents != null ? ` · ${counts.agents} agents` : ''}
+              <span className="mono faint truncate" style={{ fontSize: 11, color: error ? 'var(--v-alert)' : undefined }} role="status">
+                {error ? 'Collector offline' : (
+                  <>
+                    {counts.projects != null ? `${counts.projects} projects` : '…'}
+                    {counts.agents != null ? ` · ${counts.agents} agents` : ''}
+                  </>
+                )}
               </span>
             </span>
           </button>

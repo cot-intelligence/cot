@@ -7,6 +7,7 @@ is stored in one local SQLite file; nothing leaves the machine.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import os
 import platform as _platform
@@ -34,7 +35,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, activity, ai_insights, cron, db, insights, passive, store, timeutil
+from . import __version__, activity, ai_insights, cron, db, extension_usage, insights, passive, store, timeutil
 
 app = FastAPI(title="cot collector", version=__version__)
 
@@ -222,6 +223,9 @@ async def _startup() -> None:
     # A first-time search index build can take longer than the desktop app waits
     # for /health; search scans until it lands.
     threading.Thread(target=_build_search_index, name="search-index", daemon=True).start()
+    # First run copies every past MCP/skill event into extension_uses; keep it
+    # off the startup path for the same reason.
+    threading.Thread(target=extension_usage.sync_quietly, name="extension-uses", daemon=True).start()
     # Opt-in telemetry runs in the background so it never blocks request handling
     # and degrades silently when offline/air-gapped.
     asyncio.create_task(_telemetry_loop())
@@ -1275,15 +1279,17 @@ def get_metrics_history(category: str = "shell", limit: int = 200) -> dict[str, 
 
 @app.get("/v1/activity")
 def get_activity(
+    request: Request,
     category: str = "shell",
     days: int = Query(7),
     project: str | None = None,
     source: str | None = None,
-) -> dict[str, Any]:
-    """Activity page rollup: top programs/domains, failing, slowest, risky."""
-    if category not in ("shell", "web"):
-        raise HTTPException(status_code=400, detail="category must be 'shell' or 'web'")
-    return activity.summarize(category, max(0, days), project or None, source or None)
+    plugin: str | None = None,
+) -> Response:
+    """Activity page rollup: top programs/domains/servers/skills, failing, slowest, risky."""
+    if category not in activity.CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"category must be one of {', '.join(activity.CATEGORIES)}")
+    return _json_payload(request, activity.summarize(category, max(0, days), project or None, source or None, plugin or None))
 
 
 @app.get("/v1/activity/log")
@@ -1297,12 +1303,13 @@ def get_activity_log(
     failed: bool = False,
     risky: bool = False,
     via: str | None = None,
+    plugin: str | None = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
-    """Every command or request in the window, filterable, newest first."""
-    if category not in ("shell", "web"):
-        raise HTTPException(status_code=400, detail="category must be 'shell' or 'web'")
+    """Every command, request, MCP call or skill load in the window, filterable, newest first."""
+    if category not in activity.CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"category must be one of {', '.join(activity.CATEGORIES)}")
     return activity.log(
         category,
         max(0, days),
@@ -1313,6 +1320,7 @@ def get_activity_log(
         failed_only=failed,
         risky_only=risky,
         via=via or None,
+        plugin=plugin or None,
         offset=offset,
         limit=limit,
     )
@@ -1397,6 +1405,74 @@ def analyze_insights(req: AnalyzeRequest | None = None) -> dict[str, Any]:
 @app.get("/v1/insights/analyses")
 def list_ai_analyses(limit: int = Query(10)) -> dict[str, Any]:
     return {"analyses": db.list_ai_analyses(max(1, min(limit, 50)))}
+
+
+# Large, cache-reused JSON (the extensions list is ~370 KB raw) goes out gzipped.
+# Applied per route rather than as middleware so the /v1/stream SSE response is
+# never buffered by a compressor. The encoded body is kept alongside the cached
+# result object, so a cache hit costs neither serialization nor compression.
+_GZIP_MIN_BYTES = 4096
+_encoded: dict[int, tuple[Any, bytes, bool]] = {}
+
+
+def _json_payload(request: Request, payload: Any) -> Response:
+    gz_ok = "gzip" in request.headers.get("accept-encoding", "")
+    hit = _encoded.get(id(payload))
+    if hit is not None and hit[0] is payload:
+        body, compressed = hit[1], hit[2]
+    else:
+        body = json.dumps(payload, separators=(",", ":"), default=str).encode()
+        compressed = len(body) >= _GZIP_MIN_BYTES
+        if compressed:
+            body = gzip.compress(body, compresslevel=5)
+        if len(_encoded) >= 32:
+            _encoded.clear()
+        _encoded[id(payload)] = (payload, body, compressed)
+    if compressed and not gz_ok:
+        body = gzip.decompress(body)
+        compressed = False
+    headers = {"Vary": "Accept-Encoding"}
+    if compressed:
+        headers["Content-Encoding"] = "gzip"
+    return Response(body, media_type="application/json", headers=headers)
+
+
+@app.get("/v1/extensions")
+def get_extensions(request: Request, refresh: bool = False, days: int = Query(0, ge=0)) -> Response:
+    """Installed plugins, skills and MCP servers across agents, with usage (``days`` > 0: in that window)."""
+    return _json_payload(request, extension_usage.overview(refresh=refresh, days=days))
+
+
+@app.get("/v1/extensions/detail")
+def get_extension_detail(request: Request, key: str, refresh: bool = False) -> Response:
+    """One extension: where it is installed, how it is used, and its security scan.
+    ``key`` is ``mcp:<server>``, ``skill:<name>`` or ``plugin:<name>@<marketplace>``."""
+    found = extension_usage.detail(key, refresh=refresh)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Extension not found")
+    return _json_payload(request, found)
+
+
+@app.post("/v1/extensions/scan")
+def post_extension_scan(key: str) -> dict[str, Any]:
+    """Run the package security scan on one installed skill or plugin."""
+    report = extension_usage.scan_one(key)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Nothing on disk to scan")
+    return report
+
+
+@app.post("/v1/extensions/scan-all")
+def post_extension_scan_all() -> dict[str, Any]:
+    """Scan every installed skill and plugin not scanned since it last changed."""
+    return extension_usage.scan_all_in_background()
+
+
+@app.get("/v1/sessions/{session_id}/extensions")
+def get_session_extensions(session_id: str) -> dict[str, Any]:
+    if not insights.session_exists(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"extensions": extension_usage.session_extensions(session_id)}
 
 
 @app.get("/v1/sessions/{session_id}/insights")
