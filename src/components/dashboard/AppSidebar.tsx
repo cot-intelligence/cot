@@ -176,7 +176,7 @@ export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, on
 
 /** Rail tooltips wait 400ms the first time; once one has shown, the rest open instantly until the pointer leaves the rail. */
 function useWarmTips() {
-  const t = useRef<number>();
+  const t = useRef<number | undefined>(undefined);
   return {
     onPointerOver(e: React.PointerEvent<HTMLElement>) {
       if (e.currentTarget.dataset.warm || !(e.target as HTMLElement).closest('[data-tip]')) return;
