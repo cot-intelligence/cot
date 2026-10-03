@@ -334,7 +334,8 @@ def _mask_args(args: list[Any]) -> list[str]:
                 out.append(arg)
                 hide_next = True
             continue
-        out.append(marketplace_scan._mask_secrets(arg))
+        # marketplace_scan is kept identical to the marketplace branch's copy, so use its helper as-is.
+        out.append(marketplace_scan._mask_secrets(arg))  # noqa: SLF001
     return out
 
 
@@ -399,7 +400,7 @@ def mcp_risks(cfg: dict[str, Any], config_file: str | None) -> list[dict[str, An
         elif flag and i + 1 < len(args) and not _is_reference(args[i + 1]):
             add("high", "plaintext-secret", f"{arg} is passed in plain text",
                 "Command-line secrets are visible to every process on the machine.")
-        elif marketplace_scan._mask_secrets(arg) != arg:
+        elif marketplace_scan._mask_secrets(arg) != arg:  # noqa: SLF001 (shared scanner helper)
             add("high", "plaintext-secret", "An argument looks like a credential",
                 "A token-shaped value is passed on the command line.")
     url = _str(cfg.get("url")) or _str(cfg.get("serverUrl")) or ""
@@ -1017,6 +1018,8 @@ class InventoryIndex:
         for server, info in inv.cursor_tools.items():
             for tool in info.get("tools", {}):
                 self.cursor_tool.setdefault(tool, []).append(server)
+        # Keys of installed skills: a /command only counts as a skill load when it names one.
+        self.known_skills: set[str] = set(self.skill_name.values())
 
     def mcp_key(self, server: str | None, tool: str | None) -> str:
         if server:

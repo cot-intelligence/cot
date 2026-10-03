@@ -234,16 +234,8 @@ def _resolve(uses: list[dict[str, Any]], idx: extensions.InventoryIndex) -> None
             u["key"] = idx.mcp_key(u["name"], u["tool"])
         else:
             u["key"] = idx.skill_key(u["name"], u["path"])
-            if u["via"] == "slash" and u["key"] not in idx_known(idx):
+            if u["via"] == "slash" and u["key"] not in idx.known_skills:
                 u["key"] = None  # /clear, /model ... are commands, not skills
-
-
-def idx_known(idx: extensions.InventoryIndex) -> set[str]:
-    cached = getattr(idx, "_known", None)
-    if cached is None:
-        cached = set(idx.skill_name.values())
-        idx._known = cached  # type: ignore[attr-defined]
-    return cached
 
 
 def _parse(ts: str | None) -> datetime | None:
@@ -267,8 +259,8 @@ class _Acc:
         self.tools: dict[str, dict[str, Any]] = {}
         self.via: dict[str, int] = {}
         # (session, tool) -> phase counts, paired like session_components does.
-        self._phases: dict[tuple[str, str], dict[str, int]] = {}
-        self._skill_loads: dict[str, list[tuple[datetime | None, str]]] = {}
+        self.phases: dict[tuple[str, str], dict[str, int]] = {}
+        self.skill_loads: dict[str, list[tuple[datetime | None, str]]] = {}
 
     def add(self, u: dict[str, Any]) -> None:
         if u["kind"] == "skill" and u["phase"] == "start":
@@ -288,7 +280,7 @@ class _Acc:
         self.via[u["via"]] = self.via.get(u["via"], 0) + 1
         if u["kind"] == "mcp":
             tool = u["tool"] or "?"
-            phases = self._phases.setdefault((sid, tool), {})
+            phases = self.phases.setdefault((sid, tool), {})
             phase = u["phase"] or "instant"
             phases[phase] = phases.get(phase, 0) + 1
             t = self.tools.setdefault(tool, {"tool": tool, "calls": 0, "errors": 0, "durations": []})
@@ -300,7 +292,7 @@ class _Acc:
                 t["durations"].append(u["duration_ms"])
             self._day(ts, phase)
         else:
-            self._skill_loads.setdefault(sid, []).append((_parse(ts), u["via"]))
+            self.skill_loads.setdefault(sid, []).append((_parse(ts), u["via"]))
             if u["status"] == "error":
                 self.errors += 1
 
@@ -311,11 +303,11 @@ class _Acc:
         self.daily[day] = self.daily.get(day, 0) + 1
 
     def finish(self, days: int = 30) -> dict[str, Any]:
-        for (sid, tool), phases in self._phases.items():
+        for (sid, tool), phases in self.phases.items():
             n = max(phases.get("start", 0), phases.get("end", 0)) + phases.get("instant", 0)
             self.calls += n
             self.tools[tool]["calls"] += n
-        for sid, loads in self._skill_loads.items():
+        for sid, loads in self.skill_loads.items():
             loads.sort(key=lambda x: x[0] or datetime.min.replace(tzinfo=timezone.utc))
             last_explicit: datetime | None = None
             for when, via in loads:
@@ -371,11 +363,11 @@ def _merge_plugin_usage(inv: extensions.Inventory, accs: dict[str, _Acc]) -> Non
                 merged.by_agent.setdefault(a, set()).update(s)
             for p, s in acc.projects.items():
                 merged.projects.setdefault(p, set()).update(s)
-            merged._phases.update({(sid, f"{k}/{t}"): v for (sid, t), v in acc._phases.items()})
-            for (sid, t) in acc._phases:
+            merged.phases.update({(sid, f"{k}/{t}"): v for (sid, t), v in acc.phases.items()})
+            for (sid, t) in acc.phases:
                 merged.tools.setdefault(f"{k}/{t}", {"tool": t, "calls": 0, "errors": 0, "durations": []})
-            for sid, loads in acc._skill_loads.items():
-                merged._skill_loads.setdefault(sid, []).extend(loads)
+            for sid, loads in acc.skill_loads.items():
+                merged.skill_loads.setdefault(sid, []).extend(loads)
             merged.errors += acc.errors
             merged.durations += acc.durations
             for d, n in acc.daily.items():
