@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>cot</title>
+  <!-- Shown by the desktop shell while the collector starts, or when it can't.
+       The shell sets ?state=starting|held|failed|stopped (+ port, message). -->
+  <style>
+    :root { --bg: #0b0e11; --fg: 244 240 234; --panel: #101419; --accent: #ff4500; color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: var(--bg); color: rgb(var(--fg));
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
+      display: grid; place-items: center; -webkit-user-select: none; user-select: none; cursor: default;
+    }
+    .drag { position: fixed; inset: 0 0 auto 0; height: 46px; }
+    main { max-width: 440px; padding: 40px 24px; text-align: center; }
+    .logo { font: italic 400 34px/1 "Newsreader", Georgia, serif; letter-spacing: -0.03em; margin-bottom: 28px; }
+    .logo span { color: var(--accent); }
+    h1 { font-size: 15px; font-weight: 600; margin: 0 0 8px; }
+    p { margin: 0; color: rgb(var(--fg) / 0.55); }
+    code, .detail { font: 12px/1.5 "JetBrains Mono", ui-monospace, Menlo, monospace; }
+    .detail {
+      margin-top: 16px; padding: 10px 12px; text-align: left; white-space: pre-wrap; word-break: break-word;
+      background: var(--panel); border: 1px solid rgb(var(--fg) / 0.1); border-radius: 6px;
+      color: rgb(var(--fg) / 0.7); -webkit-user-select: text; user-select: text;
+    }
+    button {
+      margin-top: 22px; padding: 8px 16px; border-radius: 6px; border: 1px solid rgb(var(--fg) / 0.2);
+      background: transparent; color: rgb(var(--fg)); cursor: pointer;
+      font: 700 10px/1 "JetBrains Mono", ui-monospace, Menlo, monospace; letter-spacing: 0.12em; text-transform: uppercase;
+    }
+    button:hover { border-color: rgb(var(--fg) / 0.35); }
+    .spinner {
+      width: 18px; height: 18px; margin: 0 auto 16px; border-radius: 50%;
+      border: 2px solid rgb(var(--fg) / 0.15); border-top-color: var(--accent);
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="drag" data-tauri-drag-region></div>
+  <main>
+    <div class="logo">cot<span>.</span></div>
+    <div id="spinner" class="spinner"></div>
+    <h1 id="title">Starting the collector…</h1>
+    <p id="body"></p>
+    <div id="detail" class="detail" hidden></div>
+    <button id="retry" type="button" hidden>Try again</button>
+  </main>
+  <script>
+    (function () {
+      var params = new URLSearchParams(location.search);
+      var state = params.get('state') || 'starting';
+      var $ = function (id) { return document.getElementById(id); };
+      var show = function (title, body, detail) {
+        $('spinner').hidden = true;
+        $('retry').hidden = false;
+        $('title').textContent = title;
+        $('body').textContent = body || '';
+        if (detail) { $('detail').hidden = false; $('detail').textContent = detail; }
+      };
+
+      if (state === 'held') {
+        var port = params.get('port') || '31337';
+        show(
+          'Another cot collector is using port ' + port,
+          'This is usually the Docker install (cot up) or the older cot app. Stop it, then try again. ' +
+          'The app won’t share the database with a second collector.',
+          'cot down   # or: docker rm -f cot'
+        );
+      } else if (state === 'failed') {
+        show('The collector could not start', '', params.get('message') || 'Unknown error');
+      } else if (state === 'stopped') {
+        show('Collector stopped', '');
+        $('retry').textContent = 'Start collector';
+      }
+
+      $('retry').addEventListener('click', function () {
+        var ipc = window.__TAURI_INTERNALS__;
+        if (ipc) ipc.invoke('retry_collector');
+      });
+    })();
+  </script>
+</body>
+</html>

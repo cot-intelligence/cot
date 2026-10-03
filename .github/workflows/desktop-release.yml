@@ -1,0 +1,146 @@
+name: Desktop release
+
+# Builds cot.app (Tauri) for Apple Silicon on the same v* tags as the Docker
+# image, attaches the DMG and updater artifacts to the GitHub Release, and opens
+# a PR on the site repo that points version.json at them. Merging that PR is
+# what ships the update to installed apps.
+#
+# Secrets:
+#   TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD  updater signing (required)
+#   SITE_REPO_TOKEN          token that can push branches and open PRs on the site repo
+#   R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY  optional cot.run binary mirror
+# Variables:
+#   SITE_REPO                e.g. cot-intelligence/website (the PR step is skipped when unset)
+#   R2_ACCOUNT_ID, R2_BUCKET optional mirror (skipped when unset)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      signature: ${{ steps.artifacts.outputs.signature }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Read version
+        id: version
+        run: |
+          version="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' backend/app/__init__.py)"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match backend/app/__init__.py (${version})" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix desktop
+
+      - name: Build cot.app
+        env:
+          COT_PYTHON: python
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: desktop/scripts/build.sh --release
+
+      - name: Verify bundle
+        run: desktop/scripts/verify-bundle.sh
+
+      - name: Collect artifacts
+        id: artifacts
+        run: |
+          bundle=desktop/src-tauri/target/release/bundle
+          mkdir -p out
+          cp "${bundle}"/dmg/*.dmg "out/cot_${{ steps.version.outputs.version }}_aarch64.dmg"
+          cp "${bundle}/macos/cot.app.tar.gz" "${bundle}/macos/cot.app.tar.gz.sig" out/
+          echo "signature=$(cat out/cot.app.tar.gz.sig)" >> "${GITHUB_OUTPUT}"
+          ls -la out
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          # docker-publish.yml may create the release first; either order works.
+          gh release view "${TAG}" >/dev/null 2>&1 \
+            || gh release create "${TAG}" --title "${TAG}" --generate-notes \
+            || gh release view "${TAG}" >/dev/null
+          gh release upload "${TAG}" out/* --clobber
+
+      - name: Mirror to R2
+        if: vars.R2_BUCKET != ''
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp out/ "s3://${{ vars.R2_BUCKET }}/desktop/v${{ steps.version.outputs.version }}/" \
+            --recursive --endpoint-url "https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+
+  site-pr:
+    needs: build
+    if: vars.SITE_REPO != '' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SITE_REPO }}
+          token: ${{ secrets.SITE_REPO_TOKEN }}
+
+      - name: Point version.json at the new build
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          SIGNATURE: ${{ needs.build.outputs.signature }}
+          URL: https://github.com/${{ github.repository }}/releases/download/v${{ needs.build.outputs.version }}/cot.app.tar.gz
+        run: |
+          file=public/version.json
+          jq --arg v "${VERSION}" --arg url "${URL}" --arg sig "${SIGNATURE}" \
+             --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+             '.version = $v | .pub_date = $date
+              | .platforms["darwin-aarch64"] = {url: $url, signature: $sig}' \
+             "${file}" > "${file}.tmp"
+          mv "${file}.tmp" "${file}"
+          cat "${file}"
+
+      - name: Open PR
+        env:
+          GH_TOKEN: ${{ secrets.SITE_REPO_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          branch="release/desktop-v${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${branch}"
+          git commit -am "release: cot ${VERSION} desktop update"
+          git push --force origin "${branch}"
+          gh pr create --repo "${{ vars.SITE_REPO }}" --head "${branch}" \
+            --title "release: cot ${VERSION} desktop update" \
+            --body "Points \`version.json\` at the cot.app ${VERSION} build from ${{ github.server_url }}/${{ github.repository }}/releases/tag/v${VERSION}. Merging ships the update to installed apps. Check \`notes\` before merging." \
+            || echo "PR already exists"
