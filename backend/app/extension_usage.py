@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import re
+import sqlite3
 import statistics
 import threading
+import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -168,6 +170,42 @@ def _sync_for_read() -> None:
 
 
 # --- Read side -------------------------------------------------------------
+
+
+# --- Result cache --------------------------------------------------------------
+#
+# The dashboard refetches on every live event (coalesced to ~1.5s) while any
+# agent works, but most events are not MCP calls or skill loads. Results are
+# reused until something they depend on changes: a new or deleted use, an
+# archive toggle, a config change (inventory version), a finished security scan,
+# or the minute rolling over (windows like "last 7 days" slide).
+
+_memo: dict[tuple, tuple[tuple, Any]] = {}
+_memo_lock = threading.Lock()
+_scan_revision = 0
+_MEMO_MAX = 64
+
+
+def _state_token(inv: "extensions.Inventory") -> tuple:
+    with store.read() as conn:
+        last, count = conn.execute("SELECT COALESCE(MAX(event_id), 0), COUNT(*) FROM extension_uses").fetchone()
+        archived = conn.execute("SELECT COUNT(*) FROM sessions WHERE archived = 1").fetchone()[0]
+    return (str(store.path()), last, count, archived, inv.version, _scan_revision, int(time.time() // 60))
+
+
+def cached(key: tuple, compute: Callable[[], Any], inv: "extensions.Inventory | None" = None) -> Any:
+    """``compute()``, or its last result when nothing it depends on has changed."""
+    token = _state_token(inv or inventory())
+    with _memo_lock:
+        hit = _memo.get(key)
+        if hit is not None and hit[0] == token:
+            return hit[1]
+    value = compute()
+    with _memo_lock:
+        if len(_memo) >= _MEMO_MAX:
+            _memo.clear()
+        _memo[key] = (token, value)
+    return value
 
 
 def _session_cwds() -> list[str]:
@@ -413,16 +451,37 @@ def _build(inv: extensions.Inventory, uses: list[dict[str, Any]]) -> tuple[dict[
     return exts, accs
 
 
-def overview(refresh: bool = False) -> dict[str, Any]:
+def overview(refresh: bool = False, days: int = 0) -> dict[str, Any]:
+    """Every extension with its usage. ``days`` > 0 limits uses, sessions and
+    failures to that window (matching the Activity range); last used and
+    "never used" always look at all history."""
     _sync_for_read()
     inv = inventory(refresh)
+    return cached(("overview", days), lambda: _overview(inv, days), inv)
+
+
+def _overview(inv: extensions.Inventory, days: int) -> dict[str, Any]:
     uses = _load_uses(" WHERE s.archived = 0")
-    exts, accs = _build(inv, uses)
+    exts, accs_all = _build(inv, uses)
+    if days > 0:
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        accs = _rollup([u for u in uses if (u["ts"] or "") >= since])
+        _merge_plugin_usage(inv, accs)
+    else:
+        accs = accs_all
+    trend_days = 7 if 0 < days <= 7 else 30
     items = []
     for key, ext in exts.items():
-        usage = accs[key].finish() if key in accs else dict(_EMPTY_USAGE)
-        items.append(_compact(ext, usage))
-    items.sort(key=lambda i: (-(i["usage"]["recent_calls"]), -(i["usage"]["calls"]), i["name"].lower()))
+        usage = accs[key].finish(trend_days) if key in accs else {**_EMPTY_USAGE, "trend": [0] * trend_days}
+        ever = accs_all.get(key)
+        usage["last_used"] = timeutil.format_ts(ever.last) if ever else None
+        usage["first_used"] = timeutil.format_ts(ever.first) if ever else None
+        if not any(usage["trend"]):
+            usage["trend"] = []  # most rows (hundreds of unused skills) would send only zeros
+        item = _compact(ext, usage)
+        item["ever_used"] = ever is not None
+        items.append(item)
+    items.sort(key=lambda i: (-(i["usage"]["calls"]), -(i["usage"]["sessions"]), i["name"].lower()))
 
     installed = [i for i in items if i["installed"]]
     cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
@@ -431,7 +490,7 @@ def overview(refresh: bool = False) -> dict[str, Any]:
             "installed": sum(1 for i in installed if i["kind"] == kind),
             "used": sum(1 for i in items if i["kind"] == kind and i["usage"]["calls"]),
             "used_30d": sum(1 for i in items if i["kind"] == kind and (i["usage"]["last_used"] or "") >= cutoff),
-            "unused": sum(1 for i in installed if i["kind"] == kind and not i["usage"]["calls"]),
+            "unused": sum(1 for i in installed if i["kind"] == kind and not i["ever_used"]),
             "project_scoped": sum(1 for i in installed if i["kind"] == kind and i["projects"]),
             "not_installed": sum(1 for i in items if i["kind"] == kind and not i["installed"]),
             "flagged": sum(1 for i in items if i["kind"] == kind and i["risk"]["level"] in ("high", "critical")),
@@ -440,6 +499,7 @@ def overview(refresh: bool = False) -> dict[str, Any]:
     }
     return {
         "generated_at": timeutil.now(),
+        "days": days,
         "summary": summary,
         "projects": inv.projects,
         "items": items,
@@ -450,6 +510,10 @@ def overview(refresh: bool = False) -> dict[str, Any]:
 def detail(key: str, refresh: bool = False) -> dict[str, Any] | None:
     _sync_for_read()
     inv = inventory(refresh)
+    return cached(("detail", key), lambda: _detail(inv, key), inv)
+
+
+def _detail(inv: extensions.Inventory, key: str) -> dict[str, Any] | None:
     uses = _load_uses()
     exts, accs = _build(inv, uses)
     ext = exts.get(key)
@@ -633,6 +697,8 @@ def run_scan(ext: dict[str, Any], *, persist: bool = True) -> dict[str, Any] | N
     with _scan_lock:
         scans = _load_scans()
         scans[ext["key"]] = {"fingerprint": _fingerprint(ext, root), "report": report}
+        global _scan_revision
+        _scan_revision += 1
         if persist:
             _save_scans(scans)
     return report
@@ -691,7 +757,8 @@ def risk_summary(ext: dict[str, Any]) -> dict[str, Any]:
         score = report.get("score")
         findings += [{"severity": f["severity"], "title": f["title"]} for f in report.get("findings", [])]
     worst = max((f["severity"] for f in findings), key=lambda s: _SEVERITY_RANK.get(s, 0), default=None)
-    scanned = report is not None or ext["kind"] == "mcp"
+    # MCP launch checks read the server's config; one no config lists was never checked.
+    scanned = report is not None or (ext["kind"] == "mcp" and ext.get("installed", True))
     return {
         "level": worst if worst and _SEVERITY_RANK.get(worst, 0) >= 2 else ("ok" if scanned else None),
         "findings": len(findings),
@@ -713,6 +780,16 @@ def activity_items(kind: str, since: str | None, project: str | None, source: st
     read right after the Skill tool loaded it folds into that load, the same
     counting the Extensions view uses."""
     _sync_for_read()
+    inv = inventory()
+    if since is not None:
+        # A window start is a fresh timestamp on every call, so it would never hit the cache.
+        return _activity_items(inv, kind, since, project, source)
+    return cached(("activity", kind, project, source), lambda: _activity_items(inv, kind, None, project, source), inv)
+
+
+def _activity_items(
+    inv: extensions.Inventory, kind: str, since: str | None, project: str | None, source: str | None
+) -> list[dict[str, Any]]:
     clauses = ["u.kind = ?", "u.phase IS NOT 'start'"]
     params: list[Any] = [kind]
     if since:
@@ -736,7 +813,6 @@ def activity_items(kind: str, since: str | None, project: str | None, source: st
             f" WHERE {' AND '.join(clauses)} ORDER BY u.ts DESC",
             params,
         )]
-    inv = inventory()
     idx = inv.index()
     _resolve(rows, idx)
     if kind == "skill":

@@ -263,3 +263,50 @@ def test_activity_covers_mcp_and_skills(homes):
     assert skills["summary"]["slash"] == 1
     log = activity.log("skill", 0, via="/command")
     assert [i["ext_key"] for i in log["items"]] == ["skill:myplug:deploy"]
+
+
+def test_overview_window_limits_usage_but_not_last_used(homes):
+    _session("c1", "claude", "/p")
+    _event("c1", "claude", tool="mcp__github__x", category="mcp", target="github/x", ts="2020-01-01T10:00:00+00:00")
+    extension_usage.inventory(refresh=True)
+    item = _by_key(extension_usage.overview(days=7))["mcp:github"]
+    assert item["usage"]["calls"] == 0 and item["usage"]["trend"] == []  # all-zero trends are not sent
+    assert item["usage"]["last_used"] is not None and item["ever_used"] is True
+    assert _by_key(extension_usage.overview())["mcp:github"]["usage"]["calls"] == 1
+
+
+def test_unlisted_extension_is_unchecked_not_clean(homes):
+    _session("c1", "claude", "/p")
+    _event("c1", "claude", tool="mcp__Claude_Browser__navigate", category="mcp", target="Claude_Browser/navigate")
+    items = _by_key(extension_usage.overview(refresh=True))
+    risk = items["mcp:Claude_Browser"]["risk"]
+    assert items["mcp:Claude_Browser"]["installed"] is False
+    assert risk["scanned"] is False and risk["level"] is None
+    assert items["mcp:github"]["risk"]["scanned"] is True
+
+
+def test_results_are_reused_until_a_relevant_change(homes, monkeypatch):
+    _session("c1", "claude", "/p")
+    _event("c1", "claude", tool="mcp__github__x", category="mcp", target="github/x")
+    first = extension_usage.overview(refresh=True)
+    calls = []
+    real = extension_usage._overview
+    monkeypatch.setattr(extension_usage, "_overview", lambda inv, days: calls.append(1) or real(inv, days))
+    assert extension_usage.overview() is first  # nothing changed: no recompute
+    _event("c1", "claude", category="prompt", detail="hello")  # not an extension use
+    assert extension_usage.overview() is first and calls == []
+    _event("c1", "claude", tool="mcp__github__y", category="mcp", target="github/y")
+    assert _by_key(extension_usage.overview())["mcp:github"]["usage"]["calls"] == 2
+    assert calls == [1]
+
+
+def test_inventory_rescans_only_when_a_read_file_changes(homes, monkeypatch):
+    import os, time as _time
+    inv = extensions.scan([str(homes["project"])], refresh=True)
+    monkeypatch.setattr(extensions, "CHECK_EVERY_S", 0)
+    assert extensions.scan([str(homes["project"])]) is inv
+    _skill(homes["claude"] / "skills", "fresh")
+    later = _time.time() + 5
+    os.utime(homes["claude"] / "skills", (later, later))
+    again = extensions.scan([str(homes["project"])])
+    assert again is not inv and "skill:fresh" in again.extensions

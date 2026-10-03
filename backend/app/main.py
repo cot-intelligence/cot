@@ -7,6 +7,7 @@ is stored in one local SQLite file; nothing leaves the machine.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import os
 import platform as _platform
@@ -1278,16 +1279,17 @@ def get_metrics_history(category: str = "shell", limit: int = 200) -> dict[str, 
 
 @app.get("/v1/activity")
 def get_activity(
+    request: Request,
     category: str = "shell",
     days: int = Query(7),
     project: str | None = None,
     source: str | None = None,
     plugin: str | None = None,
-) -> dict[str, Any]:
+) -> Response:
     """Activity page rollup: top programs/domains/servers/skills, failing, slowest, risky."""
     if category not in activity.CATEGORIES:
         raise HTTPException(status_code=400, detail=f"category must be one of {', '.join(activity.CATEGORIES)}")
-    return activity.summarize(category, max(0, days), project or None, source or None, plugin or None)
+    return _json_payload(request, activity.summarize(category, max(0, days), project or None, source or None, plugin or None))
 
 
 @app.get("/v1/activity/log")
@@ -1405,20 +1407,50 @@ def list_ai_analyses(limit: int = Query(10)) -> dict[str, Any]:
     return {"analyses": db.list_ai_analyses(max(1, min(limit, 50)))}
 
 
+# Large, cache-reused JSON (the extensions list is ~370 KB raw) goes out gzipped.
+# Applied per route rather than as middleware so the /v1/stream SSE response is
+# never buffered by a compressor. The encoded body is kept alongside the cached
+# result object, so a cache hit costs neither serialization nor compression.
+_GZIP_MIN_BYTES = 4096
+_encoded: dict[int, tuple[Any, bytes, bool]] = {}
+
+
+def _json_payload(request: Request, payload: Any) -> Response:
+    gz_ok = "gzip" in request.headers.get("accept-encoding", "")
+    hit = _encoded.get(id(payload))
+    if hit is not None and hit[0] is payload:
+        body, compressed = hit[1], hit[2]
+    else:
+        body = json.dumps(payload, separators=(",", ":"), default=str).encode()
+        compressed = len(body) >= _GZIP_MIN_BYTES
+        if compressed:
+            body = gzip.compress(body, compresslevel=5)
+        if len(_encoded) >= 32:
+            _encoded.clear()
+        _encoded[id(payload)] = (payload, body, compressed)
+    if compressed and not gz_ok:
+        body = gzip.decompress(body)
+        compressed = False
+    headers = {"Vary": "Accept-Encoding"}
+    if compressed:
+        headers["Content-Encoding"] = "gzip"
+    return Response(body, media_type="application/json", headers=headers)
+
+
 @app.get("/v1/extensions")
-def get_extensions(refresh: bool = False) -> dict[str, Any]:
-    """Installed plugins, skills and MCP servers across agents, with usage."""
-    return extension_usage.overview(refresh=refresh)
+def get_extensions(request: Request, refresh: bool = False, days: int = Query(0, ge=0)) -> Response:
+    """Installed plugins, skills and MCP servers across agents, with usage (``days`` > 0: in that window)."""
+    return _json_payload(request, extension_usage.overview(refresh=refresh, days=days))
 
 
 @app.get("/v1/extensions/detail")
-def get_extension_detail(key: str, refresh: bool = False) -> dict[str, Any]:
+def get_extension_detail(request: Request, key: str, refresh: bool = False) -> Response:
     """One extension: where it is installed, how it is used, and its security scan.
     ``key`` is ``mcp:<server>``, ``skill:<name>`` or ``plugin:<name>@<marketplace>``."""
     found = extension_usage.detail(key, refresh=refresh)
     if found is None:
         raise HTTPException(status_code=404, detail="Extension not found")
-    return found
+    return _json_payload(request, found)
 
 
 @app.post("/v1/extensions/scan")

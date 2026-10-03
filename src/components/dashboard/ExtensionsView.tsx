@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   getExtensionDetail,
@@ -15,7 +15,6 @@ import {
   type RiskLevel,
   type SecurityReport,
 } from '../../lib/api';
-import { usePolling } from '../../lib/usePolling';
 import { agentLabel } from '../forest/AgentMark';
 import { Dropdown } from '../forest/Dropdown';
 import { fmt, project, shortId } from '../forest/format';
@@ -48,11 +47,12 @@ const RISK_CHIP: Record<string, string> = { critical: 'c-critical', high: 'c-cri
 type UseFilter = 'all' | 'used' | 'unused' | 'missing';
 type SortKey = 'calls' | 'sessions' | 'recent' | 'name';
 const PAGE = 100;
+const DEFAULT_USE: UseFilter = 'used';
 
 /** The installed list an extension belongs to (Activity → MCP / Skills → Installed, or Plugins). */
 function installedListHref(key: string): string {
   const kind = key.split(':')[0];
-  return kind === 'plugin' ? '#/metrics-history?tab=plugin' : `#/metrics-history?tab=${kind}&view=installed`;
+  return `#/metrics-history?tab=${kind}`;
 }
 const BACK_LABEL: Record<ExtensionKind, string> = { mcp: 'MCP servers', skill: 'Skills', plugin: 'Plugins' };
 
@@ -62,18 +62,39 @@ export function extensionPageHref(key: string): string {
 }
 
 interface ExtensionsViewProps {
-  /** Only this kind (the Installed view of Activity → MCP / Skills / Plugins). */
   kind: ExtensionKind;
+  /** The Activity range; uses, sessions and failures count only this window (0 = all time). */
+  days: number;
+  /** Set when the page already has an agent filter; the card then hides its own. */
+  agent?: string;
+  /** The Plugins page has no activity summary above, so the card brings its own numbers. */
+  showKpis?: boolean;
 }
 
 const KIND_PLURAL: Record<ExtensionKind, string> = { mcp: 'MCP servers', skill: 'skills', plugin: 'plugins' };
+const KIND_TITLE: Record<ExtensionKind, string> = { mcp: 'MCP servers', skill: 'Skills', plugin: 'Plugins' };
 
-/** What is installed of one kind, across agents and scopes, with usage and risk. Rendered inside an Activity page. */
-export function ExtensionsView({ kind }: ExtensionsViewProps) {
-  const [refreshKey, setRefreshKey] = useState(0);
-  const { data, error } = usePolling<ExtensionsResponse>(['extensions', refreshKey], () => getExtensions(), 60000);
-  const [use, setUse] = useState<UseFilter>('all');
-  const [agent, setAgent] = useState('');
+/** Installed extensions with usage for the range, shared by the Activity pages and their KPIs. A negative `days` skips the fetch. */
+export function useExtensions(days: number): { data: ExtensionsResponse | null; error: boolean } {
+  const q = useQuery({
+    queryKey: ['extensions', days],
+    queryFn: () => getExtensions(false, days),
+    enabled: days >= 0,
+    refetchInterval: 60000,
+    placeholderData: keepPreviousData,
+  });
+  return { data: q.data ?? null, error: q.isError };
+}
+
+/** Everything installed of one kind, with usage for the range and risk: a card in an Activity page. */
+export function ExtensionsView({ kind, days, agent: pageAgent, showKpis }: ExtensionsViewProps) {
+  const queryClient = useQueryClient();
+  const refresh = () => void queryClient.invalidateQueries({ queryKey: ['extensions'] });
+  const { data, error } = useExtensions(days);
+  // Opens on what sessions used in the range; "Any" lists everything installed.
+  const [use, setUse] = useState<UseFilter>(DEFAULT_USE);
+  const [ownAgent, setAgent] = useState('');
+  const agent = pageAgent ?? ownAgent;
   const [scope, setScope] = useState('');
   const [proj, setProj] = useState('');
   const [q, setQ] = useState('');
@@ -90,7 +111,7 @@ export function ExtensionsView({ kind }: ExtensionsViewProps) {
   useEffect(() => {
     if (!data?.scan.running && !scanning) return;
     const t = window.setTimeout(() => {
-      setRefreshKey((k) => k + 1);
+      refresh();
       if (!data?.scan.running) setScanning(false);
     }, 1500);
     return () => window.clearTimeout(t);
@@ -101,7 +122,7 @@ export function ExtensionsView({ kind }: ExtensionsViewProps) {
     const needle = q.trim().toLowerCase();
     const out = items.filter((i) => {
       if (use === 'used' && !i.usage.calls) return false;
-      if (use === 'unused' && (i.usage.calls || !i.installed)) return false;
+      if (use === 'unused' && (i.ever_used || !i.installed)) return false;
       if (use === 'missing' && i.installed) return false;
       if (agent && !i.agents.includes(agent)) return false;
       if (scope && !i.scopes.includes(scope as ExtensionScope)) return false;
@@ -130,11 +151,13 @@ export function ExtensionsView({ kind }: ExtensionsViewProps) {
     try {
       await scanAllExtensions();
     } finally {
-      setRefreshKey((k) => k + 1);
+      refresh();
     }
   };
 
-  const filtered = !!(agent || scope || proj || q || flaggedOnly || use !== 'all');
+  const filtered = !!(ownAgent || scope || proj || q || flaggedOnly || use !== DEFAULT_USE);
+  const range = days === 0 ? 'all time' : days === 1 ? '24h' : `${days}d`;
+  const trendDays = days > 0 && days <= 7 ? 7 : 30;
   const Th = ({ k, children, num }: { k: SortKey; children: ReactNode; num?: boolean }) => (
     <th style={num ? { textAlign: 'right' } : undefined} aria-sort={sort === k ? 'descending' : undefined}>
       <button type="button" onClick={() => setSort(k)} style={sort === k ? { color: 'var(--v-fg)' } : undefined}>
@@ -153,7 +176,7 @@ export function ExtensionsView({ kind }: ExtensionsViewProps) {
           {!data ? 'Security scan' : data.scan.running ? `Scanning ${data.scan.done}/${data.scan.total}` : unscanned ? `Scan ${unscanned} unscanned` : 'All scanned'}
         </button>
       )}
-      <button type="button" className="iconbtn" onClick={() => void getExtensions(true).finally(() => setRefreshKey((k) => k + 1))} aria-label="Re-read agent configs" title="Re-read agent configs">
+      <button type="button" className="iconbtn" onClick={() => void getExtensions(true, days).finally(refresh)} aria-label="Re-read agent configs" title="Re-read agent configs">
         <Icon name="replay" size={15} />
       </button>
     </div>
@@ -161,16 +184,17 @@ export function ExtensionsView({ kind }: ExtensionsViewProps) {
 
   return (
     <>
-        <div className="kpis" style={{ marginBottom: 16 }}>
+      {showKpis && (
+        <div className="kpis">
           <div className="kpi">
             <span className="label">Installed</span>
             <span className="v">{s ? fmt.n(s.installed) : '—'}</span>
             <span className="d">{s ? `${s.project_scoped} scoped to a project` : ' '}</span>
           </div>
           <div className="kpi">
-            <span className="label">Used · 30 days</span>
-            <span className="v">{s ? fmt.n(s.used_30d) : '—'}</span>
-            <span className="d">{s ? (kind === 'plugin' ? 'through their skills and servers' : `${s.not_installed} used but not in any config`) : ' '}</span>
+            <span className="label">Used · {range}</span>
+            <span className="v">{s ? fmt.n(s.used) : '—'}</span>
+            <span className="d">{kind === 'plugin' ? 'through their skills and servers' : s ? `${s.not_installed} used but not in any config` : ' '}</span>
           </div>
           <div className="kpi">
             <span className="label">Never used</span>
@@ -183,14 +207,26 @@ export function ExtensionsView({ kind }: ExtensionsViewProps) {
             <span className="d">{s ? (kind === 'mcp' ? 'by launch checks' : unscanned ? `${unscanned} not scanned yet` : 'every package scanned') : ' '}</span>
           </div>
         </div>
+      )}
 
-        <div className="toolbar">
+      <section className="card" style={{ marginTop: 16, overflow: 'hidden' }}>
+        <div className="card-h" style={{ paddingBottom: 12 }}>
+          <span className="card-t">{KIND_TITLE[kind]}</span>
+          {/* Same "installed" as the page's KPI; rows that no config lists are called out so the counts add up. */}
+          <span className="label">{data && s ? (() => {
+            const outside = rows.filter((i) => !i.installed).length;
+            return `${rows.length} shown${outside ? ` (${outside} not in any config)` : ''} · ${s.installed} installed`;
+          })() : '…'}</span>
+        </div>
+        <div className="toolbar" style={{ padding: '0 20px', marginBottom: 12 }}>
           <label className="vfield">
             <Icon name="search" size={14} />
             <input value={q} onChange={(e) => { setQ(e.target.value); setShown(PAGE); }} placeholder="Filter by name or description" aria-label={`Filter ${KIND_PLURAL[kind]}`} />
           </label>
-          <Dropdown label="Agent" value={agent} onChange={setAgent} placeholder="All agents"
-            options={[{ value: '', label: 'All agents' }, ...agents.map((a) => ({ value: a, label: agentLabel(a), meta: items.filter((i) => i.agents.includes(a)).length }))]} />
+          {pageAgent === undefined && (
+            <Dropdown label="Agent" value={ownAgent} onChange={setAgent} placeholder="All agents"
+              options={[{ value: '', label: 'All agents' }, ...agents.map((a) => ({ value: a, label: agentLabel(a), meta: items.filter((i) => i.agents.includes(a)).length }))]} />
+          )}
           <Dropdown label="Scope" value={scope} onChange={setScope} placeholder="All scopes"
             options={[{ value: '', label: 'All scopes' }, ...scopes.map((sc) => ({ value: sc, label: SCOPE_LABEL[sc] ?? sc, meta: items.filter((i) => i.scopes.includes(sc)).length }))]} />
           {(data?.projects.length ?? 0) > 0 && (
@@ -213,12 +249,12 @@ export function ExtensionsView({ kind }: ExtensionsViewProps) {
             <span className="mono faint" style={{ fontSize: 11 }}>{data ? flagged : '…'}</span>
           </button>
           {filtered && (
-            <button type="button" className="vbtn vbtn-quiet vbtn-sm" onClick={() => { setAgent(''); setScope(''); setProj(''); setQ(''); setUse('all'); setFlaggedOnly(false); }}>Clear</button>
+            <button type="button" className="vbtn vbtn-quiet vbtn-sm" onClick={() => { setAgent(''); setScope(''); setProj(''); setQ(''); setUse(DEFAULT_USE); setFlaggedOnly(false); }}>Clear</button>
           )}
           {actions}
         </div>
 
-        <div className="card" style={{ overflow: 'auto' }}>
+        <div style={{ overflowX: 'auto', borderTop: '1px solid var(--v-line)' }}>
           <table className="t">
             <thead>
               <tr>
@@ -227,7 +263,7 @@ export function ExtensionsView({ kind }: ExtensionsViewProps) {
                 <th>Installed</th>
                 <Th k="sessions" num>Sessions</Th>
                 <Th k="calls" num>Uses</Th>
-                <th aria-label="Last 30 days">30d</th>
+                <th aria-label={`Daily uses, last ${trendDays} days`}>{trendDays}d</th>
                 <Th k="recent">Last used</Th>
                 <th>Risk</th>
               </tr>
@@ -238,7 +274,7 @@ export function ExtensionsView({ kind }: ExtensionsViewProps) {
                   <td style={{ maxWidth: 420 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                       <span className="dim" style={{ display: 'inline-flex' }} title={KIND_LABEL[i.kind]}><Icon name={KIND_ICON[i.kind]} size={15} /></span>
-                      <span className="truncate" style={{ fontWeight: 500 }}>{i.display_name}</span>
+                      <span className="truncate" style={{ fontWeight: 500, color: i.installed && !i.ever_used ? 'var(--v-dim)' : undefined }}>{i.display_name}</span>
                       {i.version && <span className="mono faint" style={{ fontSize: 11 }}>{i.version}</span>}
                       {i.enabled === false && <span className="vchip c-dim">off</span>}
                     </div>
@@ -264,13 +300,22 @@ export function ExtensionsView({ kind }: ExtensionsViewProps) {
           </table>
           {!data && !error && <div className="empty">Reading agent configs…</div>}
           {error && !data && <div className="empty">Collector offline — extensions unavailable.</div>}
-          {data && rows.length === 0 && <div className="empty">{filtered ? `No ${KIND_PLURAL[kind]} match these filters.` : `No ${KIND_PLURAL[kind]} found in any agent's config.`}</div>}
+          {data && rows.length === 0 && (
+            <div className="empty">
+              {filtered
+                ? `No ${KIND_PLURAL[kind]} match these filters.`
+                : items.length === 0
+                  ? `No ${KIND_PLURAL[kind]} found in any agent's config.`
+                  : <>No {KIND_PLURAL[kind]} used in {range}. <button type="button" className="vbtn vbtn-quiet vbtn-sm" style={{ marginLeft: 8 }} onClick={() => setUse('all')}>Show all {items.length}</button></>}
+            </div>
+          )}
           {rows.length > shown && (
             <div style={{ textAlign: 'center', padding: 12, borderTop: '1px solid var(--v-line)' }}>
               <button type="button" className="vbtn vbtn-quiet vbtn-sm" onClick={() => setShown((n) => n + PAGE)}>Show {Math.min(PAGE, rows.length - shown)} more of {rows.length - shown}</button>
             </div>
           )}
         </div>
+      </section>
       <ExtensionDrawer extKey={open} onClose={() => openKey(null)} />
     </>
   );

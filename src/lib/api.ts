@@ -1535,6 +1535,8 @@ export interface ExtensionItem {
   native_usage: { count: number | null; last_used: string | null } | null;
   usage: ExtensionUsage;
   risk: ExtensionRisk;
+  /** Used at least once in all history (usage itself may be limited to a window). */
+  ever_used?: boolean;
 }
 
 export interface ExtensionKindSummary {
@@ -1654,8 +1656,13 @@ export interface SessionExtension {
   tools: string[];
 }
 
-export async function getExtensions(refresh = false): Promise<ExtensionsResponse> {
-  return json<ExtensionsResponse>(await fetch(`/v1/extensions${refresh ? '?refresh=true' : ''}`));
+/** `days` > 0 limits uses, sessions and failures to that window; last used is always all-time. */
+export async function getExtensions(refresh = false, days = 0): Promise<ExtensionsResponse> {
+  const params = new URLSearchParams();
+  if (refresh) params.set('refresh', 'true');
+  if (days) params.set('days', String(days));
+  const qs = params.toString();
+  return json<ExtensionsResponse>(await fetch(`/v1/extensions${qs ? `?${qs}` : ''}`));
 }
 
 export async function getExtensionDetail(key: string): Promise<ExtensionDetail> {

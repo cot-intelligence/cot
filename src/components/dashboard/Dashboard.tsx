@@ -40,7 +40,7 @@ type DashboardRoute =
   | { view: 'list' }
   | { view: 'session'; sessionId: string; focusEventId?: number; focusQuery?: string; focusNonce?: number }
   | { view: 'overview' }
-  | { view: 'metrics-history'; tab?: MetricsHistoryTab; group?: string; installed?: boolean }
+  | { view: 'metrics-history'; tab?: MetricsHistoryTab; group?: string }
   | { view: 'replay' }
   | { view: 'replay-session'; sessionId: string; focusEventId?: number; focusQuery?: string; focusNonce?: number }
   | { view: 'settings' }
@@ -52,9 +52,9 @@ type MetricsHistoryTab = 'shell' | 'web' | 'mcp' | 'skill' | 'plugin';
 const ACTIVITY_LABEL: Record<MetricsHistoryTab, string> = { shell: 'Shell', web: 'Web', mcp: 'MCP', skill: 'Skills', plugin: 'Plugins' };
 const ACTIVITY_TABS = Object.keys(ACTIVITY_LABEL) as MetricsHistoryTab[];
 
-/** The installed list for an extension kind: Activity → MCP / Skills → Installed, or Activity → Plugins. */
+/** The Activity page that lists an extension kind (MCP, Skills, Plugins). */
 function installedHref(kind: string): string {
-  return kind === 'plugin' ? '#/metrics-history?tab=plugin' : `#/metrics-history?tab=${kind}&view=installed`;
+  return `#/metrics-history?tab=${kind}`;
 }
 
 function parseHash(): DashboardRoute {
@@ -64,7 +64,7 @@ function parseHash(): DashboardRoute {
   const extPage = hash.match(/^extensions\/(.+)$/);
   if (extPage) return { view: 'extension', key: decodeURIComponent(extPage[1]) };
   // The old Extensions list now lives in Activity (MCP / Skills → Installed, Plugins).
-  if (/^extensions(\?.*)?$/.test(hash)) return { view: 'metrics-history', tab: 'mcp', installed: true };
+  if (/^extensions(\?.*)?$/.test(hash)) return { view: 'metrics-history', tab: 'mcp' };
   const findingsMatch = hash.match(/^findings(?:\?pillar=(security|cost|usability))?$/);
   if (findingsMatch) return { view: 'findings', pillar: findingsMatch[1] as InsightPillar | undefined };
   // The workspace opens on the Overview.
@@ -79,7 +79,6 @@ function parseHash(): DashboardRoute {
       view: 'metrics-history',
       tab: tab && ACTIVITY_TABS.includes(tab) ? tab : undefined,
       group: q.get('group') ?? undefined,
-      installed: q.get('view') === 'installed' || tab === 'plugin',
     };
   }
   // Legacy #/metrics and #/insights merged into the unified Overview page.
@@ -323,7 +322,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
         label: 'Go to installed MCP servers, skills and plugins',
         icon: 'plug',
         keywords: 'extensions plugins skills mcp servers installed usage scope security scan',
-        active: onMetricsHistory && route.view === 'metrics-history' && !!route.installed,
+        active: onMetricsHistory && route.view === 'metrics-history' && route.tab === 'mcp',
         run: () => goInstalled('mcp'),
       },
       {
@@ -477,7 +476,6 @@ export function Dashboard({ onSetup }: DashboardProps) {
                   onBack={goOverview}
                   initialTab={route.view === 'metrics-history' ? route.tab : undefined}
                   initialGroup={route.view === 'metrics-history' ? route.group : undefined}
-                  installed={route.view === 'metrics-history' && !!route.installed}
                 />
               </Suspense>
             </main>

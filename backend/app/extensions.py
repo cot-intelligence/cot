@@ -36,7 +36,29 @@ from . import marketplace_scan
 
 SKILL_FILE = "SKILL.md"
 MAX_SKILL_DIRS = 2000
-CACHE_TTL_S = 20.0
+# How often a cached inventory checks whether any file it read has changed.
+CHECK_EVERY_S = 2.0
+
+# Every file and directory the running scan read. The cached inventory keeps
+# this set and is rebuilt only when one of them changes (mtime, size, or it
+# appears or disappears), not on a timer.
+_watched: set[str] = set()
+
+
+def _watch(path: Path | str | None) -> None:
+    if path is not None:
+        _watched.add(str(path))
+
+
+def _signature(paths: Iterable[str]) -> tuple:
+    out = []
+    for p in sorted(paths):
+        try:
+            st = os.stat(p)
+            out.append((p, st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append((p, None, None))
+    return tuple(out)
 
 
 # --- Agent homes -----------------------------------------------------------
@@ -72,6 +94,7 @@ def claude_json_path() -> Path | None:
     when one is set explicitly."""
     explicit = os.environ.get("COT_CLAUDE_HOME") or os.environ.get("CLAUDE_CONFIG_DIR")
     candidate = (claude_home() / ".claude.json") if explicit else Path.home() / ".claude.json"
+    _watch(candidate)
     return candidate if candidate.is_file() else None
 
 
@@ -93,6 +116,7 @@ def claude_managed_mcp() -> Path:
 
 
 def _read_json(path: Path) -> Any:
+    _watch(path)
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -100,6 +124,7 @@ def _read_json(path: Path) -> Any:
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
+    _watch(path)
     try:
         with path.open("rb") as fh:
             return tomllib.load(fh)
@@ -199,6 +224,7 @@ def ext_key(kind: str, name: str) -> str:
 
 def _skill_dirs(root: Path) -> Iterable[Path]:
     """Skill directories directly under ``root`` (one level, symlinks followed)."""
+    _watch(root)
     try:
         entries = sorted(root.iterdir())
     except OSError:
@@ -215,6 +241,7 @@ def _skill_dirs(root: Path) -> Iterable[Path]:
 
 
 def _skill_meta(skill_dir: Path) -> dict[str, Any]:
+    _watch(skill_dir / SKILL_FILE)
     try:
         text = (skill_dir / SKILL_FILE).read_text(encoding="utf-8", errors="replace")[:64_000]
     except OSError:
@@ -475,6 +502,7 @@ def _plugin_mcp_servers(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
 
 
 def _count_md(root: Path) -> int:
+    _watch(root)
     try:
         return sum(1 for p in root.iterdir() if p.suffix == ".md")
     except OSError:
@@ -562,6 +590,7 @@ def _marketplace_entries(market_root: Path) -> dict[str, dict[str, Any]]:
 
 
 def _latest_version_dir(root: Path) -> Path | None:
+    _watch(root)
     try:
         dirs = [p for p in root.iterdir() if p.is_dir()]
     except OSError:
@@ -654,6 +683,7 @@ def _scan_claude(out: list[Install], projects: list[str]) -> dict[str, Any]:
         _add_mcp(out, proj.get("mcpServers"), "claude", "local", cj_path, project=proj_path)
     for proj_path in projects:
         mcp_json = Path(proj_path) / ".mcp.json"
+        _watch(mcp_json)
         if not mcp_json.is_file():
             continue
         proj_state = _dict(_dict(cj.get("projects")).get(proj_path))
@@ -674,9 +704,11 @@ def _scan_claude(out: list[Install], projects: list[str]) -> dict[str, Any]:
             project=proj_path, enabled_fn=state,
         )
     managed = claude_managed_mcp()
+    _watch(managed)
     if managed.is_file():
         _add_mcp(out, _dict(_read_json(managed)).get("mcpServers"), "claude", "managed", managed)
     desktop = claude_desktop_config()
+    _watch(desktop)
     if desktop.is_file():
         _add_mcp(out, _dict(_read_json(desktop)).get("mcpServers"), "claude", "desktop", desktop)
 
@@ -699,12 +731,14 @@ def _cursor_tool_index() -> dict[str, dict[str, Any]]:
     descriptors are how a tool name maps back to one."""
     servers: dict[str, dict[str, Any]] = {}
     root = cursor_home() / "projects"
+    _watch(root)
     try:
         projects = list(root.iterdir())
     except OSError:
         return servers
     for proj in projects:
         mcps = proj / "mcps"
+        _watch(mcps)
         try:
             server_dirs = list(mcps.iterdir())
         except OSError:
@@ -731,6 +765,7 @@ def _scan_cursor(out: list[Install], projects: list[str]) -> dict[str, Any]:
     _add_mcp(out, _dict(_read_json(home / "mcp.json")).get("mcpServers"), "cursor", "user", home / "mcp.json")
     for proj_path in projects:
         f = Path(proj_path) / ".cursor" / "mcp.json"
+        _watch(f)
         if f.is_file():
             _add_mcp(out, _dict(_read_json(f)).get("mcpServers"), "cursor", "project", f, project=proj_path)
         _add_skills(out, Path(proj_path) / ".cursor" / "skills", "cursor", "project", project=proj_path)
@@ -782,6 +817,7 @@ def _scan_codex(out: list[Install], projects: list[str]) -> dict[str, Any]:
         )
     for proj_path in projects:
         pcfg = Path(proj_path) / ".codex" / "config.toml"
+        _watch(pcfg)
         if pcfg.is_file():
             _add_mcp(out, _read_toml(pcfg).get("mcp_servers"), "codex", "project", pcfg, project=proj_path)
         _add_skills(out, Path(proj_path) / ".agents" / "skills", "codex", "project", project=proj_path)
@@ -810,6 +846,7 @@ def project_roots(cwds: Iterable[str]) -> list[str]:
             if key in seen:
                 break
             seen.add(key)
+            _watch(p)  # a project gaining .mcp.json / .claude/ changes this directory
             if p == home or p == p.parent:
                 break
             try:
@@ -943,6 +980,11 @@ class Inventory:
     projects: list[str]
     cursor_tools: dict[str, dict[str, Any]]
     scanned_at: float
+    # Bumped on every rescan; callers fold it into their own cache keys.
+    version: int = 0
+    cwds: tuple[str, ...] = ()
+    signature: tuple = ()
+    checked_at: float = 0.0
 
     def index(self) -> "InventoryIndex":
         return InventoryIndex(self)
@@ -1002,28 +1044,52 @@ _cache_lock = threading.Lock()
 _cache: Inventory | None = None
 
 
+_versions = 0
+
+
 def scan(cwds: Iterable[str], *, refresh: bool = False) -> Inventory:
-    """Read every agent's config. Cached briefly; a scan touches a few hundred files."""
-    global _cache
+    """Read every agent's config, reusing the last result until a file it read changes."""
+    global _cache, _versions
     with _cache_lock:
-        if not refresh and _cache is not None and time.time() - _cache.scanned_at < CACHE_TTL_S:
-            return _cache
-        cwd_list = list(cwds)
+        cwd_key = tuple(sorted(set(cwds)))
+        now = time.time()
+        if not refresh and _cache is not None and _cache.cwds == cwd_key:
+            if now - _cache.checked_at < CHECK_EVERY_S:
+                return _cache
+            if _signature(_cache_watched) == _cache.signature:
+                _cache.checked_at = now
+                return _cache
+        _watched.clear()
         cj_path = claude_json_path()
         cj = _dict(_read_json(cj_path)) if cj_path else {}
         codex_projects = list(_dict(_read_toml(codex_home() / "config.toml").get("projects")).keys())
-        projects = project_roots([*cwd_list, *_dict(cj.get("projects")).keys(), *codex_projects])
+        projects = project_roots([*cwd_key, *_dict(cj.get("projects")).keys(), *codex_projects])
         installs: list[Install] = []
         native = _scan_claude(installs, projects)
         cursor_extra = _scan_cursor(installs, projects)
         _scan_codex(installs, projects)
+        watched = frozenset(_watched)
+        _versions += 1
         _cache = Inventory(
             extensions=group(installs, native),
             projects=projects,
             cursor_tools=cursor_extra.get("cursor_tools", {}),
-            scanned_at=time.time(),
+            scanned_at=now,
+            version=_versions,
+            cwds=cwd_key,
+            signature=_signature(watched),
+            checked_at=now,
         )
+        _set_watched(watched)
         return _cache
+
+
+_cache_watched: frozenset[str] = frozenset()
+
+
+def _set_watched(paths: frozenset[str]) -> None:
+    global _cache_watched
+    _cache_watched = paths
 
 
 def clear_cache() -> None:

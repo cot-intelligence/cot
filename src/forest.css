@@ -103,6 +103,11 @@
 .vf .nav-i[aria-current='page'] { color: var(--v-fg); }
 .vf .nav-i .pill { position: absolute; inset: 0; border-radius: 8px; background: var(--v-surface); box-shadow: 0 0 0 1px var(--v-line), 0 1px 2px rgb(0 0 0 / 0.04); z-index: -1; }
 .vf .nav-i .ct { margin-left: auto; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--v-faint); }
+/* Collapsible card header (Activity logs): the whole title row toggles; the chevron turns to show state. */
+.vf .log-toggle { display: inline-flex; align-items: center; gap: 8px; border: 0; background: none; padding: 0; color: inherit; text-align: left; min-width: 0; }
+.vf .log-toggle > svg { color: var(--v-faint); transition: transform 150ms var(--v-ease-out), color 150ms ease; flex: none; }
+.vf .log-toggle[aria-expanded='true'] > svg { transform: rotate(90deg); }
+@media (hover: hover) and (pointer: fine) { .vf .log-toggle:hover > svg { color: var(--v-fg); } }
 .vf .nav-i .ct.hot { color: var(--v-alert); background: color-mix(in srgb, var(--v-alert) 10%, transparent); padding: 1px 6px; border-radius: 6px; }
 /* Icons sit a step quieter than labels and come up with them, so the active entry reads first. */
 .vf .nav-i > svg { color: var(--v-faint); transition: color 150ms ease; flex: none; }
@@ -411,7 +416,8 @@
 .vf .side-nav { overflow: auto; }
 @media (min-width: 901px) {
   .vf.app[data-rail='true'] { grid-template-columns: 60px 1fr; background: var(--v-rail); }
-  .vf .side[data-rail='true'] { background: none; border-right: 0; overflow: visible; align-items: center; position: relative; z-index: 5; }
+  /* Above the page's content layer (z-10 in Dashboard) so rail tooltips aren't cut off by the main panel; below drawers and scrims (50+). */
+  .vf .side[data-rail='true'] { background: none; border-right: 0; overflow: visible; align-items: center; position: relative; z-index: 30; }
   /* The whole rail reads as "expand"; its links and buttons stay ordinary pointers. */
   .vf .side[data-rail='true'] { cursor: e-resize; }
   .vf .side[data-rail='true'] :is(a, button) { cursor: pointer; }

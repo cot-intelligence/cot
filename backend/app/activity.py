@@ -476,6 +476,18 @@ def _ref(item: dict[str, Any]) -> dict[str, Any]:
 def summarize(
     category: str, days: int, project: str | None = None, source: str | None = None, plugin: str | None = None
 ) -> dict[str, Any]:
+    if category in _EXTENSION_CATEGORIES:
+        # Reused until a new MCP call / skill load, a config change or the minute rolls over.
+        return extension_usage.cached(
+            ("summary", category, days, project, source, plugin),
+            lambda: _summarize(category, days, project, source, plugin),
+        )
+    return _summarize(category, days, project, source, plugin)
+
+
+def _summarize(
+    category: str, days: int, project: str | None = None, source: str | None = None, plugin: str | None = None
+) -> dict[str, Any]:
     # Load the whole history once: the window is summarized, and everything
     # before it is the baseline that anomalies are measured against.
     unfiltered = load(category, 0, project, source)
