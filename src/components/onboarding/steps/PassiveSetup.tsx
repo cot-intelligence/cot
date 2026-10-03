@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { AgentId } from '../../../lib/agents';
-import { getPassive, previewSchedule, runPassiveNow, updatePassive, type PassiveStatus } from '../../../lib/api';
+import { getPassive, PassiveUnsupportedError, previewSchedule, runPassiveNow, updatePassive, type PassiveStatus } from '../../../lib/api';
 import { agentLabel } from '../../forest/AgentMark';
 import { fmt } from '../../forest/format';
 import { Icon } from '../../forest/icons';
@@ -19,7 +19,7 @@ export type PassiveDraft = ReturnType<typeof usePassiveDraft>;
  */
 export function usePassiveDraft() {
   const [p, setP] = useState<PassiveStatus | null>(null);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<'unsupported' | 'offline' | false>(false);
   const [agents, setAgents] = useState<AgentId[] | null>(null);
   const [cron, setCron] = useState<string | null>(null);
   const [started, setStarted] = useState(false);
@@ -36,7 +36,7 @@ export function usePassiveDraft() {
           setAgents((a) => a ?? x.agents_detail.filter((d) => d.readable && d.transcripts > 0).map((d) => d.agent));
           setCron((c) => c ?? x.cron);
         })
-        .catch(() => live && setFailed(true));
+        .catch((e) => live && setFailed(e instanceof PassiveUnsupportedError ? 'unsupported' : 'offline'));
     load();
     const t = started ? window.setInterval(load, 2000) : 0;
     return () => {
@@ -73,7 +73,14 @@ export function PassiveSetup({
 
   if (failed) {
     return (
-      <Shell eyebrow="Transcripts only" title="Couldn't reach the collector" lead="Passive mode needs the cot collector running on this machine.">
+      <Shell
+        eyebrow="Transcripts only"
+        title={failed === 'unsupported' ? 'This collector needs an update' : "Couldn't reach the collector"}
+        lead={
+          failed === 'unsupported'
+            ? "The cot collector running here predates passive import. Update the cot app, or choose Live hooks for now."
+            : 'Passive mode needs the cot collector running on this machine.'
+        }>
         <Actions onBack={() => onStep(0)} />
       </Shell>
     );

@@ -1383,8 +1383,17 @@ export interface PassiveStatus {
   presets: { id: string; label: string; cron: string }[];
 }
 
+/** Thrown when the collector predates passive mode (no /v1/passive): the app needs updating. */
+export class PassiveUnsupportedError extends Error {
+  constructor() {
+    super('This collector does not support passive import yet');
+  }
+}
+
 export async function getPassive(): Promise<PassiveStatus> {
-  return json<PassiveStatus>(await fetch('/v1/passive'));
+  const res = await fetch('/v1/passive');
+  if (res.status === 404) throw new PassiveUnsupportedError();
+  return json<PassiveStatus>(res);
 }
 
 export async function updatePassive(patch: { enabled?: boolean; agents?: PassiveAgent[]; cron?: string }): Promise<PassiveStatus> {

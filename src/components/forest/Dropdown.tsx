@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion';
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Icon } from './icons';
 
 export interface DropdownOption {
@@ -7,6 +7,8 @@ export interface DropdownOption {
   label: string;
   /** Right-aligned secondary text, e.g. a count. */
   meta?: string | number;
+  /** A small visual shown before the label, in the trigger and the list (e.g. a workspace mark). */
+  icon?: ReactNode;
 }
 
 /** Lists longer than this get a search field. */
@@ -92,6 +94,7 @@ export function Dropdown({
           if (!open && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); setOpen(true); }
           else if (open) onKey(e);
         }}>
+        {current?.icon && <span className="dd-ic" aria-hidden="true">{current.icon}</span>}
         <span className="truncate">{current?.label ?? placeholder}</span>
         <Icon name="down" size={14} className="dd-chev" />
       </button>
@@ -132,6 +135,7 @@ export function Dropdown({
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => pick(o.value)}>
                   <Icon name="check" size={14} className="dd-ck" />
+                  {o.icon && <span className="dd-ic" aria-hidden="true">{o.icon}</span>}
                   <span className="truncate">{o.label}</span>
                   {o.meta !== undefined && <span className="dd-m">{o.meta}</span>}
                 </li>

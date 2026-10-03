@@ -10,6 +10,7 @@ const P: Record<string, string> = {
   search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4',
   sun: 'M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4',
   moon: 'M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z',
+  monitor: 'M3 5h18v11H3zM9 20h6M12 16v4',
   chevron: 'M9 6l6 6-6 6',
   down: 'M6 9l6 6 6-6',
   close: 'M6 6l12 12M18 6L6 18',

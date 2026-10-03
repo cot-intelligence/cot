@@ -95,6 +95,8 @@
 .vf .side-top { display: flex; align-items: center; justify-content: space-between; height: 56px; padding: 0 12px 0 18px; }
 .vf .ws { margin: 4px 12px 8px; display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 12px; border: 1px solid var(--v-line); background: var(--v-surface); text-align: left; width: calc(100% - 24px); transition: border-color 150ms ease; }
 @media (hover: hover) and (pointer: fine) { .vf .ws:hover { border-color: var(--v-mute); } }
+/* A picked headshot fills the avatar box; the initial keeps the brand fill. */
+.vf .av[data-art] { overflow: hidden; padding: 0; background: none !important; box-shadow: inset 0 0 0 1px var(--v-line); }
 .vf .ws .av { width: 28px; height: 28px; border-radius: 8px; background: var(--v-hot); color: var(--v-onHot); display: grid; place-items: center; font-weight: 600; font-size: 13px; flex: none; }
 .vf .nav-g { padding: 12px 12px 4px; }
 .vf .nav-g .label { padding: 0 8px 6px; display: block; }
@@ -131,6 +133,9 @@
 .vf .vseg button[aria-pressed='true'] { color: var(--v-fg); }
 .vf .vseg .thumb { position: absolute; inset: 0; border-radius: 7px; background: var(--v-surface); box-shadow: 0 0 0 1px var(--v-line), 0 1px 2px rgb(0 0 0 / 0.06); z-index: 0; }
 .vf .vseg button span { position: relative; z-index: 1; }
+/* Icon-only options (e.g. the theme switch): square, icon centred. */
+.vf .vseg button[data-icon] { width: 34px; padding: 0; }
+.vf .vseg button[data-icon] > span:last-child { display: grid; place-items: center; }
 
 .vf .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; border: 1px solid var(--v-line); border-radius: 16px; background: var(--v-surface); overflow: hidden; }
 .vf .kpi { padding: 18px 20px; border-right: 1px solid var(--v-line); display: grid; gap: 4px; min-width: 0; }
@@ -180,6 +185,9 @@
 .vf .dd-o[aria-selected='true'] .dd-ck { visibility: visible; }
 .vf .dd-o[aria-selected='true'] { font-weight: 500; }
 .vf .dd-m { margin-left: auto; padding-left: 12px; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--v-faint); font-variant-numeric: tabular-nums; }
+.vf .dd-ic { flex: none; width: 20px; height: 20px; border-radius: 6px; overflow: hidden; display: grid; place-items: center; box-shadow: inset 0 0 0 1px var(--v-line); }
+.vf .dd-ic > * { width: 100%; height: 100%; }
+.vf .dd-ic-initial { display: grid; place-items: center; width: 100%; height: 100%; background: var(--v-hot); color: var(--v-onHot); font-size: 11px; font-weight: 600; }
 .vf .dd-none { padding: 14px 10px; font-size: 13px; color: var(--v-faint); text-align: center; }
 /* Passive (transcripts-only) mode: components/passive/PassiveParts.tsx */
 .vf .psv-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
@@ -324,6 +332,18 @@
 @keyframes tray-spin { to { transform: rotate(360deg); } }
 .vf .tray-empty { margin: 0; padding: 4px 10px 12px; font-size: 13px; color: var(--v-dim); }
 @media (prefers-reduced-motion: reduce) { .vf .tray-spin { animation: none; border-top-color: color-mix(in srgb, var(--v-hot) 22%, transparent); border-right-color: var(--v-hot); } }
+/* Workspace mark picker (components/forest/MarkPicker.tsx): a dropdown whose menu is a grid. */
+.vf .mkp-pop { left: auto; right: 0; min-width: 0; width: 292px; max-width: calc(100vw - 32px); padding: 8px; transform-origin: top right; }
+.vf .mkp-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+.vf .mkp-o { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 4px 6px; border: 0; border-radius: 10px; background: none; color: var(--v-dim); min-width: 0; transition: background-color 150ms ease, color 150ms ease; }
+@media (hover: hover) and (pointer: fine) { .vf .mkp-o:hover { background: var(--v-wash); color: var(--v-fg); } }
+.vf .mkp-o:active .mkp-art { transform: scale(0.95); }
+.vf .mkp-art { width: 44px; height: 44px; border-radius: 12px; overflow: hidden; box-shadow: inset 0 0 0 1px var(--v-line); transition: transform 150ms var(--v-ease-out), box-shadow 150ms ease; }
+.vf .mkp-art > * { width: 100%; height: 100%; }
+.vf .mkp-art .dd-ic-initial { font-size: 18px; }
+.vf .mkp-o[aria-checked='true'] { color: var(--v-fg); font-weight: 500; }
+.vf .mkp-o[aria-checked='true'] .mkp-art { box-shadow: 0 0 0 2px var(--v-hot); }
+.vf .mkp-l { max-width: 100%; font-size: 11px; line-height: 14px; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vf .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 12px 10px 16px; border-top: 1px solid var(--v-line); }
 .vf .pager-b { display: flex; align-items: center; gap: 2px; }
 .vf .pager-n { min-width: 30px; height: 30px; padding: 0 6px; border-radius: 8px; border: 1px solid transparent; background: none; font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--v-dim); font-variant-numeric: tabular-nums; transition: background-color 150ms ease, color 150ms ease; }

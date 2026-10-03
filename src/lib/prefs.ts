@@ -7,9 +7,11 @@ export interface Prefs {
   motion: 'system' | 'reduced';
   start: 'overview' | 'sessions' | 'findings';
   range: 7 | 30 | 90;
+  /** Workspace avatar: an id from components/forest/avatars, or 'initial' for the letter. */
+  avatar: string;
 }
 
-const DEFAULTS: Prefs = { density: 'comfortable', motion: 'system', start: 'overview', range: 30 };
+const DEFAULTS: Prefs = { density: 'comfortable', motion: 'system', start: 'overview', range: 30, avatar: 'initial' };
 const KEY = 'cot.prefs';
 
 function read(): Prefs {

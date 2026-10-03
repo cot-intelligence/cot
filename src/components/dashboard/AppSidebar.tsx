@@ -4,6 +4,8 @@ import { getHealth, type Health } from '../../lib/api';
 import { usePolling } from '../../lib/usePolling';
 import { Icon } from '../forest/icons';
 import { Wordmark } from '../forest/ui';
+import { WorkspaceAvatar } from '../forest/avatars';
+import { usePrefs } from '../../lib/prefs';
 
 export type NavKey = 'sessions' | 'overview' | 'history' | 'replay' | 'findings' | 'governance' | 'settings';
 
@@ -46,6 +48,7 @@ export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, on
   const { data: health, error } = usePolling<Health>(['health'], () => getHealth(), 15000);
   const warm = useWarmTips();
   const ws = 'Local workspace';
+  const { avatar } = usePrefs();
   const foot = error ? 'Collector offline' : `Collector on :31337${health ? ` · v${health.version}` : ''}`;
 
   return (
@@ -113,7 +116,7 @@ export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, on
               <span className="live" style={error ? { background: 'var(--v-alert)' } : undefined} />
             </span>
             <button type="button" className="rail-btn" onClick={onSearch} data-tip={ws} aria-label={`Workspace: ${ws}`}>
-              <span className="av">{ws[0]}</span>
+              <WorkspaceAvatar id={avatar} name={ws} />
             </button>
           </div>
         ) : (
@@ -134,7 +137,7 @@ export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, on
             {/* Workspace sits at the bottom in both states, like the rail's avatar. */}
         {!rail && (
           <button type="button" className="ws" onClick={onSearch} aria-label={`Workspace: ${ws}`}>
-            <span className="av">{ws[0]}</span>
+            <WorkspaceAvatar id={avatar} name={ws} />
             <span style={{ display: 'grid', minWidth: 0 }}>
               <b className="truncate" style={{ fontWeight: 600, fontSize: 13 }}>{ws}</b>
               <span className="mono faint truncate" style={{ fontSize: 11 }}>

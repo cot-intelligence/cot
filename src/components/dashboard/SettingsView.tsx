@@ -16,6 +16,7 @@ import {
   type Health,
   type HookHealthState,
   type HookStatus,
+  PassiveUnsupportedError,
   type PassiveAgent,
   type PassiveStatus,
   type RetentionCleanupResult,
@@ -29,6 +30,7 @@ import { usePolling } from '../../lib/usePolling';
 import { fmt } from '../forest/format';
 import { Icon } from '../forest/icons';
 import { Agent, Seg, Switch } from '../forest/ui';
+import { MarkPicker } from '../forest/MarkPicker';
 import { ExportModal } from './ExportModal';
 import { AgentSources, HooksGap, RunStatus, SchedulePicker } from '../passive/PassiveParts';
 import { homePath } from './GovernanceView';
@@ -101,7 +103,17 @@ export function SettingsView({ sidebarOpen, onSidebarOpenChange, navCollapsed, o
           <div className="set-body">
             <Section id="appearance" title="Appearance" desc="How the dashboard looks on this browser.">
               <Row label="Theme" hint="Light is the default. System follows your OS setting.">
-                <Seg id="set-theme" value={preference} onChange={setPreference} options={[{ k: 'light', l: 'Light' }, { k: 'dark', l: 'Dark' }, { k: 'system', l: 'System' }]} />
+                <Seg
+                  id="set-theme"
+                  label="Theme"
+                  value={preference}
+                  onChange={setPreference}
+                  options={[
+                    { k: 'light', l: <Icon name="sun" size={16} />, name: 'Light' },
+                    { k: 'dark', l: <Icon name="moon" size={16} />, name: 'Dark' },
+                    { k: 'system', l: <Icon name="monitor" size={16} />, name: 'System' },
+                  ]}
+                />
               </Row>
               <Row label="Density" hint="Compact fits more rows into tables and traces.">
                 <Seg id="set-density" value={prefs.density} onChange={pref('density')} options={[{ k: 'comfortable', l: 'Comfortable' }, { k: 'compact', l: 'Compact' }]} />
@@ -111,6 +123,9 @@ export function SettingsView({ sidebarOpen, onSidebarOpenChange, navCollapsed, o
               </Row>
               <Row label="Session list" hint="Whether the session list stays open beside a session's trace.">
                 <Seg id="set-sesslist" value={sidebarOpen ? 'open' : 'closed'} onChange={(v) => onSidebarOpenChange(v === 'open')} options={[{ k: 'open', l: 'Open' }, { k: 'closed', l: 'Collapsed' }]} />
+              </Row>
+              <Row label="Workspace mark" hint="The image beside the workspace name in the sidebar. Saved on this browser.">
+                <MarkPicker value={prefs.avatar} initial="L" onChange={(v) => setPref('avatar', v)} />
               </Row>
               <Row label="Motion" hint="Reduced keeps fades and drops movement, whatever the OS says.">
                 <Seg id="set-motion" value={prefs.motion} onChange={pref('motion')} options={[{ k: 'system', l: 'System' }, { k: 'reduced', l: 'Reduced' }]} />
@@ -330,11 +345,20 @@ function PassiveSection() {
   const [p, setP] = useState<PassiveStatus | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [gap, setGap] = useState(false);
+  // 'unsupported': an older collector without passive mode; 'offline': the request failed.
+  const [problem, setProblem] = useState<'unsupported' | 'offline' | null>(null);
   const running = !!p?.running.running;
   // Poll quickly while a pass runs so the phase moves on screen; slowly otherwise.
   useEffect(() => {
     let live = true;
-    const load = () => getPassive().then((x) => live && setP(x)).catch(() => {});
+    const load = () =>
+      getPassive()
+        .then((x) => {
+          if (!live) return;
+          setP(x);
+          setProblem(null);
+        })
+        .catch((e) => live && setProblem(e instanceof PassiveUnsupportedError ? 'unsupported' : 'offline'));
     load();
     const t = window.setInterval(load, running ? 2000 : 15000);
     return () => { live = false; window.clearInterval(t); };
@@ -357,6 +381,18 @@ function PassiveSection() {
   };
   return (
     <Section id="passive" title="Passive import" desc="Build sessions from agent transcripts on a schedule, with or without hooks. Each run imports metadata first, then runs analysis.">
+      {problem && !p ? (
+        <Row
+          label="Passive mode"
+          hint={
+            problem === 'unsupported'
+              ? "This collector doesn't support passive import yet. Update the cot app to turn it on."
+              : "Couldn't reach the collector. It will retry automatically."
+          }>
+          <span className={`vchip ${problem === 'unsupported' ? 'c-dim' : 'c-warn'}`}>{problem === 'unsupported' ? 'needs update' : 'offline'}</span>
+        </Row>
+      ) : (
+      <>
       <Row
         label="Passive mode"
         hint={!p ? 'Loading…' : p.enabled ? `On. ${p.schedule.description}${p.next_scheduled ? `, next at ${fmt.dayTime(p.next_scheduled)}` : ''}.` : 'Off. Turn it on to import transcripts on a schedule.'}>
@@ -377,14 +413,15 @@ function PassiveSection() {
           </button>
         </div>
       </Row>
-      <Row label="Without hooks" hint="What transcripts alone can't show." stack>
-        <div>
-          <button type="button" className="vbtn vbtn-ghost vbtn-sm" aria-expanded={gap} onClick={() => setGap((g) => !g)}>
-            {gap ? 'Hide' : 'Show'} what you don't get <Icon name="down" size={14} style={{ transform: gap ? 'rotate(180deg)' : undefined }} />
-          </button>
-          {gap && <div style={{ marginTop: 12 }}><HooksGap /></div>}
-        </div>
+      <Row label="Without hooks" hint="What transcripts alone can't show.">
+        <button type="button" className="vbtn vbtn-ghost vbtn-sm" aria-expanded={gap} aria-controls="set-hooks-gap" onClick={() => setGap((g) => !g)}>
+          {gap ? 'Hide' : 'Show'} what you don't get <Icon name="down" size={14} style={{ transform: gap ? 'rotate(180deg)' : undefined }} />
+        </button>
       </Row>
+      {/* Opens under the row at full width, so the list reads like the rest of the section. */}
+      {gap && <div id="set-hooks-gap" style={{ padding: '4px 0 14px' }}><HooksGap /></div>}
+      </>
+      )}
     </Section>
   );
 }
