@@ -46,6 +46,7 @@ const P: Record<string, string> = {
   replay: 'M4 12a8 8 0 1 0 2.3-5.7M4 4v4h4M12 8v4l3 2',
   upload: 'M12 20V9M7 14l5-5 5 5M5 4h14',
   trash: 'M4 7h16M10 7V4h4v3M6 7l1 13h10l1-13M10 11v6M14 11v6',
+  bell: 'M6 9a6 6 0 0 1 12 0c0 6 2.5 8 2.5 8h-17S6 15 6 9M10 20.5a2.2 2.2 0 0 0 4 0',
   archive: 'M4 5h16v4H4zM5 9v10h14V9M10 13h4',
 };
 

@@ -1290,3 +1290,139 @@ export async function sendTestEvent(source: AgentId): Promise<string> {
   }
   return sid;
 }
+
+// ---------------------------------------------------------------- passive mode
+
+export type PassiveAgent = 'claude' | 'cursor' | 'codex';
+
+/** What's on disk for one agent (a scan, nothing imported) plus sessions already in cot. */
+export interface PassiveAgentDetail {
+  agent: PassiveAgent;
+  root: string;
+  readable: boolean;
+  transcripts: number;
+  bytes: number;
+  projects: number;
+  oldest: string | null;
+  newest: string | null;
+  /** Transcripts written to in the last few minutes: sessions still running, left for the next run. */
+  active: number;
+  sessions: number;
+}
+
+export interface PassiveRunAgent {
+  status: 'ok' | 'error' | 'unreadable' | 'skipped' | 'importing';
+  events?: number;
+  held_back?: number;
+  error?: string;
+}
+
+export interface PassiveRun {
+  id: number;
+  trigger: 'manual' | 'schedule' | string;
+  started_at: string;
+  finished_at: string | null;
+  status: 'running' | 'ok' | 'partial' | 'error';
+  phase?: 'metadata' | 'analysis' | 'done';
+  agents?: Partial<Record<PassiveAgent, PassiveRunAgent>>;
+  events?: number;
+  new_sessions?: number;
+  held_back?: number;
+  findings?: number;
+  error?: string;
+}
+
+export interface PassiveSchedule {
+  cron: string;
+  description: string;
+  next_runs: string[];
+}
+
+export interface PassiveStatus {
+  enabled: boolean;
+  agents: PassiveAgent[];
+  cron: string;
+  schedule: PassiveSchedule;
+  next_scheduled: string | null;
+  running: { running: boolean; phase?: 'metadata' | 'analysis'; started_at?: string; trigger?: string; agents?: Partial<Record<PassiveAgent, PassiveRunAgent>> };
+  agents_detail: PassiveAgentDetail[];
+  runs: PassiveRun[];
+  presets: { id: string; label: string; cron: string }[];
+}
+
+export async function getPassive(): Promise<PassiveStatus> {
+  return json<PassiveStatus>(await fetch('/v1/passive'));
+}
+
+export async function updatePassive(patch: { enabled?: boolean; agents?: PassiveAgent[]; cron?: string }): Promise<PassiveStatus> {
+  const res = await fetch('/v1/passive', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(body?.detail || `Couldn't save (${res.status})`);
+  }
+  return (await res.json()) as PassiveStatus;
+}
+
+export async function previewSchedule(cron: string): Promise<({ valid: true } & PassiveSchedule) | { valid: false; error: string }> {
+  return json(
+    await fetch('/v1/passive/schedule/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cron }),
+    }),
+  );
+}
+
+export async function runPassiveNow(): Promise<{ started: boolean }> {
+  return json(await fetch('/v1/passive/run', { method: 'POST' }));
+}
+
+/** Light progress check (no transcript scan) for the dashboard banner. */
+export async function getPassiveRunning(): Promise<{ running: PassiveStatus['running']; last_run: PassiveRun | null }> {
+  return json(await fetch('/v1/passive/running'));
+}
+
+// ----------------------------------------------------------------- task tray
+
+export type TaskRunning =
+  | { id: string; kind: 'session'; session_id: string; title: string; source: string; cwd: string | null; events: number; started_at: string; last_activity: string | null }
+  | { id: string; kind: 'passive'; phase: 'metadata' | 'analysis'; trigger?: string; started_at?: string }
+  | { id: string; kind: 'index'; title: string };
+
+export interface TaskRecent {
+  id: string;
+  kind: 'passive';
+  status: 'ok' | 'partial' | 'error';
+  finished_at: string;
+  trigger: string;
+  new_sessions: number;
+  findings?: number;
+  held_back: number;
+  error?: string;
+}
+
+/** In-progress work for the top-bar tray, plus passive runs that finished in the last day.
+ *  Collectors from before /v1/tasks still report live sessions through the sessions list. */
+export async function getTasks(): Promise<{ running: TaskRunning[]; recent: TaskRecent[] }> {
+  const res = await fetch('/v1/tasks');
+  if (res.status !== 404) return json(res);
+  const live = await getSessions({ limit: 20, status: 'active' });
+  return {
+    running: live.map((x) => ({
+      id: `session:${x.id}`,
+      kind: 'session' as const,
+      session_id: x.id,
+      title: x.title || 'Untitled session',
+      source: x.source,
+      cwd: x.cwd,
+      events: x.event_count,
+      started_at: x.started_at,
+      last_activity: x.last_activity ?? null,
+    })),
+    recent: [],
+  };
+}

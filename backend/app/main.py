@@ -15,7 +15,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +34,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, activity, ai_insights, db, insights, store
+from . import __version__, activity, ai_insights, cron, db, insights, passive, store, timeutil
 
 app = FastAPI(title="cot collector", version=__version__)
 
@@ -204,15 +204,28 @@ def _bridge_dir() -> Path:
 _BRIDGE_DIR = _bridge_dir()
 
 
+_search_index_building = False
+
+
+def _build_search_index() -> None:
+    global _search_index_building
+    _search_index_building = True
+    try:
+        db.ensure_search_index()
+    finally:
+        _search_index_building = False
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     db.init_db(build_search_index=False)
     # A first-time search index build can take longer than the desktop app waits
     # for /health; search scans until it lands.
-    threading.Thread(target=db.ensure_search_index, name="search-index", daemon=True).start()
+    threading.Thread(target=_build_search_index, name="search-index", daemon=True).start()
     # Opt-in telemetry runs in the background so it never blocks request handling
     # and degrades silently when offline/air-gapped.
     asyncio.create_task(_telemetry_loop())
+    passive.start_scheduler()
 
 
 @app.get("/health")
@@ -1034,6 +1047,149 @@ async def set_question_answer(request: Request) -> dict[str, Any]:
 @app.get("/v1/connections")
 def get_connections() -> dict[str, Any]:
     return {"connections": db.connections()}
+
+
+# ---------------------------------------------------------------- passive mode
+
+@app.middleware("http")
+async def _remember_self_url(request: Request, call_next):
+    """The passive importer posts back to this collector; use the address it
+    actually serves on rather than assuming the default port."""
+    server = request.scope.get("server")
+    if server and server[1]:
+        host = server[0] if server[0] not in ("0.0.0.0", "::", "") else "127.0.0.1"
+        passive.self_url = f"http://{host}:{server[1]}"
+    return await call_next(request)
+
+
+def _passive_payload() -> dict[str, Any]:
+    cfg = passive.config()
+    counts = passive._session_counts()  # noqa: SLF001
+    return {
+        **cfg,
+        "schedule": passive.schedule_info(cfg["cron"]),
+        "next_scheduled": passive.next_scheduled(),
+        "running": passive.running(),
+        "agents_detail": [{**passive.scan(a), "sessions": counts.get(a, 0)} for a in passive.AGENTS],
+        "runs": passive.runs(10),
+        "presets": cron.PRESETS,
+    }
+
+
+@app.get("/v1/passive")
+def get_passive() -> dict[str, Any]:
+    """Passive (transcripts-only) mode: config, what's on disk, schedule, recent runs."""
+    return _passive_payload()
+
+
+@app.put("/v1/passive")
+async def update_passive(request: Request) -> dict[str, Any]:
+    body = await _json_body(request)
+    agents = body.get("agents")
+    if agents is not None and not isinstance(agents, list):
+        raise HTTPException(status_code=400, detail="agents must be a list")
+    try:
+        passive.update_config(
+            enabled=bool(body["enabled"]) if "enabled" in body else None,
+            agents=agents,
+            expr=str(body["cron"]) if "cron" in body else None,
+        )
+    except cron.CronError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return _passive_payload()
+
+
+@app.post("/v1/passive/schedule/preview")
+async def preview_passive_schedule(request: Request) -> dict[str, Any]:
+    """Plain-English reading and next runs for a cron expression, without saving it."""
+    body = await _json_body(request)
+    try:
+        return {"valid": True, **passive.schedule_info(str(body.get("cron") or ""))}
+    except cron.CronError as exc:
+        return {"valid": False, "error": str(exc)}
+
+
+@app.get("/v1/passive/running")
+def get_passive_running() -> dict[str, Any]:
+    """Cheap progress for the dashboard banner: no transcript scan."""
+    last = passive.runs(1)
+    return {"running": passive.running(), "last_run": last[0] if last else None}
+
+
+@app.post("/v1/passive/run")
+def run_passive_now() -> dict[str, Any]:
+    """Start an import + analysis pass now; it runs in the background."""
+    return {"started": passive.run_in_background("manual"), "running": passive.running()}
+
+
+# ---------------------------------------------------------------- task tray
+
+_TASK_RECENT_HOURS = 24
+_TASK_SESSIONS_MAX = 20
+
+
+@app.get("/v1/tasks")
+def get_tasks() -> dict[str, Any]:
+    """What's in progress right now, for the top-bar task tray, plus passive runs
+    that finished recently. Cheap enough to poll: live sessions come from the
+    events timestamp index, nothing scans transcripts."""
+    running: list[dict[str, Any]] = []
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=timeutil._ACTIVE_WINDOW_SECONDS)).isoformat()  # noqa: SLF001
+    with store.read() as conn:
+        live_ids = [
+            r["session_id"]
+            for r in conn.execute(
+                "SELECT session_id, MAX(ts) AS last FROM events WHERE ts >= ? GROUP BY session_id"
+                " ORDER BY last DESC LIMIT ?",
+                (cutoff, _TASK_SESSIONS_MAX * 2),
+            ).fetchall()
+        ]
+    if live_ids:
+        sessions, _ = db.list_sessions_page(_TASK_SESSIONS_MAX, ids=live_ids)
+        for s in sessions:
+            if s.get("status") != "active":
+                continue
+            running.append({
+                "id": f"session:{s['id']}",
+                "kind": "session",
+                "session_id": s["id"],
+                "title": s.get("title") or "Untitled session",
+                "source": s.get("source"),
+                "cwd": s.get("cwd"),
+                "events": s.get("event_count"),
+                "started_at": s.get("started_at"),
+                "last_activity": s.get("last_activity"),
+            })
+    run = passive.running()
+    if run.get("running"):
+        running.append({
+            "id": "passive:current",
+            "kind": "passive",
+            "phase": run.get("phase") or "metadata",
+            "trigger": run.get("trigger"),
+            "started_at": run.get("started_at"),
+        })
+    if _search_index_building:
+        running.append({"id": "search-index", "kind": "index", "title": "Building the search index"})
+
+    since = datetime.now(timezone.utc) - timedelta(hours=_TASK_RECENT_HOURS)
+    recent = []
+    for r in passive.runs(10):
+        finished = timeutil.parse_ts(r.get("finished_at"))
+        if r["status"] == "running" or not finished or finished < since:
+            continue
+        recent.append({
+            "id": f"passive:{r['id']}",
+            "kind": "passive",
+            "status": r["status"],
+            "finished_at": r["finished_at"],
+            "trigger": r["trigger"],
+            "new_sessions": r.get("new_sessions", 0),
+            "findings": r.get("findings"),
+            "held_back": r.get("held_back", 0),
+            "error": r.get("error"),
+        })
+    return {"running": running, "recent": recent}
 
 
 @app.get("/v1/hooks/status")

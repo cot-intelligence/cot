@@ -5,7 +5,10 @@ import {
   getHookStatus,
   getRetention,
   getSettings,
+  getPassive,
   getVersionInfo,
+  runPassiveNow,
+  updatePassive,
   runAiAnalysis,
   updateRetention,
   updateSettings,
@@ -13,6 +16,8 @@ import {
   type Health,
   type HookHealthState,
   type HookStatus,
+  type PassiveAgent,
+  type PassiveStatus,
   type RetentionCleanupResult,
   type RetentionStatus,
   type Settings,
@@ -25,6 +30,7 @@ import { fmt } from '../forest/format';
 import { Icon } from '../forest/icons';
 import { Agent, Seg, Switch } from '../forest/ui';
 import { ExportModal } from './ExportModal';
+import { AgentSources, HooksGap, RunStatus, SchedulePicker } from '../passive/PassiveParts';
 import { homePath } from './GovernanceView';
 
 interface SettingsViewProps {
@@ -40,6 +46,7 @@ const SECTIONS = [
   { id: 'defaults', label: 'Defaults', icon: 'overview' },
   { id: 'ai', label: 'AI insights', icon: 'sparkle' },
   { id: 'collector', label: 'Collector & hooks', icon: 'plug' },
+  { id: 'passive', label: 'Passive import', icon: 'clock' },
   { id: 'privacy', label: 'Privacy', icon: 'lock' },
   { id: 'data', label: 'Data & retention', icon: 'database' },
 ];
@@ -121,6 +128,7 @@ export function SettingsView({ sidebarOpen, onSidebarOpenChange, navCollapsed, o
 
             <AiSection settings={settings} onSettings={setSettings} />
             <CollectorSection onRunOnboarding={onRunOnboarding} />
+            <PassiveSection />
             <PrivacySection settings={settings} onSettings={setSettings} />
             <DataSection onExport={() => setExportOpen(true)} />
           </div>
@@ -318,6 +326,69 @@ function PrivacySection({ settings: s, onSettings }: { settings: Settings | null
   );
 }
 
+function PassiveSection() {
+  const [p, setP] = useState<PassiveStatus | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [gap, setGap] = useState(false);
+  const running = !!p?.running.running;
+  // Poll quickly while a pass runs so the phase moves on screen; slowly otherwise.
+  useEffect(() => {
+    let live = true;
+    const load = () => getPassive().then((x) => live && setP(x)).catch(() => {});
+    load();
+    const t = window.setInterval(load, running ? 2000 : 15000);
+    return () => { live = false; window.clearInterval(t); };
+  }, [running]);
+  const save = async (patch: Parameters<typeof updatePassive>[0]) => {
+    setErr(null);
+    try {
+      setP(await updatePassive(patch));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not save');
+    }
+  };
+  const toggleAgent = (a: PassiveAgent, on: boolean) => {
+    if (!p) return;
+    void save({ agents: on ? [...p.agents, a] : p.agents.filter((x) => x !== a) });
+  };
+  const runNow = async () => {
+    await runPassiveNow();
+    setP(await getPassive());
+  };
+  return (
+    <Section id="passive" title="Passive import" desc="Build sessions from agent transcripts on a schedule, with or without hooks. Each run imports metadata first, then runs analysis.">
+      <Row
+        label="Passive mode"
+        hint={!p ? 'Loading…' : p.enabled ? `On. ${p.schedule.description}${p.next_scheduled ? `, next at ${fmt.dayTime(p.next_scheduled)}` : ''}.` : 'Off. Turn it on to import transcripts on a schedule.'}>
+        <Switch on={!!p?.enabled} disabled={!p} label="Passive mode" onChange={(v) => void save({ enabled: v })} />
+      </Row>
+      <Row label="Agents" hint="Transcripts found on this machine. Only switched-on agents are imported." stack>
+        {p && <AgentSources detail={p.agents_detail} enabled={p.agents} onToggle={toggleAgent} />}
+      </Row>
+      <Row label="Schedule" hint="Pick a plain-English schedule or write your own cron." stack>
+        {p && <SchedulePicker value={p.cron} presets={p.presets} onChange={(c) => void save({ cron: c })} />}
+      </Row>
+      {err && <p role="alert" className="mono" style={{ margin: '0 0 8px', fontSize: 12, color: 'var(--v-alert)' }}>{err}</p>}
+      <Row label="Last run" hint={running ? undefined : 'Runs also start on the schedule while passive mode is on.'} stack>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+          {p && <RunStatus status={p} />}
+          <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={!p || running || p.agents.length === 0} onClick={() => void runNow()}>
+            <Icon name="bolt" size={14} />{running ? 'Running…' : 'Run now'}
+          </button>
+        </div>
+      </Row>
+      <Row label="Without hooks" hint="What transcripts alone can't show." stack>
+        <div>
+          <button type="button" className="vbtn vbtn-ghost vbtn-sm" aria-expanded={gap} onClick={() => setGap((g) => !g)}>
+            {gap ? 'Hide' : 'Show'} what you don't get <Icon name="down" size={14} style={{ transform: gap ? 'rotate(180deg)' : undefined }} />
+          </button>
+          {gap && <div style={{ marginTop: 12 }}><HooksGap /></div>}
+        </div>
+      </Row>
+    </Section>
+  );
+}
+
 const WINDOWS = [7, 30, 90, 180].map((d) => ({ k: d, l: `${d}d` }));
 
 function DataSection({ onExport }: { onExport: () => void }) {
@@ -380,9 +451,9 @@ function Section({ id, title, desc, children }: { id: string; title: string; des
   );
 }
 
-function Row({ label, hint, children, wide }: { label: string; hint?: string; children: ReactNode; wide?: boolean }) {
+function Row({ label, hint, children, wide, stack }: { label: string; hint?: string; children: ReactNode; wide?: boolean; stack?: boolean }) {
   return (
-    <div className="set-row" data-wide={wide}>
+    <div className="set-row" data-wide={wide} data-stack={stack || undefined}>
       <div style={{ minWidth: 0 }}><div className="set-l">{label}</div>{hint && <div className="set-hint">{hint}</div>}</div>
       <div className="set-c" style={{ gap: 8 }}>{children}</div>
     </div>
@@ -393,24 +464,43 @@ function Row({ label, hint, children, wide }: { label: string; hint?: string; ch
  *  A click sets it directly and holds it until the jump settles, so the spy never flickers through sections in between. */
 function useScrollSpy(): [string, (id: string) => void] {
   const [cur, setCur] = useState(SECTIONS[0].id);
-  const hold = useRef(0);
+  // A nav click pins its section until the reader scrolls on their own: the
+  // short sections near the bottom can't reach the top, so position alone
+  // would hand the click to the last section.
+  const pinned = useRef(false);
   useEffect(() => {
     const root = document.getElementById('vf-scroll');
     if (!root) return;
     let raf = 0;
     const tick = () => {
       raf = 0;
-      if (performance.now() < hold.current) return;
+      if (pinned.current) return;
       const els = [...root.querySelectorAll<HTMLElement>('[data-spy]')];
       const top = root.getBoundingClientRect().top;
-      const atEnd = root.scrollTop + root.clientHeight >= root.scrollHeight - 4;
-      const pick = atEnd ? els[els.length - 1] : els.filter((el) => el.getBoundingClientRect().top - top <= 96).pop() ?? els[0];
+      // The reading line sits near the top, then slides down over the last
+      // screen of scroll so every section, however short, takes a turn.
+      const left = root.scrollHeight - root.clientHeight - root.scrollTop;
+      const reach = Math.min(root.clientHeight * 0.6, 360);
+      const line = 96 + Math.max(0, 1 - left / reach) * (root.clientHeight - 96 - 48);
+      const pick = els.filter((el) => el.getBoundingClientRect().top - top <= line).pop() ?? els[0];
       if (pick?.dataset.spy) setCur(pick.dataset.spy);
     };
     const on = () => { if (!raf) raf = requestAnimationFrame(tick); };
+    const unpin = () => { pinned.current = false; };
     root.addEventListener('scroll', on, { passive: true });
+    root.addEventListener('wheel', unpin, { passive: true });
+    root.addEventListener('touchmove', unpin, { passive: true });
+    root.addEventListener('keydown', unpin);
+    root.addEventListener('pointerdown', unpin);
     tick();
-    return () => { root.removeEventListener('scroll', on); cancelAnimationFrame(raf); };
+    return () => {
+      root.removeEventListener('scroll', on);
+      root.removeEventListener('wheel', unpin);
+      root.removeEventListener('touchmove', unpin);
+      root.removeEventListener('keydown', unpin);
+      root.removeEventListener('pointerdown', unpin);
+      cancelAnimationFrame(raf);
+    };
   }, []);
-  return [cur, (id) => { hold.current = performance.now() + 150; setCur(id); }];
+  return [cur, (id) => { pinned.current = true; setCur(id); }];
 }

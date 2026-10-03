@@ -13,6 +13,8 @@ import { readNavCollapsed, readSidebarOpen, writeNavCollapsed, writeSidebarOpen 
 import { MetricsSkeleton } from '../ui/Skeleton';
 import { AppSidebar, type NavKey } from './AppSidebar';
 import { CommandPalette, type PaletteCommand, type PaletteScope } from './CommandPalette';
+import { PassiveBanner } from '../passive/PassiveBanner';
+import { TaskTray } from './TaskTray';
 import { SessionsView } from './SessionsView';
 import { ReplayView } from './ReplayView';
 import { SessionDetailView } from './SessionDetailView';
@@ -387,7 +389,9 @@ export function Dashboard({ onSetup }: DashboardProps) {
             <FIcon name="search" size={15} />
             <kbd className="kbd"><svg aria-hidden="true" width="8" height="10" viewBox="0 0 8 10"><path d="M6 1 2 9" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" fill="none" /></svg></kbd>
           </button>
+          <TaskTray />
         </header>
+        <PassiveBanner />
 
         <div className="relative z-10 flex min-h-0 flex-1 overflow-hidden">
           {onSettings ? (
