@@ -36,7 +36,8 @@ const MAIN_WINDOW: &str = "main";
 const CHROME_SCRIPT: &str = r#"
 (function () {
   if (location.hostname !== '127.0.0.1' && location.hostname !== 'localhost') return;
-  var CLEAR = 92, HEADER_PAD = 24;
+  // CLEAR: where content may start beside the traffic lights; LIGHTS: where they end.
+  var CLEAR = 92, LIGHTS = 80, HEADER_PAD = 24;
 
   var init = function () {
     var style = document.createElement('style');
@@ -45,8 +46,15 @@ const CHROME_SCRIPT: &str = r#"
     style.textContent =
       // Expanded sidebar: its top row starts after the traffic lights.
       '.cot-mac-rail:not([data-rail="true"]) .cot-mac-brand{padding-left:' + CLEAR + 'px!important}' +
-      // Icon rail (60px): the logo drops below the traffic lights instead.
+      // Icon rail (60px): the logo drops below the traffic lights, and a blurred plate in the
+      // rail's colour sits behind the lights, covering the content frame's corner they overhang.
+      // A real element on <body> (WebKit doesn't draw a fixed ::before inside the sidebar).
       '.cot-mac-rail[data-rail="true"] .cot-mac-brand{margin-top:28px}' +
+      '#cot-mac-lights{position:fixed;top:0;left:0;width:' + (LIGHTS + 10) + 'px;height:40px;z-index:45;pointer-events:none;' +
+      'background:rgba(228,232,225,0.72);background:color-mix(in srgb,var(--v-rail) 72%,transparent);' +
+      '-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);' +
+      'border-bottom-right-radius:12px;display:none}' +
+      '#cot-mac-lights[data-on]{display:block}' +
       // The top row is the titlebar: no breadcrumb, and the sidebar's divider
       // starts below it so nothing runs between the traffic lights.
       '.cot-mac-header nav[aria-label="Breadcrumb"]{visibility:hidden}' +
@@ -58,6 +66,16 @@ const CHROME_SCRIPT: &str = r#"
     var mark = function () {
       var side = document.querySelector('aside.side');
       var brand = side && side.querySelector('.side-top');
+      var plate = document.getElementById('cot-mac-lights');
+      if (!plate) {
+        plate = document.createElement('div');
+        plate.id = 'cot-mac-lights';
+        plate.setAttribute('aria-hidden', 'true');
+        document.body.appendChild(plate);
+      }
+      // Only over the icon rail on desktop widths; the expanded sidebar already clears the lights.
+      var railOn = !!side && side.getAttribute('data-rail') === 'true' && window.innerWidth > 900;
+      if (railOn) plate.setAttribute('data-on', ''); else plate.removeAttribute('data-on');
       if (brand) {
         side.classList.add('cot-mac-rail');
         brand.classList.add('cot-mac-brand');
@@ -69,7 +87,7 @@ const CHROME_SCRIPT: &str = r#"
         header.setAttribute('data-tauri-drag-region', '');
         // Only when the header itself reaches under the traffic lights (no sidebar beside it).
         var left = header.getBoundingClientRect().left;
-        var overhang = Math.max(0, CLEAR - left);
+        var overhang = Math.max(0, LIGHTS - left);
         header.style.paddingLeft = overhang ? (overhang + HEADER_PAD) + 'px' : '';
       }
     };
