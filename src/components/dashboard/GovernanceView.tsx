@@ -214,9 +214,9 @@ export function GovernanceView({ onRunOnboarding, onSelect }: GovernanceViewProp
         <section className="card" style={{ marginTop: 16, overflow: 'hidden' }}>
           <div className="card-h" style={{ paddingBottom: 12 }}><span className="card-t">Audit log</span><span className="label">{audit.length} entries</span></div>
           {audit.length === 0 ? (
-            <div className="empty">No cot config events recorded yet.</div>
+            <div className="empty audit-scroll" style={{ display: 'grid', placeItems: 'center' }}>No cot config events recorded yet.</div>
           ) : (
-            <div style={{ overflowX: 'auto' }}>
+            <div className="audit-scroll">
               <table className="t">
                 <thead><tr><th>When</th><th>Action</th><th>Actor</th><th>Target</th><th>Status</th></tr></thead>
                 <tbody>
@@ -224,7 +224,7 @@ export function GovernanceView({ onRunOnboarding, onSelect }: GovernanceViewProp
                     <tr key={e.id}>
                       <td className="mono dim" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{fmt.dayTime(e.ts)}</td>
                       <td className="mono" style={{ fontSize: 12 }}>{e.action}</td>
-                      <td>{e.actor}</td>
+                      <td style={{ whiteSpace: 'nowrap' }}>{e.actor}</td>
                       <td className="mono" style={{ fontSize: 12 }}>
                         {e.target && /^[0-9a-f-]{20,}$/i.test(e.target) ? (
                           <a href="#/sessions" onClick={(ev) => { ev.preventDefault(); onSelect(e.target!); }}>{shortId(e.target)}</a>

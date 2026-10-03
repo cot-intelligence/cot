@@ -2,7 +2,6 @@
 import { motion } from 'framer-motion';
 import type { ReactNode } from 'react';
 import { AgentMark, agentLabel } from './AgentMark';
-import { Icon } from './icons';
 
 export function Wordmark({ size = 22 }: { size?: number }) {
   return <span className="wordmark" style={{ fontSize: size, lineHeight: 1 }}>cot<i>.</i></span>;
@@ -19,14 +18,6 @@ export function Agent({ id, label = true }: { id: string; label?: boolean }) {
       <AgentMark id={id} size={13} />
       {label && <span style={{ fontSize: 12 }}>{agentLabel(id)}</span>}
     </span>
-  );
-}
-
-export function ThemeButton({ theme, toggle }: { theme: string; toggle: () => void }) {
-  return (
-    <button type="button" className="iconbtn" onClick={toggle} aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}>
-      <Icon name={theme === 'dark' ? 'sun' : 'moon'} />
-    </button>
   );
 }
 

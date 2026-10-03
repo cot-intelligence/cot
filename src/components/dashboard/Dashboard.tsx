@@ -3,7 +3,6 @@ import { getInsights, getMetrics, getSettings, getStats, updateSettings, type In
 import { userTimeZone } from '../../lib/categoryMeta';
 import { useTheme } from '../../lib/theme';
 import { usePrefs } from '../../lib/prefs';
-import { ThemeButton } from '../forest/ui';
 import { Icon as FIcon } from '../forest/icons';
 import { usePolling } from '../../lib/usePolling';
 import { useQueryClient } from '@tanstack/react-query';
@@ -149,6 +148,14 @@ export function Dashboard({ onSetup }: DashboardProps) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setPaletteOpen((o) => !o);
+        return;
+      }
+      // "/" opens it too, unless the key is going into a field.
+      const t = e.target as HTMLElement | null;
+      const typing = !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+      if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey && !typing) {
+        e.preventDefault();
+        setPaletteOpen(true);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -226,7 +233,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
   const tz = userTimeZone();
   // Same key as the Overview's metrics, so it is shared rather than fetched twice.
   const { data: metrics } = usePolling<Metrics>(['metrics', tz], () => getMetrics(tz), 60000);
-  const { theme, toggle: toggleTheme } = useTheme();
+  const { theme } = useTheme();
   const { density } = usePrefs();
   const narrow = useNarrow();
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -376,12 +383,10 @@ export function Dashboard({ onSetup }: DashboardProps) {
               </span>
             ))}
           </nav>
-          <button type="button" className="search" onClick={() => setPaletteOpen(true)}>
-            <FIcon name="search" size={15} /> <span className="truncate">Search sessions, findings…</span>
-            <span className="kbd">⌘K</span>
+          <button type="button" className="search" onClick={() => setPaletteOpen(true)} aria-label="Search sessions, findings" aria-keyshortcuts="/ Meta+K" title="Search (/ or ⌘K)">
+            <FIcon name="search" size={15} />
+            <kbd className="kbd"><svg aria-hidden="true" width="8" height="10" viewBox="0 0 8 10"><path d="M6 1 2 9" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" fill="none" /></svg></kbd>
           </button>
-          <span className="demo-badge hide-sm"><span className="live" style={{ width: 6, height: 6 }} />Live data</span>
-          <ThemeButton theme={theme} toggle={toggleTheme} />
         </header>
 
         <div className="relative z-10 flex min-h-0 flex-1 overflow-hidden">

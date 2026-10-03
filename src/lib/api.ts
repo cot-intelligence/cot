@@ -49,6 +49,8 @@ export interface SessionSummary {
   /** Session Replay copies only: the id the session had where it was exported. */
   imported_from?: string;
   imported_at?: string | null;
+  /** Context typed at import time: why this trace was brought in. */
+  import_note?: string | null;
 }
 
 export interface TimelineItem {
@@ -839,6 +841,49 @@ export async function getSessions(filters: SessionFilters = {}): Promise<Session
   return data.sessions;
 }
 
+export type SessionSort = 'recent' | 'events' | 'duration' | 'cost';
+
+export interface SessionPageQuery extends SessionFilters {
+  offset?: number;
+  /** Last path segment of the working directory, as the dashboard names projects. */
+  project?: string;
+  /** Only these sessions (the "with findings" filter). An empty list matches nothing. */
+  ids?: string[];
+  sort?: SessionSort;
+  order?: 'asc' | 'desc';
+}
+
+export interface SessionPage {
+  sessions: SessionSummary[];
+  total: number;
+  has_more: boolean;
+}
+
+/** One page of the sessions list, filtered and sorted by the collector, plus the total. */
+export async function getSessionsPage(f: SessionPageQuery): Promise<SessionPage> {
+  const params = new URLSearchParams();
+  if (f.limit) params.set('limit', String(f.limit));
+  if (f.offset) params.set('offset', String(f.offset));
+  if (f.status) params.set('status', f.status);
+  if (f.source) params.set('source', f.source);
+  if (f.q) params.set('q', f.q);
+  if (f.project) params.set('project', f.project);
+  if (f.ids) params.set('ids', f.ids.join(','));
+  if (f.sort && f.sort !== 'recent') params.set('sort', f.sort);
+  if (f.order === 'asc') params.set('order', 'asc');
+  if (f.archived) params.set('archived', 'true');
+  if (f.bookmarked) params.set('bookmarked', 'true');
+  return json<SessionPage>(await fetch(`/v1/sessions?${params.toString()}`));
+}
+
+/** Every project name with its session count, for the Sessions project filter. */
+export async function getSessionProjects(archived = false): Promise<{ project: string; sessions: number }[]> {
+  const data = await json<{ projects: { project: string; sessions: number }[] }>(
+    await fetch(`/v1/sessions/projects${archived ? '?archived=true' : ''}`),
+  );
+  return data.projects;
+}
+
 export async function getSessionDetail(id: string, store: Store = 'main'): Promise<SessionDetail> {
   return json<SessionDetail>(await fetch(inStore(`/v1/sessions/${id}`, store)));
 }
@@ -900,6 +945,17 @@ export async function importReplaySession(file: File): Promise<ReplayImportResul
     throw new Error(body?.detail || `Import failed (${res.status})`);
   }
   return (await res.json()) as ReplayImportResult;
+}
+
+/** Set (or clear, with an empty string) the context note on a Session Replay import. */
+export async function setImportNote(id: string, note: string): Promise<void> {
+  await json(
+    await fetch(inStore(`/v1/sessions/${encodeURIComponent(id)}/import-note`, 'replay'), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    }),
+  );
 }
 
 /** Delete an imported session, with every session its file brought along. */

@@ -4,6 +4,7 @@ import { getActivityLog, type ActivityCategory, type ActivityFilters } from '../
 import { fmt, project as fproject } from '../../forest/format';
 import { Icon as FIcon } from '../../forest/icons';
 import { Agent } from '../../forest/ui';
+import { Dropdown } from '../../forest/Dropdown';
 
 export type LogStatus = 'all' | 'failed' | 'risky';
 
@@ -91,11 +92,16 @@ export function ActivityLog({
           <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder={category === 'shell' ? 'Filter commands' : 'Filter URLs and searches'} aria-label={`Filter ${noun}`} style={{ width: '100%' }} />
         </label>
         {category === 'shell' && viaOptions.length > 0 && (
-          <select className="sel" value={via} onChange={(e) => setVia(e.target.value)} aria-label="Ran through">
-            <option value="">Via: any</option>
-            {viaOptions.map((v) => <option key={v.key} value={v.key}>Via {viaLabel(v.key)} ({v.runs.toLocaleString()})</option>)}
-            {via && !viaOptions.some((v) => v.key === via) && <option value={via}>Via {viaLabel(via)}</option>}
-          </select>
+          <Dropdown
+            label="Ran through"
+            value={via}
+            onChange={setVia}
+            options={[
+              { value: '', label: 'Via: any' },
+              ...viaOptions.map((v) => ({ value: v.key, label: `Via ${viaLabel(v.key)}`, meta: v.runs.toLocaleString() })),
+              ...(via && !viaOptions.some((v) => v.key === via) ? [{ value: via, label: `Via ${viaLabel(via)}` }] : []),
+            ]}
+          />
         )}
         {group && (
           <span className="vchip c-fg" style={{ height: 26, paddingRight: 2 }}>

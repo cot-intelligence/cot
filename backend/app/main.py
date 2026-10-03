@@ -32,7 +32,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import __version__, activity, ai_insights, db, insights, store
 
@@ -844,26 +844,43 @@ def get_stats() -> dict[str, Any]:
     return db.stats()
 
 
+@app.get("/v1/sessions/projects")
+def get_session_projects(archived: bool = False) -> dict[str, Any]:
+    """Project names for the Sessions filter, so it lists every project, not one page's."""
+    return {"projects": db.list_session_projects(archived)}
+
+
 @app.get("/v1/sessions")
 def get_sessions(
     limit: int = 50,
+    offset: int = 0,
     status: str | None = None,
     source: str | None = None,
     q: str | None = None,
     archived: bool = False,
     bookmarked: bool = False,
+    project: str | None = None,
+    ids: str | None = None,
+    sort: str = "recent",
+    order: str = "desc",
 ) -> dict[str, Any]:
+    """A page of sessions plus ``total`` matching. ``ids`` is comma-separated."""
     limit = max(1, min(limit, 500))
-    return {
-        "sessions": db.list_sessions(
-            limit,
-            status=status,
-            source=source,
-            q=q,
-            archived=archived,
-            bookmarked=bookmarked,
-        )
-    }
+    offset = max(0, offset)
+    sessions, total = db.list_sessions_page(
+        limit,
+        offset=offset,
+        status=status,
+        source=source,
+        q=q,
+        archived=archived,
+        bookmarked=bookmarked,
+        project=project or None,
+        ids=[x for x in ids.split(",") if x] if ids is not None else None,
+        sort=sort,
+        desc=order != "asc",
+    )
+    return {"sessions": sessions, "total": total, "has_more": offset + len(sessions) < total}
 
 
 @app.post("/v1/sessions/{session_id}/archive")
@@ -1351,6 +1368,18 @@ def delete_session(session_id: str) -> dict[str, Any]:
     if not db.delete_imported_session(session_id):
         raise HTTPException(status_code=404, detail="No imported session with this id")
     return {"deleted": session_id}
+
+
+class ImportNoteBody(BaseModel):
+    note: str | None = Field(default=None, max_length=db.IMPORT_NOTE_MAX)
+
+
+@app.put("/v1/sessions/{session_id}/import-note")
+def set_import_note(session_id: str, body: ImportNoteBody) -> dict[str, Any]:
+    """Context for a Session Replay import. Run with ``?store=replay``."""
+    if not db.set_import_note(session_id, body.note):
+        raise HTTPException(status_code=404, detail="No imported session with this id")
+    return {"session_id": session_id, "import_note": (body.note or "").strip() or None}
 
 
 @app.get("/v1/sessions/{session_id}/export")

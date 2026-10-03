@@ -547,7 +547,7 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
 
 
         <>
-          <p className="font-mono text-label uppercase tracking-label text-fg/40">
+          <p className="mt-4 px-5 pb-2 font-mono text-label uppercase leading-5 tracking-label text-fg/40" style={{ textWrap: 'pretty' }}>
             Charts below the agents are all-time · findings, spend and projects follow the window ·
             findings auto-resolve when the signal stops · AI analysis only runs when you ask
           </p>

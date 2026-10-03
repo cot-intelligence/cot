@@ -149,7 +149,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
           </div>
 
           {tab === 'timeline' && (
-            <div className="grid-2" style={{ marginTop: 0, gridTemplateColumns: 'minmax(0, 1fr) 260px' }}>
+            <div className="grid-2 grid-trace" style={{ marginTop: 0 }}>
               <div className="card">
                 <div className="card-b">
                   <ol className="tl">

@@ -10,6 +10,7 @@ import { ActivityLog, type LogStatus } from './activity/ActivityLog';
 import { ShareBars as FShareBars } from '../forest/charts';
 import { fmt, project as fproject } from '../forest/format';
 import { Icon as FIcon } from '../forest/icons';
+import { Dropdown } from '../forest/Dropdown';
 import { Seg as FSeg, Sev } from '../forest/ui';
 
 interface MetricsHistoryViewProps {
@@ -86,14 +87,8 @@ export function MetricsHistoryView({ onSelect, initialTab = 'shell' }: MetricsHi
         </div>
         {(data?.projects.length || data?.sources.length || project || source) ? (
           <div className="toolbar">
-            <select className="sel" value={project} onChange={(e) => setProject(e.target.value)} aria-label="Project">
-              <option value="">All projects</option>
-              {(data?.projects ?? []).map((p) => <option key={p.cwd} value={p.cwd}>{fproject(p.cwd)} · {p.runs}</option>)}
-            </select>
-            <select className="sel" value={source} onChange={(e) => setSource(e.target.value)} aria-label="Agent">
-              <option value="">All agents</option>
-              {(data?.sources ?? []).map((x) => <option key={x.source} value={x.source}>{sourceLabel(x.source)} · {x.runs}</option>)}
-            </select>
+            <Dropdown label="Project" value={project} onChange={setProject} options={[{ value: '', label: 'All projects' }, ...(data?.projects ?? []).map((p) => ({ value: p.cwd, label: fproject(p.cwd), meta: p.runs }))]} />
+            <Dropdown label="Agent" value={source} onChange={setSource} options={[{ value: '', label: 'All agents' }, ...(data?.sources ?? []).map((x) => ({ value: x.source, label: sourceLabel(x.source), meta: x.runs }))]} />
             {(project || source) && <button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={() => { setProject(''); setSource(''); }}>Clear</button>}
           </div>
         ) : null}
