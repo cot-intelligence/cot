@@ -1,144 +1,166 @@
+import { motion } from 'framer-motion';
+import { useRef } from 'react';
 import { getHealth, type Health } from '../../lib/api';
-import { usePeek } from '../../lib/usePeek';
 import { usePolling } from '../../lib/usePolling';
-import { Icon, type IconName } from '../ui/icons';
+import { Icon } from '../forest/icons';
+import { Wordmark } from '../forest/ui';
 
-export type NavKey = 'sessions' | 'overview' | 'history' | 'replay' | 'settings';
+export type NavKey = 'sessions' | 'overview' | 'history' | 'replay' | 'findings' | 'governance' | 'settings';
 
-const NAV: { key: NavKey; label: string; href: string; icon: IconName }[] = [
-  { key: 'sessions', label: 'Sessions', href: '#/sessions', icon: 'list' },
-  { key: 'overview', label: 'Overview', href: '#/overview', icon: 'chart' },
-  { key: 'history', label: 'Activity', href: '#/metrics-history', icon: 'terminal' },
-  { key: 'replay', label: 'Session Replay', href: '#/replay', icon: 'replay' },
+// Markup and classes follow the demo's sidebar (demo-variants/src/variants/forest/App.tsx) one to one;
+// Session Replay is the one entry the demo doesn't have.
+const NAV: { group: string; items: { key: NavKey; label: string; href: string; icon: string }[] }[] = [
+  {
+    group: 'Monitor',
+    items: [
+      { key: 'overview', label: 'Overview', href: '#/overview', icon: 'overview' },
+      { key: 'sessions', label: 'Sessions', href: '#/sessions', icon: 'sessions' },
+      { key: 'history', label: 'Activity', href: '#/metrics-history', icon: 'activity' },
+      { key: 'replay', label: 'Session Replay', href: '#/replay', icon: 'replay' },
+    ],
+  },
+  {
+    group: 'Govern',
+    items: [
+      { key: 'findings', label: 'Findings', href: '#/findings', icon: 'findings' },
+      { key: 'governance', label: 'Governance', href: '#/governance', icon: 'governance' },
+    ],
+  },
 ];
 
 interface AppSidebarProps {
   active: NavKey;
-  collapsed: boolean;
+  /** The icon rail (desktop only; phones always get the full drawer). */
+  rail: boolean;
+  narrow: boolean;
+  mobileOpen: boolean;
+  onMobileClose: () => void;
   onToggleCollapsed: () => void;
   onSearch: () => void;
+  counts: { sessions?: number; findings?: number; projects?: number; agents?: number };
 }
 
-/**
- * Primary app navigation. Expanded it shows labels; collapsed (or below `md`)
- * it is an icon rail, with each entry's label kept as a tooltip. Hovering the
- * collapsed rail peeks the full panel over the content without reflowing it.
- */
-export function AppSidebar({ active, collapsed: pinnedCollapsed, onToggleCollapsed, onSearch }: AppSidebarProps) {
-  const { peek, handlers } = usePeek(pinnedCollapsed);
-  const collapsed = pinnedCollapsed && !peek;
+const PILL = { type: 'spring', duration: 0.3, bounce: 0 } as const;
+
+export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, onToggleCollapsed, onSearch, counts }: AppSidebarProps) {
+  const { data: health, error } = usePolling<Health>(['health'], () => getHealth(), 15000);
+  const warm = useWarmTips();
+  const ws = 'Local workspace';
+  const foot = error ? 'Collector offline' : `Collector on :31337${health ? ` · v${health.version}` : ''}`;
 
   return (
-    <div
-      {...handlers}
-      className={`rail-motion relative z-30 shrink-0 ${pinnedCollapsed ? 'w-14' : 'w-14 md:w-56'}`}>
-      {/* Every row pads its icon to the same x as the 56px rail's center, so
-          expanding only widens the panel and fades labels in. */}
-      <nav
-        aria-label="Primary"
-        data-expanded={!collapsed}
-        className={`rail-motion absolute inset-y-0 left-0 flex flex-col overflow-hidden border-r border-line/10 ${
-          collapsed ? 'w-14' : 'w-14 md:w-56'
-        } ${peek ? 'bg-panel shadow-soft-lg' : 'bg-panel/80 shadow-none backdrop-blur-sm'}`}>
-        <div className="flex h-14 shrink-0 items-center border-b border-line/10 px-2.5">
-          <a href="#/sessions" className="focus-ring flex items-baseline gap-2 rounded-sm" aria-label="cot. home">
-            <span className="w-9 text-center font-serif text-2xl italic leading-none tracking-tight text-fg">cot.</span>
-            <span className="rail-label eyebrow !tracking-[0.18em]">Intelligence</span>
-          </a>
+    <>
+      <aside className="side" data-open={mobileOpen} data-rail={rail} aria-label="Workspace navigation" {...warm}>
+        <div className="side-top">
+          {rail ? (
+            <button type="button" className="rail-logo" onClick={onToggleCollapsed} aria-label="Expand sidebar" data-tip="Expand sidebar">
+              <span className="wordmark">c<i>.</i></span>
+              <Icon name="sidebar" size={18} />
+            </button>
+          ) : (
+            <>
+              <a href="#/overview" aria-label="cot overview" style={{ textDecoration: 'none' }}><Wordmark /></a>
+              <button type="button" className="iconbtn" onClick={() => (narrow ? onMobileClose() : onToggleCollapsed())} aria-label={narrow ? 'Close navigation' : 'Collapse sidebar'}>
+                <Icon name={narrow ? 'close' : 'sidebar'} />
+              </button>
+            </>
+          )}
         </div>
-
-        <div className="flex flex-1 flex-col gap-1 p-2">
-          <button
-            type="button"
-            onClick={onSearch}
-            title="Search everything (⌘K)"
-            aria-label="Search everything"
-            className="focus-ring mb-3 flex h-9 shrink-0 items-center gap-3 rounded-[5px] border border-line/10 bg-bg/60 px-[11px] text-fg/45 transition-colors hover:border-line/25 hover:text-fg">
-            <Icon name="search" className="h-4 w-4 shrink-0" />
-            <span className="rail-label flex-1 text-left font-mono text-[0.68rem] uppercase tracking-[0.14em]">Search</span>
-            <kbd className="rail-label rounded-[3px] border border-line/10 px-1.5 py-0.5 font-mono text-[0.55rem] text-fg/40">
-              ⌘K
-            </kbd>
-          </button>
-
-          <p className="rail-label eyebrow px-3 pb-1">Workspace</p>
-          {NAV.map((item) => (
-            <NavLink
-              key={item.key}
-              label={item.label}
-              href={item.href}
-              icon={item.icon}
-              current={active === item.key}
-            />
+        <nav className="side-nav">
+          {NAV.map((g) => (
+            <div className="nav-g" key={g.group}>
+              {!rail && <span className="label">{g.group}</span>}
+              {g.items.map((it) => {
+                const on = it.key === active;
+                const badge = it.key === 'findings' && !!counts.findings;
+                return (
+                  <a
+                    key={it.key}
+                    href={it.href}
+                    className="nav-i"
+                    aria-current={on ? 'page' : undefined}
+                    onClick={onMobileClose}
+                    aria-label={rail ? (badge ? `${it.label}, ${counts.findings} open` : it.label) : undefined}
+                    data-tip={rail ? it.label : undefined}>
+                    {on && <motion.span layoutId="vf-pill" className="pill" transition={PILL} />}
+                    <Icon name={it.icon} />
+                    {rail ? (
+                      badge && <span className="badge" aria-hidden="true" />
+                    ) : (
+                      <>
+                        <span>{it.label}</span>
+                        {badge && <span className="ct hot">{counts.findings}</span>}
+                        {it.key === 'sessions' && counts.sessions != null && <span className="ct">{counts.sessions}</span>}
+                      </>
+                    )}
+                  </a>
+                );
+              })}
+            </div>
           ))}
-
-          <div className="mt-auto flex flex-col gap-1">
-            <NavLink label="Settings" href="#/settings" icon="settings" current={active === 'settings'} />
-            <CollectorStatus />
-            <button
-              type="button"
-              onClick={onToggleCollapsed}
-              aria-label={pinnedCollapsed ? 'Keep navigation open' : 'Collapse navigation'}
-              title={pinnedCollapsed ? 'Keep navigation open' : 'Collapse navigation'}
-              className="focus-ring hidden h-8 items-center gap-3 rounded-[5px] px-[13px] text-fg/35 transition-colors hover:bg-fg/[0.05] hover:text-fg md:flex">
-              <Icon
-                name="chevron-left"
-                className={`h-3.5 w-3.5 shrink-0 transition-transform duration-300 ${pinnedCollapsed ? 'rotate-180' : ''}`}
-              />
-              <span className="rail-label font-mono text-[0.6rem] uppercase tracking-[0.14em]">
-                {pinnedCollapsed ? 'Keep open' : 'Collapse'}
-              </span>
+        </nav>
+        {rail ? (
+          <div className="rail-foot">
+            <a href="#/settings" className="nav-i" aria-current={active === 'settings' ? 'page' : undefined} aria-label="Settings" data-tip="Settings">
+              {active === 'settings' && <motion.span layoutId="vf-pill" className="pill" transition={PILL} />}
+              <Icon name="sliders" />
+            </a>
+            <span className="rail-btn" tabIndex={0} data-tip={foot} aria-label={foot}>
+              <span className="live" style={error ? { background: 'var(--v-alert)' } : undefined} />
+            </span>
+            <button type="button" className="rail-btn" onClick={onSearch} data-tip={ws} aria-label={`Workspace: ${ws}`}>
+              <span className="av">{ws[0]}</span>
             </button>
           </div>
-        </div>
-      </nav>
-    </div>
+        ) : (
+          <>
+            <div className="nav-g" style={{ marginTop: 'auto', paddingBottom: 8 }}>
+              <a href="#/settings" className="nav-i" aria-current={active === 'settings' ? 'page' : undefined} onClick={onMobileClose}>
+                {active === 'settings' && <motion.span layoutId="vf-pill" className="pill" transition={PILL} />}
+                <Icon name="sliders" />
+                <span>Settings</span>
+              </a>
+            </div>
+            <div className="side-foot" style={{ marginTop: 0 }} role="status">
+              <span className="live" style={error ? { background: 'var(--v-alert)' } : undefined} />
+              <span>{foot}</span>
+            </div>
+          </>
+        )}
+            {/* Workspace sits at the bottom in both states, like the rail's avatar. */}
+        {!rail && (
+          <button type="button" className="ws" onClick={onSearch} aria-label={`Workspace: ${ws}`}>
+            <span className="av">{ws[0]}</span>
+            <span style={{ display: 'grid', minWidth: 0 }}>
+              <b className="truncate" style={{ fontWeight: 600, fontSize: 13 }}>{ws}</b>
+              <span className="mono faint truncate" style={{ fontSize: 11 }}>
+                {counts.projects != null ? `${counts.projects} projects` : '…'}
+                {counts.agents != null ? ` · ${counts.agents} agents` : ''}
+              </span>
+            </span>
+          </button>
+        )}
+      </aside>
+      {mobileOpen && <div className="scrim" style={{ zIndex: 55 }} onClick={onMobileClose} />}
+    </>
   );
 }
 
-function NavLink({
-  label,
-  href,
-  icon,
-  current,
-}: {
-  label: string;
-  href: string;
-  icon: IconName;
-  current: boolean;
-}) {
-  return (
-    <a
-      href={href}
-      title={label}
-      aria-current={current ? 'page' : undefined}
-      className={`focus-ring group relative flex h-9 shrink-0 items-center gap-3 rounded-[5px] px-3 font-mono text-[0.68rem] font-bold uppercase tracking-[0.14em] transition-colors ${
-        current ? 'bg-fg/[0.07] text-fg' : 'text-fg/55 hover:bg-fg/[0.04] hover:text-fg'
-      }`}>
-      {current && <span className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-vermilion" aria-hidden="true" />}
-      <Icon name={icon} className={`h-4 w-4 shrink-0 ${current ? 'text-vermilion' : ''}`} />
-      <span className="rail-label">{label}</span>
-    </a>
-  );
-}
-
-function CollectorStatus() {
-  const { data: health, error } = usePolling<Health>(['health'], () => getHealth(), 15000);
-  const online = !error && health?.status === 'ok';
-  const text = error ? 'Collector offline' : health ? 'Collector online' : 'Connecting…';
-
-  return (
-    <div
-      title={health ? `${text} · v${health.version}` : text}
-      className="mt-2 flex h-10 shrink-0 items-center gap-3 border-t border-line/10 px-4 pt-2">
-      <span className="relative flex h-2 w-2 shrink-0" aria-hidden="true">
-        {online && <span className="absolute inset-0 animate-pulse rounded-full bg-olive/60" />}
-        <span className={`relative h-2 w-2 rounded-full ${online ? 'bg-olive' : error ? 'bg-vermilion' : 'bg-fg/30'}`} />
-      </span>
-      <span className="rail-label min-w-0 flex-1 truncate font-mono text-[0.6rem] uppercase tracking-[0.14em] text-fg/45">
-        {text}
-      </span>
-      {health && <span className="rail-label font-mono text-[0.58rem] text-fg/30">v{health.version}</span>}
-    </div>
-  );
+/** Rail tooltips wait 400ms the first time; once one has shown, the rest open instantly until the pointer leaves the rail. */
+function useWarmTips() {
+  const t = useRef<number>();
+  return {
+    onPointerOver(e: React.PointerEvent<HTMLElement>) {
+      if (e.currentTarget.dataset.warm || !(e.target as HTMLElement).closest('[data-tip]')) return;
+      const el = e.currentTarget;
+      window.clearTimeout(t.current);
+      t.current = window.setTimeout(() => {
+        el.dataset.warm = 'true';
+      }, 400);
+    },
+    onPointerLeave(e: React.PointerEvent<HTMLElement>) {
+      window.clearTimeout(t.current);
+      delete e.currentTarget.dataset.warm;
+    },
+  };
 }

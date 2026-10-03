@@ -1,18 +1,26 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { getSettings, updateSettings, type Store } from '../../lib/api';
+import { getInsights, getMetrics, getSettings, getStats, updateSettings, type InsightPillar, type InsightsResponse, type Metrics, type Stats, type Store } from '../../lib/api';
+import { userTimeZone } from '../../lib/categoryMeta';
+import { useTheme } from '../../lib/theme';
+import { usePrefs } from '../../lib/prefs';
+import { ThemeButton } from '../forest/ui';
+import { Icon as FIcon } from '../forest/icons';
+import { usePolling } from '../../lib/usePolling';
+import { useQueryClient } from '@tanstack/react-query';
+import { project as fproject } from '../forest/format';
 import { setDocumentTitle } from '../../lib/documentTitle';
 import { sessionHref } from '../../lib/sessionStore';
-import { usePeek } from '../../lib/usePeek';
 import { readNavCollapsed, readSidebarOpen, writeNavCollapsed, writeSidebarOpen } from '../../lib/settings';
-import { ThemeToggle } from '../ui/ThemeToggle';
 import { MetricsSkeleton } from '../ui/Skeleton';
 import { AppSidebar, type NavKey } from './AppSidebar';
 import { CommandPalette, type PaletteCommand, type PaletteScope } from './CommandPalette';
-import { DashboardHome } from './DashboardHome';
+import { SessionsView } from './SessionsView';
 import { ReplayView } from './ReplayView';
 import { SessionDetailView } from './SessionDetailView';
 import { SessionList } from './SessionList';
 import { SettingsView } from './SettingsView';
+import { FindingsView } from './FindingsView';
+import { GovernanceView } from './GovernanceView';
 
 // Code-split: recharts (~heavy) only loads when the Overview tab is opened.
 const OverviewView = lazy(() =>
@@ -33,13 +41,20 @@ type DashboardRoute =
   | { view: 'metrics-history'; tab?: MetricsHistoryTab }
   | { view: 'replay' }
   | { view: 'replay-session'; sessionId: string; focusEventId?: number; focusQuery?: string }
-  | { view: 'settings' };
+  | { view: 'settings' }
+  | { view: 'findings'; pillar?: InsightPillar }
+  | { view: 'governance' };
 
 type MetricsHistoryTab = 'shell' | 'web';
 
 function parseHash(): DashboardRoute {
   const hash = window.location.hash.replace(/^#\/?/, '');
   if (hash === 'settings') return { view: 'settings' };
+  if (hash === 'governance') return { view: 'governance' };
+  const findingsMatch = hash.match(/^findings(?:\?pillar=(security|cost|usability))?$/);
+  if (findingsMatch) return { view: 'findings', pillar: findingsMatch[1] as InsightPillar | undefined };
+  // The workspace opens on the Overview.
+  if (hash === '') return { view: 'overview' };
   const historyMatch = hash.match(/^metrics-history(?:\?tab=(shell|web))?$/);
   if (historyMatch) return { view: 'metrics-history', tab: historyMatch[1] as MetricsHistoryTab | undefined };
   // Legacy #/metrics and #/insights merged into the unified Overview page.
@@ -118,7 +133,6 @@ export function Dashboard({ onSetup }: DashboardProps) {
   }, [navCollapsed]);
 
   const toggleSidebar = useCallback(() => saveSidebarOpen(!sidebarOpen), [saveSidebarOpen, sidebarOpen]);
-  const { peek: sessionsPeek, handlers: sessionsPeekHandlers } = usePeek(!sidebarOpen);
 
   useEffect(() => {
     const onHash = () => {
@@ -147,6 +161,8 @@ export function Dashboard({ onSetup }: DashboardProps) {
     else if (route.view === 'overview') setDocumentTitle('Overview');
     else if (route.view === 'metrics-history') setDocumentTitle('Activity');
     else if (route.view === 'replay') setDocumentTitle('Session Replay');
+    else if (route.view === 'findings') setDocumentTitle('Findings');
+    else if (route.view === 'governance') setDocumentTitle('Governance');
   }, [route.view]);
 
   const selectSession = useCallback((id: string, eventId?: number, query?: string, store: Store = 'main') => {
@@ -177,6 +193,16 @@ export function Dashboard({ onSetup }: DashboardProps) {
     window.location.hash = tab === 'web' ? '#/metrics-history?tab=web' : '#/metrics-history';
   }, []);
 
+  const goFindings = useCallback((pillar?: InsightPillar) => {
+    setRoute({ view: 'findings', pillar });
+    window.location.hash = pillar ? `#/findings?pillar=${pillar}` : '#/findings';
+  }, []);
+
+  const goGovernance = useCallback(() => {
+    setRoute({ view: 'governance' });
+    window.location.hash = '#/governance';
+  }, []);
+
   const goReplay = useCallback(() => {
     setRoute({ view: 'replay' });
     window.location.hash = '#/replay';
@@ -188,7 +214,23 @@ export function Dashboard({ onSetup }: DashboardProps) {
   const onOverview = route.view === 'overview';
   const onMetricsHistory = route.view === 'metrics-history';
   const onReplay = route.view === 'replay' || replayId !== null;
-  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay;
+  const onFindings = route.view === 'findings';
+  const onGovernance = route.view === 'governance';
+  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay && !onFindings && !onGovernance;
+
+  // Counts for the navigation: sessions traced, and findings that still need a look.
+  const { data: stats } = usePolling<Stats>(['stats'], () => getStats(), 15000);
+  // Same query key as Overview and Findings use for their default window, so the collector computes findings once.
+  const { data: openInsights } = usePolling<InsightsResponse>(['insights', 30], () => getInsights(30, 'all'), 60000);
+  const openFindings = openInsights?.insights.filter((f) => f.status === 'active' && f.severity !== 'info').length ?? 0;
+  const tz = userTimeZone();
+  // Same key as the Overview's metrics, so it is shared rather than fetched twice.
+  const { data: metrics } = usePolling<Metrics>(['metrics', tz], () => getMetrics(tz), 60000);
+  const { theme, toggle: toggleTheme } = useTheme();
+  const { density } = usePrefs();
+  const narrow = useNarrow();
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const rail = navCollapsed && !narrow;
 
   // Navigation entries shown in the palette, marked active for the current view.
   const paletteCommands = useMemo<PaletteCommand[]>(
@@ -226,6 +268,22 @@ export function Dashboard({ onSetup }: DashboardProps) {
         run: goReplay,
       },
       {
+        id: 'nav-findings',
+        label: 'Go to Findings',
+        icon: 'warn',
+        keywords: 'findings insights security cost usability rules triage dismiss',
+        active: onFindings,
+        run: () => goFindings(),
+      },
+      {
+        id: 'nav-governance',
+        label: 'Go to Governance',
+        icon: 'plug',
+        keywords: 'governance hooks coverage retention audit residency',
+        active: onGovernance,
+        run: goGovernance,
+      },
+      {
         id: 'nav-settings',
         label: 'Go to Settings',
         icon: 'settings',
@@ -241,6 +299,10 @@ export function Dashboard({ onSetup }: DashboardProps) {
       onMetricsHistory,
       onReplay,
       onSettings,
+      onFindings,
+      onGovernance,
+      goFindings,
+      goGovernance,
       goSessions,
       goOverview,
       goMetricsHistory,
@@ -260,7 +322,11 @@ export function Dashboard({ onSetup }: DashboardProps) {
     [selectedId, replayId],
   );
 
-  const activeNav: NavKey = onSettings
+  const activeNav: NavKey = onFindings
+    ? 'findings'
+    : onGovernance
+      ? 'governance'
+      : onSettings
     ? 'settings'
     : onOverview
       ? 'overview'
@@ -270,46 +336,52 @@ export function Dashboard({ onSetup }: DashboardProps) {
           ? 'replay'
           : 'sessions';
 
+  const queryClient = useQueryClient();
+  const cachedSummary = selectedId ? queryClient.getQueryData<{ summary: { cwd: string | null } }>(['sessionDetail', selectedId])?.summary : undefined;
   const crumbs: { label: string; href?: string }[] = selectedId
-    ? [{ label: 'Sessions', href: '#/sessions' }, { label: shortSession(selectedId) }]
+    ? [{ label: 'Sessions', href: '#/sessions' }, { label: cachedSummary ? `${fproject(cachedSummary.cwd)} · ${selectedId.slice(0, 8)}` : shortSession(selectedId) }]
     : replayId
       ? [{ label: 'Session Replay', href: '#/replay' }, { label: shortSession(replayId) }]
       : route.view === 'replay'
         ? [{ label: 'Session Replay' }]
         : onMetricsHistory
-      ? [{ label: 'Overview', href: '#/overview' }, { label: 'Activity' }]
-      : [{ label: onSettings ? 'Settings' : onOverview ? 'Overview' : 'Sessions' }];
+      ? [{ label: 'Activity' }]
+      : [{ label: onFindings ? 'Findings' : onGovernance ? 'Governance' : onSettings ? 'Settings' : onOverview ? 'Overview' : 'Sessions' }];
+  const trail = [{ label: 'Local workspace', href: '#/overview' }, ...crumbs];
 
   return (
-    <div className="relative flex h-screen">
+    <div className="vf app" data-theme={theme} data-rail={rail} data-density={density}>
       <AppSidebar
         active={activeNav}
-        collapsed={navCollapsed}
+        rail={rail}
+        narrow={narrow}
+        mobileOpen={mobileOpen}
+        onMobileClose={() => setMobileOpen(false)}
         onToggleCollapsed={toggleNav}
         onSearch={() => setPaletteOpen(true)}
+        counts={{ sessions: stats?.sessions, findings: openFindings, projects: metrics?.totals.projects, agents: stats ? Object.keys(stats.by_source).length : undefined }}
       />
-      <div className="relative flex min-w-0 flex-1 flex-col">
-        <div className="pointer-events-none absolute inset-0 grid-bg" aria-hidden="true" />
-        <header className="relative z-10 flex h-14 shrink-0 items-center justify-between gap-4 border-b border-line/10 bg-bg/70 px-6 backdrop-blur-sm">
-          <nav aria-label="Breadcrumb" className="min-w-0">
-            <ol className="flex min-w-0 items-center gap-2.5 font-mono text-[0.68rem] font-bold uppercase tracking-[0.16em]">
-              {crumbs.map((c, i) => (
-                <li key={c.label} className="flex min-w-0 items-center gap-2">
-                  {i > 0 && <span className="text-fg/20" aria-hidden="true">/</span>}
-                  {c.href ? (
-                    <a href={c.href} className="focus-ring shrink-0 rounded-sm text-fg/45 transition-colors hover:text-fg">
-                      {c.label}
-                    </a>
-                  ) : (
-                    <span aria-current="page" className="truncate font-medium text-fg">
-                      {c.label}
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ol>
+      <div className="main">
+        <header className="top">
+          <button type="button" className="iconbtn show-sm" onClick={() => setMobileOpen(true)} aria-label="Open navigation"><FIcon name="menu" /></button>
+          <nav aria-label="Breadcrumb" className="crumbs">
+            {trail.map((c, i) => (
+              <span key={c.label} style={{ display: 'contents' }}>
+                {i > 0 && <FIcon name="chevron" size={14} className={i === 1 ? 'hide-sm' : undefined} />}
+                {i === trail.length - 1 ? (
+                  <b className={`truncate ${i > 1 ? 'mono' : ''}`} style={i > 1 ? { fontSize: 12 } : undefined} aria-current="page">{c.label}</b>
+                ) : (
+                  <a href={c.href} className={i === 0 ? 'hide-sm' : undefined} style={{ textDecoration: 'none' }}>{c.label}</a>
+                )}
+              </span>
+            ))}
           </nav>
-          <ThemeToggle />
+          <button type="button" className="search" onClick={() => setPaletteOpen(true)}>
+            <FIcon name="search" size={15} /> <span className="truncate">Search sessions, findings…</span>
+            <span className="kbd">⌘K</span>
+          </button>
+          <span className="demo-badge hide-sm"><span className="live" style={{ width: 6, height: 6 }} />Live data</span>
+          <ThemeButton theme={theme} toggle={toggleTheme} />
         </header>
 
         <div className="relative z-10 flex min-h-0 flex-1 overflow-hidden">
@@ -318,8 +390,18 @@ export function Dashboard({ onSetup }: DashboardProps) {
               <SettingsView
                 sidebarOpen={sidebarOpen}
                 onSidebarOpenChange={saveSidebarOpen}
+                navCollapsed={navCollapsed}
+                onNavCollapsedChange={(c) => c !== navCollapsed && toggleNav()}
                 onRunOnboarding={onSetup}
               />
+            </main>
+          ) : onFindings ? (
+            <main className="flex min-w-0 flex-1 flex-col">
+              <FindingsView onSelect={selectSession} initialPillar={route.view === 'findings' ? route.pillar : undefined} />
+            </main>
+          ) : onGovernance ? (
+            <main className="flex min-w-0 flex-1 flex-col">
+              <GovernanceView onRunOnboarding={onSetup} onSelect={(id) => selectSession(id)} />
             </main>
           ) : onMetricsHistory ? (
             <main className="flex min-w-0 flex-1 flex-col">
@@ -347,30 +429,17 @@ export function Dashboard({ onSetup }: DashboardProps) {
           ) : onOverview ? (
             <main className="flex min-w-0 flex-1 flex-col">
               <Suspense fallback={<MetricsSkeleton />}>
-                <OverviewView onSelect={selectSession} onHistory={goMetricsHistory} />
+                <OverviewView onSelect={selectSession} onHistory={goMetricsHistory} onFindings={goFindings} />
               </Suspense>
             </main>
           ) : selectedId ? (
             <>
-              {/* The slot keeps the pinned width; a hover peek overlays the timeline. */}
-              <div
-                {...sessionsPeekHandlers}
-                className={`rail-motion relative z-20 hidden shrink-0 md:block ${
-                  sidebarOpen ? 'w-80' : 'w-10'
-                }`}>
-                <div
-                  className={`rail-motion absolute inset-y-0 left-0 overflow-hidden ${
-                    sidebarOpen || sessionsPeek ? 'w-80' : 'w-10'
-                  } ${sessionsPeek ? 'shadow-soft-lg' : 'shadow-none'}`}>
-                  <SessionList
-                    selectedId={selectedId}
-                    onSelect={selectSession}
-                    collapsed={!sidebarOpen && !sessionsPeek}
-                    peeking={sessionsPeek}
-                    onToggle={toggleSidebar}
-                  />
+              {/* The demo's trace page has no side list; it appears only when "Session list: Open" is set in Settings. */}
+              {sidebarOpen && (
+                <div className="relative z-20 hidden w-80 shrink-0 border-r border-line/10 md:block">
+                  <SessionList selectedId={selectedId} onSelect={selectSession} collapsed={false} peeking={false} onToggle={toggleSidebar} />
                 </div>
-              </div>
+              )}
               <main className="flex min-h-0 min-w-0 flex-1 flex-col">
                 <SessionDetailView
                   sessionId={selectedId}
@@ -380,7 +449,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
               </main>
             </>
           ) : (
-            <DashboardHome onSelect={selectSession} />
+            <SessionsView onSelect={selectSession} />
           )}
         </div>
       </div>
@@ -400,4 +469,17 @@ export function Dashboard({ onSetup }: DashboardProps) {
 function shortSession(id: string): string {
   const tail = id.includes('/') ? id.slice(id.lastIndexOf('/') + 1) : id;
   return tail.length > 12 ? `${tail.slice(0, 10)}…` : tail;
+}
+
+/** Below 900px the sidebar is a drawer (the demo's breakpoint). */
+function useNarrow() {
+  const q = '(max-width: 900px)';
+  const [narrow, setNarrow] = useState(() => window.matchMedia?.(q).matches ?? false);
+  useEffect(() => {
+    const mq = window.matchMedia?.(q);
+    const on = (e: MediaQueryListEvent) => setNarrow(e.matches);
+    mq?.addEventListener('change', on);
+    return () => mq?.removeEventListener('change', on);
+  }, []);
+  return narrow;
 }

@@ -167,26 +167,26 @@ export function ShareCardModal({ metrics, onClose }: ShareCardModalProps) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/50 px-4 py-8 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-8 backdrop-blur-sm"
       onClick={onClose}>
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Share your metrics"
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-full w-full max-w-4xl flex-col overflow-hidden border border-fg/15 bg-bg shadow-soft-lg">
+        className="flex max-h-full w-full max-w-4xl flex-col overflow-hidden rounded-card border border-line/10 bg-surface shadow-soft-lg">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-fg/10 px-5 py-3.5">
+        <div className="flex items-center justify-between border-b border-line/10 px-5 py-3.5">
           <div className="flex items-baseline gap-2">
-            <h2 className="font-serif text-xl font-bold uppercase tracking-tight text-fg">
-              Share your <span className="lowercase italic text-vermilion">card</span>
+            <h2 className="text-lg font-semibold tracking-[-0.01em] text-fg">
+              Share your <span className="lowercase italic text-hot">card</span>
             </h2>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="flex h-7 w-7 items-center justify-center border border-fg/20 font-mono text-sm text-fg/60 transition-colors hover:border-fg/50 hover:text-fg">
+            className="flex h-7 w-7 items-center justify-center rounded-control border border-line/10 font-mono text-sm text-fg/60 transition-colors hover:border-line/25 hover:text-fg">
             ✕
           </button>
         </div>
@@ -195,7 +195,7 @@ export function ShareCardModal({ metrics, onClose }: ShareCardModalProps) {
           {/* Controls */}
           <div className="w-full shrink-0 space-y-5 md:w-64">
             <div className="space-y-1.5">
-              <label className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/45">
+              <label className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
                 Headline
               </label>
               <input
@@ -203,26 +203,26 @@ export function ShareCardModal({ metrics, onClose }: ShareCardModalProps) {
                 maxLength={32}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="My coding footprint"
-                className="w-full border border-fg/20 bg-surface px-2.5 py-2 font-mono text-xs text-fg placeholder:text-fg/30 focus:border-vermilion focus:outline-none"
+                className="w-full border rounded-control border-line/[0.16] bg-surface px-2.5 py-2 font-mono text-xs text-fg placeholder:text-fg/40 focus:border-hot focus:outline-none"
               />
-              <p className="font-mono text-[0.5rem] text-fg/35">Last word becomes the accent.</p>
+              <p className="font-mono text-label text-fg/40">Last word becomes the accent.</p>
             </div>
 
             <div className="space-y-1.5">
-              <label className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/45">
-                Handle <span className="text-fg/25">(optional)</span>
+              <label className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
+                Handle <span className="text-fg/40">(optional)</span>
               </label>
               <input
                 value={handle}
                 maxLength={24}
                 onChange={(e) => setHandle(e.target.value)}
                 placeholder="@you"
-                className="w-full border border-fg/20 bg-surface px-2.5 py-2 font-mono text-xs text-fg placeholder:text-fg/30 focus:border-vermilion focus:outline-none"
+                className="w-full border rounded-control border-line/[0.16] bg-surface px-2.5 py-2 font-mono text-xs text-fg placeholder:text-fg/40 focus:border-hot focus:outline-none"
               />
             </div>
 
             <div className="space-y-1.5">
-              <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/45">
+              <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
                 Theme
               </span>
               <div className="grid grid-cols-2 gap-px bg-fg/15">
@@ -231,8 +231,8 @@ export function ShareCardModal({ metrics, onClose }: ShareCardModalProps) {
                     key={t}
                     type="button"
                     onClick={() => setTheme(t)}
-                    className={`py-2 font-mono text-[0.6rem] font-bold uppercase tracking-widest transition-colors ${
-                      theme === t ? 'bg-fg text-bg' : 'bg-bg text-fg/55 hover:text-fg'
+                    className={`py-2 font-mono text-label font-semibold uppercase tracking-label transition-colors ${
+                      theme === t ? 'bg-fg text-bg' : 'bg-bg text-fg/60 hover:text-fg'
                     }`}>
                     {t}
                   </button>
@@ -242,10 +242,10 @@ export function ShareCardModal({ metrics, onClose }: ShareCardModalProps) {
 
             <div className="space-y-2">
               <div className="flex items-baseline justify-between">
-                <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/45">
+                <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
                   Metrics
                 </span>
-                <span className="font-mono text-[0.55rem] tabular-nums text-fg/35">
+                <span className="font-mono text-label tabular-nums text-fg/40">
                   {selected.length}/{MAX_STATS}
                 </span>
               </div>
@@ -258,10 +258,10 @@ export function ShareCardModal({ metrics, onClose }: ShareCardModalProps) {
                       type="button"
                       onClick={() => toggle(s.key)}
                       aria-pressed={on}
-                      className={`border px-2 py-1 font-mono text-[0.58rem] uppercase tracking-wider transition-colors ${
+                      className={`border px-2 py-1 font-mono text-label uppercase tracking-wider transition-colors ${
                         on
-                          ? 'border-vermilion bg-vermilion/10 text-vermilion'
-                          : 'border-fg/20 text-fg/55 hover:border-fg/45 hover:text-fg'
+                          ? 'border-hot bg-hot/10 text-hot'
+                          : 'border-line/[0.16] text-fg/60 hover:border-line/45 hover:text-fg'
                       }`}>
                       {s.label}
                     </button>
@@ -290,7 +290,7 @@ export function ShareCardModal({ metrics, onClose }: ShareCardModalProps) {
 
           {/* Preview + actions */}
           <div className="flex min-w-0 flex-1 flex-col gap-4">
-            <div className="border border-fg/15 bg-panel/40 p-3">
+            <div className="border rounded-cell border-line/10 bg-panel/40 p-3">
               <canvas
                 ref={canvasRef}
                 style={{ aspectRatio: `${CARD_W} / ${CARD_H}` }}
@@ -325,7 +325,7 @@ export function ShareCardModal({ metrics, onClose }: ShareCardModalProps) {
               />
             </div>
 
-            <p className="min-h-[1rem] font-mono text-[0.6rem] text-fg/45">
+            <p className="min-h-[1rem] font-mono text-label text-fg/60">
               {hint ??
                 'Copy or share copies the card image — paste (⌘V) into X or LinkedIn compose.'}
             </p>
@@ -350,7 +350,7 @@ function SeriesPicker({
   const kindTag = (k: ChartSeries['kind']) => (k === 'line' ? 'line' : k === 'pie' ? 'pie' : 'bars');
   return (
     <div className="space-y-2">
-      <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/45">
+      <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
         {label}
       </span>
       <div className="flex flex-wrap gap-1.5">
@@ -362,13 +362,13 @@ function SeriesPicker({
               type="button"
               onClick={() => onChange(o.key)}
               aria-pressed={on}
-              className={`flex items-center gap-1.5 border px-2 py-1 font-mono text-[0.58rem] uppercase tracking-wider transition-colors ${
+              className={`flex items-center gap-1.5 border px-2 py-1 font-mono text-label uppercase tracking-wider transition-colors ${
                 on
-                  ? 'border-vermilion bg-vermilion/10 text-vermilion'
-                  : 'border-fg/20 text-fg/55 hover:border-fg/45 hover:text-fg'
+                  ? 'border-hot bg-hot/10 text-hot'
+                  : 'border-line/[0.16] text-fg/60 hover:border-line/45 hover:text-fg'
               }`}>
               {o.label}
-              <span className={`text-[0.5rem] ${on ? 'text-vermilion/70' : 'text-fg/30'}`}>
+              <span className={`text-label ${on ? 'text-hot/70' : 'text-fg/40'}`}>
                 {kindTag(o.kind)}
               </span>
             </button>
@@ -395,7 +395,7 @@ function ActionButton({
       type="button"
       onClick={onClick}
       disabled={busy}
-      className="flex items-center justify-center gap-2 border border-fg/25 px-3 py-2.5 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/75 transition-colors hover:border-fg/55 hover:text-fg disabled:opacity-60">
+      className="btn">
       {busy ? <span className="font-mono">…</span> : icon}
       {label}
     </button>

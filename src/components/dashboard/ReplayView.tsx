@@ -57,7 +57,7 @@ export function ReplayView() {
       <div className="mx-auto max-w-6xl space-y-8 px-6 py-10 sm:px-8">
         <FadeIn>
           <PageHeader
-            eyebrow="Imported"
+            eyebrow="Monitor"
             title="Session Replay"
             description="Sessions imported from exported JSON files. They're kept apart from your traced sessions and don't count toward Overview or Activity."
             actions={
@@ -83,7 +83,7 @@ export function ReplayView() {
         </FadeIn>
 
         {error && (
-          <p role="alert" className="rounded border border-vermilion/40 bg-vermilion/[0.05] px-4 py-3 font-mono text-xs text-vermilion">
+          <p role="alert" className="rounded-cell border border-alert/40 bg-alert/[0.06] px-4 py-3 font-mono text-xs text-alert">
             {error}
           </p>
         )}
@@ -92,7 +92,7 @@ export function ReplayView() {
           {isPending ? (
             <p className="font-mono text-xs text-fg/40">Loading…</p>
           ) : isError ? (
-            <p className="font-mono text-xs text-vermilion">Couldn't load imported sessions.</p>
+            <p className="font-mono text-xs text-hot">Couldn't load imported sessions.</p>
           ) : sessions && sessions.length > 0 ? (
             <div className="border-y border-line/10">
               {sessions.map((s) => (
@@ -100,8 +100,8 @@ export function ReplayView() {
               ))}
             </div>
           ) : (
-            <div className="rounded border border-dashed border-line/15 px-6 py-12 text-center">
-              <Icon name="replay" className="mx-auto h-6 w-6 text-fg/30" />
+            <div className="rounded border border-dashed border-line/10 px-6 py-12 text-center">
+              <Icon name="replay" className="mx-auto h-6 w-6 text-fg/40" />
               <p className="mt-3 text-sm text-fg/60">No imported sessions yet.</p>
               <p className="mt-1 text-xs text-fg/40">
                 Export a session from its page or the Sessions list, then import the .json file here.
@@ -131,27 +131,27 @@ function ReplayRow({
   }, [confirming]);
 
   return (
-    <div className="group flex items-center gap-3 border-b border-line/10 px-3 py-2.5 transition-colors last:border-b-0 hover:bg-surface">
+    <div className="group flex items-center gap-3 border-b border-line/10 px-3 py-2.5 transition-colors last:border-b-0 hover:bg-fg/[0.04]">
       <a
         href={sessionHref(s.id, 'replay')}
-        className="flex min-w-0 flex-1 items-center gap-3 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-vermilion">
+        className="flex min-w-0 flex-1 items-center gap-3 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-hot">
         <span className="min-w-0 flex-1 truncate font-mono text-sm font-medium text-fg">
           {s.title || `Session ${(s.imported_from ?? s.id).slice(0, 8)}`}
         </span>
         <SourceBadge source={s.source} />
         <span
-          className="hidden font-mono text-[0.65rem] tabular-nums text-fg/40 sm:inline"
+          className="hidden font-mono text-data tabular-nums text-fg/40 sm:inline"
           title={`Original session ${s.imported_from}`}>
           from {s.imported_from?.slice(0, 8)}
         </span>
-        <span className="inline-flex items-center gap-1 font-mono text-[0.65rem] tabular-nums text-fg/45">
+        <span className="inline-flex items-center gap-1 font-mono text-data tabular-nums text-fg/60">
           <Icon name="event" className="h-3 w-3" />
           {s.event_count}
         </span>
-        <span className="w-28 shrink-0 text-right font-mono text-[0.65rem] text-fg/45" title="Recorded">
+        <span className="w-28 shrink-0 text-right font-mono text-data text-fg/60" title="Recorded">
           {formatRelative(s.started_at)}
         </span>
-        <span className="hidden w-28 shrink-0 text-right font-mono text-[0.65rem] text-fg/35 md:inline" title="Imported">
+        <span className="hidden w-28 shrink-0 text-right font-mono text-data text-fg/40 md:inline" title="Imported">
           imported {formatRelative(s.imported_at)}
         </span>
       </a>
@@ -160,7 +160,7 @@ function ReplayRow({
         download
         aria-label="Export session as JSON"
         title="Export as JSON"
-        className="rounded p-1 text-fg/35 transition hover:bg-panel hover:text-fg focus-visible:outline-none">
+        className="rounded p-1 text-fg/40 transition hover:bg-panel hover:text-fg focus-visible:outline-none">
         <Icon name="download" className="h-3.5 w-3.5" />
       </a>
       <button
@@ -168,8 +168,8 @@ function ReplayRow({
         onClick={() => (confirming ? void onDelete(s.id) : setConfirming(true))}
         aria-label={confirming ? 'Confirm delete' : 'Delete imported session'}
         title={confirming ? 'Click again to delete' : 'Delete imported session'}
-        className={`rounded p-1 font-mono text-[0.6rem] uppercase tracking-widest transition focus-visible:outline-none ${
-          confirming ? 'bg-vermilion/10 px-2 text-vermilion' : 'text-fg/35 hover:bg-panel hover:text-fg'
+        className={`rounded p-1 font-mono text-label uppercase tracking-label transition focus-visible:outline-none ${
+          confirming ? 'bg-alert/10 px-2 text-alert' : 'text-fg/40 hover:bg-panel hover:text-fg'
         }`}>
         {confirming ? 'Delete?' : <Icon name="trash" className="h-3.5 w-3.5" />}
       </button>

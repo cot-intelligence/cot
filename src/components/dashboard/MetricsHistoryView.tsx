@@ -1,22 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { activateOnKey } from '../../lib/a11y';
 import {
   getActivity,
-  type ActivityAttention,
   type ActivityCategory,
   type ActivityFilters,
-  type ActivitySummary,
 } from '../../lib/api';
-import { formatDuration, formatRelative } from '../../lib/categoryMeta';
-import { compact } from '../../lib/format';
 import { sourceLabel } from '../../lib/sourceLabels';
-import { FadeIn } from '../ui/FadeIn';
-import { Icon } from '../ui/icons';
-import { PageHeader } from '../ui/PageHeader';
-import { Select } from '../ui/Select';
-import { ActivityLog, viaLabel, type LogStatus } from './activity/ActivityLog';
-import { CommandText, Grid, Section, Stat, shortPath } from './activity/parts';
+import { ActivityLog, type LogStatus } from './activity/ActivityLog';
+import { ShareBars as FShareBars } from '../forest/charts';
+import { fmt, project as fproject } from '../forest/format';
+import { Icon as FIcon } from '../forest/icons';
+import { Seg as FSeg, Sev } from '../forest/ui';
 
 interface MetricsHistoryViewProps {
   onSelect: (sessionId: string, eventId?: number) => void;
@@ -24,23 +18,22 @@ interface MetricsHistoryViewProps {
   initialTab?: ActivityCategory;
 }
 
-const RANGES: { days: number; label: string }[] = [
-  { days: 1, label: '24h' },
-  { days: 7, label: '7 days' },
-  { days: 30, label: '30 days' },
-  { days: 0, label: 'All time' },
+const RANGES: { days: number; label: string; short: string }[] = [
+  { days: 1, label: '24h', short: '24h' },
+  { days: 7, label: '7 days', short: '7d' },
+  { days: 30, label: '30 days', short: '30d' },
+  { days: 0, label: 'All time', short: 'all' },
 ];
 
 /** How many "Worth a look" entries show before "Show more". */
 const ATTENTION_SHOWN = 5;
-const MOST_USED_SHOWN = 6;
 
 /**
  * Activity: what agents ran in the shell and fetched from the web. Four
  * numbers, a short ranked list of what is worth a look (measured against the
  * history before the range), what agents rely on, then every command.
  */
-export function MetricsHistoryView({ onSelect, onBack, initialTab = 'shell' }: MetricsHistoryViewProps) {
+export function MetricsHistoryView({ onSelect, initialTab = 'shell' }: MetricsHistoryViewProps) {
   const [tab, setTab] = useState<ActivityCategory>(initialTab);
   const [days, setDays] = useState(7);
   const [project, setProject] = useState('');
@@ -73,95 +66,123 @@ export function MetricsHistoryView({ onSelect, onBack, initialTab = 'shell' }: M
   };
 
   const shell = tab === 'shell';
+  const sm = data?.summary;
+  const groups = data?.groups ?? [];
+  const attention = data?.attention ?? [];
+  const [moreAttention, setMoreAttention] = useState(false);
+  const rangeLabel = days === 0 ? 'all time' : days === 1 ? 'last 24 hours' : `last ${days} days`;
 
+  // Markup mirrors the demo's Activity page (demo-variants/src/variants/forest/pages-b.tsx); the real filters,
+  // "Worth a look" and the full searchable log are kept in the same style.
   return (
-    <div className="scroll-thin flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-5xl space-y-8 px-6 py-8 sm:px-8">
-        <FadeIn>
-          <PageHeader
-            above={
-              <button
-                type="button"
-                onClick={onBack}
-                className="flex items-center gap-1.5 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/45 transition-colors hover:text-fg">
-                <Icon name="chevron-left" className="h-3 w-3" />
-                Overview
-              </button>
-            }
-            title="Activity"
-            description="What your agents ran and fetched, and what is worth a look."
-          />
-        </FadeIn>
-
-        <FadeIn delay={0.03} className="space-y-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex border border-fg/20">
-              <TabBtn active={shell} onClick={() => switchTab('shell')}>
-                <Icon name="terminal" className="h-3.5 w-3.5" />
-                Shell
-              </TabBtn>
-              <TabBtn active={!shell} onClick={() => switchTab('web')}>
-                <Icon name="globe" className="h-3.5 w-3.5" />
-                Web
-              </TabBtn>
-            </div>
-            <div className="seg" role="tablist" aria-label="Time range">
-              {RANGES.map((r) => (
-                <button
-                  key={r.days}
-                  type="button"
-                  role="tab"
-                  aria-selected={days === r.days}
-                  aria-pressed={days === r.days}
-                  onClick={() => setDays(r.days)}
-                  className="seg-item">
-                  {r.label}
-                </button>
-              ))}
-            </div>
-            <div className="ml-auto flex flex-wrap gap-2">
-              <Select
-                aria-label="Project"
-                value={project}
-                onChange={setProject}
-                options={[
-                  { value: '', label: 'All projects' },
-                  ...(data?.projects ?? []).map((p) => ({ value: p.cwd, label: shortPath(p.cwd) })),
-                  ...(project && !data?.projects.some((p) => p.cwd === project)
-                    ? [{ value: project, label: shortPath(project) }]
-                    : []),
-                ]}
-              />
-              <Select
-                aria-label="Agent"
-                value={source}
-                onChange={setSource}
-                options={[
-                  { value: '', label: 'All agents' },
-                  ...(data?.sources ?? []).map((s) => ({ value: s.source, label: sourceLabel(s.source) })),
-                  ...(source && !data?.sources.some((s) => s.source === source)
-                    ? [{ value: source, label: sourceLabel(source) }]
-                    : []),
-                ]}
-              />
-            </div>
+    <div className="scroll" id="vf-scroll">
+      <div className="page">
+        <div className="ph">
+          <div><span className="label">Monitor</span><h1>Activity</h1><p>What agents ran on the machine, grouped by {shell ? 'program' : 'host'}.</p></div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <FSeg id="vf-kind" value={tab} onChange={switchTab} options={[{ k: 'shell', l: 'Shell' }, { k: 'web', l: 'Web' }]} />
+            <FSeg id="vf-arange" value={days} onChange={(d) => { setDays(d); setGroup(null); }} options={RANGES.map((r) => ({ k: r.days, l: r.short }))} />
           </div>
+        </div>
+        {(data?.projects.length || data?.sources.length || project || source) ? (
+          <div className="toolbar">
+            <select className="sel" value={project} onChange={(e) => setProject(e.target.value)} aria-label="Project">
+              <option value="">All projects</option>
+              {(data?.projects ?? []).map((p) => <option key={p.cwd} value={p.cwd}>{fproject(p.cwd)} · {p.runs}</option>)}
+            </select>
+            <select className="sel" value={source} onChange={(e) => setSource(e.target.value)} aria-label="Agent">
+              <option value="">All agents</option>
+              {(data?.sources ?? []).map((x) => <option key={x.source} value={x.source}>{sourceLabel(x.source)} · {x.runs}</option>)}
+            </select>
+            {(project || source) && <button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={() => { setProject(''); setSource(''); }}>Clear</button>}
+          </div>
+        ) : null}
 
-          {!isError && (
-            <Glance data={data} pending={isPending} shell={shell} onFailed={() => showInLog({ status: 'failed' })} />
-          )}
-        </FadeIn>
-
-        {isError ? (
-          <p className="border border-fg/15 p-8 text-center font-mono text-xs text-fg/50">
-            Collector offline. Activity is unavailable.
-          </p>
+        {isError && !data ? (
+          <div className="card empty">Collector offline. Activity is unavailable.</div>
         ) : (
-          <FadeIn delay={0.06} className="space-y-8">
-            <WorthALook data={data} onSelect={onSelect} />
-            <MostUsed data={data} shell={shell} active={group} onPick={(key) => showInLog({ group: key })} />
-            <div ref={logRef} className="scroll-mt-4">
-              <Section n="03" title={shell ? 'Every command' : 'Every request'}>
+          <>
+            <div className="kpis">
+              <div className="kpi"><span className="label">{shell ? 'Commands' : 'Requests'}</span><span className="v">{sm ? fmt.n(sm.runs) : '…'}</span><span className="d">{rangeLabel}</span></div>
+              <div className="kpi"><span className="label">Failed</span><span className="v">{sm ? fmt.n(sm.failed) : '…'}</span><span className="d">{sm ? `${fmt.pct(sm.fail_rate)} fail rate` : ''}</span></div>
+              <div className="kpi"><span className="label">Time spent</span><span className="v">{sm ? fmt.dur(sm.total_ms / 1000) : '…'}</span><span className="d">{sm ? `across ${fmt.n(sm.sessions)} sessions` : ''}</span></div>
+              <div className="kpi">
+                <span className="label">{shell ? 'Risky' : 'Local hosts'}</span>
+                <span className="v" style={{ color: shell && sm?.risky ? 'var(--v-alert)' : undefined }}>{sm ? (shell ? sm.risky : sm.local ?? 0) : '…'}</span>
+                <span className="d">{sm ? (shell ? `${sm.elevated} elevated` : 'localhost calls') : ''}</span>
+              </div>
+            </div>
+
+            <section className="card" style={{ marginTop: 16, overflow: 'hidden' }}>
+              <div className="card-h" style={{ paddingBottom: 12 }}><span className="card-t">Worth a look</span><span className="label">{data ? `${attention.length} ${attention.length === 1 ? 'item' : 'items'}` : '…'}</span></div>
+              {isPending && !data ? (
+                <div className="card-b dim" style={{ fontSize: 13 }}>Loading…</div>
+              ) : attention.length === 0 ? (
+                <div className="card-b dim" style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}><FIcon name="check" size={15} style={{ color: 'var(--v-olive)' }} />Nothing unusual in this range.</div>
+              ) : (
+                <ul style={{ listStyle: 'none', margin: 0, padding: '0 8px 8px' }}>
+                  {(moreAttention ? attention : attention.slice(0, ATTENTION_SHOWN)).map((a, i) => (
+                    <li key={`${a.kind}-${a.title}-${i}`}>
+                      <button type="button" className="hov" onClick={() => onSelect(a.ref.session_id, a.ref.event_id)} style={{ width: '100%', textAlign: 'left', border: 0, background: 'none', borderRadius: 10, padding: '10px 12px', display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr)', gap: '4px 10px', alignItems: 'center' }}>
+                        <Sev s={a.severity} />
+                        <span className="truncate" style={{ fontSize: 13, fontWeight: 500 }}>{a.title}</span>
+                        {(a.subject || a.names || a.detail) && (
+                          <span className="mono faint truncate" style={{ gridColumn: 2, fontSize: 12 }} title={a.names ? a.names.join(', ') : a.subject ?? a.detail ?? ''}>
+                            {a.names ? a.names.join(', ') : a.subject ?? ''}{a.detail ? `${a.subject || a.names ? ' · ' : ''}${a.detail}` : ''}
+                          </span>
+                        )}
+                      </button>
+                    </li>
+                  ))}
+                  {attention.length > ATTENTION_SHOWN && (
+                    <li><button type="button" className="vbtn vbtn-ghost vbtn-sm" style={{ margin: '4px 4px 0' }} onClick={() => setMoreAttention((x) => !x)}>{moreAttention ? 'Show fewer' : `Show all ${attention.length}`}</button></li>
+                  )}
+                </ul>
+              )}
+            </section>
+
+            <div className="grid-2">
+              <section className="card" style={{ overflow: 'hidden' }}>
+                <div className="card-h" style={{ paddingBottom: 12 }}><span className="card-t">{shell ? 'Programs' : 'Hosts'}</span><span className="label">{data ? `${groups.length} groups` : '…'}</span></div>
+                <div style={{ overflowX: 'auto' }}>
+                  <table className="t">
+                    <thead><tr><th>{shell ? 'Program' : 'Host'}</th>{shell && <th>Top verbs</th>}<th className="num">Runs</th><th className="num">Failed</th><th className="num">Time</th></tr></thead>
+                    <tbody>
+                      {groups.slice(0, 14).map((g) => (
+                        <tr key={g.key} className="click" data-sel={group === g.key} onClick={() => showInLog({ group: group === g.key ? null : g.key })} tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && showInLog({ group: g.key })} title="Show these in the log">
+                          <td className="mono" style={{ fontSize: 12 }}>{g.key}{g.elevated ? <span className="vchip c-warn" style={{ marginLeft: 8 }}>sudo {g.elevated}</span> : null}</td>
+                          {shell && <td><div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>{(g.verbs ?? []).slice(0, 3).map((v) => <span key={v.key} className="vchip c-dim">{v.key} {v.runs}</span>)}</div></td>}
+                          <td className="num">{g.runs}</td>
+                          <td className="num" style={{ color: g.failed ? 'var(--v-alert)' : undefined }}>{g.failed}</td>
+                          <td className="num">{fmt.ms(g.total_ms)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {data && groups.length === 0 && <div className="empty">Nothing ran in this range.</div>}
+                </div>
+              </section>
+              <section className="card">
+                <div className="card-h"><span className="card-t">Time by {shell ? 'program' : 'host'}</span></div>
+                <div className="card-b">
+                  <FShareBars
+                    key={tab}
+                    rows={groups.slice().sort((x, y) => y.total_ms - x.total_ms).slice(0, 8).map((g) => ({ key: g.key, label: <span className="mono" style={{ fontSize: 12 }}>{g.key}</span>, value: g.total_ms / 1000, color: g.failed ? 'var(--v-amber)' : undefined }))}
+                    color="var(--v-hot)"
+                    track="var(--v-panel)"
+                    format={(v) => fmt.dur(v)}
+                  />
+                  <p className="faint" style={{ fontSize: 12, margin: '14px 0 0' }}>Amber bars had at least one failed run.</p>
+                </div>
+              </section>
+            </div>
+
+            <section ref={logRef} className="card" style={{ marginTop: 16, scrollMarginTop: 16, overflow: 'hidden' }}>
+              <div className="card-h" style={{ paddingBottom: 12, flexWrap: 'wrap' }}>
+                <span className="card-t">{shell ? 'Command log' : 'Request log'} · {rangeLabel}</span>
+                <FSeg id="vf-only" value={status} onChange={setStatus} options={(shell ? (['all', 'failed', 'risky'] as const) : (['all', 'failed'] as const)).map((k) => ({ k, l: k[0].toUpperCase() + k.slice(1) }))} />
+              </div>
+              <div>
                 <ActivityLog
                   category={tab}
                   filters={filters}
@@ -172,232 +193,11 @@ export function MetricsHistoryView({ onSelect, onBack, initialTab = 'shell' }: M
                   viaOptions={shell ? data?.via : undefined}
                   onSelect={onSelect}
                 />
-              </Section>
-            </div>
-          </FadeIn>
+              </div>
+            </section>
+          </>
         )}
       </div>
     </div>
-  );
-}
-
-function Glance({
-  data,
-  pending,
-  shell,
-  onFailed,
-}: {
-  data?: ActivitySummary;
-  pending: boolean;
-  shell: boolean;
-  onFailed: () => void;
-}) {
-  const s = data?.summary;
-  const none = pending ? '…' : '0';
-  return (
-    <Grid cols="grid-cols-2 lg:grid-cols-4">
-      <Stat
-        label={shell ? 'Commands' : 'Requests'}
-        value={s ? compact(s.runs) : none}
-        hint={s ? `in ${s.sessions} sessions${s.elevated ? `, ${s.elevated} as root` : ''}` : undefined}
-      />
-      <button type="button" onClick={onFailed} disabled={!s?.failed} className="bg-bg text-left disabled:cursor-default">
-        <Stat
-          label="Failed"
-          value={s ? compact(s.failed) : none}
-          hint={s && s.runs ? `${(s.fail_rate * 100).toFixed(1)}% of runs` : undefined}
-          accent={s?.failed ? 'text-vermilion' : undefined}
-        />
-      </button>
-      <Stat label={shell ? 'Time running' : 'Time waiting'} value={s ? formatDuration(s.total_ms) : none} />
-      <Stat label={shell ? 'Programs' : 'Domains'} value={s ? compact(s.groups) : none} />
-    </Grid>
-  );
-}
-
-const KIND_LABEL: Record<ActivityAttention['kind'], string> = {
-  loop: 'Loop',
-  failure_spike: 'Failing more',
-  failing: 'Failing',
-  risky: 'Risky',
-  first_seen: 'New',
-  slow: 'Slow',
-};
-
-const SEVERITY_TAG: Record<ActivityAttention['severity'], string> = {
-  critical: 'border-vermilion bg-vermilion text-cream',
-  warn: 'border-vermilion/60 text-vermilion',
-  info: 'border-line/30 text-fg/60',
-};
-
-function WorthALook({
-  data,
-  onSelect,
-}: {
-  data?: ActivitySummary;
-  onSelect: (sessionId: string, eventId?: number) => void;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const all = data?.attention ?? [];
-  const shown = expanded ? all : all.slice(0, ATTENTION_SHOWN);
-  return (
-    <Section
-      n="01"
-      title="Worth a look"
-      aside={
-        all.length > 0 ? <span className="font-mono text-[0.6rem] tabular-nums text-fg/50">{all.length}</span> : undefined
-      }>
-      <div className="border border-fg/15 bg-bg">
-        {!data ? (
-          <p className="px-4 py-5 font-mono text-xs text-fg/50">Loading…</p>
-        ) : all.length === 0 ? (
-          <p className="flex items-center gap-2.5 px-4 py-5 font-mono text-xs text-fg/60">
-            <Icon name="check" className="h-4 w-4 text-olive" />
-            Nothing unusual in this range.
-          </p>
-        ) : (
-          <ul className="divide-y divide-fg/[0.07]">
-            {shown.map((a, i) => (
-              <AttentionRow key={`${a.kind}-${a.title}-${i}`} item={a} onSelect={onSelect} />
-            ))}
-          </ul>
-        )}
-        {all.length > ATTENTION_SHOWN && (
-          <button
-            type="button"
-            onClick={() => setExpanded(!expanded)}
-            className="w-full border-t border-fg/10 px-4 py-2 text-left font-mono text-[0.62rem] font-bold text-fg/55 transition-colors hover:bg-surface/60 hover:text-fg">
-            {expanded ? 'Show fewer' : `Show ${all.length - ATTENTION_SHOWN} more`}
-          </button>
-        )}
-      </div>
-    </Section>
-  );
-}
-
-function AttentionRow({
-  item: a,
-  onSelect,
-}: {
-  item: ActivityAttention;
-  onSelect: (sessionId: string, eventId?: number) => void;
-}) {
-  const open = () => onSelect(a.ref.session_id, a.ref.event_id);
-  return (
-    <li
-      role="button"
-      tabIndex={0}
-      onClick={open}
-      onKeyDown={(e) => activateOnKey(e, open)}
-      title={a.names ? a.names.join(', ') : (a.subject ?? undefined)}
-      className="group grid cursor-pointer grid-cols-[5.75rem_minmax(0,1fr)_auto] items-start gap-x-3 px-4 py-3 transition-colors hover:bg-surface/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-vermilion">
-      <span
-        className={`mt-px justify-self-start border px-1.5 py-0.5 font-mono text-[0.52rem] font-bold uppercase tracking-widest ${SEVERITY_TAG[a.severity]}`}>
-        {KIND_LABEL[a.kind]}
-      </span>
-      <span className="min-w-0">
-        <span className="block font-mono text-xs font-bold text-fg">{a.title}</span>
-        {a.subject && (
-          <span className="mt-1 block truncate font-mono text-[0.68rem]">
-            <CommandText core={a.subject} program={a.program ?? undefined} />
-          </span>
-        )}
-        {a.detail && <span className="mt-0.5 block truncate font-mono text-[0.65rem] text-fg/55">{a.detail}</span>}
-      </span>
-      <span className="flex items-center gap-1.5 pt-px font-mono text-[0.6rem] tabular-nums text-fg/50">
-        {a.ref.ts ? formatRelative(a.ref.ts) : ''}
-        <Icon name="chevron-right" className="h-3 w-3 text-fg/30 transition-colors group-hover:text-fg/70" />
-      </span>
-    </li>
-  );
-}
-
-function MostUsed({
-  data,
-  shell,
-  active,
-  onPick,
-}: {
-  data?: ActivitySummary;
-  shell: boolean;
-  active: string | null;
-  onPick: (key: string) => void;
-}) {
-  const rows = (data?.groups ?? []).slice(0, MOST_USED_SHOWN);
-  const max = rows[0]?.runs ?? 1;
-  return (
-    <Section
-      n="02"
-      title={shell ? 'Most used' : 'Top domains'}
-      aside={<span className="font-mono text-[0.6rem] text-fg/50">click one to filter the list</span>}>
-      <div className="border border-fg/15 bg-bg">
-        {!data ? (
-          <p className="px-4 py-5 font-mono text-xs text-fg/50">Loading…</p>
-        ) : rows.length === 0 ? (
-          <p className="px-4 py-5 font-mono text-xs text-fg/55">Nothing in this range.</p>
-        ) : (
-          <ul className="divide-y divide-fg/[0.06]">
-            {rows.map((g) => {
-              const pick = () => onPick(g.key);
-              const on = active === g.key;
-              return (
-                <li
-                  key={g.key}
-                  role="button"
-                  tabIndex={0}
-                  aria-pressed={on}
-                  onClick={pick}
-                  onKeyDown={(e) => activateOnKey(e, pick)}
-                  title={groupTip(g) || undefined}
-                  className={`grid cursor-pointer grid-cols-[minmax(0,10rem)_minmax(0,1fr)_3.5rem_4.5rem] items-center gap-4 px-4 py-2 transition-colors hover:bg-surface/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-vermilion ${
-                    on ? 'bg-surface' : ''
-                  }`}>
-                  <span className="truncate font-mono text-xs font-bold text-fg">
-                    {g.key}
-                    {g.local && <span className="ml-2 font-normal text-fg/45">local</span>}
-                  </span>
-                  {/* Share of the top entry; the count carries the scale. */}
-                  <span className="block h-1.5" aria-hidden="true">
-                    <span className="block h-full bg-fg/45" style={{ width: `${Math.max(3, (g.runs / max) * 100)}%` }} />
-                  </span>
-                  <span className="text-right font-mono text-xs tabular-nums text-fg/80">{compact(g.runs)}</span>
-                  <span className="flex flex-col items-end text-right font-mono text-[0.62rem] tabular-nums text-vermilion/90">
-                    {g.failed > 0 && <span>{g.failed} failed</span>}
-                    {g.elevated > 0 && (
-                      <span className="font-bold" title="Ran with sudo / doas / su">
-                        {g.elevated} as root
-                      </span>
-                    )}
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </div>
-    </Section>
-  );
-}
-
-/** Hover text for a Most used row: its subcommands and what it ran through. */
-function groupTip(g: ActivitySummary['groups'][number]): string {
-  const lines = (g.verbs ?? []).map((v) => `${g.key} ${v.key}: ${v.runs}`);
-  if (g.via?.length) {
-    lines.push('', 'Ran through:', ...g.via.map((v) => `  ${viaLabel(v.key)}: ${v.runs} of ${g.runs}`));
-  }
-  return lines.join('\n');
-}
-
-function TabBtn({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      onClick={onClick}
-      className={`flex items-center gap-1.5 border-r border-fg/20 px-3 py-2 font-mono text-[0.6rem] font-bold uppercase tracking-widest transition-colors last:border-r-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-vermilion ${
-        active ? 'bg-fg text-bg' : 'bg-surface text-fg/55 hover:text-fg'
-      }`}>
-      {children}
-    </button>
   );
 }

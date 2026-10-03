@@ -1,5 +1,8 @@
 import type { ReactNode } from 'react';
 import type { ActivityRisk } from '../../../lib/api';
+import { TONE } from '../../ui/tone';
+
+const CARD_GRID = 'overflow-hidden rounded-card border border-line/10 bg-line/10';
 
 // Building blocks for the Activity page. Section / Grid / Stat mirror the
 // Overview page's so the two read as one product (Overview's are private to
@@ -19,8 +22,8 @@ export function Section({
   return (
     <section className="space-y-3.5">
       <div className="flex min-h-7 items-center gap-2.5">
-        <span className="font-mono text-[0.6rem] font-bold tabular-nums text-vermilion">{n}</span>
-        <h2 className="font-mono text-[0.62rem] font-bold uppercase tracking-[0.2em] text-fg/65">{title}</h2>
+        <span className="font-mono text-label font-semibold tabular-nums text-hot">{n}</span>
+        <h2 className="font-mono text-label font-semibold uppercase tracking-label text-fg/65">{title}</h2>
         <span className="ml-1 h-px flex-1 bg-fg/10" />
         {aside}
       </div>
@@ -31,15 +34,15 @@ export function Section({
 
 /** Seamless ruled grid: cells share single hairlines, no outer box. */
 export function Grid({ cols, children }: { cols: string; children: ReactNode }) {
-  return <div className={`grid gap-px bg-fg/10 ${cols}`}>{children}</div>;
+  return <div className={`grid gap-px ${CARD_GRID} ${cols}`}>{children}</div>;
 }
 
 export function Stat({ label, value, hint, accent }: { label: string; value: string; hint?: string; accent?: string }) {
   return (
-    <div className="bg-bg px-4 py-3">
-      <p className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/50">{label}</p>
-      <p className={`mt-1 font-mono text-2xl font-bold tabular-nums ${accent ?? 'text-fg'}`}>{value}</p>
-      {hint && <p className="mt-0.5 font-mono text-[0.58rem] text-fg/50">{hint}</p>}
+    <div className="bg-surface px-4 py-3">
+      <p className="font-mono text-label uppercase tracking-label text-fg/60">{label}</p>
+      <p className={`mt-1 font-mono text-2xl font-semibold tabular-nums ${accent ?? 'text-fg'}`}>{value}</p>
+      {hint && <p className="mt-0.5 font-mono text-label text-fg/60">{hint}</p>}
     </div>
   );
 }
@@ -61,7 +64,7 @@ export function CommandText({ core, program, className = '' }: { core: string; p
   return (
     <span className={className}>
       {at > 0 && <Prefix text={core.slice(0, at)} />}
-      <span className="font-bold text-fg">{core.slice(at, at + program!.length)}</span>
+      <span className="font-semibold text-fg">{core.slice(at, at + program!.length)}</span>
       <span className="text-fg/75">{core.slice(at + program!.length)}</span>
     </span>
   );
@@ -75,11 +78,11 @@ function Prefix({ text }: { text: string }) {
     <>
       {parts.map((part, i) =>
         ELEVATION.test(part) ? (
-          <span key={i} className="font-bold text-vermilion">
+          <span key={i} className="font-semibold text-hot">
             {part}
           </span>
         ) : (
-          <span key={i} className="text-fg/45">
+          <span key={i} className="text-fg/60">
             {part}
           </span>
         ),
@@ -97,21 +100,19 @@ function findProgram(core: string, program: string): number {
 export function RiskTag({ risk }: { risk: ActivityRisk }) {
   return (
     <span
-      className={`inline-block shrink-0 border px-1.5 py-0.5 font-mono text-[0.52rem] font-bold uppercase tracking-widest ${
-        risk.severity === 'critical' ? 'border-vermilion bg-vermilion text-cream' : 'border-vermilion/60 text-vermilion'
-      }`}>
+      className={`chip shrink-0 ${risk.severity === 'critical' ? TONE.critical : TONE.warn}`}>
       {risk.label}
     </span>
   );
 }
 
-/** Small ✕ marking a failed run; failures are the one thing in vermilion. */
+/** Small ✕ marking a failed run; failures are the one thing in alert red. */
 export function FailMark() {
   return (
     <span
       aria-label="Failed"
       title="Failed"
-      className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] bg-vermilion/15 font-mono text-[0.6rem] font-bold text-vermilion">
+      className="flex h-4 w-4 shrink-0 items-center justify-center rounded-chip bg-alert/[0.14] font-mono text-label font-semibold text-alert">
       ✕
     </span>
   );

@@ -62,14 +62,14 @@ export function PostInstall({ agents, onFinish }: PostInstallProps) {
   return (
     <FadeIn className="space-y-10">
       <header className="space-y-3">
-        <span className="inline-block border border-fg bg-fg px-3 py-1 font-mono text-[0.6rem] font-bold uppercase tracking-widest text-bg">
+        <span className="inline-block border rounded-control border-line/[0.16] bg-fg px-3 py-1 font-mono text-label font-semibold uppercase tracking-label text-bg">
           INSTALLED
         </span>
-        <h1 className="text-4xl font-extrabold uppercase leading-[0.95] tracking-tight text-fg sm:text-5xl">
+        <h1 className="text-[2.25rem] font-semibold leading-[1.05] tracking-display text-fg sm:text-[2.75rem]">
           You&apos;re{' '}
-          <span className="font-serif lowercase italic text-olive">all set</span>
+          <span className="text-olive">all set</span>
         </h1>
-        <p className="max-w-md font-mono text-xs leading-relaxed text-fg/55">
+        <p className="max-w-md text-lead text-fg/60">
           cot is installed and your hooks are connected. Sessions from your agents
           will appear in the dashboard automatically.
         </p>
@@ -82,12 +82,12 @@ export function PostInstall({ agents, onFinish }: PostInstallProps) {
           return (
             <span
               key={id}
-              className="inline-flex items-center gap-2 border border-olive/40 bg-olive/5 px-3 py-1.5">
+              className="inline-flex items-center gap-2 border rounded-control border-olive/40 bg-olive/5 px-3 py-1.5">
               <AgentMark id={id} className="h-4 w-4 shrink-0" variant="25d" />
-              <span className="font-mono text-[0.65rem] font-bold text-fg">
+              <span className="font-mono text-data font-semibold text-fg">
                 {agent.product}
               </span>
-              <span className="inline-flex items-center gap-1 font-mono text-[0.5rem] font-bold uppercase tracking-widest text-olive">
+              <span className="inline-flex items-center gap-1 font-mono text-label font-semibold uppercase tracking-label text-olive">
                 <span className="h-1.5 w-1.5 rounded-full bg-olive" />
                 Connected
               </span>
@@ -97,22 +97,22 @@ export function PostInstall({ agents, onFinish }: PostInstallProps) {
       </div>
 
       {/* Import status */}
-      <div className="relative overflow-hidden border border-fg/20 bg-surface">
-        <div className="flex items-center justify-between border-b border-fg/15 px-5 py-3">
-          <span className="font-mono text-[0.6rem] font-bold uppercase tracking-widest text-fg/45">
+      <div className="relative overflow-hidden rounded-card border border-line/10 bg-surface">
+        <div className="flex items-center justify-between border-b border-line/10 px-5 py-3">
+          <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
             IMPORT
           </span>
           <span
-            className={`inline-flex items-center gap-2 border px-2 py-1 font-mono text-[0.55rem] font-bold uppercase tracking-widest ${
+            className={`inline-flex items-center gap-2 border px-2 py-1 font-mono text-label font-semibold uppercase tracking-label ${
               hasSessions
-                ? 'border-olive bg-olive text-cream'
+                ? 'border-olive bg-olive text-bg'
                 : loading
-                  ? 'border-cobalt bg-cobalt text-cream'
-                  : 'border-fg/30 bg-fg/10 text-fg/50'
+                  ? 'border-cobalt bg-cobalt text-bg'
+                  : 'border-line/30 bg-fg/10 text-fg/60'
             }`}>
             <span
               className={`h-1.5 w-1.5 rounded-full ${
-                hasSessions ? 'bg-cream' : loading ? 'bg-cream animate-pulse' : 'bg-fg/30'
+                hasSessions ? 'bg-bg' : loading ? 'bg-bg animate-pulse' : 'bg-fg/30'
               }`}
             />
             {hasSessions ? 'IMPORTED' : loading ? 'PROCESSING' : 'READY'}
@@ -130,7 +130,7 @@ export function PostInstall({ agents, onFinish }: PostInstallProps) {
                   {[0, 1, 2].map((i) => (
                     <motion.span
                       key={i}
-                      className="h-2 w-2 rounded-full bg-vermilion"
+                      className="h-2 w-2 rounded-full bg-hot"
                       animate={{ opacity: [0.25, 1, 0.25] }}
                       transition={{
                         duration: 1.2,
@@ -141,7 +141,7 @@ export function PostInstall({ agents, onFinish }: PostInstallProps) {
                     />
                   ))}
                 </div>
-                <span className="font-mono text-xs text-fg/50">
+                <span className="font-mono text-xs text-fg/60">
                   Importing existing sessions…
                 </span>
               </motion.div>
@@ -150,13 +150,13 @@ export function PostInstall({ agents, onFinish }: PostInstallProps) {
                 key="summary"
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.4, ease: [0.25, 0.1, 0.25, 1] }}
+                transition={{ duration: 0.3, ease: [0.23, 1, 0.32, 1] }}
                 className="space-y-4">
                 <p className="font-mono text-sm text-fg">
-                  <span className="font-bold text-vermilion">{formatNumber(sessionCount)}</span>
+                  <span className="font-semibold text-hot">{formatNumber(sessionCount)}</span>
                   {' '}session{sessionCount !== 1 ? 's' : ''} imported and processing
                   {summary!.by_source.length > 0 && (
-                    <span className="text-fg/50">
+                    <span className="text-fg/60">
                       {' — '}
                       {summary!.by_source
                         .map((s) => `${s.sessions} from ${sourceLabel(s.source)}`)
@@ -178,7 +178,7 @@ export function PostInstall({ agents, onFinish }: PostInstallProps) {
         </div>
       </div>
 
-      <div className="flex items-center justify-end border-t border-fg/10 pt-6">
+      <div className="flex items-center justify-end border-t border-line/10 pt-6">
         <button
           type="button"
           onClick={(e) => {
@@ -188,7 +188,7 @@ export function PostInstall({ agents, onFinish }: PostInstallProps) {
               y: e.clientY || rect.top + rect.height / 2,
             });
           }}
-          className="group inline-flex items-center gap-3 border border-vermilion bg-vermilion px-7 py-3.5 font-mono text-xs font-bold uppercase tracking-widest text-cream transition-opacity hover:opacity-90">
+          className="group btn-primary px-5 py-2.5 text-body">
           Continue to dashboard
           <span className="transition-transform group-hover:translate-x-1">→</span>
         </button>

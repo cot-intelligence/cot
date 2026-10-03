@@ -12,7 +12,7 @@ export function highlight(text: string, q: string): (string | JSX.Element)[] {
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) out.push(text.slice(last, m.index));
     out.push(
-      <mark key={key++} className="bg-vermilion/20 text-fg">
+      <mark key={key++} className="bg-hot/20 text-fg">
         {m[0]}
       </mark>,
     );

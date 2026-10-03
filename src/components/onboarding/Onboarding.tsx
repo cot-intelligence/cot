@@ -91,12 +91,11 @@ export function Onboarding({ onComplete }: OnboardingProps) {
     return (
       <div className="relative flex min-h-screen flex-col">
         <div className="pointer-events-none absolute inset-0 grid-bg" aria-hidden="true" />
-        <div className="pointer-events-none absolute inset-x-0 top-0 h-[60vh] glow-vermilion" aria-hidden="true" />
 
         <header className="relative z-10 flex items-center justify-between gap-4 px-6 py-5 sm:px-10">
           <a
             href="/"
-            className="font-serif text-2xl font-bold italic tracking-tighter text-fg">
+            className="wordmark text-2xl">
             cot.
           </a>
           <ThemeToggle />
@@ -111,7 +110,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
           </div>
         </main>
 
-        <footer className="relative z-10 flex items-center justify-between px-6 py-5 font-mono text-[0.6rem] uppercase tracking-widest text-fg/25 sm:px-10">
+        <footer className="relative z-10 flex items-center justify-between px-6 py-5 font-mono text-label uppercase tracking-label text-fg/40 sm:px-10">
           <span>SELF-HOSTED</span>
           <span>v1.0</span>
         </footer>
@@ -122,12 +121,11 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   return (
     <div className="relative flex min-h-screen flex-col">
       <div className="pointer-events-none absolute inset-0 grid-bg" aria-hidden="true" />
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-[60vh] glow-vermilion" aria-hidden="true" />
 
       <header className="relative z-10 flex items-center justify-between gap-4 px-6 py-5 sm:px-10">
         <a
           href="/"
-          className="font-serif text-2xl font-bold italic tracking-tighter text-fg">
+          className="wordmark text-2xl">
           cot.
         </a>
         <div className="flex items-center gap-4 sm:gap-6">
@@ -148,7 +146,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
               initial={{ opacity: 0, y: 16 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -12 }}
-              transition={{ duration: 0.4, ease: [0.25, 0.1, 0.25, 1] }}>
+              transition={{ duration: 0.3, ease: [0.23, 1, 0.32, 1] }}>
               {step === 0 && (
                 <ChooseAgent
                   selected={agents}
@@ -177,7 +175,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
         </div>
       </main>
 
-      <footer className="relative z-10 flex items-center justify-between px-6 py-5 font-mono text-[0.6rem] uppercase tracking-widest text-fg/25 sm:px-10">
+      <footer className="relative z-10 flex items-center justify-between px-6 py-5 font-mono text-label uppercase tracking-label text-fg/40 sm:px-10">
         <span>SELF-HOSTED</span>
         <span>v1.0</span>
       </footer>
