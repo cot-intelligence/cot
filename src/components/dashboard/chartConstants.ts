@@ -1,15 +1,17 @@
 // Shared chart constants/types. Kept value-export-only (no components) so the
 // chart component modules stay Fast-Refresh friendly.
 
+// Series colours. The first four follow the theme tokens (Signal Forest);
+// the rest are fixed mid-tones that read on both grounds.
 export const CHART_COLORS = [
-  '#FF4500', // vermilion
-  '#2B5CE6', // cobalt
-  '#3A4D39', // olive (light; UI uses theme-aware --olive via Tailwind)
-  '#E0991F', // amber
-  '#7A5CC8', // violet
-  '#1FA88F', // teal
+  'rgb(var(--hot))',
+  'rgb(var(--cobalt))',
+  'rgb(var(--amber))',
+  'rgb(var(--olive))',
+  '#8B6FD6', // violet
+  '#2BA3A3', // teal
   '#C8487A', // magenta
-  '#5C8A2B', // moss
+  '#7E8F5C', // moss
 ];
 
 export interface Datum {

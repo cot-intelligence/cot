@@ -248,7 +248,7 @@ def _url_request_target(url: str) -> str:
 _HOOK_CAPTURED_AT: str | None = None
 
 
-def _spool_append(url: str, payload: dict) -> None:
+def _spool_append(url: str, payload: dict) -> bool:
     """Queue an undelivered ingest event, trimming the oldest to stay under the
     byte cap."""
     path = _url_request_target(url)
@@ -278,11 +278,13 @@ def _spool_append(url: str, payload: dict) -> None:
                 SPOOL_PATH.write_bytes(existing)
             with SPOOL_PATH.open("a", encoding="utf-8") as fh:
                 fh.write(line)
+            return True
         except OSError as exc:
             print(f"cot: failed to spool event: {exc}", file=sys.stderr)
+            return False
 
 
-def _spool_target(record: dict) -> str:
+def _spool_target(record: dict, endpoint: str | None = None) -> str:
     """Resolve new and legacy spool records against the current collector."""
     path = record.get("path")
     if not isinstance(path, str) or not path:
@@ -292,10 +294,10 @@ def _spool_target(record: dict) -> str:
         path = _url_request_target(legacy_url)
     if not path.startswith("/v1/ingest/"):
         return ""
-    return f"{COT_ENDPOINT.rstrip('/')}{path}"
+    return f"{(endpoint or COT_ENDPOINT).rstrip('/')}{path}"
 
 
-def _spool_flush(timeout: float = 3.0) -> bool:
+def _spool_flush(timeout: float = 3.0, *, endpoint: str | None = None) -> bool:
     """Replay queued events in order. Stops at the first unreachable send and
     rewrites the unsent remainder. Returns True if the collector was reachable
     (spool empty or fully/partially drained), False if it is still down."""
@@ -320,7 +322,7 @@ def _spool_flush(timeout: float = 3.0) -> bool:
                 rec = json.loads(lines[i])
             except json.JSONDecodeError:
                 continue  # skip a corrupt line rather than wedge the queue
-            target = _spool_target(rec)
+            target = _spool_target(rec, endpoint)
             if not target:
                 continue
             if not _send_once(target, rec.get("payload", {}), timeout):
@@ -342,6 +344,14 @@ def _spool_flush(timeout: float = 3.0) -> bool:
 def _post(url: str, payload: dict) -> None:
     is_ingest = "/v1/ingest/" in url
     if is_ingest:
+        if "/v1/ingest/opencode" in url:
+            # The plugin bounds subprocess lifetime. Persist before HTTP work
+            # so a timeout during queue replay cannot lose the new event.
+            if not _spool_append(url, payload):
+                raise OSError("Unable to persist OpenCode hook event")
+            if _collector_reachable():
+                _spool_flush(endpoint=url.split("/v1/ingest/", 1)[0])
+            return
         if not _collector_reachable():
             _spool_append(url, payload)
             return
@@ -1402,7 +1412,13 @@ def _log_launch(body: dict) -> None:
         pass
 
 
-AGENTS = ("claude", "cursor", "codex")
+AGENTS = ("claude", "cursor", "codex", "opencode")
+OPENCODE_EVENTS = (
+    "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+    "PostToolUseFailure", "afterAgentResponse", "afterAgentThought",
+    "OpenCodeUsage", "PermissionRequest", "PostCompact", "Stop",
+)
+OPENCODE_PLUGIN_MARKER = 'id: "cot.observability"'
 
 # Where each agent reads its hook config, and whether it is a Cursor-style file
 # (a top-level "version" alongside "hooks") vs. a Claude/Codex-style file.
@@ -1410,6 +1426,7 @@ _CONFIG_TARGETS = {
     "claude": (Path.home() / ".claude" / "settings.json", False),
     "cursor": (Path.home() / ".cursor" / "hooks.json", True),
     "codex": (Path.home() / ".codex" / "hooks.json", False),
+    "opencode": (Path.home() / ".config" / "opencode" / "plugins" / "cot.js", False),
 }
 
 
@@ -1616,6 +1633,28 @@ def _backup_config(agent: str, path: Path, action: str) -> dict | None:
 
 
 def _agent_hook_status(agent: str) -> dict:
+    if agent == "opencode":
+        path = _CONFIG_TARGETS[agent][0]
+        try:
+            content = path.read_text()
+        except OSError:
+            content = ""
+        installed = OPENCODE_PLUGIN_MARKER in content
+        expected = list(OPENCODE_EVENTS)
+        return {
+            "agent": agent,
+            "config_path": str(path),
+            "config_exists": path.exists(),
+            "valid_json": None,
+            "error": None,
+            "installed": installed,
+            "expected_hooks": expected,
+            "installed_hooks": expected if installed else [],
+            "missing_hooks": [] if installed else expected,
+            "backup_count": len(_backup_entries(agent)),
+            "latest_backup": _latest_backup(agent),
+            "warnings": [] if installed else ["plugin_missing"],
+        }
     path, _ = _CONFIG_TARGETS[agent]
     expected = _template_events(_hook_templates()[agent])
     config, err = _read_json_file(path)
@@ -1691,6 +1730,28 @@ def _hooks_installed(agent: str) -> bool:
 
 
 def _install_agent(agent: str, action: str = "install") -> dict:
+    if agent == "opencode":
+        path = _CONFIG_TARGETS[agent][0]
+        try:
+            current = path.read_text()
+        except FileNotFoundError:
+            current = None
+        if current is not None and OPENCODE_PLUGIN_MARKER not in current:
+            raise ValueError(f"{path} exists and is not cot's plugin; move it before installing")
+        req = urllib.request.Request(f"{COT_ENDPOINT}/opencode-plugin.js")
+        with urllib.request.urlopen(req, timeout=10) as response:
+            plugin = response.read().decode("utf-8")
+        if OPENCODE_PLUGIN_MARKER not in plugin:
+            raise ValueError("collector returned an invalid OpenCode plugin")
+        changed = current != plugin
+        backup = None
+        if changed:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            backup = _backup_config(agent, path, action)
+            path.write_text(plugin)
+        status = _agent_hook_status(agent)
+        status.update({"changed": changed, "backup_created": backup, "status": "ok"})
+        return status
     path, cursor_style = _CONFIG_TARGETS[agent]
     template = _hook_templates()[agent]
 
@@ -1721,6 +1782,21 @@ def _install_agent(agent: str, action: str = "install") -> dict:
 
 
 def _uninstall_agent(agent: str, action: str = "uninstall") -> dict:
+    if agent == "opencode":
+        path = _CONFIG_TARGETS[agent][0]
+        try:
+            content = path.read_text()
+        except FileNotFoundError:
+            content = None
+        if content is not None and OPENCODE_PLUGIN_MARKER not in content:
+            return {"agent": agent, "config_path": str(path), "changed": False,
+                    "backup_created": None, "status": "error", "error": "plugin file is not owned by cot"}
+        backup = None
+        if content is not None:
+            backup = _backup_config(agent, path, action)
+            path.unlink()
+        return {"agent": agent, "config_path": str(path), "changed": content is not None,
+                "backup_created": backup, "status": "ok"}
     path, _ = _CONFIG_TARGETS[agent]
     config, err = _read_json_file(path)
     if err == "missing":
@@ -1767,8 +1843,8 @@ def _write_hook_status() -> None:
     """Record installed hook status where the collector can read it.
 
     The collector runs in Docker with ~/.cot mounted, so it cannot inspect
-    ~/.claude, ~/.cursor, or ~/.codex directly. This manifest is the bridge's
-    small, content-free handoff to the dashboard.
+    agent config directories directly. This manifest is the bridge's small,
+    content-free handoff to the dashboard.
     """
     status = {
         "updated_at": _now_z(),
@@ -1796,7 +1872,7 @@ def _cmd_install(args: list[str]) -> int:
                 print(f"cot: backup saved -> {result['backup_created']['backup_path']}")
             elif not result.get("changed"):
                 print(f"cot: {agent} hooks already up to date")
-        except OSError as exc:
+        except (OSError, ValueError, urllib.error.URLError) as exc:
             results.append(
                 {
                     "agent": agent,
@@ -1839,8 +1915,13 @@ def _cmd_install(args: list[str]) -> int:
     if "codex" in agents:
         print("cot: run /hooks in Codex to review and trust the new hooks.")
 
+    if not status_written or any(r["status"] != "ok" for r in results):
+        return 1
+
     # Auto-import historical transcripts after hook setup.
     if os.environ.get("COT_SKIP_IMPORT") in ("1", "true", "yes"):
+        return 0
+    if all(agent == "opencode" for agent in agents):
         return 0
     print("cot: importing historical transcripts…")
     try:
@@ -1849,6 +1930,8 @@ def _cmd_install(args: list[str]) -> int:
         offsets = _import_offsets_load()
         total = 0
         for agent in agents:
+            if agent == "opencode":
+                continue  # Live plugin only; no historical OpenCode parser yet.
             count = _import_agent(agent, None, offsets, origins, verbose=False)
             total += count
         _import_offsets_save(offsets)
@@ -2160,7 +2243,7 @@ def _confirm_purge(assume_yes: bool) -> bool:
         return False
     print("cot purge will remove:")
     print(f"  - Docker collector container: {_container_name()}")
-    print("  - cot hooks from Claude, Cursor, and Codex")
+    print("  - cot hooks from Claude, Cursor, Codex, and OpenCode")
     print(f"  - local cot state, bridge, and trace DB: {STATE_DIR}")
     answer = input("Type 'purge' to continue: ").strip()
     return answer == "purge"
@@ -3481,9 +3564,16 @@ def _fetch_session_origins() -> dict[str, str]:
 
 
 def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
-                  origins: dict[str, str], *, verbose: bool = True) -> int:
-    """Import transcripts for one agent. Returns count of events posted."""
+                  origins: dict[str, str], *, verbose: bool = True,
+                  skip_active_s: float = 0, held_back: list[str] | None = None) -> int:
+    """Import transcripts for one agent. Returns count of events posted.
+
+    ``skip_active_s`` holds back transcripts written to within that many seconds
+    (a session that's still running): their offsets stay put, so a later pass
+    imports them whole once they've gone quiet. Held-back paths are appended to
+    ``held_back``."""
     transcripts = _discover_transcripts(agent)
+    now_ts = time.time()
     if verbose and not transcripts:
         print(f"cot import: no {agent} transcripts found", file=sys.stderr)
         return 0
@@ -3526,6 +3616,15 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
         )
         if origins.get(sid) == "hook" and not is_cursor_subagent and not hook_supplement:
             continue
+
+        if skip_active_s:
+            try:
+                if now_ts - path.stat().st_mtime < skip_active_s:
+                    if held_back is not None:
+                        held_back.append(str(path))
+                    continue
+            except OSError:
+                pass
 
         # Apply --since filter on file mtime as a cheap pre-filter
         if since:
@@ -3608,6 +3707,9 @@ def _cmd_import(args: list[str]) -> int:
     parser.add_argument("--since", help="Only import transcripts modified after YYYY-MM-DD")
     parser.add_argument("--report", action="store_true",
                         help="Print an ingestion quality/coverage report when done")
+    parser.add_argument("--skip-active", type=float, default=0, metavar="MINUTES",
+                        help="Leave transcripts written to in the last MINUTES for a later run "
+                             "(sessions still in progress)")
     parsed = parser.parse_args(args)
 
     agents = parsed.agent or ["claude", "cursor", "codex"]
@@ -3615,10 +3717,14 @@ def _cmd_import(args: list[str]) -> int:
     origins = _fetch_session_origins()
     offsets = _import_offsets_load()
     total = 0
+    held_back: list[str] = []
 
     for agent in agents:
-        count = _import_agent(agent, parsed.since, offsets, origins)
+        count = _import_agent(agent, parsed.since, offsets, origins,
+                              skip_active_s=max(0.0, parsed.skip_active) * 60, held_back=held_back)
         total += count
+    if held_back:
+        print(f"cot import: held back {len(held_back)} in-progress transcript(s) for the next run")
 
     _import_offsets_save(offsets)
     _write_import_parser_version()
@@ -3917,8 +4023,8 @@ def main() -> int:
     if len(sys.argv) < 3 or sys.argv[1] != "hook":
         print(
             "Usage:\n"
-            "  cot hook <claude|cursor|codex>   # reads a hook payload from stdin\n"
-            "  cot install [claude cursor codex]  # wire up agent hook configs\n"
+            "  cot hook <claude|cursor|codex|opencode>   # reads a hook payload from stdin\n"
+            "  cot install [claude cursor codex opencode]  # wire up agent integrations\n"
             "  cot import [--agent X] [--since]   # import historical transcripts\n"
             "  cot reimport                       # wipe + re-import all transcripts\n"
             "  cot recover-questions              # fill AskQuestion answers from transcripts\n"

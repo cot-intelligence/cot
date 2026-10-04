@@ -44,16 +44,16 @@ export function EventList({ items, selectedKey, sessionId, onSelect, runs, scrol
               type="button"
               ref={active ? selectedRef : undefined}
               onClick={() => onSelect(item)}
-              className={`flex w-full items-start gap-2.5 border-l-2 px-3.5 py-3 text-left transition-colors ${
+              className={`flex w-full items-start gap-2.5 px-3.5 py-3 text-left transition-colors ${
                 active
-                  ? 'border-l-vermilion bg-surface'
-                  : 'border-l-transparent hover:bg-surface'
+                  ? 'bg-surface ring-1 ring-inset ring-line/[0.16]'
+                  : 'hover:bg-fg/[0.04]'
               }`}>
               <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${meta.dot}`} />
               <span className="min-w-0 flex-1 space-y-1">
                 <span className="flex items-center justify-between gap-2">
                   <span className="flex min-w-0 items-center gap-1.5">
-                    <span className={`truncate font-mono text-[0.62rem] font-bold uppercase tracking-widest ${meta.color}`}>
+                    <span className={`truncate font-mono text-label font-semibold uppercase tracking-label ${meta.color}`}>
                       {meta.label}
                     </span>
                     {isSubagent && <SubagentBadge />}
@@ -64,7 +64,7 @@ export function EventList({ items, selectedKey, sessionId, onSelect, runs, scrol
                   </span>
                   {/* Time + duration grouped in one shrink-0 cluster; full
                       timestamp on hover keeps rows narrow and overlap-free. */}
-                  <span className="flex shrink-0 items-center gap-2 font-mono text-[0.6rem] tabular-nums text-fg/45">
+                  <span className="flex shrink-0 items-center gap-2 font-mono text-label tabular-nums text-fg/60">
                     {item.duration_ms != null && item.duration_ms > 0 && (
                       <span>{formatDuration(item.duration_ms)}</span>
                     )}
@@ -74,13 +74,13 @@ export function EventList({ items, selectedKey, sessionId, onSelect, runs, scrol
                   </span>
                 </span>
                 <span className="flex items-center gap-1.5">
-                  <span className="min-w-0 flex-1 truncate font-mono text-sm font-bold text-fg">
+                  <span className="min-w-0 flex-1 truncate font-mono text-sm font-semibold text-fg">
                     {item.title}
                   </span>
                   {item.attachments && <AttachmentBadge attachments={item.attachments} />}
                 </span>
                 {showTarget && (
-                  <span className="block truncate font-mono text-xs text-fg/55">
+                  <span className="block truncate font-mono text-xs text-fg/60">
                     {item.target}
                   </span>
                 )}
@@ -100,7 +100,7 @@ function SubagentBadge() {
   return (
     <span
       title="Ran during a subagent's execution"
-      className="flex shrink-0 items-center gap-0.5 rounded border border-cobalt/40 px-1 py-px font-mono text-[0.5rem] font-bold uppercase tracking-widest text-cobalt">
+      className="flex shrink-0 items-center gap-0.5 rounded border border-cobalt/40 px-1 py-px font-mono text-label font-semibold uppercase tracking-label text-cobalt">
       <Icon name="robot" className="h-2.5 w-2.5" />
       Sub
     </span>
@@ -111,7 +111,7 @@ function InterruptedBadge() {
   return (
     <span
       title="The user stopped the agent mid-output — this thought/response was cut off"
-      className="flex shrink-0 items-center gap-0.5 rounded border border-vermilion/50 px-1 py-px font-mono text-[0.5rem] font-bold uppercase tracking-widest text-vermilion">
+      className="shrink-0 chip bg-amber/[0.14] text-amber ring-amber/[0.32]">
       <Icon name="stop" className="h-2.5 w-2.5" />
       Stopped
     </span>
@@ -122,8 +122,8 @@ function InterruptedBadge() {
 // labels are Cursor's user-facing names (e.g. internal "chat" is shown as "Ask").
 const COMPOSER_MODES: Record<string, { label: string; icon: IconName; cls: string }> = {
   plan: { label: 'Plan', icon: 'layers', cls: 'border-olive/40 text-olive' },
-  chat: { label: 'Ask', icon: 'chat', cls: 'border-fg/20 text-fg/50' },
-  debug: { label: 'Debug', icon: 'terminal', cls: 'border-vermilion/40 text-vermilion' },
+  chat: { label: 'Ask', icon: 'chat', cls: 'border-line/[0.16] text-fg/60' },
+  debug: { label: 'Debug', icon: 'terminal', cls: 'border-hot/40 text-hot' },
   triage: { label: 'Triage', icon: 'list', cls: 'border-cobalt/40 text-cobalt' },
   multitask: { label: 'Multitask', icon: 'robot', cls: 'border-cobalt/40 text-cobalt' },
   project: { label: 'Project', icon: 'file', cls: 'border-cobalt/40 text-cobalt' },
@@ -135,7 +135,7 @@ function ComposerModeBadge({ mode }: { mode: string }) {
   return (
     <span
       title={`Cursor ${mode} mode`}
-      className={`flex shrink-0 items-center gap-0.5 rounded border px-1 py-px font-mono text-[0.5rem] font-bold uppercase tracking-widest ${m.cls}`}>
+      className={`flex shrink-0 items-center gap-0.5 rounded border px-1 py-px font-mono text-label font-semibold uppercase tracking-label ${m.cls}`}>
       <Icon name={m.icon} className="h-2.5 w-2.5" />
       {m.label}
     </span>
@@ -144,13 +144,13 @@ function ComposerModeBadge({ mode }: { mode: string }) {
 
 function QaBadge({ variant }: { variant: 'question' | 'answer' }) {
   const map = {
-    question: { label: 'Question', cls: 'border-fg/20 text-fg/50', title: 'This prompt event contains questions' },
+    question: { label: 'Question', cls: 'border-line/[0.16] text-fg/60', title: 'This prompt event contains questions' },
     answer: { label: 'Answer', cls: 'border-cobalt/40 text-cobalt', title: 'This prompt event stores the user answer' },
   }[variant];
   return (
     <span
       title={map.title}
-      className={`shrink-0 rounded border px-1 py-px font-mono text-[0.5rem] font-bold uppercase tracking-widest ${map.cls}`}>
+      className={`shrink-0 rounded border px-1 py-px font-mono text-label font-semibold uppercase tracking-label ${map.cls}`}>
       {map.label}
     </span>
   );

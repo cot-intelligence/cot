@@ -222,3 +222,76 @@ smoke:
     done
 
     python3 scripts/smoke_e2e.py "${endpoint}"
+
+# macOS app: build cot.app (SwiftUI shell + frozen collector + dashboard).
+#   just mac build      full build
+#   just mac app        Swift shell only, for iterating on the UI
+#   just mac run        build and launch
+#   just mac clean      drop macos/build
+mac action="build":
+    #!/usr/bin/env sh
+    set -eu
+
+    case "{{action}}" in
+      build) macos/build.sh ;;
+      app)   macos/build.sh --app-only ;;
+      run)   macos/build.sh --run ;;
+      clean) rm -rf macos/build && printf '%s\n' "removed macos/build" ;;
+      *) printf '%s\n' "unknown action: {{action}} (build|app|run|clean)" >&2; exit 2 ;;
+    esac
+
+# Fresh web install in a sandbox: runs `curl cot.run/install | sh` with HOME in a
+# temp dir, so the collector container, ~/.cot and hook files never touch yours.
+#   just fresh            collector built from origin/main
+#   just fresh release    the published image users pull today
+#   just fresh down       remove the container and sandbox
+# COT_FRESH_HISTORY=1 imports your real transcripts read-only.
+# Fresh web install in a sandbox: up | release | down
+fresh action="up":
+    #!/usr/bin/env sh
+    set -eu
+    case "{{action}}" in
+      up)      scripts/fresh-install.sh ;;
+      release) scripts/fresh-install.sh --release ;;
+      down)    scripts/fresh-install.sh down ;;
+      *) printf '%s\n' "unknown action: {{action}} (up|release|down)" >&2; exit 2 ;;
+    esac
+
+# Desktop app (Tauri): cot.app that runs the frozen collector, self-updates.
+#   just desktop dev      run the shell in dev mode (stages the collector once)
+#   just desktop build    build cot.app (dashboard + frozen collector + shell)
+#   just desktop shell    rebuild dashboard + shell only, reusing the frozen collector
+#   just desktop dmg      build cot.app and the DMG
+#   just desktop verify   check the built app's collector answers /health
+#   just desktop install  install the built app to /Applications (old one kept in ~/cot-app-backups)
+#   just desktop deploy   build, verify, install
+#   just desktop prod     install origin/main like a release: clean build, install, bridge + hooks
+#   just desktop test     Rust unit tests
+#   just desktop clean    drop build output and staged resources
+# Desktop app: dev | build | shell | dmg | verify | install | deploy | prod | test | clean
+desktop action="build":
+    #!/usr/bin/env sh
+    set -eu
+    scripts/ensure-node-deps.sh desktop
+    cd desktop
+    case "{{action}}" in
+      dev)     npx tauri dev ;;
+      build)   scripts/build.sh ;;
+      shell)   scripts/build.sh --shell ;;
+      dmg)     scripts/build.sh --dmg ;;
+      verify)  scripts/verify-bundle.sh ;;
+      install) scripts/install.sh ;;
+      deploy)  scripts/build.sh && scripts/verify-bundle.sh && scripts/install.sh ;;
+      prod)    scripts/install-main.sh ;;
+      test)    cargo test --manifest-path src-tauri/Cargo.toml ;;
+      clean)   rm -rf build src-tauri/target src-tauri/resources && printf '%s\n' "removed desktop build output" ;;
+      *) printf '%s\n' "unknown action: {{action}} (dev|build|shell|dmg|verify|install|deploy|prod|test|clean)" >&2; exit 2 ;;
+    esac
+
+# Cut a release locally: bump backend/app/__init__.py, test, commit, annotated tag.
+# Never pushes; prints the push commands (pushing the tag publishes the Docker
+# image and the desktop app).
+#   just release 1.11.0 "Signal Forest design and extension observability"
+# Release: bump version, test, commit and tag locally (prints the push commands)
+release version summary:
+    scripts/release.sh "{{version}}" "{{summary}}"
