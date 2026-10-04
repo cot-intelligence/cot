@@ -57,20 +57,20 @@ export function writeTimelineSidebarMode(mode: TimelineSidebarMode): void {
   }
 }
 
-export function readSavedAgents(): ('claude' | 'cursor' | 'codex')[] {
+export function readSavedAgents(): ('claude' | 'cursor' | 'codex' | 'opencode')[] {
   try {
     const raw = localStorage.getItem(AGENTS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as unknown;
       if (Array.isArray(parsed)) {
         return parsed.filter(
-          (x): x is 'claude' | 'cursor' | 'codex' =>
-            x === 'claude' || x === 'cursor' || x === 'codex',
+          (x): x is 'claude' | 'cursor' | 'codex' | 'opencode' =>
+            x === 'claude' || x === 'cursor' || x === 'codex' || x === 'opencode',
         );
       }
     }
     const legacy = localStorage.getItem(LEGACY_AGENT_KEY);
-    if (legacy === 'claude' || legacy === 'cursor' || legacy === 'codex') return [legacy];
+    if (legacy === 'claude' || legacy === 'cursor' || legacy === 'codex' || legacy === 'opencode') return [legacy];
   } catch {
     /* ignore */
   }
@@ -86,7 +86,7 @@ export function readOnboarded(): boolean {
 }
 
 /** Local copy of the onboarding result; the collector holds the durable one. */
-export function writeOnboarded(agents: ('claude' | 'cursor' | 'codex')[]): void {
+export function writeOnboarded(agents: ('claude' | 'cursor' | 'codex' | 'opencode')[]): void {
   try {
     localStorage.setItem(ONBOARDED_KEY, '1');
     localStorage.setItem(AGENTS_KEY, JSON.stringify(agents));

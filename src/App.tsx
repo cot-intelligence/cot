@@ -8,6 +8,7 @@ import { setDocumentTitle } from './lib/documentTitle';
 import { identifyInstall } from './lib/analytics';
 import type { AgentId } from './lib/agents';
 import { readOnboarded, readSavedAgents, writeOnboarded } from './lib/settings';
+import { getPrefs } from './lib/prefs';
 
 type Origin = { x: number; y: number };
 
@@ -48,7 +49,7 @@ export function App() {
 
   useEffect(() => {
     if (!window.location.hash) {
-      window.location.hash = '#/sessions';
+      window.location.hash = `#/${getPrefs().start}`;
     }
   }, []);
 
@@ -87,7 +88,7 @@ export function App() {
           onCovered={() => setView('dashboard')}
           onDone={() => {
             setTransition(null);
-            window.location.hash = '#/sessions';
+            window.location.hash = '#/overview';
           }}
         />
       )}
@@ -138,7 +139,7 @@ function FluidReveal({
   return (
     <motion.div
       aria-hidden="true"
-      className="pointer-events-none fixed inset-0 z-[100] bg-vermilion"
+      className="pointer-events-none fixed inset-0 z-[100] bg-hot"
       style={{ clipPath: clip }}
     />
   );

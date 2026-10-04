@@ -1,6 +1,6 @@
 import { AGENTS, type AgentId } from '../../../lib/agents';
 import { AgentCard } from '../AgentCard';
-import { FadeIn } from '../../ui/FadeIn';
+import { Icon } from '../../forest/icons';
 
 interface ChooseAgentProps {
   selected: AgentId[];
@@ -10,22 +10,14 @@ interface ChooseAgentProps {
 
 export function ChooseAgent({ selected, onToggle, onContinue }: ChooseAgentProps) {
   return (
-    <FadeIn className="space-y-10">
-      <header className="space-y-3">
-        <span className="inline-block border border-fg bg-fg px-3 py-1 font-mono text-[0.6rem] font-bold uppercase tracking-widest text-bg">
-          AGENT_SOURCE
-        </span>
-        <h1 className="text-4xl font-extrabold uppercase leading-[0.95] tracking-tight text-fg sm:text-5xl">
-          Connect your{' '}
-          <span className="font-serif lowercase italic text-vermilion">agents</span>
-        </h1>
-        <p className="max-w-md font-mono text-xs leading-relaxed text-fg/55">
-          Select the agents you use. cot ingests lifecycle hooks locally — no
-          SDK, no code changes, your traces never leave your machine.
-        </p>
-      </header>
+    <div>
+      <span className="label">Live hooks · step 1</span>
+      <h1 className="onb-t">Choose agents to connect</h1>
+      <p className="onb-lead dim">
+        cot adds a small hook to each agent you pick. No SDK, no code changes, and your traces never leave this machine.
+      </p>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2">
         {AGENTS.map((agent) => (
           <AgentCard
             key={agent.id}
@@ -36,23 +28,14 @@ export function ChooseAgent({ selected, onToggle, onContinue }: ChooseAgentProps
         ))}
       </div>
 
-      <div className="flex items-center justify-between gap-4">
-        <p className="font-mono text-[0.65rem] uppercase tracking-widest text-fg/30">
-          {selected.length === 0
-            ? 'Select at least one'
-            : `${selected.length} selected`}
-        </p>
-        <button
-          type="button"
-          disabled={selected.length === 0}
-          onClick={onContinue}
-          className="group inline-flex items-center gap-3 border border-fg bg-fg px-7 py-3.5 font-mono text-xs font-bold uppercase tracking-widest text-bg transition-opacity enabled:hover:opacity-90 disabled:cursor-not-allowed disabled:border-fg/20 disabled:bg-transparent disabled:text-fg/30">
-          Continue
-          <span className="transition-transform group-enabled:group-hover:translate-x-1">
-            {'→'}
-          </span>
+      <div className="onb-actions">
+        <span className="mono faint" style={{ fontSize: 12 }}>
+          {selected.length === 0 ? 'Select at least one' : `${selected.length} selected`}
+        </span>
+        <button type="button" className="vbtn vbtn-primary" disabled={selected.length === 0} onClick={onContinue}>
+          Continue <Icon name="arrow" size={15} />
         </button>
       </div>
-    </FadeIn>
+    </div>
   );
 }

@@ -1,950 +1,543 @@
-import { useEffect, useState, type ReactNode } from 'react';
-import { usePolling } from '../../lib/usePolling';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   cleanupRetention,
   getHealth,
   getHookStatus,
   getRetention,
   getSettings,
-  getSelfAudit,
+  getPassive,
   getVersionInfo,
+  runPassiveNow,
+  updatePassive,
+  runAiAnalysis,
   updateRetention,
   updateSettings,
-  type AuditEvent,
+  type AiProvider,
   type Health,
   type HookHealthState,
   type HookStatus,
-  type HookStatusAgent,
+  PassiveUnsupportedError,
+  type PassiveAgent,
+  type PassiveStatus,
   type RetentionCleanupResult,
   type RetentionStatus,
   type Settings,
   type VersionInfo,
 } from '../../lib/api';
-import { formatRelative } from '../../lib/categoryMeta';
-import { formatBytes } from '../../lib/format';
-import { readSavedAgents } from '../../lib/settings';
-import { sourceLabel } from '../../lib/sourceLabels';
+import { setPref, usePrefs, type Prefs } from '../../lib/prefs';
 import { useTheme } from '../../lib/theme';
-import { FadeIn } from '../ui/FadeIn';
-import { AgentMark } from '../ui/AgentMark';
-import { PageHeader } from '../ui/PageHeader';
+import { usePolling } from '../../lib/usePolling';
+import { fmt } from '../forest/format';
+import { Icon } from '../forest/icons';
+import { Agent, Seg, Switch } from '../forest/ui';
+import { MarkPicker } from '../forest/MarkPicker';
 import { ExportModal } from './ExportModal';
+import { AgentSources, HooksGap, RunStatus, SchedulePicker } from '../passive/PassiveParts';
+import { homePath } from './GovernanceView';
 
 interface SettingsViewProps {
   sidebarOpen: boolean;
   onSidebarOpenChange: (open: boolean) => void;
+  navCollapsed: boolean;
+  onNavCollapsedChange: (collapsed: boolean) => void;
   onRunOnboarding: () => void;
 }
 
-// Above this on-disk size, suggest enabling retention if it's paused. The local
-// DB stores raw event payloads, so a busy machine can reach hundreds of MB.
-const DB_SIZE_NUDGE_BYTES = 500 * 1024 * 1024;
+const SECTIONS = [
+  { id: 'appearance', label: 'Appearance', icon: 'sun' },
+  { id: 'defaults', label: 'Defaults', icon: 'overview' },
+  { id: 'ai', label: 'AI insights', icon: 'sparkle' },
+  { id: 'collector', label: 'Collector & hooks', icon: 'plug' },
+  { id: 'passive', label: 'Passive import', icon: 'clock' },
+  { id: 'privacy', label: 'Privacy', icon: 'lock' },
+  { id: 'data', label: 'Data & retention', icon: 'database' },
+];
 
-export function SettingsView({
-  sidebarOpen,
-  onSidebarOpenChange,
-  onRunOnboarding,
-}: SettingsViewProps) {
+const HOOK_HEALTH: Record<HookHealthState, { label: string; c: string }> = {
+  healthy: { label: 'healthy', c: 'c-ok' },
+  missing_hooks: { label: 'missing hooks', c: 'c-critical' },
+  not_installed: { label: 'not installed', c: 'c-critical' },
+  stale: { label: 'stale', c: 'c-warn' },
+  no_events: { label: 'no events yet', c: 'c-dim' },
+};
+
+/** Markup mirrors the demo's Settings page (demo-variants/src/variants/forest/settings.tsx); every control writes for real. */
+export function SettingsView({ sidebarOpen, onSidebarOpenChange, navCollapsed, onNavCollapsedChange, onRunOnboarding }: SettingsViewProps) {
+  const prefs = usePrefs();
   const { preference, setPreference } = useTheme();
-  const { data: health, error: healthError } = usePolling<Health>(['health'], () => getHealth(), 10000);
-  const { data: hookStatus, error: hookStatusError } = usePolling<HookStatus>(['hookStatus'], () => getHookStatus(), 10000);
-  const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
-  const [versionChecking, setVersionChecking] = useState(false);
-  const [versionCheckError, setVersionCheckError] = useState<string | null>(null);
+  const [section, setSection] = useScrollSpy();
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [retention, setRetention] = useState<RetentionStatus | null>(null);
-  const [cleanupResult, setCleanupResult] = useState<RetentionCleanupResult | null>(null);
-  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
-  const [retentionBusy, setRetentionBusy] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
-  const [aiKeyInput, setAiKeyInput] = useState('');
-  const [aiModelInput, setAiModelInput] = useState('');
-  const [aiEndpointInput, setAiEndpointInput] = useState('');
-  const [aiConnectionOpen, setAiConnectionOpen] = useState(false);
-  const [aiBusy, setAiBusy] = useState(false);
-  const [aiError, setAiError] = useState<string | null>(null);
-  const savedAgents = readSavedAgents();
 
   useEffect(() => {
-    let active = true;
-    getVersionInfo()
-      .then((data) => {
-        if (active) setVersionInfo(data);
-      })
-      .catch(() => {
-        /* offline — leave version info empty */
-      });
-    getSettings()
-      .then((data) => {
-        if (active) {
-          setSettings(data);
-          setAiModelInput(data.ai_model ?? '');
-          setAiEndpointInput(data.ai_endpoint ?? '');
-          setAiConnectionOpen(!data.ai_configured);
-        }
-      })
-      .catch(() => {
-        /* offline — leave settings empty */
-      });
-    Promise.all([getRetention(), getSelfAudit(8)])
-      .then(([ret, audit]) => {
-        if (active) {
-          setRetention(ret);
-          setAuditEvents(audit);
-        }
-      })
-      .catch(() => {
-        /* offline — leave retention/audit empty */
-      });
-    return () => {
-      active = false;
-    };
+    getSettings().then(setSettings).catch(() => {});
   }, []);
 
-  const setTelemetry = async (enabled: boolean) => {
-    if (!settings || settings.telemetry_env_disabled) return;
-    setSettings({ ...settings, telemetry_enabled: enabled });
-    try {
-      const next = await updateSettings({ telemetry_enabled: enabled });
-      setSettings(next);
-    } catch {
-      /* revert on failure */
-      setSettings((s) => (s ? { ...s, telemetry_enabled: !enabled } : s));
-    }
-  };
-
-  const refreshAudit = async () => {
-    const [ret, audit] = await Promise.all([getRetention(), getSelfAudit(8)]);
-    setRetention(ret);
-    setAuditEvents(audit);
-  };
-
-  const patchAi = async (patch: Parameters<typeof updateSettings>[0]) => {
-    setAiBusy(true);
-    setAiError(null);
-    try {
-      const next = await updateSettings(patch);
-      setSettings(next);
-      return next;
-    } catch (err) {
-      setAiError(err instanceof Error ? err.message : String(err));
-      return null;
-    } finally {
-      setAiBusy(false);
-    }
-  };
-
-  const saveAiKey = async () => {
-    const value = aiKeyInput.trim();
-    if (!value) return;
-    if (await patchAi({ ai_api_key: value })) setAiKeyInput('');
-  };
-
-  const saveAiModel = async () => {
-    if (!settings) return;
-    const value = aiModelInput.trim();
-    if (value === (settings.ai_model ?? '')) return;
-    const next = await patchAi({ ai_model: value });
-    if (next) setAiModelInput(next.ai_model ?? '');
-  };
-
-  const saveAiEndpoint = async () => {
-    if (!settings) return;
-    const value = aiEndpointInput.trim();
-    if (value === (settings.ai_endpoint ?? '')) return;
-    const next = await patchAi({ ai_endpoint: value });
-    if (next) setAiEndpointInput(next.ai_endpoint ?? '');
-  };
-
-  const saveAiConnection = async () => {
-    if (!settings) return;
-    const patch: Parameters<typeof updateSettings>[0] = {
-      ai_model: aiModelInput.trim(),
-      ai_endpoint: aiEndpointInput.trim(),
-    };
-    if (aiKeyInput.trim()) patch.ai_api_key = aiKeyInput.trim();
-    const next = await patchAi(patch);
-    if (next) {
-      setAiKeyInput('');
-      setAiModelInput(next.ai_model ?? '');
-      setAiEndpointInput(next.ai_endpoint ?? '');
-      setAiConnectionOpen(false);
-    }
-  };
-
-  const setRetentionEnabled = async (enabled: boolean) => {
-    if (!retention) return;
-    setRetention({ ...retention, policy: { ...retention.policy, enabled } });
-    try {
-      const next = await updateRetention({ enabled });
-      setRetention(next);
-      setAuditEvents(await getSelfAudit(8));
-    } catch {
-      setRetention((r) => (r ? { ...r, policy: { ...r.policy, enabled: !enabled } } : r));
-    }
-  };
-
-  const setRetentionDays = async (days: number) => {
-    if (!retention) return;
-    const before = retention.policy.days;
-    setRetention({ ...retention, policy: { ...retention.policy, days } });
-    try {
-      const next = await updateRetention({ days });
-      setRetention(next);
-      setAuditEvents(await getSelfAudit(8));
-    } catch {
-      setRetention((r) => (r ? { ...r, policy: { ...r.policy, days: before } } : r));
-    }
-  };
-
-  const runRetentionCleanup = async (dryRun: boolean) => {
-    if (!dryRun && !window.confirm('Delete sessions older than the retention window?')) return;
-    setRetentionBusy(true);
-    try {
-      const result = await cleanupRetention(dryRun);
-      setCleanupResult(result);
-      await refreshAudit();
-    } finally {
-      setRetentionBusy(false);
-    }
-  };
-
-  const checkForUpdates = async () => {
-    setVersionChecking(true);
-    setVersionCheckError(null);
-    try {
-      const data = await getVersionInfo(true);
-      setVersionInfo(data);
-      if (!data.latest) {
-        setVersionCheckError('Update check unavailable — offline or disabled.');
-      }
-    } catch {
-      setVersionCheckError('Could not reach the collector to check for updates.');
-    } finally {
-      setVersionChecking(false);
-    }
-  };
+  const pref = <K extends keyof Prefs>(k: K) => (v: Prefs[K]) => setPref(k, v);
 
   return (
-    <div className="scroll-thin flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-3xl space-y-10 px-6 py-8 sm:px-8">
-        <FadeIn>
-          <PageHeader
-            eyebrow="Configuration"
-            title="Settings"
-            description="Collector, hooks and preferences. Your traces stay on your machine."
-          />
-        </FadeIn>
+    <div className="scroll" id="vf-scroll">
+      <div className="page">
+        <div className="ph">
+          <div><span className="label">Workspace</span><h1>Settings</h1><p>Display, AI, collector and data. Your traces stay on your machine.</p></div>
+        </div>
+        <div className="set">
+          <nav className="set-nav" aria-label="Settings sections">
+            {SECTIONS.map((x) => (
+              <a
+                key={x.id}
+                href="#/settings"
+                className="nav-i"
+                aria-current={section === x.id ? 'true' : undefined}
+                onClick={(e) => {
+                  e.preventDefault();
+                  setSection(x.id);
+                  document.getElementById(`set-${x.id}`)?.scrollIntoView({ block: 'start' });
+                }}>
+                <Icon name={x.icon} />
+                <span>{x.label}</span>
+              </a>
+            ))}
+          </nav>
 
-        <FadeIn delay={0.03}>
-          <Section title="Collector" description="Local API that receives agent events.">
-            <div className="grid gap-3 sm:grid-cols-3">
-              <Stat
-                label="Status"
-                value={healthError ? 'Offline' : health?.status ?? '…'}
-                accent={!healthError && health?.status === 'ok'}
-                warn={healthError}
-              />
-              <Stat label="Version" value={health?.version ?? '—'} />
-              <Stat
-                label="Database"
-                value={health ? shortPath(health.db_path) : '—'}
-                hint={health?.db_path}
-              />
-            </div>
-          </Section>
-        </FadeIn>
+          <div className="set-body">
+            <Section id="appearance" title="Appearance" desc="How the dashboard looks on this browser.">
+              <Row label="Theme" hint="Light is the default. System follows your OS setting.">
+                <Seg
+                  id="set-theme"
+                  label="Theme"
+                  value={preference}
+                  onChange={setPreference}
+                  options={[
+                    { k: 'light', l: <Icon name="sun" size={16} />, name: 'Light' },
+                    { k: 'dark', l: <Icon name="moon" size={16} />, name: 'Dark' },
+                    { k: 'system', l: <Icon name="monitor" size={16} />, name: 'System' },
+                  ]}
+                />
+              </Row>
+              <Row label="Density" hint="Compact fits more rows into tables and traces.">
+                <Seg id="set-density" value={prefs.density} onChange={pref('density')} options={[{ k: 'comfortable', l: 'Comfortable' }, { k: 'compact', l: 'Compact' }]} />
+              </Row>
+              <Row label="Sidebar" hint="The rail keeps icons only, with names on hover.">
+                <Seg id="set-rail" value={navCollapsed ? 'rail' : 'full'} onChange={(v) => onNavCollapsedChange(v === 'rail')} options={[{ k: 'full', l: 'Expanded' }, { k: 'rail', l: 'Rail' }]} />
+              </Row>
+              <Row label="Session list" hint="Whether the session list stays open beside a session's trace.">
+                <Seg id="set-sesslist" value={sidebarOpen ? 'open' : 'closed'} onChange={(v) => onSidebarOpenChange(v === 'open')} options={[{ k: 'open', l: 'Open' }, { k: 'closed', l: 'Collapsed' }]} />
+              </Row>
+              <Row label="Workspace mark" hint="The image beside the workspace name in the sidebar. Saved on this browser.">
+                <MarkPicker value={prefs.avatar} initial="L" onChange={(v) => setPref('avatar', v)} />
+              </Row>
+              <Row label="Motion" hint="Reduced keeps fades and drops movement, whatever the OS says.">
+                <Seg id="set-motion" value={prefs.motion} onChange={pref('motion')} options={[{ k: 'system', l: 'System' }, { k: 'reduced', l: 'Reduced' }]} />
+              </Row>
+            </Section>
 
-        <FadeIn delay={0.05}>
-          <Section
-            title="Setup wizard"
-            description="Step-by-step onboarding to pick an agent and verify your first trace.">
-            <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg bg-surface p-4 shadow-soft">
-              <div className="space-y-1">
-                <p className="font-mono text-sm font-bold text-fg">
-                  {savedAgents.length > 0 ? 'Reconfigure cot' : 'Configure cot'}
-                </p>
-                <p className="font-mono text-xs text-fg/45">
-                  Re-run the wizard to switch agents or re-verify setup.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={onRunOnboarding}
-                className="shrink-0 border border-fg bg-fg px-5 py-2.5 font-mono text-[0.65rem] font-bold uppercase tracking-widest text-bg shadow-soft transition-opacity hover:opacity-90">
-                Run setup wizard
-              </button>
-            </div>
-          </Section>
-        </FadeIn>
+            <Section id="defaults" title="Defaults" desc="Where the dashboard opens and what it shows first.">
+              <Row label="Start page" hint="Opened when you visit the dashboard root.">
+                <Seg id="set-start" value={prefs.start} onChange={pref('start')} options={[{ k: 'overview', l: 'Overview' }, { k: 'sessions', l: 'Sessions' }, { k: 'findings', l: 'Findings' }]} />
+              </Row>
+              <Row label="Overview range" hint="Used until you pick another range on the page.">
+                <Seg id="set-range" value={prefs.range} onChange={pref('range')} options={[{ k: 7, l: '7d' }, { k: 30, l: '30d' }, { k: 90, l: '90d' }]} />
+              </Row>
+            </Section>
 
-        <FadeIn delay={0.07}>
-          <Section
-            title="Hook health"
-            description="Agent hook status and recent activity.">
-            {hookStatusError ? (
-              <p className="font-mono text-xs text-vermilion/70">
-                Hook status is unavailable while the collector is offline.
-              </p>
-            ) : hookStatus ? (
-              <>
-                <ul className="divide-y divide-line/10 rounded-lg bg-surface shadow-soft">
-                  {hookStatus.agents.map((agent) => (
-                    <HookHealthRow
-                      key={agent.source}
-                      agent={agent}
-                      onReconfigure={onRunOnboarding}
-                    />
-                  ))}
-                </ul>
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <p className="font-mono text-[0.62rem] text-fg/40">
-                    Updated {formatRelative(hookStatus.updated_at)} ·{' '}
-                    {hookStatus.manifest_found ? 'bridge manifest found' : 'using event history'}
-                  </p>
-                  {hookStatus.agents.some((agent) => needsHookRepair(agent)) && (
-                    <button
-                      type="button"
-                      onClick={onRunOnboarding}
-                      className="border border-vermilion px-3 py-1.5 font-mono text-[0.6rem] font-bold uppercase tracking-widest text-vermilion transition-colors hover:bg-vermilion hover:text-cream">
-                      Reconfigure cot
-                    </button>
-                  )}
-                </div>
-              </>
-            ) : (
-              <p className="font-mono text-xs text-fg/40">Checking hook status…</p>
-            )}
-          </Section>
-        </FadeIn>
-
-        <FadeIn delay={0.13}>
-          <Section title="Preferences" description="Dashboard display options.">
-            <div className="space-y-4">
-              <PreferenceRow label="Theme" hint="Light, dark, or match your system setting.">
-                <div className="flex gap-1 rounded-md bg-panel p-1">
-                  {(['system', 'light', 'dark'] as const).map((t) => (
-                    <ToggleChip
-                      key={t}
-                      label={t}
-                      active={preference === t}
-                      onClick={() => setPreference(t)}
-                    />
-                  ))}
-                </div>
-              </PreferenceRow>
-              <PreferenceRow
-                label="Session sidebar"
-                hint="Default state when opening a session detail view.">
-                <div className="flex gap-1 rounded-md bg-panel p-1">
-                  <ToggleChip
-                    label="Open"
-                    active={sidebarOpen}
-                    onClick={() => onSidebarOpenChange(true)}
-                  />
-                  <ToggleChip
-                    label="Collapsed"
-                    active={!sidebarOpen}
-                    onClick={() => onSidebarOpenChange(false)}
-                  />
-                </div>
-              </PreferenceRow>
-              <PreferenceRow label="Usage metrics">
-                <div className="flex gap-1 rounded-md bg-panel p-1">
-                  <ToggleChip
-                    label="On"
-                    active={!!settings?.telemetry_enabled}
-                    disabled={!settings || settings.telemetry_env_disabled}
-                    onClick={() => setTelemetry(true)}
-                  />
-                  <ToggleChip
-                    label="Off"
-                    active={!!settings && !settings.telemetry_enabled}
-                    disabled={!settings || settings.telemetry_env_disabled}
-                    onClick={() => setTelemetry(false)}
-                  />
-                </div>
-              </PreferenceRow>
-            </div>
-          </Section>
-        </FadeIn>
-
-        <FadeIn delay={0.125}>
-          <Section
-            title="AI insights"
-            description="Bring your own key for AI analysis on the Overview page. Runs only when you ask; findings, metrics and masked excerpts are sent to your provider. The key stays local in ~/.cot.">
-            <div className="space-y-4">
-              {settings?.ai_env_disabled && (
-                <p className="font-mono text-xs text-vermilion">
-                  Disabled for this deployment via COT_DISABLE_LLM.
-                </p>
-              )}
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-surface p-4 shadow-soft">
-                <div className="min-w-0 space-y-1">
-                  <p className="font-mono text-sm font-bold text-fg">
-                    {settings?.ai_configured ? 'AI connection configured' : 'No AI connection'}
-                  </p>
-                  <p className="truncate font-mono text-xs text-fg/45" title={settings?.ai_effective_endpoint}>
-                    {settings
-                      ? `${settings.ai_provider === 'openai' ? 'OpenAI' : 'Anthropic'} · ${
-                          settings.ai_model ?? settings.ai_default_model
-                        } · ${settings.ai_effective_endpoint}`
-                      : 'Loading connection state…'}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setAiConnectionOpen((open) => !open)}
-                  disabled={!settings || settings.ai_env_disabled || aiBusy}
-                  className="shrink-0 border border-fg/25 px-3 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/75 shadow-soft transition-colors hover:border-vermilion hover:text-vermilion disabled:cursor-not-allowed disabled:opacity-40">
-                  {aiConnectionOpen ? 'Hide form' : settings?.ai_configured ? 'Edit connection' : 'Add connection'}
-                </button>
-              </div>
-              {aiConnectionOpen && (
-                <div className="space-y-4 rounded-lg bg-surface p-4 shadow-soft">
-              <PreferenceRow
-                label="API key"
-                hint={
-                  settings?.ai_configured
-                    ? `Configured ${settings.ai_key_masked ?? ''}${
-                        settings.ai_key_source === 'env' ? ' — from environment variable' : ''
-                      }`
-                    : 'Not configured — analysis is disabled until you add one.'
-                }>
-                <div className="flex flex-wrap items-center gap-2">
-                  <input
-                    type="password"
-                    value={aiKeyInput}
-                    onChange={(e) => setAiKeyInput(e.target.value)}
-                    onBlur={() => void saveAiKey()}
-                    placeholder={settings?.ai_provider === 'openai' ? 'sk-…' : 'sk-ant-…'}
-                    autoComplete="off"
-                    disabled={!settings || settings.ai_env_disabled}
-                    className="w-52 rounded-md bg-panel px-3 py-1.5 font-mono text-xs text-fg placeholder:text-fg/30 focus:outline-none focus:ring-1 focus:ring-vermilion disabled:cursor-not-allowed disabled:opacity-40"
-                  />
-                </div>
-              </PreferenceRow>
-              <PreferenceRow
-                label="Model"
-                hint={`Optional override — default is ${settings?.ai_default_model ?? '…'}.`}>
-                <div className="flex flex-wrap items-center gap-2">
-                  <input
-                    type="text"
-                    value={aiModelInput}
-                    onChange={(e) => setAiModelInput(e.target.value)}
-                    onBlur={() => void saveAiModel()}
-                    placeholder={settings?.ai_default_model}
-                    autoComplete="off"
-                    disabled={!settings || settings.ai_env_disabled}
-                    className="w-52 rounded-md bg-panel px-3 py-1.5 font-mono text-xs text-fg placeholder:text-fg/30 focus:outline-none focus:ring-1 focus:ring-vermilion disabled:cursor-not-allowed disabled:opacity-40"
-                  />
-                </div>
-              </PreferenceRow>
-              <PreferenceRow
-                label="Endpoint"
-                hint={`Optional override — default is ${settings?.ai_default_endpoint ?? '…'}.`}>
-                <div className="flex flex-wrap items-center gap-2">
-                  <input
-                    type="url"
-                    value={aiEndpointInput}
-                    onChange={(e) => setAiEndpointInput(e.target.value)}
-                    onBlur={() => void saveAiEndpoint()}
-                    placeholder={settings?.ai_default_endpoint}
-                    autoComplete="off"
-                    disabled={!settings || settings.ai_env_disabled}
-                    className="w-full min-w-[16rem] max-w-md rounded-md bg-panel px-3 py-1.5 font-mono text-xs text-fg placeholder:text-fg/30 focus:outline-none focus:ring-1 focus:ring-vermilion disabled:cursor-not-allowed disabled:opacity-40"
-                  />
-                </div>
-              </PreferenceRow>
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  onClick={() => void saveAiConnection()}
-                  disabled={
-                    !settings ||
-                    settings.ai_env_disabled ||
-                    aiBusy ||
-                    (!aiKeyInput.trim() &&
-                      aiModelInput.trim() === (settings.ai_model ?? '') &&
-                      aiEndpointInput.trim() === (settings.ai_endpoint ?? ''))
-                  }
-                  className="border border-fg bg-fg px-4 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-bg shadow-soft transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40">
-                  Save connection
-                </button>
-              </div>
-                </div>
-              )}
-              {aiError && <p className="font-mono text-xs text-vermilion">{aiError}</p>}
-            </div>
-          </Section>
-        </FadeIn>
-
-        <FadeIn delay={0.12}>
-          <Section
-            title="Data export"
-            description="Export sessions, audit logs, or metrics to JSON or CSV.">
-            <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg bg-surface p-4 shadow-soft">
-              <div className="space-y-1">
-                <p className="font-mono text-sm font-bold text-fg">
-                  Export your data
-                </p>
-                <p className="font-mono text-xs text-fg/45">
-                  Filter by source, dates, models, tokens and more.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setExportOpen(true)}
-                className="shrink-0 border border-fg bg-fg px-5 py-2.5 font-mono text-[0.65rem] font-bold uppercase tracking-widest text-bg shadow-soft transition-opacity hover:opacity-90">
-                Open export
-              </button>
-            </div>
-          </Section>
-        </FadeIn>
-
-        <FadeIn delay={0.135}>
-          <Section
-            title="Retention & audit"
-            description="Local cleanup policy and cot's own configuration trail.">
-            <div className="grid gap-3 sm:grid-cols-3">
-              <Stat
-                label="Database size"
-                value={retention ? formatBytes(retention.db_size_bytes) : '—'}
-                warn={!!retention && retention.db_size_bytes >= DB_SIZE_NUDGE_BYTES}
-              />
-              <Stat
-                label="Policy"
-                value={
-                  retention
-                    ? retention.policy.enabled
-                      ? `${retention.policy.days} days`
-                      : 'Paused'
-                    : '—'
-                }
-                accent={!!retention?.policy.enabled}
-              />
-              <Stat
-                label="Dry-run sessions"
-                value={(retention?.preview_sessions ?? 0).toLocaleString()}
-              />
-            </div>
-
-            {retention &&
-              !retention.policy.enabled &&
-              retention.db_size_bytes >= DB_SIZE_NUDGE_BYTES && (
-                <div className="rounded-lg border border-vermilion/40 bg-vermilion/5 p-4">
-                  <p className="font-mono text-xs leading-relaxed text-fg/70">
-                    Your local database is{' '}
-                    <span className="font-bold text-vermilion">
-                      {formatBytes(retention.db_size_bytes)}
-                    </span>{' '}
-                    and retention is paused, so traces accumulate indefinitely. Enable a
-                    policy below to prune old sessions and reclaim disk automatically.
-                  </p>
-                  <button
-                    type="button"
-                    disabled={retentionBusy}
-                    onClick={() => setRetentionEnabled(true)}
-                    className="mt-3 border border-vermilion px-4 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-vermilion transition-colors hover:bg-vermilion hover:text-cream disabled:cursor-not-allowed disabled:opacity-40">
-                    Enable {retention.policy.days}-day retention
-                  </button>
-                </div>
-              )}
-
-            <div className="space-y-4 rounded-lg bg-surface p-4 shadow-soft">
-              <PreferenceRow
-                label="Retention policy"
-                hint={retention ? `Cutoff ${formatRelative(retention.cutoff)}` : undefined}>
-                <div className="flex gap-1 rounded-md bg-panel p-1">
-                  <ToggleChip
-                    label="On"
-                    active={!!retention?.policy.enabled}
-                    disabled={!retention}
-                    onClick={() => setRetentionEnabled(true)}
-                  />
-                  <ToggleChip
-                    label="Paused"
-                    active={!!retention && !retention.policy.enabled}
-                    disabled={!retention}
-                    onClick={() => setRetentionEnabled(false)}
-                  />
-                </div>
-              </PreferenceRow>
-
-              <PreferenceRow label="Window">
-                <div className="flex flex-wrap gap-1 rounded-md bg-panel p-1">
-                  {[7, 30, 90, 180].map((days) => (
-                    <ToggleChip
-                      key={days}
-                      label={`${days}d`}
-                      active={retention?.policy.days === days}
-                      disabled={!retention}
-                      onClick={() => setRetentionDays(days)}
-                    />
-                  ))}
-                </div>
-              </PreferenceRow>
-
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  disabled={!retention || retentionBusy}
-                  onClick={() => runRetentionCleanup(true)}
-                  className="border border-line/30 px-4 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg transition-colors hover:border-cobalt hover:text-cobalt disabled:cursor-not-allowed disabled:opacity-40">
-                  Dry run
-                </button>
-                <button
-                  type="button"
-                  disabled={!retention?.policy.enabled || retentionBusy}
-                  onClick={() => runRetentionCleanup(false)}
-                  className="border border-vermilion px-4 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-vermilion transition-colors hover:bg-vermilion hover:text-cream disabled:cursor-not-allowed disabled:opacity-40">
-                  Clean now
-                </button>
-              </div>
-
-              {cleanupResult && (
-                <p className="font-mono text-xs text-fg/45">
-                  {cleanupResult.dry_run ? 'Dry run found' : 'Cleanup removed'}{' '}
-                  {(
-                    cleanupResult.dry_run
-                      ? cleanupResult.eligible_events
-                      : cleanupResult.deleted_events
-                  ).toLocaleString()}{' '}
-                  events across{' '}
-                  {(
-                    cleanupResult.dry_run
-                      ? cleanupResult.eligible_sessions
-                      : cleanupResult.deleted_sessions
-                  ).toLocaleString()}{' '}
-                  sessions.
-                  {!cleanupResult.dry_run && cleanupResult.reclaimed_bytes > 0 && (
-                    <> Reclaimed {formatBytes(cleanupResult.reclaimed_bytes)}.</>
-                  )}
-                </p>
-              )}
-            </div>
-
-            <div className="space-y-2">
-              <p className="font-mono text-[0.65rem] uppercase tracking-widest text-fg/40">
-                Self-audit
-              </p>
-              {auditEvents.length === 0 ? (
-                <p className="font-mono text-xs text-fg/40">No cot config events recorded yet.</p>
-              ) : (
-                <ul className="divide-y divide-line/10 rounded-lg bg-surface shadow-soft">
-                  {auditEvents.map((event) => (
-                    <li key={event.id} className="flex items-center gap-3 px-4 py-3">
-                      <span
-                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                          event.status === 'error'
-                            ? 'bg-vermilion'
-                            : event.status === 'dry_run'
-                              ? 'bg-cobalt'
-                              : 'bg-olive'
-                        }`}
-                      />
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate font-mono text-xs font-bold text-fg">
-                          {event.action}
-                        </p>
-                        <p className="font-mono text-[0.62rem] text-fg/45">
-                          {event.actor}
-                          {event.target ? ` · ${event.target}` : ''} · {formatRelative(event.ts)}
-                        </p>
-                      </div>
-                      <span className="shrink-0 font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/40">
-                        {event.status}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </Section>
-        </FadeIn>
-
-        <FadeIn delay={0.14}>
-          <Section title="About" description="The cot build running on this machine right now.">
-            <div className="space-y-4 rounded-lg bg-surface p-4 shadow-soft">
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div className="space-y-1">
-                  <p className="font-mono text-sm font-bold text-fg">cot collector</p>
-                  <p className="font-mono text-xs text-fg/45">Self-hosted · your traces stay local</p>
-                </div>
-                <div className="text-right">
-                  <p className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">
-                    Running version
-                  </p>
-                  <p
-                    className={`mt-0.5 font-mono text-2xl font-bold tabular-nums ${
-                      healthError ? 'text-vermilion' : 'text-fg'
-                    }`}>
-                    {healthError ? 'Offline' : health?.version ? `v${health.version}` : '…'}
-                  </p>
-                </div>
-              </div>
-              <VersionStatus
-                info={versionInfo}
-                checking={versionChecking}
-                checkError={versionCheckError}
-                onCheck={checkForUpdates}
-                disabled={healthError}
-              />
-            </div>
-          </Section>
-        </FadeIn>
+            <AiSection settings={settings} onSettings={setSettings} />
+            <CollectorSection onRunOnboarding={onRunOnboarding} />
+            <PassiveSection />
+            <PrivacySection settings={settings} onSettings={setSettings} />
+            <DataSection onExport={() => setExportOpen(true)} />
+          </div>
+        </div>
       </div>
-
       {exportOpen && <ExportModal onClose={() => setExportOpen(false)} />}
     </div>
   );
 }
 
-const HOOK_HEALTH_LABELS: Record<HookHealthState, string> = {
-  healthy: 'Healthy',
-  missing_hooks: 'Missing hooks',
-  not_installed: 'Not installed',
-  stale: 'Stale',
-  no_events: 'No events yet',
-};
+function AiSection({ settings: s, onSettings }: { settings: Settings | null; onSettings: (s: Settings) => void }) {
+  const [model, setModel] = useState('');
+  const [endpoint, setEndpoint] = useState('');
+  // The key is write-only: typed here, sent once, never read back or stored in the browser.
+  const [key, setKey] = useState('');
+  const [show, setShow] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
 
-function needsHookRepair(agent: HookStatusAgent): boolean {
-  return agent.health === 'missing_hooks' || agent.health === 'not_installed';
-}
+  useEffect(() => {
+    if (!s) return;
+    setModel(s.ai_model ?? '');
+    setEndpoint(s.ai_endpoint ?? '');
+  }, [s?.ai_model, s?.ai_endpoint]); // eslint-disable-line react-hooks/exhaustive-deps
 
-function hookTone(health: HookHealthState): { text: string; dot: string } {
-  if (health === 'healthy') return { text: 'text-olive', dot: 'bg-olive' };
-  if (health === 'missing_hooks' || health === 'not_installed') {
-    return { text: 'text-vermilion', dot: 'bg-vermilion' };
-  }
-  if (health === 'stale') return { text: 'text-cobalt', dot: 'bg-cobalt' };
-  return { text: 'text-fg/45', dot: 'bg-fg/30' };
-}
+  const patch = async (p: Parameters<typeof updateSettings>[0], done: string) => {
+    setBusy(true);
+    setNote(null);
+    try {
+      onSettings(await updateSettings(p));
+      setNote({ ok: true, text: done });
+      return true;
+    } catch (err) {
+      setNote({ ok: false, text: err instanceof Error ? err.message : String(err) });
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
 
-function HookHealthRow({
-  agent,
-  onReconfigure,
-}: {
-  agent: HookStatusAgent;
-  onReconfigure: () => void;
-}) {
-  const tone = hookTone(agent.health);
+  const dirty = !!s && (!!key.trim() || model.trim() !== (s.ai_model ?? '') || endpoint.trim() !== (s.ai_endpoint ?? ''));
+  const save = async () => {
+    const p: Parameters<typeof updateSettings>[0] = { ai_model: model.trim(), ai_endpoint: endpoint.trim() };
+    if (key.trim()) p.ai_api_key = key.trim();
+    if (await patch(p, 'Saved.')) {
+      setKey('');
+      setShow(false);
+    }
+  };
+  const removeKey = async () => {
+    if (!window.confirm('Remove the saved API key? AI analysis stops until you add one again.')) return;
+    await patch({ ai_api_key: '' }, 'Key removed.');
+  };
+  const run = async () => {
+    if (!window.confirm('Run an AI analysis now? Findings, metrics and masked excerpts from the last 30 days are sent to your provider.')) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const a = await runAiAnalysis(30);
+      setNote(a.status === 'ok' ? { ok: true, text: 'Analysis saved. It leads the executive summary on the Overview.' } : { ok: false, text: a.error ?? 'The analysis failed.' });
+    } catch (err) {
+      setNote({ ok: false, text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const provider: AiProvider = s?.ai_provider ?? 'anthropic';
+  const disabled = !s || s.ai_env_disabled;
   return (
-    <li className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center">
-      <div className="flex min-w-0 flex-1 items-start gap-3">
-        <AgentMark id={agent.source} className="mt-0.5 h-5 w-5 shrink-0" />
-        <div className="min-w-0 flex-1 space-y-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="font-mono text-sm font-bold text-fg">{sourceLabel(agent.source)}</p>
-            <span
-              className={`inline-flex items-center gap-1.5 font-mono text-[0.55rem] font-bold uppercase tracking-widest ${tone.text}`}>
-              <span className={`h-1.5 w-1.5 rounded-full ${tone.dot}`} />
-              {HOOK_HEALTH_LABELS[agent.health]}
+    <Section id="ai" title="AI insights" desc="Bring your own key for AI analysis. It runs only when you ask; findings, metrics and masked excerpts go to your provider. The key stays in ~/.cot.">
+      <div className="set-status" data-on={!!s?.ai_configured}>
+        <Icon name={s?.ai_configured ? 'check' : 'sparkle'} size={16} />
+        <div style={{ minWidth: 0 }}>
+          <b>{!s ? 'Loading…' : s.ai_env_disabled ? 'Disabled on this install' : s.ai_configured ? 'Connection configured' : 'Not configured'}</b>
+          {s && (
+            <span className="mono dim truncate" style={{ display: 'block', fontSize: 12 }} title={s.ai_effective_endpoint}>
+              {provider === 'anthropic' ? 'Anthropic' : 'OpenAI-compatible'} · {s.ai_model || s.ai_default_model} · {s.ai_effective_endpoint}
             </span>
+          )}
+        </div>
+        {s?.ai_configured && <span className="vchip c-dim" style={{ marginLeft: 'auto' }}>key from {s.ai_key_source === 'env' ? 'env' : '~/.cot'}</span>}
+      </div>
+      <fieldset disabled={disabled} className="set-fs">
+        <Row label="Provider" hint="OpenAI-compatible covers OpenRouter, Azure and local gateways.">
+          <Seg id="set-prov" value={provider} onChange={(v) => v !== provider && void patch({ ai_provider: v }, 'Provider saved.')} options={[{ k: 'anthropic', l: 'Anthropic' }, { k: 'openai', l: 'OpenAI-compatible' }]} />
+        </Row>
+        <Row label="API key" hint={s?.ai_configured ? `Saved ${s.ai_key_masked ?? ''}. Paste a new one to replace it.` : 'Write-only. cot never sends it back to the browser.'}>
+          <div className="input-wrap">
+            <input className="input mono" type={show ? 'text' : 'password'} value={key} onChange={(e) => setKey(e.target.value)} placeholder={s?.ai_configured ? '•••• saved' : provider === 'openai' ? 'sk-…' : 'sk-ant-…'} autoComplete="off" spellCheck={false} aria-label="API key" />
+            <button type="button" className="iconbtn" style={{ width: 28, height: 28 }} onClick={() => setShow((x) => !x)} aria-label={show ? 'Hide key' : 'Show key'} aria-pressed={show} disabled={!key}><Icon name="eye" size={15} /></button>
           </div>
-          <p className="font-mono text-[0.62rem] text-fg/45">
-            {agent.installed_hooks.length}/{agent.expected_hooks.length} hooks ·{' '}
-            {agent.missing_hooks.length > 0 ? `${agent.missing_hooks.length} missing` : 'complete'} ·{' '}
-            last {formatRelative(agent.last_event)}
-          </p>
-          {agent.config_path && (
-            <p className="truncate font-mono text-[0.6rem] text-fg/35" title={agent.config_path}>
-              {shortPath(agent.config_path)}
-            </p>
-          )}
-          {agent.latest_backup && (
-            <p
-              className="truncate font-mono text-[0.6rem] text-fg/35"
-              title={agent.latest_backup.backup_path}>
-              backup {formatRelative(agent.latest_backup.created_at)} ·{' '}
-              {shortPath(agent.latest_backup.backup_path)}
-            </p>
-          )}
-          {agent.missing_labels.length > 0 && (
-            <p className="font-mono text-[0.6rem] text-vermilion/80">
-              Missing {agent.missing_labels.slice(0, 3).join(', ')}
-              {agent.missing_labels.length > 3 ? ` +${agent.missing_labels.length - 3}` : ''}
-            </p>
-          )}
+        </Row>
+        <Row label="Model" hint={`Optional. Default is ${s?.ai_default_model ?? '…'}.`}>
+          <input className="input mono" value={model} onChange={(e) => setModel(e.target.value)} placeholder={s?.ai_default_model} aria-label="Model" spellCheck={false} />
+        </Row>
+        <Row label="Endpoint" hint="Optional. Leave empty for the provider default." wide>
+          <input className="input mono" style={{ width: '100%' }} value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder={s?.ai_default_endpoint} aria-label="Endpoint" spellCheck={false} />
+        </Row>
+        <div className="set-actions">
+          {note && <span style={{ marginRight: 'auto', alignSelf: 'center', fontSize: 13, color: note.ok ? 'var(--v-olive)' : 'var(--v-alert)' }}>{note.text}</span>}
+          {s?.ai_configured && s.ai_key_source === 'db' && <button type="button" className="vbtn vbtn-ghost vbtn-sm" style={{ color: 'var(--v-alert)' }} disabled={busy} onClick={removeKey}>Remove key</button>}
+          <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={busy || !s?.ai_configured || dirty} onClick={run}>Run analysis</button>
+          <button type="button" className="vbtn vbtn-primary vbtn-sm" disabled={busy || !dirty} onClick={save}>{busy ? 'Saving…' : 'Save'}</button>
         </div>
-      </div>
-      {needsHookRepair(agent) && (
-        <button
-          type="button"
-          onClick={onReconfigure}
-          className="self-start border border-vermilion px-3 py-1.5 font-mono text-[0.6rem] font-bold uppercase tracking-widest text-vermilion transition-colors hover:bg-vermilion hover:text-cream sm:self-center">
-          Reconfigure
+      </fieldset>
+    </Section>
+  );
+}
+
+function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) {
+  const { data: health, error } = usePolling<Health>(['health'], () => getHealth(), 10000);
+  const { data: hooks } = usePolling<HookStatus>(['hookStatus'], () => getHookStatus(), 10000);
+  const [r, setR] = useState<RetentionStatus | null>(null);
+  const [v, setV] = useState<VersionInfo | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  useEffect(() => {
+    getRetention().then(setR).catch(() => {});
+    getVersionInfo().then(setV).catch(() => {});
+  }, []);
+  const check = async () => {
+    setChecking(true);
+    setCheckError(null);
+    try {
+      const d = await getVersionInfo(true);
+      setV(d);
+      if (!d.latest) setCheckError('Update check unavailable: offline or disabled.');
+    } catch {
+      setCheckError('Could not reach the collector.');
+    } finally {
+      setChecking(false);
+    }
+  };
+  const now = new Date().toISOString();
+  return (
+    <Section id="collector" title="Collector & hooks" desc="The local API that receives agent events, and the hooks that feed it.">
+      <dl className="set-facts">
+        <div><dt className="label">Status</dt><dd><span className="live" style={{ display: 'inline-block', marginRight: 8, ...(error ? { background: 'var(--v-alert)' } : {}) }} />{error ? 'offline' : health?.status === 'ok' ? 'online' : '…'}</dd></div>
+        <div><dt className="label">Version</dt><dd className="mono">{health?.version ?? '—'}</dd></div>
+        <div><dt className="label">Address</dt><dd className="mono">localhost:31337</dd></div>
+        <div><dt className="label">Database</dt><dd className="mono" title={health?.db_path}>{health ? homePath(health.db_path) : '—'}{r ? ` · ${fmt.bytes(r.db_size_bytes)}` : ''}</dd></div>
+      </dl>
+      <ul className="set-list">
+        {(hooks?.agents ?? []).map((h) => (
+          <li key={h.source}>
+            <div style={{ display: 'grid', gap: 2, minWidth: 0 }}>
+              <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Agent id={h.source} /><span className={`vchip ${HOOK_HEALTH[h.health].c}`}><span className="dot" />{HOOK_HEALTH[h.health].label}</span></span>
+              <span className="mono faint truncate" style={{ fontSize: 11 }} title={h.config_path ?? ''}>{h.config_path ? homePath(h.config_path) : 'no config file'}</span>
+            </div>
+            <span className="mono dim" style={{ fontSize: 12, textAlign: 'right', whiteSpace: 'nowrap' }}>
+              {h.installed_hooks.length}/{h.expected_hooks.length} hooks<br /><span className="faint">{h.last_event ? `last event ${fmt.ago(h.last_event, now)}` : 'no events yet'}</span>
+            </span>
+          </li>
+        ))}
+        {!hooks && <li className="dim" style={{ fontSize: 13 }}>Checking hook status…</li>}
+      </ul>
+      <Row label="Setup wizard" hint="Re-run onboarding to switch agents or re-verify hooks.">
+        <button type="button" className="vbtn vbtn-quiet vbtn-sm" onClick={onRunOnboarding}>Run setup</button>
+      </Row>
+      <Row
+        label="Updates"
+        hint={checking ? 'Checking…' : checkError ? checkError : v?.latest ? (v.update_available ? `Update available: v${v.latest}.` : `Up to date. Latest is v${v.latest}.`) : 'Check whether a newer release is available.'}>
+        {v?.update_available && v.url && <a className="vbtn vbtn-ghost vbtn-sm" href={v.url} target="_blank" rel="noreferrer">Instructions <Icon name="external" size={14} /></a>}
+        <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={checking || error} onClick={check}>Check for updates</button>
+      </Row>
+    </Section>
+  );
+}
+
+function PrivacySection({ settings: s, onSettings }: { settings: Settings | null; onSettings: (s: Settings) => void }) {
+  const locked = !s || s.telemetry_env_disabled;
+  const setOn = async (on: boolean) => {
+    if (!s) return;
+    onSettings({ ...s, telemetry_enabled: on });
+    try {
+      onSettings(await updateSettings({ telemetry_enabled: on }));
+    } catch {
+      onSettings({ ...s, telemetry_enabled: !on });
+    }
+  };
+  return (
+    <Section id="privacy" title="Privacy" desc="What, if anything, leaves this machine.">
+      <Row
+        label="Usage metrics"
+        hint={s?.telemetry_env_disabled ? 'Turned off for this install by COT_DISABLE_TELEMETRY.' : `Anonymous totals (sessions, events, models, error rate) sent to ${s?.telemetry_endpoint ?? 'cot.run'}. No traces, prompts, paths or code.`}>
+        <Switch on={!!s?.telemetry_enabled} disabled={locked} label="Usage metrics" onChange={(v) => void setOn(v)} />
+      </Row>
+      <Row label="AI analysis" hint="Sends findings and masked excerpts to your provider, only when you run it.">
+        <a href="#/settings" className="vbtn vbtn-ghost vbtn-sm" onClick={(e) => { e.preventDefault(); document.getElementById('set-ai')?.scrollIntoView({ block: 'start' }); }}>
+          {s?.ai_configured ? 'Configured' : 'Off'} <Icon name="arrow" size={14} />
+        </a>
+      </Row>
+    </Section>
+  );
+}
+
+function PassiveSection() {
+  const [p, setP] = useState<PassiveStatus | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [gap, setGap] = useState(false);
+  // 'unsupported': an older collector without passive mode; 'offline': the request failed.
+  const [problem, setProblem] = useState<'unsupported' | 'offline' | null>(null);
+  const running = !!p?.running.running;
+  // Poll quickly while a pass runs so the phase moves on screen; slowly otherwise.
+  useEffect(() => {
+    let live = true;
+    const load = () =>
+      getPassive()
+        .then((x) => {
+          if (!live) return;
+          setP(x);
+          setProblem(null);
+        })
+        .catch((e) => live && setProblem(e instanceof PassiveUnsupportedError ? 'unsupported' : 'offline'));
+    load();
+    const t = window.setInterval(load, running ? 2000 : 15000);
+    return () => { live = false; window.clearInterval(t); };
+  }, [running]);
+  const save = async (patch: Parameters<typeof updatePassive>[0]) => {
+    setErr(null);
+    try {
+      setP(await updatePassive(patch));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not save');
+    }
+  };
+  const toggleAgent = (a: PassiveAgent, on: boolean) => {
+    if (!p) return;
+    void save({ agents: on ? [...p.agents, a] : p.agents.filter((x) => x !== a) });
+  };
+  const runNow = async () => {
+    await runPassiveNow();
+    setP(await getPassive());
+  };
+  return (
+    <Section id="passive" title="Passive import" desc="Build sessions from agent transcripts on a schedule, with or without hooks. Each run imports metadata first, then runs analysis.">
+      {problem && !p ? (
+        <Row
+          label="Passive mode"
+          hint={
+            problem === 'unsupported'
+              ? "This collector doesn't support passive import yet. Update the cot app to turn it on."
+              : "Couldn't reach the collector. It will retry automatically."
+          }>
+          <span className={`vchip ${problem === 'unsupported' ? 'c-dim' : 'c-warn'}`}>{problem === 'unsupported' ? 'needs update' : 'offline'}</span>
+        </Row>
+      ) : (
+      <>
+      <Row
+        label="Passive mode"
+        hint={!p ? 'Loading…' : p.enabled ? `On. ${p.schedule.description}${p.next_scheduled ? `, next at ${fmt.dayTime(p.next_scheduled)}` : ''}.` : 'Off. Turn it on to import transcripts on a schedule.'}>
+        <Switch on={!!p?.enabled} disabled={!p} label="Passive mode" onChange={(v) => void save({ enabled: v })} />
+      </Row>
+      <Row label="Agents" hint="Transcripts found on this machine. Only switched-on agents are imported." stack>
+        {p && <AgentSources detail={p.agents_detail} enabled={p.agents} onToggle={toggleAgent} />}
+      </Row>
+      <Row label="Schedule" hint="Pick a plain-English schedule or write your own cron." stack>
+        {p && <SchedulePicker value={p.cron} presets={p.presets} onChange={(c) => void save({ cron: c })} />}
+      </Row>
+      {err && <p role="alert" className="mono" style={{ margin: '0 0 8px', fontSize: 12, color: 'var(--v-alert)' }}>{err}</p>}
+      <Row label="Last run" hint={running ? undefined : 'Runs also start on the schedule while passive mode is on.'} stack>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+          {p && <RunStatus status={p} />}
+          <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={!p || running || p.agents.length === 0} onClick={() => void runNow()}>
+            <Icon name="bolt" size={14} />{running ? 'Running…' : 'Run now'}
+          </button>
+        </div>
+      </Row>
+      <Row label="Without hooks" hint="What transcripts alone can't show.">
+        <button type="button" className="vbtn vbtn-ghost vbtn-sm" aria-expanded={gap} aria-controls="set-hooks-gap" onClick={() => setGap((g) => !g)}>
+          {gap ? 'Hide' : 'Show'} what you don't get <Icon name="down" size={14} style={{ transform: gap ? 'rotate(180deg)' : undefined }} />
         </button>
+      </Row>
+      {/* Opens under the row at full width, so the list reads like the rest of the section. */}
+      {gap && <div id="set-hooks-gap" style={{ padding: '4px 0 14px' }}><HooksGap /></div>}
+      </>
       )}
-    </li>
+    </Section>
   );
 }
 
-function VersionStatus({
-  info,
-  checking,
-  checkError,
-  onCheck,
-  disabled = false,
-}: {
-  info: VersionInfo | null;
-  checking: boolean;
-  checkError: string | null;
-  onCheck: () => void;
-  disabled?: boolean;
-}) {
-  let status: ReactNode = (
-    <span className="font-mono text-xs text-fg/40">
-      Check whether a newer release is available.
-    </span>
-  );
+const WINDOWS = [7, 30, 90, 180].map((d) => ({ k: d, l: `${d}d` }));
 
-  if (checking) {
-    status = <span className="font-mono text-xs text-fg/50">Checking for updates…</span>;
-  } else if (checkError) {
-    status = <span className="font-mono text-xs text-vermilion/80">{checkError}</span>;
-  } else if (info?.latest && info.update_available) {
-    status = (
-      <span className="inline-flex items-center gap-2 font-mono text-xs font-bold text-vermilion">
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-vermilion" />
-        Update available · v{info.latest}
-      </span>
-    );
-  } else if (info?.latest) {
-    status = (
-      <span className="inline-flex items-center gap-2 font-mono text-xs text-fg/50">
-        <span className="h-1.5 w-1.5 rounded-full bg-olive" />
-        Up to date · latest v{info.latest}
-      </span>
-    );
-  }
-
+function DataSection({ onExport }: { onExport: () => void }) {
+  const [r, setR] = useState<RetentionStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<RetentionCleanupResult | null>(null);
+  useEffect(() => {
+    getRetention().then(setR).catch(() => {});
+  }, []);
+  const set = async (p: { enabled?: boolean; days?: number }) => {
+    if (!r) return;
+    const before = r;
+    setR({ ...r, policy: { ...r.policy, ...p } });
+    try {
+      setR(await updateRetention(p));
+    } catch {
+      setR(before);
+    }
+  };
+  const clean = async (dryRun: boolean) => {
+    if (!dryRun && !window.confirm('Delete sessions older than the retention window?')) return;
+    setBusy(true);
+    try {
+      setResult(await cleanupRetention(dryRun));
+      setR(await getRetention());
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line/10 pt-3">
-      <div className="min-w-0 flex-1">{status}</div>
-      <div className="flex shrink-0 flex-wrap items-center gap-2">
-        {info?.update_available && info.url && !checking && (
-          <a
-            href={info.url}
-            target="_blank"
-            rel="noreferrer"
-            className="border border-vermilion px-3 py-1.5 font-mono text-[0.6rem] font-bold uppercase tracking-widest text-vermilion transition-colors hover:bg-vermilion hover:text-cream">
-            Update instructions
-          </a>
-        )}
-        <button
-          type="button"
-          onClick={onCheck}
-          disabled={disabled || checking}
-          className="border border-line/30 px-3 py-1.5 font-mono text-[0.6rem] font-bold uppercase tracking-widest text-fg transition-colors hover:border-cobalt hover:text-cobalt disabled:cursor-not-allowed disabled:opacity-40">
-          {checking ? 'Checking…' : 'Check for updates'}
-        </button>
-      </div>
-    </div>
+    <Section id="data" title="Data & retention" desc="Local cleanup, exports and this browser's preferences.">
+      <Row label="Retention" hint={!r ? 'Loading…' : r.policy.enabled ? `Sessions older than ${r.policy.days} days are removed automatically.` : `Paused. The database is ${fmt.bytes(r.db_size_bytes)} and keeps growing.`}>
+        <Switch on={!!r?.policy.enabled} disabled={!r} label="Retention" onChange={(v) => void set({ enabled: v })} />
+      </Row>
+      <Row label="Window" hint={r ? `A ${r.policy.days}-day window would remove ${fmt.n(r.preview_sessions)} sessions and ${fmt.n(r.preview_events)} events.` : undefined}>
+        <Seg id="set-ret" value={r?.policy.days ?? 30} onChange={(d) => void set({ days: d })} options={WINDOWS} />
+      </Row>
+      <Row
+        label="Clean up"
+        hint={result ? `${result.dry_run ? 'Dry run found' : 'Removed'} ${fmt.n(result.dry_run ? result.eligible_events : result.deleted_events)} events in ${fmt.n(result.dry_run ? result.eligible_sessions : result.deleted_sessions)} sessions${!result.dry_run && result.reclaimed_bytes > 0 ? `, reclaimed ${fmt.bytes(result.reclaimed_bytes)}` : ''}.` : 'Preview what the window removes, or remove it now.'}>
+        <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={!r || busy} onClick={() => clean(true)}>Dry run</button>
+        <button type="button" className="vbtn vbtn-ghost vbtn-sm" style={{ color: 'var(--v-alert)' }} disabled={!r?.policy.enabled || busy} onClick={() => clean(false)}>Clean now</button>
+      </Row>
+      <Row label="Export" hint="Sessions, audit log or metrics as JSON or CSV.">
+        <button type="button" className="vbtn vbtn-quiet vbtn-sm" onClick={onExport}><Icon name="download" size={14} />Export data</button>
+      </Row>
+      <Row label="Dashboard preferences" hint="Density, motion and defaults on this browser.">
+        <button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={() => { setPref('density', 'comfortable'); setPref('motion', 'system'); setPref('start', 'overview'); setPref('range', 30); }}>Reset to defaults</button>
+      </Row>
+    </Section>
   );
 }
 
-function Section({
-  title,
-  description,
-  icon,
-  children,
-}: {
-  title: string;
-  description: string;
-  icon?: ReactNode;
-  children: ReactNode;
-}) {
+function Section({ id, title, desc, children }: { id: string; title: string; desc: string; children: ReactNode }) {
   return (
-    <section className="space-y-4 border-b border-line/10 pb-10 last:border-0">
-      <div className="space-y-1">
-        <div className="flex items-center gap-2.5">
-          {icon}
-          <h2 className="font-mono text-[0.7rem] font-bold uppercase tracking-widest text-fg/55">
-            {title}
-          </h2>
-        </div>
-        <p className="font-mono text-xs leading-relaxed text-fg/45">{description}</p>
-      </div>
-      <div className="space-y-4">{children}</div>
+    <section className="card set-sec" id={`set-${id}`} aria-labelledby={`set-${id}-t`} data-spy={id}>
+      <div className="set-h"><h2 id={`set-${id}-t`}>{title}</h2><p className="dim">{desc}</p></div>
+      {children}
     </section>
   );
 }
 
-function Stat({
-  label,
-  value,
-  hint,
-  accent,
-  warn,
-}: {
-  label: string;
-  value: string;
-  hint?: string;
-  accent?: boolean;
-  warn?: boolean;
-}) {
+function Row({ label, hint, children, wide, stack }: { label: string; hint?: string; children: ReactNode; wide?: boolean; stack?: boolean }) {
   return (
-    <div className="rounded-lg bg-surface px-4 py-3 shadow-soft">
-      <p className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">{label}</p>
-      <p
-        className={`mt-1 font-mono text-sm font-bold tabular-nums ${
-          warn ? 'text-vermilion' : accent ? 'text-olive' : 'text-fg'
-        }`}
-        title={hint}>
-        {value}
-      </p>
+    <div className="set-row" data-wide={wide} data-stack={stack || undefined}>
+      <div style={{ minWidth: 0 }}><div className="set-l">{label}</div>{hint && <div className="set-hint">{hint}</div>}</div>
+      <div className="set-c" style={{ gap: 8 }}>{children}</div>
     </div>
   );
 }
 
-function PreferenceRow({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <div>
-        <p className="font-mono text-sm font-bold text-fg">{label}</p>
-        {hint && <p className="font-mono text-xs text-fg/45">{hint}</p>}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function ToggleChip({
-  label,
-  active,
-  onClick,
-  disabled = false,
-}: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className={`rounded px-3 py-1.5 font-mono text-[0.65rem] font-bold uppercase tracking-widest transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-        active ? 'bg-surface text-fg shadow-soft' : 'text-fg/45 hover:text-fg'
-      }`}>
-      {label}
-    </button>
-  );
-}
-
-function shortPath(path: string): string {
-  const home = path.replace(/^\/Users\/[^/]+/, '~').replace(/^\/root/, '~');
-  if (home.length <= 36) return home;
-  const parts = home.split('/');
-  return `${parts[0]}/…/${parts[parts.length - 1]}`;
+/** Highlights the last section whose heading has reached the top of the scroll area (or the final one at the bottom).
+ *  A click sets it directly and holds it until the jump settles, so the spy never flickers through sections in between. */
+function useScrollSpy(): [string, (id: string) => void] {
+  const [cur, setCur] = useState(SECTIONS[0].id);
+  // A nav click pins its section until the reader scrolls on their own: the
+  // short sections near the bottom can't reach the top, so position alone
+  // would hand the click to the last section.
+  const pinned = useRef(false);
+  useEffect(() => {
+    const root = document.getElementById('vf-scroll');
+    if (!root) return;
+    let raf = 0;
+    const tick = () => {
+      raf = 0;
+      if (pinned.current) return;
+      const els = [...root.querySelectorAll<HTMLElement>('[data-spy]')];
+      const top = root.getBoundingClientRect().top;
+      // The reading line sits near the top, then slides down over the last
+      // screen of scroll so every section, however short, takes a turn.
+      const left = root.scrollHeight - root.clientHeight - root.scrollTop;
+      const reach = Math.min(root.clientHeight * 0.6, 360);
+      const line = 96 + Math.max(0, 1 - left / reach) * (root.clientHeight - 96 - 48);
+      const pick = els.filter((el) => el.getBoundingClientRect().top - top <= line).pop() ?? els[0];
+      if (pick?.dataset.spy) setCur(pick.dataset.spy);
+    };
+    const on = () => { if (!raf) raf = requestAnimationFrame(tick); };
+    const unpin = () => { pinned.current = false; };
+    root.addEventListener('scroll', on, { passive: true });
+    root.addEventListener('wheel', unpin, { passive: true });
+    root.addEventListener('touchmove', unpin, { passive: true });
+    root.addEventListener('keydown', unpin);
+    root.addEventListener('pointerdown', unpin);
+    tick();
+    return () => {
+      root.removeEventListener('scroll', on);
+      root.removeEventListener('wheel', unpin);
+      root.removeEventListener('touchmove', unpin);
+      root.removeEventListener('keydown', unpin);
+      root.removeEventListener('pointerdown', unpin);
+      cancelAnimationFrame(raf);
+    };
+  }, []);
+  return [cur, (id) => { pinned.current = true; setCur(id); }];
 }

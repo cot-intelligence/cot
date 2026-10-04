@@ -2,12 +2,12 @@
 // instant instead of showing a bare spinner.
 
 export function Skeleton({ className = '' }: { className?: string }) {
-  return <div className={`animate-pulse rounded-sm bg-fg/10 ${className}`} />;
+  return <div className={`animate-pulse rounded-chip bg-fg/[0.07] ${className}`} />;
 }
 
 /** A bordered "card" of skeleton lines, matching the metrics panels. */
 function SkelBlock({ className = '', children }: { className?: string; children?: React.ReactNode }) {
-  return <div className={`border border-fg/10 bg-surface/40 p-4 ${className}`}>{children}</div>;
+  return <div className={`bg-surface p-4 ${className}`}>{children}</div>;
 }
 
 export function MetricsSkeleton() {
@@ -19,9 +19,9 @@ export function MetricsSkeleton() {
           <Skeleton className="h-3 w-80" />
         </div>
 
-        <div className="grid grid-cols-2 gap-px bg-fg/10 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-card border border-line/10 bg-line/10 sm:grid-cols-4">
           {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="space-y-2 bg-bg px-4 py-3">
+            <div key={i} className="space-y-2 bg-surface px-4 py-3">
               <Skeleton className="h-6 w-16" />
               <Skeleton className="h-2.5 w-20" />
             </div>
@@ -35,7 +35,7 @@ export function MetricsSkeleton() {
               <Skeleton className="h-2.5 w-28" />
               <span className="ml-1 h-px flex-1 bg-fg/10" />
             </div>
-            <div className="grid gap-px bg-fg/10 md:grid-cols-2">
+            <div className="grid gap-px overflow-hidden rounded-card border border-line/10 bg-line/10 md:grid-cols-2">
               <SkelBlock>
                 <Skeleton className="h-32 w-full" />
               </SkelBlock>
@@ -94,7 +94,7 @@ export function SessionDetailSkeleton() {
           {/* Chat body skeleton */}
           <div className="min-w-0 flex-1 space-y-3 p-4">
             {/* User prompt */}
-            <div className="rounded-lg border border-fg/10 p-4 space-y-2">
+            <div className="rounded-lg border border-line/10 p-4 space-y-2">
               <div className="flex items-center gap-2">
                 <Skeleton className="h-2 w-2 rounded-full" />
                 <Skeleton className="h-2.5 w-10" />
@@ -142,7 +142,7 @@ export function TableRowsSkeleton({ rows = 6, cols = 8 }: { rows?: number; cols?
   return (
     <>
       {Array.from({ length: rows }).map((_, r) => (
-        <tr key={r} className="border-b border-fg/10">
+        <tr key={r} className="border-b border-line/10">
           {Array.from({ length: cols }).map((_, c) => (
             <td key={c} className="px-4 py-3.5">
               <Skeleton className="h-3 w-full" />

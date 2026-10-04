@@ -8,23 +8,24 @@ function StatCard({
   value,
   hint,
   accent = false,
+  className = '',
 }: {
   label: string;
   value: string | number;
   hint?: string;
   accent?: boolean;
+  className?: string;
 }) {
   return (
-    <div className="bg-bg px-4 py-3.5">
-      <p className="font-mono text-[0.58rem] uppercase tracking-widest text-fg/40">{label}</p>
+    <div className={`bg-surface px-4 py-4 ${className}`}>
+      <p className="eyebrow">{label}</p>
       <p
-        className={`mt-1 font-mono text-lg font-bold leading-tight tabular-nums ${
-          accent ? 'text-vermilion' : 'text-fg'
-        }`}>
-        {value}
+        className="mt-1.5 flex items-center gap-2 font-mono text-xl font-semibold leading-tight tracking-[-0.02em] tabular-nums text-fg">
+        {accent && <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-signal" aria-hidden="true" />}
+        {typeof value === 'number' ? value.toLocaleString() : value}
       </p>
       {hint && (
-        <p className="mt-0.5 truncate font-mono text-[0.55rem] text-fg/40" title={hint}>
+        <p className="mt-1 truncate font-mono text-data text-fg/60" title={hint}>
           {hint}
         </p>
       )}
@@ -42,7 +43,7 @@ export function TelemetryPanel() {
     : undefined;
 
   return (
-    <div className="grid grid-cols-2 gap-px overflow-hidden border border-fg/15 bg-fg/10 sm:grid-cols-3 lg:grid-cols-5">
+    <div className="grid grid-cols-2 gap-px overflow-hidden rounded-card border border-line/10 bg-line/10 lg:grid-cols-5">
       <StatCard
         label="Sessions"
         value={stats?.sessions ?? '—'}
@@ -57,6 +58,7 @@ export function TelemetryPanel() {
       <StatCard label="Events" value={stats?.events ?? '—'} />
       <StatCard label="Tool calls" value={stats?.tool_calls ?? '—'} />
       <StatCard
+        className="col-span-2 lg:col-span-1"
         label="Avg duration"
         value={stats ? formatDuration(null, stats.avg_duration_seconds) : '—'}
       />

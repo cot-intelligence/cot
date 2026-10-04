@@ -15,24 +15,24 @@ export function SessionRow({ session, selected, onSelect }: SessionRowProps) {
     <button
       type="button"
       onClick={onSelect}
-      className={`w-full border-b border-line/10 px-4 py-3.5 text-left transition-colors hover:bg-surface ${
-        selected ? 'bg-surface border-l-2 border-l-vermilion' : 'border-l-2 border-l-transparent'
+      className={`w-full border-b border-line/10 px-4 py-3.5 text-left transition-colors hover:bg-fg/[0.04] ${
+        selected ? 'bg-surface ring-1 ring-inset ring-line/[0.16]' : ''
       }`}>
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-2.5">
-          <AgentMark id={session.source} className="mt-0.5 h-4 w-4 shrink-0 text-fg/50" />
+          <AgentMark id={session.source} className="mt-0.5 h-4 w-4 shrink-0 text-fg/60" />
           <div className="min-w-0">
-            <p className="truncate font-mono text-sm font-bold text-fg">
+            <p className="truncate font-mono text-sm font-semibold text-fg">
               {session.title || session.id}
             </p>
-            <p className="mt-1 font-mono text-xs text-fg/45">
+            <p className="mt-1 font-mono text-xs text-fg/60">
               {session.event_count} events · {formatDuration(null, session.duration_seconds)}
             </p>
           </div>
         </div>
         <div className="shrink-0 text-right">
           <span
-            className={`font-mono text-[0.62rem] uppercase tracking-widest ${
+            className={`font-mono text-label uppercase tracking-label ${
               isActive ? 'text-cobalt' : 'text-fg/40'
             }`}>
             {isActive ? 'Active' : 'Done'}

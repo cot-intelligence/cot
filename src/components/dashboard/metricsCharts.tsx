@@ -5,10 +5,10 @@ import { formatMetricsDay } from '../../lib/format';
 
 const HEAT_LEVELS = [
   'bg-fg/[0.07]',
-  'bg-vermilion/25',
-  'bg-vermilion/50',
-  'bg-vermilion/75',
-  'bg-vermilion',
+  'bg-hot/25',
+  'bg-hot/50',
+  'bg-hot/75',
+  'bg-hot',
 ];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -68,7 +68,7 @@ export function ContributionHeatmap({
           {monthLabels.map((label, i) => (
             <span
               key={i}
-              className="min-w-0 flex-1 font-mono text-[0.5rem] text-fg/40"
+              className="min-w-0 flex-1 font-mono text-label text-fg/40"
               style={{ overflow: 'visible', whiteSpace: 'nowrap' }}>
               {label}
             </span>
@@ -83,7 +83,7 @@ export function ContributionHeatmap({
                     key={ri}
                     title={`${formatMetricsDay(cell.key)}: ${cell.count.toLocaleString()} events`}
                     className={`aspect-square rounded-[2px] ${HEAT_LEVELS[level(cell.count)]} ${
-                      cell.count ? 'ring-1 ring-inset ring-vermilion/10' : ''
+                      cell.count ? 'ring-1 ring-inset ring-hot/10' : ''
                     }`}
                   />
                 ) : (
@@ -94,7 +94,7 @@ export function ContributionHeatmap({
           ))}
         </div>
       </div>
-      <div className="flex items-center justify-end gap-1 font-mono text-[0.5rem] uppercase tracking-widest text-fg/40">
+      <div className="flex items-center justify-end gap-1 font-mono text-label uppercase tracking-label text-fg/40">
         Less
         {HEAT_LEVELS.map((l, i) => (
           <span key={i} className={`h-2.5 w-2.5 rounded-[2px] ${l}`} />

@@ -31,7 +31,7 @@ export function AttachmentBadge({ attachments }: { attachments: Attachment[] }) 
   return (
     <span
       title={attachments.map(describe).join('\n')}
-      className="inline-flex shrink-0 items-center gap-1 rounded border border-cobalt/30 px-1 py-0.5 font-mono text-[0.55rem] text-cobalt">
+      className="inline-flex shrink-0 items-center gap-1 rounded border border-cobalt/30 px-1 py-0.5 font-mono text-label text-cobalt">
       <Icon name="paperclip" className="h-2.5 w-2.5" />
       {attachments.length}
     </span>
@@ -46,7 +46,7 @@ export function AttachmentTags({ attachments }: { attachments: Attachment[] }) {
       {attachments.map((a, i) => (
         <span
           key={i}
-          className="inline-flex items-center gap-1.5 rounded border border-fg/15 bg-panel px-2 py-1 font-mono text-[0.6rem] text-fg/70">
+          className="inline-flex items-center gap-1.5 rounded border border-line/10 bg-panel px-2 py-1 font-mono text-label text-fg/70">
           <Icon name={a.kind === 'image' ? 'image' : 'file'} className="h-3 w-3 text-cobalt" />
           {describe(a)}
         </span>
