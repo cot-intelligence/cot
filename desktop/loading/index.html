@@ -6,46 +6,70 @@
   <title>cot</title>
   <!-- Shown by the desktop shell while the collector starts, or when it can't.
        The shell sets ?state=starting|held|failed|stopped (+ port, message). -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@500;600&family=Newsreader:ital,opsz,wght@1,6..72,700&display=swap">
+  <!-- Signal Forest tokens from src/forest.css; follows the OS light/dark setting
+       (the dashboard's own theme choice lives on another origin). -->
   <style>
-    :root { --bg: #0b0e11; --fg: 244 240 234; --panel: #101419; --accent: #ff4500; color-scheme: dark; }
+    :root {
+      --bg: #f5f6f3; --panel: #ecefe9; --hot: #0f5b3e;
+      --fg: rgb(12 26 20); --dim: rgb(12 26 20 / 0.6); --line: rgb(12 26 20 / 0.1);
+      --mute: rgb(12 26 20 / 0.16); --wash: rgb(12 26 20 / 0.05);
+      --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+      color-scheme: light;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0a1612; --panel: #0e1d18; --hot: #c8f169;
+        --fg: rgb(233 240 234); --dim: rgb(233 240 234 / 0.6); --line: rgb(233 240 234 / 0.1);
+        --mute: rgb(233 240 234 / 0.16); --wash: rgb(233 240 234 / 0.05);
+        color-scheme: dark;
+      }
+    }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
-      background: var(--bg); color: rgb(var(--fg));
-      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
+      background: var(--bg); color: var(--fg);
+      font: 14px/22px Geist, ui-sans-serif, system-ui, -apple-system, sans-serif;
       display: grid; place-items: center; -webkit-user-select: none; user-select: none; cursor: default;
     }
+    ::selection { background: color-mix(in srgb, var(--hot) 28%, transparent); }
     .drag { position: fixed; inset: 0 0 auto 0; height: 46px; }
     main { max-width: 440px; padding: 40px 24px; text-align: center; }
-    .logo { font: italic 400 34px/1 "Newsreader", Georgia, serif; letter-spacing: -0.03em; margin-bottom: 28px; }
-    .logo span { color: var(--accent); }
-    h1 { font-size: 15px; font-weight: 600; margin: 0 0 8px; }
-    p { margin: 0; color: rgb(var(--fg) / 0.55); }
-    code, .detail { font: 12px/1.5 "JetBrains Mono", ui-monospace, Menlo, monospace; }
+    .wordmark { font: italic 700 36px/1 Newsreader, Georgia, serif; letter-spacing: -0.02em; margin-bottom: 28px; }
+    .wordmark i { color: var(--hot); font-style: inherit; }
+    h1 { font-size: 16px; line-height: 24px; font-weight: 500; margin: 0 0 6px; }
+    p { margin: 0; color: var(--dim); }
     .detail {
       margin-top: 16px; padding: 10px 12px; text-align: left; white-space: pre-wrap; word-break: break-word;
-      background: var(--panel); border: 1px solid rgb(var(--fg) / 0.1); border-radius: 6px;
-      color: rgb(var(--fg) / 0.7); -webkit-user-select: text; user-select: text;
+      font: 500 12px/18px "Geist Mono", ui-monospace, Menlo, monospace;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+      color: var(--fg); -webkit-user-select: text; user-select: text;
     }
     button {
-      margin-top: 22px; padding: 8px 16px; border-radius: 6px; border: 1px solid rgb(var(--fg) / 0.2);
-      background: transparent; color: rgb(var(--fg)); cursor: pointer;
-      font: 700 10px/1 "JetBrains Mono", ui-monospace, Menlo, monospace; letter-spacing: 0.12em; text-transform: uppercase;
+      display: inline-flex; align-items: center; height: 36px; margin-top: 22px; padding: 0 14px;
+      border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--fg);
+      font: 500 14px/1 Geist, ui-sans-serif, system-ui, sans-serif; cursor: pointer;
+      transition: transform 150ms var(--ease-out), background-color 150ms ease, border-color 150ms ease;
     }
-    button:hover { border-color: rgb(var(--fg) / 0.35); }
+    button:active { transform: scale(0.97); }
+    @media (hover: hover) and (pointer: fine) { button:hover { border-color: var(--mute); background: var(--wash); } }
+    button:focus-visible { outline: 2px solid color-mix(in srgb, var(--hot) 75%, transparent); outline-offset: 2px; }
     .spinner {
       width: 18px; height: 18px; margin: 0 auto 16px; border-radius: 50%;
-      border: 2px solid rgb(var(--fg) / 0.15); border-top-color: var(--accent);
+      border: 2px solid var(--mute); border-top-color: var(--hot);
       animation: spin 0.8s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
     [hidden] { display: none !important; }
   </style>
 </head>
 <body>
   <div class="drag" data-tauri-drag-region></div>
   <main>
-    <div class="logo">cot<span>.</span></div>
+    <div class="wordmark">cot<i>.</i></div>
     <div id="spinner" class="spinner"></div>
     <h1 id="title">Starting the collector…</h1>
     <p id="body"></p>

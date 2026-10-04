@@ -7,12 +7,9 @@ The React UI and the backend are unchanged. The app bundles:
 
 - `Contents/Resources/cot-collector/`, the collector frozen by PyInstaller
   (onedir, so launches don't unpack anything), built from
-  `macos/packaging/cot-collector.spec`, which it shares with the Swift app
+  `desktop/packaging/cot-collector.spec`
 - `Contents/Resources/static/`, the vite build, passed to the collector as
   `COT_STATIC_DIR`
-
-The Swift app in `macos/` uses the same bundle id (`run.cot.app`) and `~/.cot`.
-Run one or the other, not both.
 
 ## Build
 

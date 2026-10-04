@@ -16,7 +16,6 @@ secrets.json
 _DESIGN_LANGUAGE.md
 
 # macOS app build output
-macos/build/
 
 # Tauri desktop app build output
 desktop/build/
