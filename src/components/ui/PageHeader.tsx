@@ -13,15 +13,15 @@ interface PageHeaderProps {
 /** Top-of-page title block shared by every dashboard view. */
 export function PageHeader({ eyebrow, title, description, actions, above }: PageHeaderProps) {
   return (
-    <header className="space-y-3 border-b border-line/10 pb-6">
+    <header className="space-y-3">
       {above}
       <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-4">
         <div className="min-w-0 space-y-2">
           {eyebrow && <p className="eyebrow">{eyebrow}</p>}
-          <h1 className="font-serif text-[2rem] font-normal leading-[1.05] tracking-[-0.03em] text-fg sm:text-[2.5rem]">
+          <h1 className="text-[1.75rem] font-semibold leading-[1.1] tracking-display text-fg sm:text-[2rem]">
             {title}
           </h1>
-          {description && <p className="max-w-2xl text-sm leading-relaxed text-fg/55">{description}</p>}
+          {description && <p className="max-w-[68ch] text-body text-fg/60">{description}</p>}
         </div>
         {actions && <div className="flex flex-wrap items-center gap-3">{actions}</div>}
       </div>

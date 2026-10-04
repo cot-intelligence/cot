@@ -98,7 +98,18 @@ def _matches(path: str | None, patterns: tuple[re.Pattern[str], ...]) -> bool:
     return any(p.search(path.replace("\\", "/")) for p in patterns)
 
 
-def canonical_tool(name: str | None) -> str:
+_OPENCODE_TOOL_ALIASES = {
+    "bash": "Bash", "shell": "Shell", "read": "Read", "write": "Write",
+    "edit": "Edit", "multiedit": "MultiEdit", "glob": "Glob", "grep": "Grep",
+    "list": "Search", "webfetch": "WebFetch", "websearch": "WebSearch",
+    "task": "Task", "subagent": "Subagent", "question": "AskUserQuestion",
+    "todowrite": "TodoWrite", "todoread": "TodoRead", "skill": "Skill",
+}
+
+
+def canonical_tool(name: str | None, source: str | None = None) -> str:
+    if source == "opencode":
+        name = _OPENCODE_TOOL_ALIASES.get(name or "", name or "")
     return _TOOL_ALIASES.get(name or "", name or "")
 
 
@@ -163,7 +174,7 @@ def extract_path(body: dict[str, Any], tool_input: dict[str, Any] | None = None)
             return val
     inputs = tool_input if isinstance(tool_input, dict) else body.get("tool_input")
     if isinstance(inputs, dict):
-        for key in ("file_path", "path", "notebook_path"):
+        for key in ("file_path", "filePath", "path", "notebook_path"):
             val = inputs.get(key)
             if isinstance(val, str) and val:
                 return val
@@ -330,7 +341,7 @@ def classify_tool(invocation: ToolInvocation) -> dict[str, Any] | None:
             "title": label,
             "target": key or label,
             "detail": json_detail({"input": tool_input, "response": tool_response}),
-            "status": "ok",
+            "status": status,
             "duration_ms": duration_ms,
         }
 

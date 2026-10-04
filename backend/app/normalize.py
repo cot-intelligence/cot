@@ -226,12 +226,13 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
             "duration_ms": duration_ms,
         }
     if boundary == "turn_end":
+        turn_status = "error" if body.get("error") else "interrupted" if body.get("interrupted") else "ok"
         return {
             "category": "lifecycle",
-            "title": "Turn ended",
+            "title": "Turn failed" if turn_status == "error" else "Turn interrupted" if turn_status == "interrupted" else "Turn ended",
             "target": None,
             "detail": _json_detail(body),
-            "status": "ok",
+            "status": turn_status,
             "duration_ms": duration_ms,
         }
 
@@ -281,7 +282,7 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
         }
 
     # --- Tool calls ---
-    tool_name = _canonical_tool(tool or body.get("tool_name") or "")
+    tool_name = _canonical_tool(tool or body.get("tool_name") or "", source)
     tool_input = _coerce_tool_input(body.get("tool_input"))
     tool_response = body.get("tool_response") or body.get("tool_output") or {}
 
@@ -349,7 +350,7 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
         "title": hook,
         "target": tool or body.get("tool_name"),
         "detail": _json_detail(body),
-        "status": "ok",
+        "status": "error" if _is_failure(hook) else "ok",
         "duration_ms": duration_ms,
     }
 

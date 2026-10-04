@@ -53,11 +53,11 @@ export function SessionList({
           onClick={onToggle}
           aria-label="Expand sessions sidebar"
           title="Show sessions"
-          className="rounded-md p-1.5 text-fg/45 transition-colors hover:bg-surface hover:text-fg">
+          className="rounded-md p-1.5 text-fg/60 transition-colors hover:bg-fg/[0.04] hover:text-fg">
           <Icon name="chevron-right" className="h-4 w-4" />
         </button>
         <span
-          className="mt-3 font-mono text-[0.55rem] uppercase tracking-widest text-fg/30 [writing-mode:vertical-rl]"
+          className="mt-3 font-mono text-label uppercase tracking-label text-fg/40 [writing-mode:vertical-rl]"
           aria-hidden="true">
           Sessions
         </span>
@@ -67,7 +67,7 @@ export function SessionList({
         className={`rail-swap flex h-full w-80 flex-col border-r border-line/10 bg-bg ${collapsed ? 'opacity-0' : 'opacity-100'}`}>
         <div className="space-y-3 border-b border-line/10 p-4">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="font-mono text-[0.65rem] font-bold uppercase tracking-widest text-fg/50">
+            <h2 className="font-mono text-data font-semibold uppercase tracking-label text-fg/60">
               Sessions
             </h2>
             <button
@@ -75,7 +75,7 @@ export function SessionList({
               onClick={onToggle}
               aria-label={peeking ? 'Keep sessions sidebar open' : 'Collapse sessions sidebar'}
               title={peeking ? 'Keep open' : 'Hide sessions'}
-              className="rounded-md p-1 text-fg/40 transition-colors hover:bg-surface hover:text-fg">
+              className="rounded-md p-1 text-fg/40 transition-colors hover:bg-fg/[0.04] hover:text-fg">
               <Icon name={peeking ? 'chevron-right' : 'chevron-left'} className="h-4 w-4" />
             </button>
           </div>
@@ -84,7 +84,7 @@ export function SessionList({
             placeholder="Search id or cwd…"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            className="w-full border border-fg/20 bg-surface px-3 py-2 font-mono text-xs text-fg placeholder:text-fg/30 focus:border-vermilion focus:outline-none"
+            className="w-full border rounded-control border-line/[0.16] bg-surface px-3 py-2 font-mono text-xs text-fg placeholder:text-fg/40 focus:border-hot focus:outline-none"
           />
           <div className="flex gap-2">
             <Select

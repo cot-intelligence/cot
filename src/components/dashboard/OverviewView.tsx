@@ -1,52 +1,53 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
-  dismissInsight,
   getAiAnalyses,
   getInsights,
   getMetrics,
-  getSettings,
-  restoreInsight,
+  getConnections,
+  getSessions,
   type AiAnalysis,
+  type Connection,
   type InsightPillar,
   type InsightsResponse,
-  type InsightStatus,
   type Metrics,
-  type Settings,
+  type SessionSummary,
 } from '../../lib/api';
 import { formatDuration, formatRelative, getCategoryMeta, userTimeZone } from '../../lib/categoryMeta';
 import { compact, formatCost, formatMetricsDay, hourLabel } from '../../lib/format';
 import { formatModel } from '../../lib/modelMeta';
 import { sourceLabel } from '../../lib/sourceLabels';
 import { usePolling } from '../../lib/usePolling';
-import { FadeIn } from '../ui/FadeIn';
+import { getPrefs } from '../../lib/prefs';
 import { Icon, type IconName } from '../ui/icons';
-import { PageHeader } from '../ui/PageHeader';
-import { MetricsSkeleton } from '../ui/Skeleton';
-import { AiInsightsSection } from './AiInsightsSection';
+import { CardNote } from '../ui/Surface';
 import { CHART_COLORS, type Datum } from './chartConstants';
 import { DailyArea, DonutChart, HBars, HourBars } from './chartTheme';
 import { ExecutiveSummary } from './ExecutiveSummary';
-import { InsightStrip } from './insightStrip';
+import { Columns, ShareBars as FShareBars, Sparkline, StackBar as FStackBar } from '../forest/charts';
+import { fmt, modelLabel, project as fproject } from '../forest/format';
+import { Icon as FIcon } from '../forest/icons';
+import { Agent, agentColor as fAgentColor, Seg as FSeg, Sev } from '../forest/ui';
+import { ExportModal } from './ExportModal';
 import { ContributionHeatmap } from './metricsCharts';
 import { ShareCardModal } from './ShareCardModal';
+
+const CARD_GRID = 'overflow-hidden rounded-cell border border-line/10 bg-line/10';
 
 interface OverviewViewProps {
   onSelect: (id: string, eventId?: number) => void;
   onHistory?: (tab?: 'shell' | 'web') => void;
+  onFindings?: (pillar?: InsightPillar) => void;
 }
 
-const WINDOWS: { label: string; days: number }[] = [
-  { label: '7D', days: 7 },
-  { label: '30D', days: 30 },
-  { label: '90D', days: 90 },
-  { label: 'All', days: 0 },
+const WINDOWS = [
+  { k: 7, l: '7d' },
+  { k: 30, l: '30d' },
+  { k: 90, l: '90d' },
+  { k: 0, l: 'all' },
 ];
-
-const STATUS_VIEWS: { key: InsightStatus; label: string }[] = [
-  { key: 'active', label: 'Active' },
-  { key: 'resolved', label: 'Resolved' },
-  { key: 'dismissed', label: 'Dismissed' },
-];
+// Daily spend and the projects table are built from the most recent sessions.
+const SESSION_SAMPLE = 500;
+const DAY_MS = 86_400_000;
 
 function shortPath(p: string | null): string {
   if (!p) return '(unknown)';
@@ -54,34 +55,28 @@ function shortPath(p: string | null): string {
   return parts.length <= 2 ? p : `…/${parts.slice(-2).join('/')}`;
 }
 
-// --- line-based building blocks (no cards) ---
+// --- building blocks ---
 
-function Section({ n, title, children }: { n: string; title: string; children: React.ReactNode }) {
+function Section({ title, aside, children }: { n?: string; title: string; aside?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <section className="space-y-3.5">
-      <div className="flex items-center gap-2.5">
-        <span className="font-mono text-[0.6rem] font-bold tabular-nums text-vermilion">{n}</span>
-        <h2 className="font-mono text-[0.62rem] font-bold uppercase tracking-[0.2em] text-fg/65">
-          {title}
-        </h2>
-        <span className="ml-1 h-px flex-1 bg-fg/10" />
-      </div>
-      {children}
+    <section className="card" style={{ marginTop: 16 }}>
+      <div className="card-h"><span className="card-t">{title}</span>{aside}</div>
+      <div className="card-b">{children}</div>
     </section>
   );
 }
 
 /** Seamless ruled grid — cells share single hairlines, no outer box. */
 function Grid({ cols, children }: { cols: string; children: React.ReactNode }) {
-  return <div className={`grid gap-px bg-fg/10 ${cols}`}>{children}</div>;
+  return <div className={`grid gap-px ${CARD_GRID} ${cols}`}>{children}</div>;
 }
 
 function Stat({ label, value, hint, accent }: { label: string; value: string; hint?: string; accent?: string }) {
   return (
-    <div className="bg-bg px-4 py-3">
-      <p className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">{label}</p>
-      <p className={`mt-1 font-mono text-2xl font-bold tabular-nums ${accent ?? 'text-fg'}`}>{value}</p>
-      {hint && <p className="font-mono text-[0.55rem] text-fg/40">{hint}</p>}
+    <div className="bg-surface px-4 py-3">
+      <p className="font-mono text-label uppercase tracking-label text-fg/40">{label}</p>
+      <p className={`mt-1 font-mono text-2xl font-semibold tabular-nums ${accent ?? 'text-fg'}`}>{value}</p>
+      {hint && <p className="font-mono text-label text-fg/40">{hint}</p>}
     </div>
   );
 }
@@ -98,78 +93,58 @@ function Spotlight({
   accent: string;
 }) {
   return (
-    <div className="bg-bg px-4 py-5">
-      <p className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/45">
+    <div className="bg-surface px-4 py-5">
+      <p className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
         {kicker}
       </p>
-      <p className={`mt-1 font-serif text-4xl font-extrabold italic leading-none ${accent}`}>
+      <p className={`mt-1 font-mono text-3xl font-semibold leading-none tracking-[-0.02em] ${accent}`}>
         {value}
       </p>
-      <p className="mt-2 font-mono text-[0.55rem] uppercase tracking-widest text-fg/45">{sub}</p>
+      <p className="mt-2 font-mono text-label uppercase tracking-label text-fg/60">{sub}</p>
     </div>
   );
 }
 
 function ChartBox({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="bg-bg p-4">
-      <p className="mb-3 font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">{label}</p>
+    <div className="bg-surface p-4">
+      <p className="mb-3 font-mono text-label uppercase tracking-label text-fg/40">{label}</p>
       {children}
     </div>
   );
 }
 
-function pillarAnchor(pillar: InsightPillar): string {
-  return `insights-${pillar}`;
-}
-
-export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
+export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewProps) {
   const tz = userTimeZone();
   const { data: m, error } = usePolling<Metrics>(['metrics', tz], () => getMetrics(tz), 5000);
   const [shareOpen, setShareOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
 
-  // Findings: windowed + status-filtered, unlike the all-time metrics.
-  const [days, setDays] = useState(30);
-  const [view, setView] = useState<InsightStatus>('active');
-  const [refreshKey, setRefreshKey] = useState(0);
-  const { data: ins } = usePolling<InsightsResponse>(
-    ['insights', days, refreshKey],
-    () => getInsights(days, 'all'),
-    60000,
-  );
+  // The window drives findings, spend and the projects table; the deeper charts below stay all-time.
+  const [days, setDays] = useState<number>(() => getPrefs().range);
+  const { data: ins } = usePolling<InsightsResponse>(['insights', days], () => getInsights(days, 'all'), 60000);
+  const { data: recent } = usePolling<SessionSummary[]>(['sessions', 'overview', SESSION_SAMPLE], () => getSessions({ limit: SESSION_SAMPLE }), 30000);
+  const win = useMemo(() => windowed(recent ?? [], days), [recent, days]);
+  const { data: connections } = usePolling<Connection[]>(['connections'], () => getConnections(), 30000);
 
-  // BYOK AI analysis state, shared between the AI section and the summary.
-  const [settings, setSettings] = useState<Settings | null>(null);
+  // The executive summary leads with the latest saved AI analysis, if one exists.
   const [analyses, setAnalyses] = useState<AiAnalysis[]>([]);
   useEffect(() => {
-    getSettings().then(setSettings).catch(() => {});
     getAiAnalyses().then(setAnalyses).catch(() => {});
   }, []);
   const latestAi = analyses.find((a) => a.status === 'ok' && a.result) ?? null;
 
-  const onLifecycle = async (fingerprint: string, action: 'dismiss' | 'restore') => {
-    try {
-      await (action === 'dismiss' ? dismissInsight(fingerprint) : restoreInsight(fingerprint));
-    } finally {
-      setRefreshKey((k) => k + 1);
-    }
-  };
-
-  const jumpToPillar = (pillar: InsightPillar) => {
-    document.getElementById(pillarAnchor(pillar))?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
+  const jumpToPillar = (pillar: InsightPillar) => onFindings?.(pillar);
 
   if (!m) {
     if (error) {
       return (
-        <div className="scroll-thin flex-1 overflow-y-auto">
-          <p className="mx-auto max-w-5xl px-6 py-12 font-mono text-xs text-fg/40">
-            Collector offline — overview unavailable.
-          </p>
+        <div className="scroll" id="vf-scroll">
+          <div className="page"><div className="card empty">Collector offline — overview unavailable.</div></div>
         </div>
       );
     }
-    return <MetricsSkeleton />;
+    return <OverviewSkeleton />;
   }
 
   const t = m.totals;
@@ -202,126 +177,152 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
     color: i === 0 ? CHART_COLORS[1] : CHART_COLORS[0],
   }));
 
-  const byStatus = (status: InsightStatus) =>
-    (ins?.insights ?? []).filter((f) => f.status === status);
-  const shown = byStatus(view);
-  const active = byStatus('active');
+  const active = (ins?.insights ?? []).filter((f) => f.status === 'active');
+  const review = active.filter((f) => f.severity !== 'info');
   const criticals = active.filter((f) => f.severity === 'critical').length;
-  const pillarFindings = (pillar: InsightPillar) => shown.filter((f) => f.pillar === pillar);
+  const sources = [...new Set((recent ?? []).map((x) => x.source))];
+  const projectFindings = (cwd: string | null) => {
+    const ids = new Set(win.sessions.filter((x) => x.cwd === cwd).map((x) => x.id));
+    const hits = active.filter((f) => f.evidence.some((e) => ids.has(e.session_id)));
+    return { n: hits.length, critical: hits.some((f) => f.severity === 'critical') };
+  };
+  const kpis = [
+    { k: 'Sessions', v: fmt.n(win.sessions.length), spark: win.series.map((x) => x.sessions), note: `${t.active_sessions} live now` },
+    { k: 'Spend', v: fmt.usd(win.cost), spark: win.series.map((x) => x.cost), note: 'list price, all models' },
+    { k: 'Tool calls', v: fmt.n(win.tools), spark: win.series.map((x) => x.events), note: `${fmt.pct(fun.error_rate)} errored` },
+    { k: 'Needs review', v: ins ? fmt.n(review.length) : '…', spark: undefined, note: ins ? `${criticals} critical · ${active.length} open in total` : 'computing…' },
+  ];
 
-  const insightStrip = (pillar: InsightPillar) =>
-    ins ? (
-      <InsightStrip
-        findings={pillarFindings(pillar)}
-        view={view}
-        onSelect={onSelect}
-        onLifecycle={onLifecycle}
-      />
-    ) : (
-      <p className="font-mono text-xs text-fg/40">Computing findings…</p>
-    );
+  const now = new Date().toISOString();
+  const models = [...m.cost.by_model].filter((x) => (x.cost ?? 0) > 0).sort((a, b) => (b.cost ?? 0) - (a.cost ?? 0));
 
+  // Markup below mirrors the demo's Overview (demo-variants/src/variants/forest/pages-a.tsx) one to one.
   return (
-    <div className="scroll-thin flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-5xl space-y-7 px-6 py-8 sm:px-8">
-        <FadeIn>
-          <PageHeader
-            eyebrow="Metrics + insights"
-            title="Overview"
-            description="Everything across your traced sessions: the numbers, the findings, and what to do about them."
-            actions={
-              <>
-                <div className="seg" title="Findings window (metrics are all-time)">
-                  {WINDOWS.map((w) => (
-                    <button
-                      key={w.label}
-                      type="button"
-                      onClick={() => setDays(w.days)}
-                      aria-pressed={days === w.days}
-                      className="seg-item">
-                      {w.label}
+    <div className="scroll" id="vf-scroll">
+      <div className="page">
+        <div className="ph">
+          <div>
+            <span className="label">Overview</span>
+            <h1>Local workspace</h1>
+            <p>{days ? `Last ${days} days` : 'All time'} across {win.projects.length} projects and {sources.length} agents.</p>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <FSeg id="vf-range" value={days} options={WINDOWS} onChange={setDays} />
+            <button type="button" className="vbtn vbtn-quiet vbtn-sm" onClick={() => setExportOpen(true)}><FIcon name="download" size={15} />Export</button>
+            <button type="button" className="vbtn vbtn-quiet vbtn-sm" onClick={() => setShareOpen(true)} title="Share a metrics card"><FIcon name="external" size={15} />Share</button>
+          </div>
+        </div>
+
+        <div className="kpis">
+          {kpis.map((k) => (
+            <div className="kpi" key={k.k}>
+              <span className="label">{k.k}</span>
+              <span className="v">{k.v}</span>
+              <span className="d"><span className="truncate">{k.note}</span>{k.spark && <span style={{ color: 'var(--v-hot)' }}><Sparkline values={k.spark} width={72} height={20} /></span>}</span>
+            </div>
+          ))}
+        </div>
+        {win.partial && <p className="mono faint" style={{ fontSize: 11, margin: '8px 0 0' }}>Spend, sessions and projects cover the latest {SESSION_SAMPLE} sessions.</p>}
+
+        <div className="grid-2">
+          <section className="card" aria-labelledby="vf-spend">
+            <div className="card-h"><span className="card-t" id="vf-spend">Daily spend</span><span className="mono faint" style={{ fontSize: 12 }}>{fmt.usd(win.cost)} total</span></div>
+            <div className="card-b">
+              <Columns key={days} data={win.series.map((x) => ({ key: x.day, value: x.cost }))} color="var(--v-hot)" muted="var(--v-mute)" label={fmt.day} format={fmt.usd} height={180} />
+            </div>
+          </section>
+          <section className="card" aria-labelledby="vf-review">
+            <div className="card-h"><span className="card-t" id="vf-review">Needs review</span><button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={() => onFindings?.()}>All findings <FIcon name="arrow" size={14} /></button></div>
+            {!ins ? (
+              <div className="card-b dim" style={{ fontSize: 13 }}>Computing findings…</div>
+            ) : (
+              <ul className="card-b" style={{ listStyle: 'none', margin: 0, display: 'grid', gap: 2 }}>
+                {review.length === 0 && <li className="dim" style={{ fontSize: 13 }}>Nothing needs review.</li>}
+                {review.slice(0, 5).map((f) => (
+                  <li key={f.fingerprint}>
+                    <button type="button" onClick={() => onFindings?.(f.pillar)} className="hov" style={{ width: 'calc(100% + 16px)', display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 10, alignItems: 'center', padding: '8px 8px', margin: '0 -8px', borderRadius: 10, border: 0, background: 'none', textAlign: 'left' }}>
+                      <Sev s={f.severity} />
+                      <span className="truncate" style={{ fontSize: 13, fontWeight: 500 }}>{f.title}</span>
                     </button>
-                  ))}
-                </div>
-                <div className="seg">
-                  {STATUS_VIEWS.map((s) => {
-                    const n = byStatus(s.key).length;
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </div>
+
+        <div className="grid-2">
+          <section className="card" aria-labelledby="vf-proj" style={{ overflow: 'hidden' }}>
+            <div className="card-h" style={{ paddingBottom: 12 }}><span className="card-t" id="vf-proj">Projects</span><span className="label">by spend</span></div>
+            <div style={{ overflowX: 'auto' }}>
+              <table className="t">
+                <thead><tr><th>Project</th><th>Agents</th><th className="num">Sessions</th><th className="num">Spend</th><th className="num">Findings</th></tr></thead>
+                <tbody>
+                  {win.projects.map((p) => {
+                    const fx = projectFindings(p.cwd);
                     return (
-                      <button
-                        key={s.key}
-                        type="button"
-                        onClick={() => setView(s.key)}
-                        aria-pressed={view === s.key}
-                        className="seg-item">
-                        {s.label} <span className="tabular-nums opacity-60">{n}</span>
-                      </button>
+                      <tr key={p.cwd ?? '-'}>
+                        <td><span className="mono" style={{ fontSize: 12 }} title={p.cwd ?? ''}>{fproject(p.cwd)}</span></td>
+                        <td style={{ minWidth: 120 }}><FStackBar parts={sources.map((a) => ({ key: sourceLabel(a), value: p.agents[a] ?? 0, color: fAgentColor(a) }))} /></td>
+                        <td className="num">{p.sessions}</td>
+                        <td className="num">{fmt.usd(p.cost)}</td>
+                        <td className="num">{fx.critical ? <span style={{ color: 'var(--v-alert)' }}>{fx.n}</span> : fx.n}</td>
+                      </tr>
                     );
                   })}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setShareOpen(true)}
-                  title="Share a metrics card"
-                  className="btn">
-                  <Icon name="share" className="h-3.5 w-3.5" />
-                  <span className="hidden sm:inline">Share</span>
-                </button>
-              </>
-            }
-          />
-        </FadeIn>
+                </tbody>
+              </table>
+            </div>
+            <div style={{ display: 'flex', gap: 14, padding: '10px 20px 14px', borderTop: '1px solid var(--v-line)', fontSize: 12 }} className="dim">
+              {sources.map((a) => <span key={a} style={{ display: 'flex', alignItems: 'center', gap: 6 }}><i style={{ width: 8, height: 8, borderRadius: 2, background: fAgentColor(a) }} />{sourceLabel(a)}</span>)}
+            </div>
+          </section>
+          <section className="card" aria-labelledby="vf-models">
+            <div className="card-h"><span className="card-t" id="vf-models">Spend by model</span><span className="label">all time</span></div>
+            <div className="card-b">
+              <FShareBars rows={models.map((x) => ({ key: x.model, label: <span className="mono" style={{ fontSize: 12 }}>{modelLabel(x.model)}</span>, value: x.cost ?? 0 }))} color="var(--v-hot)" track="var(--v-panel)" format={fmt.usd} />
+              {m.cost.unpriced_models.length > 0 && <p className="faint" style={{ fontSize: 12, margin: '14px 0 0' }}>Unpriced: {m.cost.unpriced_models.slice(0, 4).map(modelLabel).join(', ')}{m.cost.unpriced_models.length > 4 ? '…' : ''}</p>}
+            </div>
+          </section>
+        </div>
 
-        {/* Headline stat strip */}
-        <FadeIn delay={0.03}>
-          <Grid cols="grid-cols-2 sm:grid-cols-4 xl:grid-cols-7">
-            <Stat label="Sessions" value={compact(t.sessions)} hint={`${t.active_sessions} active now`} />
-            <Stat label="Events" value={compact(t.events)} />
-            <Stat label="Tool calls" value={compact(t.tool_calls)} />
-            <Stat label="Tokens" value={compact(m.tokens.total)} />
-            <Stat
-              label="Est. cost"
-              value={m.cost.total > 0 ? formatCost(m.cost.total) : '—'}
-            />
-            <Stat
-              label="Findings"
-              value={ins ? String(active.length) : '…'}
-              hint={criticals ? `${criticals} critical` : undefined}
-              accent={criticals ? 'text-vermilion' : undefined}
-            />
-            <Stat
-              label="Fixed this week"
-              value={ins ? String(ins.counts.resolved_recently) : '…'}
-              accent="text-olive"
-            />
-          </Grid>
-        </FadeIn>
+        <section className="card" style={{ marginTop: 16 }} aria-labelledby="vf-agents">
+          <div className="card-h"><span className="card-t" id="vf-agents">Agents</span><a href="#/governance" className="vbtn vbtn-ghost vbtn-sm">Coverage <FIcon name="arrow" size={14} /></a></div>
+          <div className="card-b" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+            {(connections ?? m.by_source.map((x) => ({ source: x.source, sessions: x.sessions, events: x.events, last_event: null, connected: true }))).map((c) => (
+              <div key={c.source} style={{ display: 'grid', gap: 6, padding: 14, borderRadius: 12, background: 'var(--v-bg)', border: '1px solid var(--v-line)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}><Agent id={c.source} /><span className={`vchip ${c.connected ? 'c-ok' : 'c-dim'}`}><span className="dot" />{c.connected ? 'connected' : 'not connected'}</span></div>
+                <span className="mono" style={{ fontSize: 12 }}>{c.sessions} sessions · {fmt.n(c.events)} events</span>
+                <span className="faint" style={{ fontSize: 12 }}>{c.last_event ? `Last event ${fmt.ago(c.last_event, now)}` : 'No events yet'}</span>
+              </div>
+            ))}
+          </div>
+        </section>
 
-        <FadeIn delay={0.04}>
-          <Section n="00" title="Executive summary">
-            <ExecutiveSummary insights={ins ?? null} metrics={m} aiAnalysis={latestAi} onJump={jumpToPillar} />
-          </Section>
-        </FadeIn>
+        <Section title="Executive summary">
+          <ExecutiveSummary insights={ins ?? null} metrics={m} aiAnalysis={latestAi} onJump={jumpToPillar} />
+        </Section>
 
-        <FadeIn delay={0.05}>
+        <>
           <Section n="01" title="Daily usage">
             <div className="space-y-4">
               <div className="flex flex-wrap items-baseline gap-x-7 gap-y-1">
-                <span className="font-mono text-sm font-bold tabular-nums text-fg">
+                <span className="font-mono text-sm font-semibold tabular-nums text-fg">
                   {compact(t.events)}{' '}
-                  <span className="text-[0.55rem] font-normal uppercase tracking-widest text-fg/45">
+                  <span className="text-label font-normal uppercase tracking-label text-fg/60">
                     events tracked
                   </span>
                 </span>
-                <span className="font-mono text-[0.62rem] text-fg/55">
+                <span className="font-mono text-label text-fg/60">
                   {activeDays} active {activeDays === 1 ? 'day' : 'days'}
                 </span>
-                <span className="font-mono text-[0.62rem] text-fg/55">
+                <span className="font-mono text-label text-fg/60">
                   ~{compact(avgPerActive)} events / day
                 </span>
                 {fun.busiest_day && (
-                  <span className="font-mono text-[0.62rem] text-fg/55">
+                  <span className="font-mono text-label text-fg/60">
                     busiest{' '}
-                    <span className="font-bold text-fg/80">{formatMetricsDay(fun.busiest_day.day)}</span> ·{' '}
+                    <span className="font-semibold text-fg/80">{formatMetricsDay(fun.busiest_day.day)}</span> ·{' '}
                     {compact(fun.busiest_day.events)}
                   </span>
                 )}
@@ -329,13 +330,13 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
               <ContributionHeatmap data={m.by_day.map((d) => ({ label: d.day, value: d.events }))} />
             </div>
           </Section>
-        </FadeIn>
+        </>
 
-        <FadeIn delay={0.06}>
+        <>
           <Section n="02" title="Highlights">
             <Grid cols="grid-cols-1 sm:grid-cols-3">
               <Spotlight
-                accent="text-vermilion"
+                accent="text-hot"
                 kicker="Peak activity"
                 value={fun.peak_hour != null ? hourLabel(fun.peak_hour) : '—'}
                 sub="busiest hour of day"
@@ -354,9 +355,9 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
               />
             </Grid>
           </Section>
-        </FadeIn>
+        </>
 
-        <FadeIn delay={0.07}>
+        <>
           <Section n="03" title="Activity">
             <Grid cols="md:grid-cols-2">
               <ChartBox label="Events per day">
@@ -367,17 +368,10 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
               </ChartBox>
             </Grid>
           </Section>
-        </FadeIn>
+        </>
 
-        <FadeIn delay={0.075}>
-          <div id={pillarAnchor('usability')} className="scroll-mt-6">
-            <Section n="04" title="Usability insights">
-              {insightStrip('usability')}
-            </Section>
-          </div>
-        </FadeIn>
 
-        <FadeIn delay={0.08}>
+        <>
           <Section n="05" title="Breakdown">
             <Grid cols="md:grid-cols-2">
               <ChartBox label="Event categories">
@@ -393,7 +387,7 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
                       {m.by_model.slice(0, 8).map((model, i) => (
                         <div
                           key={model.model}
-                          className="flex items-center justify-between gap-2 font-mono text-[0.62rem]">
+                          className="flex items-center justify-between gap-2 font-mono text-label">
                           <span className="flex min-w-0 items-center gap-1.5">
                             <span
                               className="h-2 w-2 shrink-0"
@@ -401,8 +395,8 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
                             />
                             <span className="truncate">{formatModel(model.model)}</span>
                           </span>
-                          <span className="flex shrink-0 items-center gap-2 text-fg/45">
-                            {model.cost != null && <span className="text-vermilion/70">{formatCost(model.cost)}</span>}
+                          <span className="flex shrink-0 items-center gap-2 text-fg/60">
+                            {model.cost != null && <span className="text-hot/70">{formatCost(model.cost)}</span>}
                             <span>{compact(model.events)}</span>
                           </span>
                         </div>
@@ -415,9 +409,9 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
               </ChartBox>
             </Grid>
           </Section>
-        </FadeIn>
+        </>
 
-        <FadeIn delay={0.09}>
+        <>
           <Section n="06" title="Tokens & agents">
             <Grid cols="md:grid-cols-2">
               <ChartBox label={`Token usage — ${compact(m.tokens.total)} total`}>
@@ -430,9 +424,9 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
                   </div>
                   <div className="min-w-0 flex-1 space-y-2">
                     {m.by_source.map((s) => (
-                      <div key={s.source} className="border-l-2 border-fg/20 pl-2.5">
-                        <p className="font-mono text-sm font-bold text-fg">{sourceLabel(s.source)}</p>
-                        <p className="font-mono text-[0.55rem] text-fg/45">
+                      <div key={s.source} className="">
+                        <p className="font-mono text-sm font-semibold text-fg">{sourceLabel(s.source)}</p>
+                        <p className="font-mono text-label text-fg/60">
                           {s.sessions} sess · {compact(s.events)} ev
                         </p>
                       </div>
@@ -442,19 +436,19 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
               </ChartBox>
             </Grid>
           </Section>
-        </FadeIn>
+        </>
 
-        <FadeIn delay={0.095}>
-          <div id={pillarAnchor('cost')} className="scroll-mt-6">
-            <Section n="07" title="Cost insights">
-              {insightStrip('cost')}
-            </Section>
-          </div>
-        </FadeIn>
 
-        <FadeIn delay={0.1}>
-          <Section n="08" title="Reliability">
+        <>
+          <Section n="08" title="All time" aside={<CardNote>since install</CardNote>}>
             <Grid cols="grid-cols-2 sm:grid-cols-4">
+              <Stat label="Sessions" value={compact(t.sessions)} hint={`${t.active_sessions} active now`} />
+              <Stat label="Events" value={compact(t.events)} />
+              <Stat label="Tool calls" value={compact(t.tool_calls)} />
+              <Stat label="Tokens" value={compact(m.tokens.total)} />
+              <Stat label="Est. cost" value={m.cost.total > 0 ? formatCost(m.cost.total) : '—'} />
+              <Stat label="Projects" value={compact(t.projects)} />
+              <Stat label="Fixed this week" value={ins ? String(ins.counts.resolved_recently) : '…'} accent="text-olive" />
               <Stat label="Error rate" value={`${(fun.error_rate * 100).toFixed(1)}%`} />
               <Stat label="Errors" value={compact(t.errors)} />
               <Stat label="Permissions" value={compact(t.permissions)} />
@@ -464,18 +458,11 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
               />
             </Grid>
           </Section>
-        </FadeIn>
+        </>
 
-        <FadeIn delay={0.105}>
-          <div id={pillarAnchor('security')} className="scroll-mt-6">
-            <Section n="09" title="Security insights">
-              {insightStrip('security')}
-            </Section>
-          </div>
-        </FadeIn>
 
         {fun.busiest_day && (
-          <FadeIn delay={0.11}>
+          <>
             <Section n="10" title="By the numbers">
               <Grid cols="grid-cols-2 sm:grid-cols-3">
                 <Fact icon="terminal" label="Shell commands" value={compact(fun.shell_commands)} onClick={() => onHistory?.('shell')} />
@@ -489,15 +476,15 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
                 <Fact icon="layers" label="Projects" value={compact(t.projects)} />
               </Grid>
             </Section>
-          </FadeIn>
+          </>
         )}
 
-        <FadeIn delay={0.115}>
+        <>
           <Section n="11" title="Attachments">
             {m.attachments.total > 0 ? (
               <div>
                 {m.attachments.by_type.length > 0 && (
-                  <div className="flex min-h-[5rem] items-center justify-center border border-fg/15 bg-panel/40 px-4 py-5">
+                  <div className="flex min-h-[5rem] items-center justify-center border rounded-cell border-line/10 bg-panel/40 px-4 py-5">
                     <WordCloud data={m.attachments.by_type} />
                   </div>
                 )}
@@ -506,13 +493,13 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
               <p className="font-mono text-xs text-fg/40">No files attached yet.</p>
             )}
           </Section>
-        </FadeIn>
+        </>
 
-        <FadeIn delay={0.12}>
+        <>
           <Section n="12" title="Leaderboards">
             <Grid cols="md:grid-cols-2">
-              <div className="bg-bg p-4">
-                <p className="mb-3 font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">
+              <div className="bg-surface p-4">
+                <p className="mb-3 font-mono text-label uppercase tracking-label text-fg/40">
                   Top projects
                 </p>
                 <ul className="divide-y divide-fg/10">
@@ -523,7 +510,7 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
                         <p className="truncate font-mono text-xs text-fg/75" title={p.cwd}>
                           {shortPath(p.cwd)}
                         </p>
-                        <p className="font-mono text-[0.55rem] text-fg/40">
+                        <p className="font-mono text-label text-fg/40">
                           {p.sessions} sess · {compact(p.events)} ev · {formatRelative(p.last_activity)}
                         </p>
                       </div>
@@ -531,8 +518,8 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
                   ))}
                 </ul>
               </div>
-              <div className="bg-bg p-4">
-                <p className="mb-3 font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">
+              <div className="bg-surface p-4">
+                <p className="mb-3 font-mono text-label uppercase tracking-label text-fg/40">
                   Busiest sessions
                 </p>
                 <ul className="divide-y divide-fg/10">
@@ -543,10 +530,10 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
                         onClick={() => onSelect(s.session_id)}
                         className="flex w-full items-center gap-3 py-2 text-left">
                         <RankBadge n={i + 1} />
-                        <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg/75 transition-colors hover:text-vermilion">
-                          {shortPath(s.cwd)} <span className="text-fg/35">{s.session_id.slice(0, 8)}</span>
+                        <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg/75 transition-colors hover:text-hot">
+                          {shortPath(s.cwd)} <span className="text-fg/40">{s.session_id.slice(0, 8)}</span>
                         </span>
-                        <span className="shrink-0 font-mono text-[0.6rem] tabular-nums text-fg/45">
+                        <span className="shrink-0 font-mono text-label tabular-nums text-fg/60">
                           {compact(s.events)}
                         </span>
                       </button>
@@ -556,28 +543,19 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
               </div>
             </Grid>
           </Section>
-        </FadeIn>
+        </>
 
-        <FadeIn delay={0.125}>
-          <Section n="13" title="AI analysis">
-            <AiInsightsSection
-              days={days}
-              settings={settings}
-              analyses={analyses}
-              onRan={(a) => setAnalyses((prev) => [a, ...prev])}
-            />
-          </Section>
-        </FadeIn>
 
-        <FadeIn delay={0.13}>
-          <p className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/35">
-            Metrics are all-time · findings computed locally over the selected window · findings
-            auto-resolve when the signal stops · AI analysis only runs when you ask
+        <>
+          <p className="mt-4 px-5 pb-2 font-mono text-label uppercase leading-5 tracking-label text-fg/40" style={{ textWrap: 'pretty' }}>
+            Charts below the agents are all-time · findings, spend and projects follow the window ·
+            findings auto-resolve when the signal stops · AI analysis only runs when you ask
           </p>
-        </FadeIn>
+        </>
       </div>
 
       {shareOpen && <ShareCardModal metrics={m} onClose={() => setShareOpen(false)} />}
+      {exportOpen && <ExportModal onClose={() => setExportOpen(false)} />}
     </div>
   );
 }
@@ -585,29 +563,29 @@ export function OverviewView({ onSelect, onHistory }: OverviewViewProps) {
 function Fact({ icon, label, value, onClick }: { icon: IconName; label: string; value: string; onClick?: () => void }) {
   const inner = (
     <>
-      <span className={`flex h-7 w-7 shrink-0 items-center justify-center border border-fg/20 text-fg/55 ${onClick ? 'transition-colors group-hover:border-vermilion group-hover:text-vermilion' : ''}`}>
+      <span className={`flex h-7 w-7 shrink-0 items-center justify-center border border-line/20 text-fg/60 ${onClick ? 'transition-colors group-hover:border-hot group-hover:text-hot' : ''}`}>
         <Icon name={icon} className="h-3.5 w-3.5" />
       </span>
       <div className="min-w-0 flex-1">
-        <p className={`truncate font-mono text-sm font-bold text-fg ${onClick ? 'transition-colors group-hover:text-vermilion' : ''}`} title={value}>
+        <p className={`truncate font-mono text-sm font-semibold text-fg ${onClick ? 'transition-colors group-hover:text-hot' : ''}`} title={value}>
           {value}
         </p>
-        <p className="font-mono text-[0.5rem] uppercase tracking-widest text-fg/40">{label}</p>
+        <p className="font-mono text-label uppercase tracking-label text-fg/40">{label}</p>
       </div>
       {onClick && (
-        <Icon name="chevron-right" className="h-3 w-3 shrink-0 text-fg/20 transition-colors group-hover:text-vermilion" />
+        <Icon name="chevron-right" className="h-3 w-3 shrink-0 text-fg/40 transition-colors group-hover:text-hot" />
       )}
     </>
   );
   if (onClick) {
     return (
-      <button type="button" onClick={onClick} className="group flex w-full items-center gap-3 bg-bg px-4 py-3 text-left transition-colors hover:bg-fg/[0.03]">
+      <button type="button" onClick={onClick} className="group flex w-full items-center gap-3 bg-surface px-4 py-3 text-left transition-colors hover:bg-fg/[0.03]">
         {inner}
       </button>
     );
   }
   return (
-    <div className="flex items-center gap-3 bg-bg px-4 py-3">
+    <div className="flex items-center gap-3 bg-surface px-4 py-3">
       {inner}
     </div>
   );
@@ -627,9 +605,9 @@ function WordCloud({ data }: { data: { type: string; count: number }[] }) {
           key={d.type}
           title={`${d.type} · ${d.count} ${d.count === 1 ? 'file' : 'files'}`}
           style={{ fontSize: `${fontRem(d.count)}rem`, color: CHART_COLORS[i % CHART_COLORS.length] }}
-          className="font-serif font-extrabold italic leading-none">
+          className="font-mono font-semibold leading-none">
           {d.type}
-          <span className="ml-1 align-super font-mono text-[0.55rem] not-italic text-fg/40">
+          <span className="ml-1 align-super font-mono text-label not-italic text-fg/40">
             {d.count}
           </span>
         </span>
@@ -641,10 +619,78 @@ function WordCloud({ data }: { data: { type: string; count: number }[] }) {
 function RankBadge({ n }: { n: number }) {
   return (
     <span
-      className={`flex h-6 w-6 shrink-0 items-center justify-center border border-fg/20 font-mono text-[0.6rem] font-bold tabular-nums ${
-        n === 1 ? 'bg-vermilion text-cream' : 'text-fg/55'
+      className={`flex h-6 w-6 shrink-0 items-center justify-center border border-line/20 font-mono text-label font-semibold tabular-nums ${
+        n === 1 ? 'bg-hot text-on-hot' : 'text-fg/60'
       }`}>
       {n}
     </span>
+  );
+}
+
+/** Sessions, spend and tool calls inside the window, per day and per project. */
+function windowed(sessions: SessionSummary[], days: number) {
+  const now = Date.now();
+  const start = days ? now - days * DAY_MS : 0;
+  const inWin = sessions.filter((x) => new Date(x.started_at).getTime() >= start);
+  const oldest = sessions.length ? Math.min(...sessions.map((x) => new Date(x.started_at).getTime())) : now;
+  // The sample is the newest N sessions: if it is full and doesn't reach back to the window start, say so.
+  const partial = sessions.length >= SESSION_SAMPLE && oldest > start;
+  const nDays = days || Math.max(1, Math.ceil((now - oldest) / DAY_MS));
+  const keys = Array.from({ length: Math.min(nDays, 120) }, (_, i) => new Date(now - (Math.min(nDays, 120) - 1 - i) * DAY_MS).toISOString().slice(0, 10));
+  const idx = new Map(keys.map((k, i) => [k, i]));
+  const series = keys.map((day) => ({ day, cost: 0, sessions: 0, tools: 0, events: 0 }));
+  const byProject = new Map<string, { cwd: string | null; sessions: number; cost: number; agents: Record<string, number> }>();
+  for (const x of inWin) {
+    const i = idx.get(x.started_at.slice(0, 10));
+    if (i != null) {
+      series[i].cost += x.cost_usd;
+      series[i].sessions++;
+      series[i].tools += x.tool_count;
+      series[i].events += x.tool_count;
+    }
+    const key = x.cwd ?? '';
+    const p = byProject.get(key) ?? { cwd: x.cwd, sessions: 0, cost: 0, agents: {} };
+    p.sessions++;
+    p.cost += x.cost_usd;
+    p.agents[x.source] = (p.agents[x.source] ?? 0) + 1;
+    byProject.set(key, p);
+  }
+  return {
+    sessions: inWin,
+    cost: inWin.reduce((a, x) => a + x.cost_usd, 0),
+    tools: inWin.reduce((a, x) => a + x.tool_count, 0),
+    series,
+    projects: [...byProject.values()].sort((a, b) => b.cost - a.cost || b.sessions - a.sessions),
+    partial,
+  };
+}
+
+/** Loading state in the demo's skeleton style (.sk blocks in the same layout as the loaded page). */
+function OverviewSkeleton() {
+  return (
+    <div className="scroll" id="vf-scroll" aria-busy="true">
+      <div className="page">
+        <div className="ph">
+          <div style={{ display: 'grid', gap: 10 }}>
+            <span className="sk" style={{ height: 12, width: 70 }} />
+            <span className="sk" style={{ height: 30, width: 260 }} />
+            <span className="sk" style={{ height: 14, width: 320 }} />
+          </div>
+        </div>
+        <div className="kpis">
+          {[0, 1, 2, 3].map((i) => (
+            <div className="kpi" key={i}>
+              <span className="sk" style={{ height: 10, width: 80 }} />
+              <span className="sk" style={{ height: 28, width: 110, margin: '4px 0' }} />
+              <span className="sk" style={{ height: 12, width: 140 }} />
+            </div>
+          ))}
+        </div>
+        <div className="grid-2">
+          <div className="card"><div className="card-b"><span className="sk" style={{ display: 'block', height: 220 }} /></div></div>
+          <div className="card"><div className="card-b"><span className="sk" style={{ display: 'block', height: 220 }} /></div></div>
+        </div>
+      </div>
+    </div>
   );
 }

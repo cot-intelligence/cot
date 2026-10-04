@@ -20,9 +20,10 @@ const CODEX_PATH =
 export function AgentMark({ id, className = '', variant = '2d' }: AgentMarkProps) {
   if (id === 'opencode') {
     return (
-      <span className={`inline-flex items-center justify-center font-mono text-[0.65em] font-black tracking-tighter ${className}`} aria-hidden="true">
-        OC
-      </span>
+      <svg viewBox="0 0 16 20" fill="none" className={className} aria-hidden="true">
+        <path d="M12 16H4V8H12V16Z" fill="currentColor" opacity="0.25" />
+        <path d="M12 4H4V16H12V4ZM16 20H0V0H16V20Z" fill="currentColor" />
+      </svg>
     );
   }
   if (id === 'claude') {

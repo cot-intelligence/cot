@@ -18,7 +18,7 @@ export function SourceBadge({ source, className = '' }: SourceBadgeProps) {
           <GenericMark />
         )}
       </span>
-      <span className="font-mono text-[0.65rem] font-bold uppercase tracking-widest text-fg/80">
+      <span className="font-mono text-data font-semibold uppercase tracking-label text-fg/80">
         {sourceLabel(source)}
       </span>
     </span>

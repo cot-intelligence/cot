@@ -259,25 +259,25 @@ export function ExportModal({ onClose }: ExportModalProps) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/50 px-4 py-8 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-8 backdrop-blur-sm"
       onClick={onClose}>
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Export data"
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-full w-full max-w-3xl flex-col overflow-hidden border border-fg/15 bg-bg shadow-soft-lg">
+        className="flex max-h-full w-full max-w-3xl flex-col overflow-hidden rounded-card border border-line/10 bg-surface shadow-soft-lg">
 
         {/* ── Header ── */}
-        <div className="flex items-center justify-between border-b border-fg/10 px-5 py-3.5">
-          <h2 className="font-serif text-xl font-bold uppercase tracking-tight text-fg">
+        <div className="flex items-center justify-between border-b border-line/10 px-5 py-3.5">
+          <h2 className="text-lg font-semibold tracking-[-0.01em] text-fg">
             Export your <span className="lowercase italic text-cobalt">data</span>
           </h2>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="flex h-7 w-7 items-center justify-center border border-fg/20 font-mono text-sm text-fg/60 transition-colors hover:border-fg/50 hover:text-fg">
+            className="flex h-7 w-7 items-center justify-center rounded-control border border-line/10 font-mono text-sm text-fg/60 transition-colors hover:border-line/25 hover:text-fg">
             ✕
           </button>
         </div>
@@ -288,7 +288,7 @@ export function ExportModal({ onClose }: ExportModalProps) {
           {/* Row 1: Data + Format side by side */}
           <div className="flex gap-5">
             <div className="flex-1 space-y-1.5">
-              <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/45">
+              <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
                 Data
               </span>
               <div className="grid grid-cols-3 gap-px bg-fg/15">
@@ -297,10 +297,10 @@ export function ExportModal({ onClose }: ExportModalProps) {
                     key={dt.key}
                     type="button"
                     onClick={() => handleDataTypeChange(dt.key)}
-                    className={`py-2 font-mono text-[0.6rem] font-bold uppercase tracking-widest transition-colors ${
+                    className={`py-2 font-mono text-label font-semibold uppercase tracking-label transition-colors ${
                       dataType === dt.key
                         ? 'bg-fg text-bg'
-                        : 'bg-bg text-fg/55 hover:text-fg'
+                        : 'bg-bg text-fg/60 hover:text-fg'
                     }`}>
                     {dt.label}
                   </button>
@@ -309,7 +309,7 @@ export function ExportModal({ onClose }: ExportModalProps) {
             </div>
 
             <div className="w-36 shrink-0 space-y-1.5">
-              <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/45">
+              <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
                 Format
               </span>
               <div className="grid grid-cols-2 gap-px bg-fg/15">
@@ -319,10 +319,10 @@ export function ExportModal({ onClose }: ExportModalProps) {
                     type="button"
                     onClick={() => setFormat(f)}
                     disabled={(f === 'csv' && dataType === 'metrics') || (f === 'csv' && includeSections.size > 0)}
-                    className={`py-2 font-mono text-[0.6rem] font-bold uppercase tracking-widest transition-colors disabled:cursor-not-allowed disabled:opacity-30 ${
+                    className={`py-2 font-mono text-label font-semibold uppercase tracking-label transition-colors disabled:cursor-not-allowed disabled:opacity-30 ${
                       format === f
                         ? 'bg-fg text-bg'
-                        : 'bg-bg text-fg/55 hover:text-fg'
+                        : 'bg-bg text-fg/60 hover:text-fg'
                     }`}>
                     {f}
                   </button>
@@ -335,9 +335,9 @@ export function ExportModal({ onClose }: ExportModalProps) {
           {hasFields ? (
             <div className="space-y-2">
               <div className="flex items-baseline justify-between">
-                <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/45">
+                <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
                   Fields{includeSections.size > 0 && (
-                    <span className="ml-1.5 font-normal text-fg/25">summary</span>
+                    <span className="ml-1.5 font-normal text-fg/40">summary</span>
                   )}
                 </span>
                 <div className="flex items-baseline gap-3">
@@ -345,17 +345,17 @@ export function ExportModal({ onClose }: ExportModalProps) {
                     type="button"
                     onClick={() => setSelectedFields(new Set(fields.map((f) => f.key)))}
                     disabled={allSelected}
-                    className="font-mono text-[0.55rem] uppercase tracking-widest text-cobalt transition-colors hover:text-cobalt/80 disabled:text-fg/20">
+                    className="font-mono text-label uppercase tracking-label text-cobalt transition-colors hover:text-cobalt/80 disabled:text-fg/40">
                     All
                   </button>
                   <button
                     type="button"
                     onClick={() => setSelectedFields(new Set())}
                     disabled={noneSelected}
-                    className="font-mono text-[0.55rem] uppercase tracking-widest text-cobalt transition-colors hover:text-cobalt/80 disabled:text-fg/20">
+                    className="font-mono text-label uppercase tracking-label text-cobalt transition-colors hover:text-cobalt/80 disabled:text-fg/40">
                     None
                   </button>
-                  <span className="font-mono text-[0.55rem] tabular-nums text-fg/30">
+                  <span className="font-mono text-label tabular-nums text-fg/40">
                     {selectedFields.size}/{fields.length}
                   </span>
                 </div>
@@ -369,10 +369,10 @@ export function ExportModal({ onClose }: ExportModalProps) {
                       type="button"
                       onClick={() => toggleField(f.key)}
                       aria-pressed={on}
-                      className={`border px-2 py-1 font-mono text-[0.58rem] uppercase tracking-wider transition-colors ${
+                      className={`border px-2 py-1 font-mono text-label uppercase tracking-wider transition-colors ${
                         on
                           ? 'border-cobalt bg-cobalt/10 text-cobalt'
-                          : 'border-fg/15 text-fg/40 hover:border-fg/35 hover:text-fg/70'
+                          : 'border-line/15 text-fg/40 hover:border-line/35 hover:text-fg/70'
                       }`}>
                       {f.label}
                     </button>
@@ -382,10 +382,10 @@ export function ExportModal({ onClose }: ExportModalProps) {
             </div>
           ) : (
             <div className="space-y-1.5">
-              <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/45">
+              <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
                 Fields
               </span>
-              <p className="font-mono text-[0.55rem] text-fg/35">
+              <p className="font-mono text-label text-fg/40">
                 Full snapshot — all fields included.
               </p>
             </div>
@@ -395,11 +395,11 @@ export function ExportModal({ onClose }: ExportModalProps) {
           {dataType === 'sessions' && (
             <div className="space-y-2">
               <div className="flex items-baseline justify-between">
-                <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/45">
+                <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
                   Include
                 </span>
                 {includeSections.size > 0 && (
-                  <span className="font-mono text-[0.55rem] tabular-nums text-cobalt">
+                  <span className="font-mono text-label tabular-nums text-cobalt">
                     {includeSections.size} section{includeSections.size !== 1 ? 's' : ''}
                   </span>
                 )}
@@ -416,14 +416,14 @@ export function ExportModal({ onClose }: ExportModalProps) {
                       className={`flex flex-col items-start border px-3 py-2 text-left transition-colors ${
                         on
                           ? 'border-cobalt bg-cobalt/10'
-                          : 'border-fg/15 hover:border-fg/35'
+                          : 'border-line/15 hover:border-line/35'
                       }`}>
-                      <span className={`font-mono text-[0.6rem] font-bold uppercase tracking-wider ${
-                        on ? 'text-cobalt' : 'text-fg/55'
+                      <span className={`font-mono text-label font-semibold uppercase tracking-wider ${
+                        on ? 'text-cobalt' : 'text-fg/60'
                       }`}>
                         {opt.label}
                       </span>
-                      <span className="font-mono text-[0.5rem] leading-snug text-fg/35">
+                      <span className="font-mono text-label leading-snug text-fg/40">
                         {opt.hint}
                       </span>
                     </button>
@@ -431,7 +431,7 @@ export function ExportModal({ onClose }: ExportModalProps) {
                 })}
               </div>
               {includeSections.size > 0 && format === 'csv' && (
-                <p className="font-mono text-[0.5rem] text-amber-500">
+                <p className="font-mono text-label text-amber-500">
                   Nested data requires JSON — format switched automatically.
                 </p>
               )}
@@ -440,12 +440,12 @@ export function ExportModal({ onClose }: ExportModalProps) {
 
           {/* Row 4: Filters (collapsible, sessions only) */}
           {dataType === 'sessions' && (
-            <div className="border border-fg/10">
+            <div className="overflow-hidden rounded-cell border border-line/10">
               <button
                 type="button"
                 onClick={() => setFiltersOpen(!filtersOpen)}
-                className="flex w-full items-center justify-between px-4 py-2.5 transition-colors hover:bg-surface/50">
-                <span className="font-mono text-[0.55rem] font-bold uppercase tracking-widest text-fg/45">
+                className="flex w-full items-center justify-between px-4 py-2.5 transition-colors hover:bg-fg/[0.04]">
+                <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
                   Filters{' '}
                   {activeFilterCount > 0 && (
                     <span className="text-cobalt">· {activeFilterCount} active</span>
@@ -453,12 +453,12 @@ export function ExportModal({ onClose }: ExportModalProps) {
                 </span>
                 <Icon
                   name={filtersOpen ? 'chevron-up' : 'chevron-down'}
-                  className="h-3.5 w-3.5 text-fg/35"
+                  className="h-3.5 w-3.5 text-fg/40"
                 />
               </button>
 
               {filtersOpen && (
-                <div className="border-t border-fg/10 bg-panel/30 px-4 pb-4 pt-3">
+                <div className="border-t border-line/10 bg-panel/30 px-4 pb-4 pt-3">
                   <div className="grid gap-x-4 gap-y-2.5 sm:grid-cols-2 md:grid-cols-3">
                     <InputField label="Session IDs" hint="comma-sep" value={sessionIds} onChange={setSessionIds} />
                     <SelectField label="Source" value={source} onChange={setSource} options={SOURCE_OPTIONS} />
@@ -477,7 +477,7 @@ export function ExportModal({ onClose }: ExportModalProps) {
                     <button
                       type="button"
                       onClick={clearFilters}
-                      className="mt-3 font-mono text-[0.55rem] uppercase tracking-widest text-vermilion transition-colors hover:text-vermilion/80">
+                      className="mt-3 font-mono text-label uppercase tracking-label text-hot transition-colors hover:text-hot/80">
                       Reset all filters
                     </button>
                   )}
@@ -488,9 +488,9 @@ export function ExportModal({ onClose }: ExportModalProps) {
         </div>
 
         {/* ── Footer ── */}
-        <div className="border-t border-fg/10 px-5 py-3.5">
+        <div className="border-t border-line/10 px-5 py-3.5">
           <div className="flex items-center justify-between gap-3">
-            <p className="min-h-[1rem] flex-1 font-mono text-[0.6rem] text-fg/45">
+            <p className="min-h-[1rem] flex-1 font-mono text-label text-fg/60">
               {hint ?? (dataType === 'metrics'
                 ? 'Full metrics snapshot, aggregated across all sessions.'
                 : dataType === 'audit'
@@ -503,14 +503,14 @@ export function ExportModal({ onClose }: ExportModalProps) {
               <button
                 type="button"
                 onClick={onClose}
-                className="border border-fg/20 px-3 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-fg/60 transition-colors hover:border-fg/45 hover:text-fg">
+                className="btn-ghost">
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={handleExport}
                 disabled={exporting || (hasFields && noneSelected)}
-                className="flex items-center gap-2 border border-cobalt bg-cobalt px-4 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-widest text-cream transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40">
+                className="btn-primary">
                 {exporting ? (
                   'Exporting…'
                 ) : (
@@ -545,16 +545,16 @@ function InputField({
 }) {
   return (
     <label className="space-y-0.5">
-      <span className="font-mono text-[0.5rem] font-bold uppercase tracking-widest text-fg/40">
+      <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/40">
         {label}
-        {hint && <span className="ml-1 font-normal text-fg/25">{hint}</span>}
+        {hint && <span className="ml-1 font-normal text-fg/40">{hint}</span>}
       </span>
       <input
         type={type}
         step={step}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="block w-full border border-fg/15 bg-surface px-2 py-1.5 font-mono text-[0.7rem] text-fg placeholder:text-fg/25 focus:border-cobalt focus:outline-none"
+        className="block w-full border rounded-control border-line/10 bg-surface px-2 py-1.5 font-mono text-data text-fg placeholder:text-fg/40 focus:border-cobalt focus:outline-none"
       />
     </label>
   );
@@ -573,13 +573,13 @@ function SelectField({
 }) {
   return (
     <label className="space-y-0.5">
-      <span className="font-mono text-[0.5rem] font-bold uppercase tracking-widest text-fg/40">
+      <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/40">
         {label}
       </span>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="block w-full border border-fg/15 bg-surface px-2 py-1.5 font-mono text-[0.7rem] text-fg focus:border-cobalt focus:outline-none">
+        className="block w-full border rounded-control border-line/10 bg-surface px-2 py-1.5 font-mono text-data text-fg focus:border-cobalt focus:outline-none">
         <option value="">Any</option>
         {options.map((o) => (
           <option key={o} value={o}>

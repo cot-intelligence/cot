@@ -158,14 +158,14 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
   const slot1: 'source' | 'project' = groupBy === 'source' ? 'project' : 'source';
 
   return (
-    <div className="border border-line/10 bg-bg">
+    <div className="overflow-hidden rounded-card border border-line/10 bg-surface">
       <div className="flex flex-wrap items-center gap-2 border-b border-line/10 p-3">
         <input
           type="search"
           placeholder="Search id or path…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          className="min-w-[12rem] flex-1 border border-fg/20 bg-surface px-3 py-2 font-mono text-sm text-fg placeholder:text-fg/30 focus:border-vermilion focus:outline-none"
+          className="min-w-[12rem] flex-1 border rounded-control border-line/[0.16] bg-surface px-3 py-2 font-mono text-sm text-fg placeholder:text-fg/40 focus:border-hot focus:outline-none"
         />
         <Select
           aria-label="Group sessions by"
@@ -212,10 +212,10 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
           onClick={() => setOnlyBookmarked((v) => !v)}
           aria-pressed={onlyBookmarked}
           title={onlyBookmarked ? 'Show all sessions' : 'Show bookmarked sessions only'}
-          className={`flex h-8 items-center gap-1.5 border px-2.5 font-mono text-[0.6rem] uppercase tracking-widest transition-colors focus-visible:border-vermilion focus-visible:outline-none ${
+          className={`flex h-8 items-center gap-1.5 border px-2.5 font-mono text-label uppercase tracking-label transition-colors focus-visible:border-hot focus-visible:outline-none ${
             onlyBookmarked
-              ? 'border-fg/50 bg-surface text-fg'
-              : 'border-fg/20 text-fg/55 hover:border-fg/50 hover:text-fg'
+              ? 'border-line/50 bg-surface text-fg'
+              : 'border-line/[0.16] text-fg/60 hover:border-line/50 hover:text-fg'
           }`}>
           <Icon name={onlyBookmarked ? 'bookmark-filled' : 'bookmark'} className="h-3.5 w-3.5" />
           Bookmarked
@@ -225,10 +225,10 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
           onClick={() => setShowArchived((v) => !v)}
           aria-pressed={showArchived}
           title={showArchived ? 'Show active sessions' : 'Show archived sessions'}
-          className={`flex h-8 items-center gap-1.5 border px-2.5 font-mono text-[0.6rem] uppercase tracking-widest transition-colors focus-visible:border-vermilion focus-visible:outline-none ${
+          className={`flex h-8 items-center gap-1.5 border px-2.5 font-mono text-label uppercase tracking-label transition-colors focus-visible:border-hot focus-visible:outline-none ${
             showArchived
-              ? 'border-fg/50 bg-surface text-fg'
-              : 'border-fg/20 text-fg/55 hover:border-fg/50 hover:text-fg'
+              ? 'border-line/50 bg-surface text-fg'
+              : 'border-line/[0.16] text-fg/60 hover:border-line/50 hover:text-fg'
           }`}>
           <Icon name="archive" className="h-3.5 w-3.5" />
           Archived
@@ -248,25 +248,25 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
                   tabIndex={0}
                   onClick={() => toggleGroup(g.key)}
                   onKeyDown={(e) => activateOnKey(e, () => toggleGroup(g.key))}
-                  className="flex cursor-pointer items-center gap-2.5 border-b border-line/10 bg-surface/40 px-3 py-2.5 transition-colors hover:bg-surface focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-vermilion">
+                  className="flex cursor-pointer items-center gap-2.5 border-b border-line/10 bg-surface/40 px-3 py-2.5 transition-colors hover:bg-fg/[0.04] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-hot">
                   <Icon
                     name={expanded ? 'chevron-down' : 'chevron-right'}
                     className="h-4 w-4 shrink-0 text-fg/40"
                   />
                   <span
-                    className="truncate font-mono text-sm font-bold text-fg"
+                    className="truncate font-mono text-sm font-semibold text-fg"
                     title={g.title || g.label}>
                     {g.label}
                   </span>
-                  <span className="shrink-0 font-mono text-[0.6rem] tabular-nums text-fg/40">
+                  <span className="shrink-0 font-mono text-label tabular-nums text-fg/40">
                     {g.items.length}
                   </span>
                   {g.activeCount > 0 && (
-                    <span className="shrink-0 font-mono text-[0.6rem] font-bold uppercase tracking-widest text-cobalt">
+                    <span className="shrink-0 font-mono text-label font-semibold uppercase tracking-label text-cobalt">
                       {g.activeCount} active
                     </span>
                   )}
-                  <span className="ml-auto shrink-0 font-mono text-[0.65rem] text-fg/45">
+                  <span className="ml-auto shrink-0 font-mono text-data text-fg/60">
                     {formatRelative(g.lastActivity)}
                   </span>
                 </div>
@@ -322,9 +322,9 @@ function BoardSessionRow({
       tabIndex={0}
       onClick={() => onSelect(s.id)}
       onKeyDown={(e) => activateOnKey(e, () => onSelect(s.id))}
-      className="group flex cursor-pointer items-center gap-3 border-b border-line/10 px-3 py-2.5 transition-colors hover:bg-surface focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-vermilion">
+      className="group flex cursor-pointer items-center gap-3 border-b border-line/10 px-3 py-2.5 transition-colors hover:bg-fg/[0.04] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-hot">
       <StatusGlyph status={s.status} archived={s.archived} />
-      <span className="shrink-0 font-mono text-[0.65rem] tabular-nums text-fg/35">
+      <span className="shrink-0 font-mono text-data tabular-nums text-fg/40">
         {s.id.slice(0, 6)}
       </span>
       <span className="min-w-0 flex-1 truncate font-mono text-sm font-medium text-fg">
@@ -335,17 +335,17 @@ function BoardSessionRow({
         {slot1 === 'source' ? (
           <SourceBadge source={s.source} />
         ) : (
-          <span className="font-mono text-[0.6rem] font-bold uppercase tracking-widest text-fg/55">
+          <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
             {basename(s.cwd || '—')}
           </span>
         )}
 
-        <span className="inline-flex items-center gap-1 font-mono text-[0.65rem] tabular-nums text-fg/45">
+        <span className="inline-flex items-center gap-1 font-mono text-data tabular-nums text-fg/60">
           <Icon name="event" className="h-3 w-3" />
           {s.event_count}
         </span>
 
-        <span className="w-12 shrink-0 text-right font-mono text-[0.65rem] text-fg/45">
+        <span className="w-12 shrink-0 text-right font-mono text-data text-fg/60">
           {formatRelative(s.last_activity || s.started_at)}
         </span>
 
@@ -359,7 +359,7 @@ function BoardSessionRow({
           aria-pressed={s.bookmarked}
           title={s.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
           className={`rounded p-1 transition hover:bg-panel focus-visible:outline-none ${
-            s.bookmarked ? 'text-vermilion' : 'text-fg/35 hover:text-fg'
+            s.bookmarked ? 'text-hot' : 'text-fg/40 hover:text-fg'
           }`}>
           <Icon name={s.bookmarked ? 'bookmark-filled' : 'bookmark'} className="h-3.5 w-3.5" />
         </button>
@@ -371,7 +371,7 @@ function BoardSessionRow({
           onKeyDown={(e) => e.stopPropagation()}
           aria-label="Export session as JSON"
           title="Export as JSON"
-          className="rounded p-1 text-fg/35 transition hover:bg-panel hover:text-fg focus-visible:outline-none">
+          className="rounded p-1 text-fg/40 transition hover:bg-panel hover:text-fg focus-visible:outline-none">
           <Icon name="download" className="h-3.5 w-3.5" />
         </a>
 
@@ -383,7 +383,7 @@ function BoardSessionRow({
           }}
           aria-label={showArchived ? 'Unarchive session' : 'Archive session'}
           title={showArchived ? 'Unarchive session' : 'Archive session'}
-          className="rounded p-1 text-fg/35 transition hover:bg-panel hover:text-fg focus-visible:outline-none">
+          className="rounded p-1 text-fg/40 transition hover:bg-panel hover:text-fg focus-visible:outline-none">
           <Icon name={showArchived ? 'unarchive' : 'archive'} className="h-3.5 w-3.5" />
         </button>
       </div>
@@ -394,7 +394,7 @@ function BoardSessionRow({
 /** A small Linear-like state circle: filled+pulsing for active, ring for done. */
 function StatusGlyph({ status, archived }: { status: string; archived: boolean }) {
   if (archived) {
-    return <span className="h-3 w-3 shrink-0 rounded-full border-2 border-fg/20" aria-label="Archived" />;
+    return <span className="h-3 w-3 shrink-0 rounded-full border-2 border-line/[0.16]" aria-label="Archived" />;
   }
   if (status === 'active') {
     return (
@@ -403,7 +403,7 @@ function StatusGlyph({ status, archived }: { status: string; archived: boolean }
       </span>
     );
   }
-  return <span className="h-3 w-3 shrink-0 rounded-full border-2 border-fg/30 bg-fg/20" aria-label="Done" />;
+  return <span className="h-3 w-3 shrink-0 rounded-full border-2 border-line/25 bg-fg/20" aria-label="Done" />;
 }
 
 function BoardSkeleton() {

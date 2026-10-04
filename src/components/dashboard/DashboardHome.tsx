@@ -10,10 +10,10 @@ interface DashboardHomeProps {
 export function DashboardHome({ onSelect }: DashboardHomeProps) {
   return (
     <div className="scroll-thin flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-6xl space-y-10 px-6 py-10 sm:px-8">
+      <div className="mx-auto max-w-6xl space-y-8 px-6 py-8 sm:px-8">
         <FadeIn className="space-y-6">
           <PageHeader
-            eyebrow="Telemetry"
+            eyebrow="Monitor"
             title="Sessions"
             description="Every traced agent session, live as it happens."
           />
