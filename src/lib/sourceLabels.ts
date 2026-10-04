@@ -10,6 +10,8 @@ export function sourceLabel(source: string): string {
       return 'Cursor';
     case 'codex':
       return 'Codex';
+    case 'opencode':
+      return 'OpenCode';
     case 'api':
       return 'API';
     case 'custom':
@@ -30,11 +32,13 @@ export function sourceTag(source: string): string {
       return 'CURSOR';
     case 'codex':
       return 'CODEX';
+    case 'opencode':
+      return 'OPENCODE';
     default:
       return source.toUpperCase();
   }
 }
 
 export function isKnownAgent(source: string): source is AgentId {
-  return source === 'claude' || source === 'cursor' || source === 'codex';
+  return source === 'claude' || source === 'cursor' || source === 'codex' || source === 'opencode';
 }

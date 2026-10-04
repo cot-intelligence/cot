@@ -108,6 +108,7 @@ export function SessionList({
                 { value: 'claude', label: 'Claude' },
                 { value: 'cursor', label: 'Cursor' },
                 { value: 'codex', label: 'Codex' },
+                { value: 'opencode', label: 'OpenCode' },
               ]}
             />
           </div>

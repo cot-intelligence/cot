@@ -50,7 +50,7 @@ title() {
   else
     printf '%s\n' "cot bridge installer v${COT_VERSION}"
   fi
-  printf '%s\n\n' "hooks for Claude Code | Cursor | Codex"
+  printf '%s\n\n' "hooks for Claude Code | Cursor | Codex | OpenCode"
 }
 
 section() {
@@ -284,6 +284,7 @@ if [ -z "${SELECTION}" ]; then
     printf '%s\n' "  1) claude   Claude Code   ~/.claude/settings.json"
     printf '%s\n' "  2) cursor   Cursor        ~/.cursor/hooks.json"
     printf '%s\n' "  3) codex    Codex         ~/.codex/hooks.json"
+    printf '%s\n' "  4) opencode OpenCode      ~/.config/opencode/plugins/cot.js"
     echo ""
     printf "Enter names/numbers (space-separated), 'all', or 'none' [all]: "
     read -r SELECTION < /dev/tty || SELECTION=""
@@ -292,7 +293,7 @@ if [ -z "${SELECTION}" ]; then
     SELECTION="none"
     echo ""
     warn "Non-interactive shell; skipping hook setup"
-    printf '%s\n' "  Re-run with COT_AGENTS=\"claude cursor codex\" to wire up hooks,"
+    printf '%s\n' "  Re-run with COT_AGENTS=\"claude cursor codex opencode\" to wire up hooks,"
     printf '%s\n' "  or run: ${TARGET} install"
   fi
 fi
@@ -301,13 +302,14 @@ fi
 AGENTS=""
 case " ${SELECTION} " in
   *" none "*|*" None "*|*" NONE "*) AGENTS="" ;;
-  *" all "*|*" All "*|*" ALL "*)    AGENTS="claude cursor codex" ;;
+  *" all "*|*" All "*|*" ALL "*)    AGENTS="claude cursor codex opencode" ;;
   *)
     for token in ${SELECTION}; do
       case "${token}" in
         1|claude|Claude|CLAUDE) AGENTS="${AGENTS} claude" ;;
         2|cursor|Cursor|CURSOR) AGENTS="${AGENTS} cursor" ;;
         3|codex|Codex|CODEX)    AGENTS="${AGENTS} codex" ;;
+        4|opencode|OpenCode|OPENCODE) AGENTS="${AGENTS} opencode" ;;
       esac
     done
     ;;
@@ -333,10 +335,12 @@ if [ -n "${AGENTS}" ]; then
 
   section "Import"
   IMPORT_ARGS=""
-  for a in ${AGENTS}; do IMPORT_ARGS="${IMPORT_ARGS} --agent ${a}"; done
-  if run_spinner "Importing historical transcripts" env COT_ENDPOINT="${COT_ENDPOINT}" "${TARGET}" import ${IMPORT_ARGS}; then
+  for a in ${AGENTS}; do
+    [ "${a}" = "opencode" ] || IMPORT_ARGS="${IMPORT_ARGS} --agent ${a}"
+  done
+  if [ -n "${IMPORT_ARGS}" ] && run_spinner "Importing historical transcripts" env COT_ENDPOINT="${COT_ENDPOINT}" "${TARGET}" import ${IMPORT_ARGS}; then
     [ -z "${RUN_OUTPUT}" ] || printf '%s\n' "${RUN_OUTPUT}"
-  else
+  elif [ -n "${IMPORT_ARGS}" ]; then
     warn "Transcript import had issues (non-fatal)."
     details "Output" "${RUN_OUTPUT}"
   fi

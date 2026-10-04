@@ -288,7 +288,7 @@ export interface Settings {
   ui_sidebar_open: boolean;
   /** Onboarding finished on this install, and the agents picked there. */
   ui_onboarded: boolean;
-  ui_onboarding_agents: ('claude' | 'cursor' | 'codex')[];
+  ui_onboarding_agents: AgentId[];
 }
 
 export async function getSettings(): Promise<Settings> {
@@ -1274,6 +1274,18 @@ export async function sendTestEvent(source: AgentId): Promise<string> {
     for (const ev of events) {
       await ingest('codex', { ...base, ...ev });
     }
+  } else if (source === 'opencode') {
+    const base = { session_id: sid, cwd, model: 'openai/gpt-5' };
+    const events: Record<string, unknown>[] = [
+      { hook_event_name: 'SessionStart', timestamp: ts() },
+      { hook_event_name: 'UserPromptSubmit', prompt: 'Inspect the parser and fix the failing test.', timestamp: ts() },
+      { hook_event_name: 'PreToolUse', tool_name: 'bash', tool_input: { command: 'npm test' }, timestamp: ts() },
+      { hook_event_name: 'PostToolUse', tool_name: 'bash', tool_input: { command: 'npm test' }, tool_response: 'Tests passed', timestamp: ts() },
+      { hook_event_name: 'afterAgentResponse', response: 'The parser test now passes.', timestamp: ts() },
+      { hook_event_name: 'OpenCodeUsage', usage: { input_tokens: 120, output_tokens: 40 }, timestamp: ts() },
+      { hook_event_name: 'Stop', timestamp: ts() },
+    ];
+    for (const ev of events) await ingest('opencode', { ...base, ...ev });
   } else {
     const base = { conversation_id: sid, workspace_roots: [cwd], cwd };
     const events: Record<string, unknown>[] = [

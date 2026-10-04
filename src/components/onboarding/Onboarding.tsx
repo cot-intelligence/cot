@@ -29,14 +29,14 @@ const STEPS: Record<Mode, string[]> = {
 };
 
 const STORAGE_KEY = 'cot.onboarding.agents';
-const AGENT_IDS: AgentId[] = ['claude', 'cursor', 'codex'];
+const AGENT_IDS: AgentId[] = ['claude', 'cursor', 'codex', 'opencode'];
 
 function readSavedAgents(): AgentId[] {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) {
       const legacy = window.localStorage.getItem('cot.onboarding.agent');
-      if (legacy === 'claude' || legacy === 'cursor' || legacy === 'codex') return [legacy];
+      if (legacy === 'claude' || legacy === 'cursor' || legacy === 'codex' || legacy === 'opencode') return [legacy];
       return [];
     }
     const parsed = JSON.parse(raw) as unknown;

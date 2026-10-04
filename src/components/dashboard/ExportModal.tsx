@@ -74,7 +74,7 @@ const INCLUDE_OPTIONS: IncludeDef[] = [
   { key: 'clarifications', label: 'Clarifications', hint: 'Questions the agent asked and user answers' },
 ];
 
-const SOURCE_OPTIONS = ['claude', 'cursor', 'codex'] as const;
+const SOURCE_OPTIONS = ['claude', 'cursor', 'codex', 'opencode'] as const;
 
 function getNestedValue(obj: Record<string, unknown>, path: string): unknown {
   return path.split('.').reduce<unknown>((o, k) => (o as Record<string, unknown>)?.[k], obj);

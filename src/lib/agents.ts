@@ -1,6 +1,6 @@
 import { defaultCollectorUrl } from './ports';
 
-export type AgentId = 'claude' | 'cursor' | 'codex';
+export type AgentId = 'claude' | 'cursor' | 'codex' | 'opencode';
 
 export interface SetupStep {
   tag: string;
@@ -49,6 +49,7 @@ export const HOOK_LABELS: Record<string, string> = {
   subagentStop: 'Subagent finish',
   preCompact: 'Compaction start',
   stop: 'Session stopped',
+  OpenCodeUsage: 'Model usage',
 };
 
 export function hookLabel(name: string): string {
@@ -194,6 +195,23 @@ export const AGENTS: Agent[] = [
       filename: '~/.codex/hooks.json',
       code: CODEX_HOOKS,
     }],
+  },
+  {
+    id: 'opencode',
+    name: 'OpenCode',
+    product: 'OpenCode',
+    tagline:
+      'Trace prompts, tool calls, responses, and usage from OpenCode 1.18.29+ and 2 through one local plugin file.',
+    events: [
+      'SessionStart',
+      'UserPromptSubmit',
+      'PreToolUse',
+      'PostToolUse',
+      'afterAgentResponse',
+      'OpenCodeUsage',
+      'Stop',
+    ],
+    steps: [INSTALL_STEP],
   },
 ];
 

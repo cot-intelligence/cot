@@ -39,6 +39,8 @@ jobs:
         run: npm run typecheck
       - name: Unit tests
         run: npm test
+      - name: OpenCode plugin regression tests
+        run: node --test bridge/tests/opencode-plugin.test.mjs
       - name: Build
         run: npm run build
 

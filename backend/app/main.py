@@ -39,7 +39,7 @@ from . import __version__, activity, ai_insights, cron, db, extension_usage, ins
 
 app = FastAPI(title="cot collector", version=__version__)
 
-AGENTS = ("claude", "cursor", "codex")
+AGENTS = ("claude", "cursor", "codex", "opencode")
 EXPECTED_HOOKS = {
     "claude": [
         "SessionStart",
@@ -79,6 +79,11 @@ EXPECTED_HOOKS = {
         "SubagentStop",
         "Stop",
     ],
+    "opencode": [
+        "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+        "PostToolUseFailure", "afterAgentResponse", "afterAgentThought",
+        "OpenCodeUsage", "PermissionRequest", "PostCompact", "Stop",
+    ],
 }
 HOOK_LABELS = {
     "SessionStart": "Session start",
@@ -106,6 +111,7 @@ HOOK_LABELS = {
     "subagentStop": "Subagent finish",
     "preCompact": "Compaction start",
     "stop": "Session stopped",
+    "OpenCodeUsage": "Model usage",
 }
 
 # --- Local-only network hardening -------------------------------------------
@@ -522,7 +528,7 @@ def get_settings() -> dict[str, Any]:
     }
 
 
-_ONBOARDING_AGENTS = ("claude", "cursor", "codex")
+_ONBOARDING_AGENTS = AGENTS
 
 
 def _stored_onboarding_agents() -> list[str]:
@@ -761,6 +767,14 @@ def bridge_script() -> FileResponse:
     return FileResponse(script, media_type="text/plain")
 
 
+@app.get("/opencode-plugin.js")
+def opencode_plugin() -> FileResponse:
+    script = _BRIDGE_DIR / "opencode-plugin.js"
+    if not script.exists():
+        raise HTTPException(status_code=404, detail="OpenCode plugin not found")
+    return FileResponse(script, media_type="text/javascript")
+
+
 async def _json_body(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
@@ -785,7 +799,7 @@ async def _ingest_body(request: Request) -> tuple[dict[str, Any] | None, str | N
 
 @app.post("/v1/ingest/{source}")
 async def ingest(source: str, request: Request) -> dict[str, Any]:
-    if source not in ("claude", "cursor", "codex"):
+    if source not in AGENTS:
         raise HTTPException(status_code=404, detail=f"Unknown source: {source}")
     body, malformed_error = await _ingest_body(request)
     if body is None:
@@ -1218,7 +1232,13 @@ def get_hook_status() -> dict[str, Any]:
         connected = bool(conn.get("connected"))
         manifest_installed = bool(entry.get("installed"))
         installed = manifest_installed or (not manifest_agents and events > 0)
-        if not installed and events == 0:
+        if source == "opencode" and source not in manifest_agents and events > 0:
+            # A manually copied plugin has no bridge-written manifest. Its
+            # events prove installation only when no explicit entry exists.
+            installed = True
+            installed_hooks = expected_hooks
+            missing_hooks = []
+        if not installed:
             health = "not_installed"
         elif missing_hooks:
             health = "missing_hooks"
@@ -1259,7 +1279,7 @@ def get_hook_status() -> dict[str, Any]:
         "updated_at": manifest.get("updated_at"),
         "endpoint": manifest.get("endpoint"),
         "manifest_found": bool(manifest_agents),
-        "repair_all_url": "/repair.sh?agents=claude,cursor,codex",
+        "repair_all_url": "/repair.sh?agents=claude,cursor,codex,opencode",
         "agents": agents,
     }
 

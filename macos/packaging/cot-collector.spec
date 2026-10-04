@@ -11,10 +11,11 @@ a = Analysis(
     binaries=[],
     datas=[
         (os.path.join(REPO, "backend", "app", "pricing.json"), "app"),
-        # Served by GET /install.sh and GET /cot. main.py resolves these two
+        # Served by the bridge download endpoints. main.py resolves these two
         # directories up from app/main.py, which lands on _internal/bridge here.
         (os.path.join(REPO, "bridge", "install.sh"), "bridge"),
         (os.path.join(REPO, "bridge", "cot"), "bridge"),
+        (os.path.join(REPO, "bridge", "opencode-plugin.js"), "bridge"),
     ],
     hiddenimports=[
         "uvicorn.logging",

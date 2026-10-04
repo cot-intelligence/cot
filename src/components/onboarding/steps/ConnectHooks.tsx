@@ -294,6 +294,17 @@ function ManualSteps({
           <ShellCommand command={shellStep.command} />
         </div>
       )}
+      {agentId === 'opencode' && (
+        <div className="space-y-1 font-mono text-[0.7rem] leading-relaxed text-fg/60">
+          <span className="block text-[0.55rem] font-bold uppercase tracking-widest text-fg/40">
+            MANUAL PLUGIN
+          </span>
+          <p>Download the plugin and save it as ~/.config/opencode/plugins/cot.js, then restart OpenCode.</p>
+          <a href="/opencode-plugin.js" download="cot.js" className="text-cobalt underline">
+            Download cot.js
+          </a>
+        </div>
+      )}
       {fileSteps.map(
         (step) =>
           step.code &&

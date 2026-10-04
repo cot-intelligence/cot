@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { AgentId } from '../../../lib/agents';
-import { getPassive, PassiveUnsupportedError, previewSchedule, runPassiveNow, updatePassive, type PassiveStatus } from '../../../lib/api';
+import { getPassive, PassiveUnsupportedError, previewSchedule, runPassiveNow, updatePassive, type PassiveAgent, type PassiveStatus } from '../../../lib/api';
 import { agentLabel } from '../../forest/AgentMark';
 import { fmt } from '../../forest/format';
 import { Icon } from '../../forest/icons';
@@ -20,7 +19,7 @@ export type PassiveDraft = ReturnType<typeof usePassiveDraft>;
 export function usePassiveDraft() {
   const [p, setP] = useState<PassiveStatus | null>(null);
   const [failed, setFailed] = useState<'unsupported' | 'offline' | false>(false);
-  const [agents, setAgents] = useState<AgentId[] | null>(null);
+  const [agents, setAgents] = useState<PassiveAgent[] | null>(null);
   const [cron, setCron] = useState<string | null>(null);
   const [started, setStarted] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -56,7 +55,7 @@ export function PassiveSetup({
 }: {
   step: number;
   onStep: (s: number) => void;
-  onFinish: (agents: AgentId[], origin: { x: number; y: number }) => void;
+  onFinish: (agents: PassiveAgent[], origin: { x: number; y: number }) => void;
   draft: PassiveDraft;
 }) {
   const { p, failed, agents, setAgents, cron, setCron, started, setStarted, err, setErr } = draft;
@@ -97,7 +96,7 @@ export function PassiveSetup({
   const chosen = p.agents_detail.filter((d) => agents.includes(d.agent));
   const total = chosen.reduce((n, d) => n + d.transcripts, 0);
   const running = chosen.reduce((n, d) => n + d.active, 0);
-  const toggle = (a: AgentId, on: boolean) => setAgents((prev) => (on ? [...(prev ?? []), a] : (prev ?? []).filter((x) => x !== a)));
+  const toggle = (a: PassiveAgent, on: boolean) => setAgents((prev) => (on ? [...(prev ?? []), a] : (prev ?? []).filter((x) => x !== a)));
 
   if (step === 1) {
     return (

@@ -13,6 +13,7 @@ export const AGENT_LABELS: Record<string, string> = {
   claude: 'Claude Code',
   cursor: 'Cursor',
   codex: 'Codex',
+  opencode: 'OpenCode',
   cowork: 'Cowork',
 };
 export const agentLabel = (id: string) => AGENT_LABELS[id] ?? id[0].toUpperCase() + id.slice(1);
@@ -30,6 +31,15 @@ export function AgentMark({ id, className = '', size = 14 }: { id: AgentId | str
     return (
       <svg viewBox="0 0 24 24" fill="currentColor" className={className} style={st} aria-hidden="true">
         <path d={CODEX_PATH} />
+      </svg>
+    );
+  }
+  if (id === 'opencode') {
+    // Official mark: anomalyco/opencode packages/ui/src/components/logo.tsx.
+    return (
+      <svg viewBox="0 0 16 20" fill="none" className={className} style={st} aria-hidden="true">
+        <path d="M12 16H4V8H12V16Z" fill="currentColor" opacity="0.25" />
+        <path d="M12 4H4V16H12V4ZM16 20H0V0H16V20Z" fill="currentColor" />
       </svg>
     );
   }

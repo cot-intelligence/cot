@@ -1130,7 +1130,7 @@ def _recategorize_other_tools(conn: sqlite3.Connection) -> None:
         except json.JSONDecodeError:
             continue
         cat = categorize(row["source"], row["hook"], raw, row["tool"])
-        if cat["category"] == "other":
+        if cat["category"] == "other" and not (row["source"] == "opencode" and cat["status"] == "error"):
             continue
         conn.execute(
             "UPDATE events SET category=?, title=?, detail=?, target=?, status=?,"
@@ -1158,7 +1158,7 @@ def _question_response_obj(detail: Any) -> dict[str, Any] | None:
     return obj if isinstance(obj, dict) else None
 
 
-_MIGRATIONS_VERSION = "9"
+_MIGRATIONS_VERSION = "10"
 _RAW_PAYLOAD_MAX_BYTES = 64 * 1024
 
 
@@ -2047,6 +2047,15 @@ def record_event(
                 "UPDATE sessions SET cwd = COALESCE(cwd, ?) WHERE id = ?",
                 (norm["cwd"], sid),
             )
+
+        if norm["source"] == "opencode" and raw.get("parent_session_id"):
+            parent = str(raw["parent_session_id"])
+            if parent != sid:
+                conn.execute(
+                    "UPDATE sessions SET parent_session_id = ?,"
+                    " subagent_label = COALESCE(subagent_label, ?) WHERE id = ?",
+                    (parent, raw.get("session_title"), sid),
+                )
 
         # Imported events carry historical timestamps; ensure the session's
         # started_at reflects the earliest event we've seen.
