@@ -1,0 +1,14 @@
+{
+  "name": "cot-desktop",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "scripts/build.sh",
+    "build:dmg": "scripts/build.sh --dmg",
+    "build:release": "scripts/build.sh --release"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

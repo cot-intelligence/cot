@@ -22,22 +22,22 @@ export function Stepper({ steps, current, onJump }: StepperProps) {
               type="button"
               disabled={!reachable}
               onClick={() => reachable && onJump?.(i)}
-              className={`group flex items-center gap-2 font-mono text-[0.6rem] font-bold uppercase tracking-widest transition-colors ${
+              className={`group flex items-center gap-2 font-mono text-label font-semibold uppercase tracking-label transition-colors ${
                 reachable ? 'cursor-pointer' : 'cursor-default'
               }`}>
               <span
-                className={`flex h-5 w-5 items-center justify-center border text-[0.6rem] tabular-nums transition-colors ${
+                className={`flex h-5 w-5 items-center justify-center border text-label tabular-nums transition-colors ${
                   active
-                    ? 'border-vermilion bg-vermilion text-cream'
+                    ? 'border-hot bg-hot text-on-hot'
                     : done
-                      ? 'border-fg/40 text-fg'
-                      : 'border-fg/20 text-fg/30'
+                      ? 'border-line/40 text-fg'
+                      : 'border-line/[0.16] text-fg/40'
                 }`}>
                 {done ? '\u2713' : String(i + 1).padStart(2, '0')}
               </span>
               <span
                 className={`hidden sm:inline transition-colors ${
-                  active ? 'text-fg' : done ? 'text-fg/60' : 'text-fg/30'
+                  active ? 'text-fg' : done ? 'text-fg/60' : 'text-fg/40'
                 }`}>
                 {step.label}
               </span>

@@ -7,28 +7,28 @@ export interface CategoryMeta {
 }
 
 // Calm palette: most categories are neutral (fg at stepped opacity).
-// vermilion = edits / permissions (focal), cobalt = external (mcp / web),
+// hot = edits / permissions (focal), cobalt = external (mcp / web),
 // olive = memory (persistence). This avoids a rainbow across lists/timeline.
 export const CATEGORY_META: Record<string, CategoryMeta> = {
   prompt: { label: 'Prompt', color: 'text-fg', dot: 'bg-fg' },
   question: { label: 'Prompt', color: 'text-fg', dot: 'bg-fg' },
   response: { label: 'Response', color: 'text-fg/75', dot: 'bg-fg/65' },
-  thought: { label: 'Thought', color: 'text-fg/55', dot: 'bg-fg/45' },
+  thought: { label: 'Thought', color: 'text-fg/60', dot: 'bg-fg/45' },
   plan: { label: 'Plan', color: 'text-olive', dot: 'bg-olive' },
-  file_edit: { label: 'File edit', color: 'text-vermilion', dot: 'bg-vermilion' },
-  file_read: { label: 'File read', color: 'text-fg/65', dot: 'bg-fg/50' },
+  file_edit: { label: 'File edit', color: 'text-olive', dot: 'bg-olive' },
+  file_read: { label: 'File read', color: 'text-cobalt', dot: 'bg-cobalt' },
   context_read: { label: 'Context / skill', color: 'text-fg/65', dot: 'bg-fg/50' },
-  shell: { label: 'Shell', color: 'text-fg/70', dot: 'bg-fg/55' },
-  mcp: { label: 'MCP / plugin', color: 'text-cobalt', dot: 'bg-cobalt' },
-  web: { label: 'External network', color: 'text-cobalt', dot: 'bg-cobalt' },
+  shell: { label: 'Shell', color: 'text-amber', dot: 'bg-amber' },
+  mcp: { label: 'MCP / plugin', color: 'text-hot', dot: 'bg-hot' },
+  web: { label: 'External network', color: 'text-hot', dot: 'bg-hot' },
   subagent: { label: 'Subagent', color: 'text-fg/70', dot: 'bg-fg/55' },
   memory: { label: 'Memory', color: 'text-olive', dot: 'bg-olive' },
-  compaction: { label: 'Compaction', color: 'text-fg/50', dot: 'bg-fg/35' },
-  permission: { label: 'Permission', color: 'text-vermilion', dot: 'bg-vermilion' },
-  notification: { label: 'Notification', color: 'text-fg/50', dot: 'bg-fg/35' },
-  lifecycle: { label: 'Lifecycle', color: 'text-fg/45', dot: 'bg-fg/30' },
-  meta: { label: 'Workflow / meta', color: 'text-fg/45', dot: 'bg-fg/30' },
-  other: { label: 'Other', color: 'text-fg/45', dot: 'bg-fg/30' },
+  compaction: { label: 'Compaction', color: 'text-fg/60', dot: 'bg-fg/35' },
+  permission: { label: 'Permission', color: 'text-amber', dot: 'bg-amber' },
+  notification: { label: 'Notification', color: 'text-fg/60', dot: 'bg-fg/35' },
+  lifecycle: { label: 'Lifecycle', color: 'text-fg/60', dot: 'bg-fg/30' },
+  meta: { label: 'Workflow / meta', color: 'text-fg/60', dot: 'bg-fg/30' },
+  other: { label: 'Other', color: 'text-fg/60', dot: 'bg-fg/30' },
 };
 
 export function getCategoryMeta(cat: string): CategoryMeta {

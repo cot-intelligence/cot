@@ -187,3 +187,33 @@ def test_real_sessions_cannot_be_deleted():
 
 def test_unknown_store_is_rejected():
     assert _client().get("/v1/sessions", params={"store": "other"}).status_code == 400
+
+
+def test_import_note_is_saved_listed_and_cleared():
+    _seed_family()
+    client = _client()
+    new_root = _import(client, _export(client, ROOT)).json()["session_id"]
+
+    res = client.put(f"/v1/sessions/{new_root}/import-note", params={"store": "replay"},
+                     json={"note": "  Repro of the flaky billing migration  "})
+    assert res.status_code == 200, res.text
+    assert res.json()["import_note"] == "Repro of the flaky billing migration"
+
+    listed = {s["id"]: s for s in _replay(client, "/v1/sessions").json()["sessions"]}
+    assert listed[new_root]["import_note"] == "Repro of the flaky billing migration"
+    detail = _replay(client, f"/v1/sessions/{new_root}").json()
+    assert detail["summary"]["import_note"] == "Repro of the flaky billing migration"
+
+    client.put(f"/v1/sessions/{new_root}/import-note", params={"store": "replay"}, json={"note": ""})
+    listed = {s["id"]: s for s in _replay(client, "/v1/sessions").json()["sessions"]}
+    assert listed[new_root]["import_note"] is None
+
+
+def test_import_note_only_applies_to_imports():
+    _seed_family()
+    client = _client()
+    res = client.put(f"/v1/sessions/{ROOT}/import-note", json={"note": "x"})
+    assert res.status_code == 404
+    res = client.put(f"/v1/sessions/{ROOT}/import-note", params={"store": "replay"},
+                     json={"note": "x" * 2001})
+    assert res.status_code == 422

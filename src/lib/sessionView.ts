@@ -198,20 +198,20 @@ export const PROVENANCE_META: Record<EventProvenance, {
   approval_review: {
     label: 'Review',
     sidebar: 'review',
-    accent: 'border-l-2 border-l-cobalt/25',
+    accent: 'ring-1 ring-cobalt/25',
     pillClass: 'bg-cobalt/10 text-cobalt',
   },
   reviewed_session: {
     label: 'Reviewed session',
     sidebar: 'reviewed',
-    accent: 'border-l-2 border-l-fg/15',
-    pillClass: 'bg-fg/8 text-fg/45',
+    accent: 'ring-1 ring-fg/15',
+    pillClass: 'bg-fg/8 text-fg/60',
   },
   subagent: {
     label: 'Subagent',
     sidebar: 'subagent',
     accent: '',
-    pillClass: 'bg-fg/8 text-fg/45',
+    pillClass: 'bg-fg/8 text-fg/60',
   },
 };
 

@@ -88,36 +88,36 @@ export function Verify({ agents: agentIds, onBack, onSetup, onFinish }: VerifyPr
     <FadeIn className="space-y-10">
       <header className="space-y-3">
         <div className="flex items-center justify-between gap-4">
-          <span className="inline-block border border-fg bg-fg px-3 py-1 font-mono text-[0.6rem] font-bold uppercase tracking-widest text-bg">
+          <span className="inline-block border rounded-control border-line/[0.16] bg-fg px-3 py-1 font-mono text-label font-semibold uppercase tracking-label text-bg">
             {hasSessions ? 'SUMMARY' : 'READY'}
           </span>
           <button
             type="button"
             onClick={onBack}
-            className="inline-flex items-center gap-2 font-mono text-[0.65rem] font-bold uppercase tracking-widest text-fg/45 transition-colors hover:text-cobalt">
+            className="inline-flex items-center gap-2 font-mono text-data font-semibold uppercase tracking-label text-fg/60 transition-colors hover:text-cobalt">
             <span>←</span>
             Change agents
           </button>
         </div>
-        <h1 className="text-4xl font-extrabold uppercase leading-[0.95] tracking-tight text-fg sm:text-5xl">
+        <h1 className="text-[2.25rem] font-semibold leading-[1.05] tracking-display text-fg sm:text-[2.75rem]">
           {hasSessions ? (
             <>
               Your{' '}
-              <span className="font-serif lowercase italic text-vermilion">history</span>
+              <span className="text-hot">history</span>
             </>
           ) : loading ? (
             <>
               Loading{' '}
-              <span className="font-serif lowercase italic text-vermilion">history</span>
+              <span className="text-hot">history</span>
             </>
           ) : (
             <>
               You&apos;re{' '}
-              <span className="font-serif lowercase italic text-olive">ready</span>
+              <span className="text-olive">ready</span>
             </>
           )}
         </h1>
-        <p className="max-w-md font-mono text-xs leading-relaxed text-fg/55">
+        <p className="max-w-md text-lead text-fg/60">
           {hasSessions
             ? 'cot found your existing agent sessions and imported them into the local database.'
             : loading
@@ -134,18 +134,18 @@ export function Verify({ agents: agentIds, onBack, onSetup, onFinish }: VerifyPr
             <span
               key={c.id}
               className={`inline-flex items-center gap-2 border px-3 py-1.5 ${
-                c.connected ? 'border-olive/40 bg-olive/5' : 'border-vermilion/30 bg-vermilion/5'
+                c.connected ? 'border-olive/40 bg-olive/5' : 'border-hot/30 bg-hot/5'
               }`}>
               <AgentMark id={c.id} className="h-4 w-4 shrink-0" variant="25d" />
-              <span className="font-mono text-[0.65rem] font-bold text-fg">
+              <span className="font-mono text-data font-semibold text-fg">
                 {agent.product}
               </span>
               <span
-                className={`inline-flex items-center gap-1 font-mono text-[0.5rem] font-bold uppercase tracking-widest ${
-                  c.connected ? 'text-olive' : 'text-vermilion'
+                className={`inline-flex items-center gap-1 font-mono text-label font-semibold uppercase tracking-label ${
+                  c.connected ? 'text-olive' : 'text-hot'
                 }`}>
                 <span
-                  className={`h-1.5 w-1.5 rounded-full ${c.connected ? 'bg-olive' : 'bg-vermilion'}`}
+                  className={`h-1.5 w-1.5 rounded-full ${c.connected ? 'bg-olive' : 'bg-hot'}`}
                 />
                 {c.connected ? 'Connected' : 'Not connected'}
               </span>
@@ -155,22 +155,22 @@ export function Verify({ agents: agentIds, onBack, onSetup, onFinish }: VerifyPr
       </div>
 
       {/* Import summary card */}
-      <div className="relative overflow-hidden border border-fg/20 bg-surface">
-        <div className="flex items-center justify-between border-b border-fg/15 px-5 py-3">
-          <span className="font-mono text-[0.6rem] font-bold uppercase tracking-widest text-fg/45">
+      <div className="relative overflow-hidden rounded-card border border-line/10 bg-surface">
+        <div className="flex items-center justify-between border-b border-line/10 px-5 py-3">
+          <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
             SESSION HISTORY
           </span>
           <span
-            className={`inline-flex items-center gap-2 border px-2 py-1 font-mono text-[0.55rem] font-bold uppercase tracking-widest ${
+            className={`inline-flex items-center gap-2 border px-2 py-1 font-mono text-label font-semibold uppercase tracking-label ${
               hasSessions
-                ? 'border-olive bg-olive text-cream'
+                ? 'border-olive bg-olive text-bg'
                 : loading
-                  ? 'border-cobalt bg-cobalt text-cream'
-                  : 'border-fg/30 bg-fg/10 text-fg/50'
+                  ? 'border-cobalt bg-cobalt text-bg'
+                  : 'border-line/30 bg-fg/10 text-fg/60'
             }`}>
             <span
               className={`h-1.5 w-1.5 rounded-full ${
-                hasSessions ? 'bg-cream' : loading ? 'bg-cream animate-pulse' : 'bg-fg/30'
+                hasSessions ? 'bg-bg' : loading ? 'bg-bg animate-pulse' : 'bg-fg/30'
               }`}
             />
             {hasSessions ? 'IMPORTED' : loading ? 'SCANNING' : 'EMPTY'}
@@ -188,7 +188,7 @@ export function Verify({ agents: agentIds, onBack, onSetup, onFinish }: VerifyPr
                   {[0, 1, 2].map((i) => (
                     <motion.span
                       key={i}
-                      className="h-2 w-2 rounded-full bg-vermilion"
+                      className="h-2 w-2 rounded-full bg-hot"
                       animate={{ opacity: [0.25, 1, 0.25] }}
                       transition={{
                         duration: 1.2,
@@ -199,7 +199,7 @@ export function Verify({ agents: agentIds, onBack, onSetup, onFinish }: VerifyPr
                     />
                   ))}
                 </div>
-                <span className="font-mono text-xs text-fg/50">
+                <span className="font-mono text-xs text-fg/60">
                   Scanning agent transcripts…
                 </span>
               </motion.div>
@@ -208,9 +208,9 @@ export function Verify({ agents: agentIds, onBack, onSetup, onFinish }: VerifyPr
                 key="summary"
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.4, ease: [0.25, 0.1, 0.25, 1] }}
+                transition={{ duration: 0.3, ease: [0.23, 1, 0.32, 1] }}
                 className="space-y-5">
-                <dl className="grid grid-cols-2 gap-px border border-fg/10 bg-fg/10 sm:grid-cols-4">
+                <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-cell border border-line/10 bg-line/10 sm:grid-cols-4">
                   <Cell label="SESSIONS" value={String(summary!.sessions)} />
                   <Cell label="TOKENS" value={formatTokens(summary!.tokens.total)} accent />
                   <Cell
@@ -228,8 +228,8 @@ export function Verify({ agents: agentIds, onBack, onSetup, onFinish }: VerifyPr
                     {summary!.by_source.map((s) => (
                       <span
                         key={s.source}
-                        className="inline-flex items-center gap-1.5 border border-fg/15 px-2.5 py-1 font-mono text-[0.6rem] text-fg/60">
-                        <span className="font-bold text-fg">{sourceLabel(s.source)}</span>
+                        className="inline-flex items-center gap-1.5 border rounded-control border-line/10 px-2.5 py-1 font-mono text-label text-fg/60">
+                        <span className="font-semibold text-fg">{sourceLabel(s.source)}</span>
                         {s.sessions} sessions · {s.events} events
                       </span>
                     ))}
@@ -251,11 +251,11 @@ export function Verify({ agents: agentIds, onBack, onSetup, onFinish }: VerifyPr
         </div>
       </div>
 
-      <div className="flex items-center justify-between gap-4 border-t border-fg/10 pt-6">
+      <div className="flex items-center justify-between gap-4 border-t border-line/10 pt-6">
         <button
           type="button"
           onClick={onSetup}
-          className="font-mono text-[0.65rem] font-bold uppercase tracking-widest text-fg/35 transition-colors hover:text-cobalt">
+          className="font-mono text-data font-semibold uppercase tracking-label text-fg/40 transition-colors hover:text-cobalt">
           Manual setup &amp; testing →
         </button>
         <button
@@ -267,7 +267,7 @@ export function Verify({ agents: agentIds, onBack, onSetup, onFinish }: VerifyPr
               y: e.clientY || rect.top + rect.height / 2,
             });
           }}
-          className="group inline-flex items-center gap-3 border border-vermilion bg-vermilion px-7 py-3.5 font-mono text-xs font-bold uppercase tracking-widest text-cream transition-opacity hover:opacity-90">
+          className="group btn-primary px-5 py-2.5 text-body">
           Open dashboard
           <span className="transition-transform group-hover:translate-x-1">→</span>
         </button>
@@ -287,11 +287,11 @@ function Cell({
 }) {
   return (
     <div className="bg-surface px-4 py-3">
-      <dt className="font-mono text-[0.56rem] uppercase tracking-widest text-fg/35">
+      <dt className="font-mono text-label uppercase tracking-label text-fg/40">
         {label}
       </dt>
       <dd
-        className={`mt-1 truncate font-mono text-sm font-bold ${accent ? 'text-vermilion' : 'text-fg'}`}>
+        className={`mt-1 truncate font-mono text-sm font-semibold ${accent ? 'text-hot' : 'text-fg'}`}>
         {value}
       </dd>
     </div>

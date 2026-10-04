@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "local-status-page",
+  "description": "The bundled starting/error page: drag the window and retry the collector.",
+  "windows": ["main"],
+  "permissions": ["core:window:allow-start-dragging", "allow-retry-collector"]
+}
