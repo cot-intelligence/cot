@@ -5,8 +5,8 @@
 #   scripts/prepare-collector.sh              always rebuild
 #   scripts/prepare-collector.sh --if-missing skip when resources exist (tauri dev)
 #
-# Reuses the Swift app's PyInstaller spec and entrypoint in macos/packaging, so
-# both apps ship the same collector. Python deps go into desktop/build/venv.
+# PyInstaller spec and entrypoint live in desktop/packaging. Python deps go
+# into desktop/build/venv.
 set -euo pipefail
 
 DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -40,7 +40,7 @@ COT_REPO_ROOT="${REPO_ROOT}" "${VENV}/bin/pyinstaller" \
   --noconfirm --clean --log-level WARN \
   --distpath "${BUILD_DIR}/dist" \
   --workpath "${BUILD_DIR}/work" \
-  "${REPO_ROOT}/macos/packaging/cot-collector.spec"
+  "${DESKTOP_DIR}/packaging/cot-collector.spec"
 
 step "Staging resources"
 rm -rf "${RESOURCES}"
