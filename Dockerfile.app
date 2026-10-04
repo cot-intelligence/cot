@@ -16,7 +16,7 @@ COPY . .
 RUN npm run build
 
 # --- Stage 2: backend + bundled dashboard ---
-FROM python:3.12-alpine
+FROM python:3.14-alpine
 WORKDIR /app
 
 ARG COT_UID=10001
