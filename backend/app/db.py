@@ -116,9 +116,11 @@ CREATE INDEX IF NOT EXISTS idx_sessions_archived_source ON sessions(archived, so
 -- One row per event that used an MCP server or loaded a skill, derived from
 -- events by extension_usage.sync() so the Extensions view never scans the
 -- payload-heavy events table. Names are what the event said, and they resolve to
--- installed extensions at read time, since installs change.
+-- installed extensions at read time, since installs change. One shell command
+-- can read several SKILL.md files, so ord numbers the uses within an event.
 CREATE TABLE IF NOT EXISTS extension_uses (
-    event_id    INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+    event_id    INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    ord         INTEGER NOT NULL DEFAULT 0,
     session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     source      TEXT NOT NULL,
     kind        TEXT NOT NULL,
@@ -129,7 +131,8 @@ CREATE TABLE IF NOT EXISTS extension_uses (
     phase       TEXT,
     status      TEXT,
     duration_ms INTEGER,
-    ts          TEXT NOT NULL
+    ts          TEXT NOT NULL,
+    PRIMARY KEY (event_id, ord)
 );
 CREATE INDEX IF NOT EXISTS idx_extension_uses_session ON extension_uses(session_id);
 
@@ -360,6 +363,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)"
         )
+
+    if "ord" not in _table_columns(conn, "extension_uses"):
+        # Keyed by event_id alone before ord existed. The table is derived from
+        # events, so rebuild it; extension_usage.sync() refills it.
+        conn.execute("DROP TABLE extension_uses")
+        for statement in SCHEMA.split(";"):
+            if "extension_uses" in statement:
+                conn.execute(statement)
 
     if "source" in session_cols:
         conn.execute(
