@@ -190,6 +190,34 @@ def test_usage_attribution(homes):
     assert used == {"mcp:github", "skill:tidy", "mcp:plugin_myplug_srv", "skill:myplug:deploy"}
 
 
+def test_codex_shell_skill_reads_count_as_loads(homes):
+    agents = homes["home"] / ".agents" / "skills"
+    _skill(agents, "code-review")
+    _skill(agents, "unslop")
+    extensions.clear_cache()
+    _session("x1", "codex", "/p")
+    # Codex loads skills by printing SKILL.md; the stored target is clipped.
+    command = (f"cat {homes['home']}/.codex/RTK.md {agents}/code-review/SKILL.md"
+               f" {agents}/unslop/SKILL.md {agents}/tidy/SKILL.md")
+    for phase in ("start", "end"):
+        _event("x1", "codex", tool="exec_command", category="shell", phase=phase,
+               target=command[:119] + "…", detail=json.dumps({"command": command}))
+    _event("x1", "codex", tool="exec_command", category="shell",
+           target=f"rtk proxy sh -c 'sed -n 1,80p {agents}/unslop/SKILL.md'", ts="2026-10-01T12:00:00+00:00")
+    # Not loads: writing a skill, listing skills, searching one.
+    _event("x1", "codex", tool="exec_command", category="shell", target=f"vim {agents}/tidy/SKILL.md")
+    _event("x1", "codex", tool="exec_command", category="shell", target=f"ls {agents}/tidy/SKILL.md")
+    _event("x1", "codex", tool="exec_command", category="shell", target=f"grep name {agents}/tidy/SKILL.md")
+
+    items = _by_key(extension_usage.overview(refresh=True))
+    assert items["skill:code-review"]["usage"]["calls"] == 1
+    assert items["skill:code-review"]["usage"]["agents"] == {"codex": 1}
+    assert items["skill:unslop"]["usage"]["calls"] == 2
+    assert items["skill:tidy"]["usage"]["calls"] == 1
+    used = {e["key"] for e in extension_usage.session_extensions("x1")}
+    assert used == {"skill:code-review", "skill:unslop", "skill:tidy"}
+
+
 def test_sync_is_incremental_and_cascades(homes):
     _session("c1", "claude", "/p")
     _event("c1", "claude", tool="mcp__github__x", category="mcp", target="github/x")
