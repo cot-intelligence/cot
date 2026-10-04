@@ -262,13 +262,14 @@ fresh action="up":
 #   just desktop build    build cot.app (dashboard + frozen collector + shell)
 #   just desktop shell    rebuild dashboard + shell only, reusing the frozen collector
 #   just desktop dmg      build cot.app and the DMG
+#   just desktop fresh    build a sandboxed DMG for fresh onboarding
 #   just desktop verify   check the built app's collector answers /health
 #   just desktop install  install the built app to /Applications (old one kept in ~/cot-app-backups)
 #   just desktop deploy   build, verify, install
 #   just desktop prod     install origin/main like a release: clean build, install, bridge + hooks
 #   just desktop test     Rust unit tests
 #   just desktop clean    drop build output and staged resources
-# Desktop app: dev | build | shell | dmg | verify | install | deploy | prod | test | clean
+# Desktop app: dev | build | shell | dmg | fresh | verify | install | deploy | prod | test | clean
 desktop action="build":
     #!/usr/bin/env sh
     set -eu
@@ -279,13 +280,14 @@ desktop action="build":
       build)   scripts/build.sh ;;
       shell)   scripts/build.sh --shell ;;
       dmg)     scripts/build.sh --dmg ;;
+      fresh)   scripts/build.sh --sandbox ;;
       verify)  scripts/verify-bundle.sh ;;
       install) scripts/install.sh ;;
       deploy)  scripts/build.sh && scripts/verify-bundle.sh && scripts/install.sh ;;
       prod)    scripts/install-main.sh ;;
       test)    cargo test --manifest-path src-tauri/Cargo.toml ;;
       clean)   rm -rf build src-tauri/target src-tauri/resources && printf '%s\n' "removed desktop build output" ;;
-      *) printf '%s\n' "unknown action: {{action}} (dev|build|shell|dmg|verify|install|deploy|prod|test|clean)" >&2; exit 2 ;;
+      *) printf '%s\n' "unknown action: {{action}} (dev|build|shell|dmg|fresh|verify|install|deploy|prod|test|clean)" >&2; exit 2 ;;
     esac
 
 # Cut a release locally: bump backend/app/__init__.py, test, commit, annotated tag.

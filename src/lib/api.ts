@@ -439,6 +439,22 @@ export interface Metrics {
   };
 }
 
+/** Overview totals over every session that started in the last `days` days (0 = all time). */
+export interface OverviewWindow {
+  days: number;
+  sessions: number;
+  cost: number;
+  tools: number;
+  oldest: string | null;
+  sources: string[];
+  series: { day: string; sessions: number; cost: number; tools: number }[];
+  projects: { cwd: string | null; sessions: number; cost: number; agents: Record<string, number> }[];
+}
+
+export async function getOverviewWindow(days: number): Promise<OverviewWindow> {
+  return json<OverviewWindow>(await fetch(`/v1/overview/window?days=${days}`));
+}
+
 export async function getMetrics(tz?: string): Promise<Metrics> {
   const params = new URLSearchParams();
   if (tz) params.set('tz', tz);
@@ -1379,6 +1395,21 @@ export interface PassiveRunAgent {
   events?: number;
   held_back?: number;
   error?: string;
+  files_done?: number;
+  files_total?: number;
+}
+
+/** Enrichment (analysis) steps done: snapshot, each rule, reconcile. */
+export interface PassiveAnalysis {
+  done: number;
+  total: number;
+}
+
+/** Import progress across every agent in the run, by bytes of transcript read. */
+export interface PassiveProgress {
+  bytes_done: number;
+  bytes_total: number;
+  agent: PassiveAgent;
 }
 
 export interface PassiveRun {
@@ -1408,7 +1439,7 @@ export interface PassiveStatus {
   cron: string;
   schedule: PassiveSchedule;
   next_scheduled: string | null;
-  running: { running: boolean; phase?: 'metadata' | 'analysis'; started_at?: string; trigger?: string; agents?: Partial<Record<PassiveAgent, PassiveRunAgent>> };
+  running: { running: boolean; phase?: 'metadata' | 'analysis'; started_at?: string; trigger?: string; agents?: Partial<Record<PassiveAgent, PassiveRunAgent>>; progress?: PassiveProgress; analysis?: PassiveAnalysis };
   agents_detail: PassiveAgentDetail[];
   runs: PassiveRun[];
   presets: { id: string; label: string; cron: string }[];
@@ -1463,7 +1494,7 @@ export async function getPassiveRunning(): Promise<{ running: PassiveStatus['run
 
 export type TaskRunning =
   | { id: string; kind: 'session'; session_id: string; title: string; source: string; cwd: string | null; events: number; started_at: string; last_activity: string | null }
-  | { id: string; kind: 'passive'; phase: 'metadata' | 'analysis'; trigger?: string; started_at?: string }
+  | { id: string; kind: 'passive'; phase: 'metadata' | 'analysis'; trigger?: string; started_at?: string; progress?: PassiveProgress | null; analysis?: PassiveAnalysis | null }
   | { id: string; kind: 'index'; title: string };
 
 export interface TaskRecent {

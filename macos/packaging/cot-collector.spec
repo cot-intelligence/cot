@@ -25,6 +25,10 @@ a = Analysis(
         "uvicorn.protocols.http.h11_impl",
         "uvicorn.protocols.websockets.auto",
         "uvicorn.lifespan.on",
+        # bridge/cot runs inside this binary for imports (see collector_entry.py);
+        # stdlib modules it needs that the collector itself may not pull in.
+        "argparse", "base64", "fcntl", "hashlib", "mimetypes", "shutil", "socket", "struct",
+        "urllib.request", "urllib.error",
     ],
     hookspath=[],
     runtime_hooks=[],

@@ -12,6 +12,7 @@ import json
 import os
 import platform as _platform
 import re
+import shlex
 import threading
 import time
 import urllib.parse
@@ -734,18 +735,36 @@ async def cleanup_retention(request: Request) -> dict[str, Any]:
     return db.cleanup_retention(dry_run=bool(body.get("dry_run", True)))
 
 
+def _sandbox_install_script(script: str) -> str:
+    # Copied onboarding commands run in a real terminal, outside the app's HOME.
+    home = os.environ.get("COT_SANDBOX_HOME")
+    if not home:
+        return script
+    exports = "export HOME=" + shlex.quote(home) + "\n"
+    exports += "export COT_ENDPOINT=" + shlex.quote("http://127.0.0.1:" + os.environ["COT_PORT"]) + "\n"
+    for key, directory in (
+        ("COT_CLAUDE_HOME", ".claude"), ("CLAUDE_CONFIG_DIR", ".claude"),
+        ("COT_CURSOR_HOME", ".cursor"), ("COT_CODEX_HOME", ".codex"),
+        ("CODEX_HOME", ".codex"), ("XDG_CONFIG_HOME", ".config"),
+    ):
+        exports += f"export {key}={shlex.quote(str(Path(home) / directory))}\n"
+    return "#!/bin/sh\n" + exports + script
+
+
 @app.get("/install.sh")
 def install_script(request: Request, repair: bool = False, agents: str | None = None):
     if repair:
         selected = _repair_agents(agents)
         return PlainTextResponse(
-            _repair_script(selected, endpoint=str(request.base_url)),
+            _sandbox_install_script(_repair_script(selected, endpoint=str(request.base_url))),
             media_type="text/x-shellscript",
             headers={"Content-Disposition": 'attachment; filename="cot-repair.sh"'},
         )
     script = _BRIDGE_DIR / "install.sh"
     if not script.exists():
         raise HTTPException(status_code=404, detail="install.sh not found")
+    if os.environ.get("COT_SANDBOX_HOME"):
+        return PlainTextResponse(_sandbox_install_script(script.read_text()), media_type="text/x-shellscript")
     return FileResponse(script, media_type="text/plain")
 
 
@@ -753,7 +772,7 @@ def install_script(request: Request, repair: bool = False, agents: str | None = 
 def repair_script(request: Request, agents: str | None = None):
     selected = _repair_agents(agents)
     return PlainTextResponse(
-        _repair_script(selected, endpoint=str(request.base_url)),
+        _sandbox_install_script(_repair_script(selected, endpoint=str(request.base_url))),
         media_type="text/x-shellscript",
         headers={"Content-Disposition": 'attachment; filename="cot-repair.sh"'},
     )
@@ -873,6 +892,12 @@ async def stream(request: Request) -> StreamingResponse:
 @app.get("/v1/stats")
 def get_stats() -> dict[str, Any]:
     return db.stats()
+
+
+@app.get("/v1/overview/window")
+def get_overview_window(days: int = 30) -> dict[str, Any]:
+    """Overview totals over every session in the window (0 = all time)."""
+    return db.session_window(max(0, days))
 
 
 @app.get("/v1/sessions/projects")
@@ -1186,6 +1211,8 @@ def get_tasks() -> dict[str, Any]:
             "phase": run.get("phase") or "metadata",
             "trigger": run.get("trigger"),
             "started_at": run.get("started_at"),
+            "progress": run.get("progress"),
+            "analysis": run.get("analysis"),
         })
     if _search_index_building:
         running.append({"id": "search-index", "kind": "index", "title": "Building the search index"})

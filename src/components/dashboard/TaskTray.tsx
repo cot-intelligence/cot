@@ -5,6 +5,7 @@ import { agentLabel } from '../forest/AgentMark';
 import { fmt, project } from '../forest/format';
 import { Icon } from '../forest/icons';
 import { EASE_OUT } from '../forest/motion';
+import { stagePercent } from '../passive/PassiveBanner';
 
 const POLL_MS = 5000;
 const events = (n: number) => `${fmt.n(n)} event${n === 1 ? '' : 's'}`;
@@ -93,7 +94,13 @@ function runningLine(t: TaskRunning, now: string): { title: string; detail: stri
   if (t.kind === 'passive') {
     return {
       title: t.phase === 'analysis' ? 'Analysing imported transcripts' : 'Importing transcripts',
-      detail: t.phase === 'analysis' ? 'Step 2 of 2 · findings next' : 'Step 1 of 2 · sessions appear as they land',
+      detail: (() => {
+        const now = stagePercent(t.phase, t.progress, t.analysis);
+        if (t.phase === 'analysis') return `Step 2 of 2 · enrichment${now != null ? ` ${now}%` : ''} · findings next`;
+        return t.progress && now != null
+          ? `Step 1 of 2 · ingestion ${now}% · ${agentLabel(t.progress.agent)}`
+          : 'Step 1 of 2 · sessions appear as they land';
+      })(),
       href: '#/settings',
     };
   }

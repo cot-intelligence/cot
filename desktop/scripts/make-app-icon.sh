@@ -2,10 +2,13 @@
 # Render src-tauri/icons/icon.svg into every app icon Tauri bundles: the PNGs,
 # icon.icns (macOS) and icon.ico (Windows). Needs rsvg-convert and ImageMagick
 # (brew install librsvg imagemagick). Edit the SVG with make-app-icon-svg.py.
+#   scripts/make-app-icon.sh [svg] [out-dir]   defaults: src-tauri/icons/icon.svg, src-tauri/icons
 set -euo pipefail
 
 ICONS="$(cd "$(dirname "${BASH_SOURCE[0]}")/../src-tauri/icons" && pwd)"
-SVG="${ICONS}/icon.svg"
+SVG="${1:-${ICONS}/icon.svg}"
+ICONS="${2:-${ICONS}}"
+mkdir -p "${ICONS}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 

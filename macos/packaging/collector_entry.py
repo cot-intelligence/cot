@@ -27,7 +27,28 @@ def _watch_parent() -> None:
         time.sleep(1)
 
 
+def _run_script(path: str) -> int:
+    """`cot-collector <script> args…` runs that script, like `python <script>`.
+
+    passive.py runs the bridge as `[sys.executable, bridge/cot, "import", …]`;
+    frozen, sys.executable is this binary, which would otherwise start a second
+    server instead of the import.
+    """
+    import runpy
+
+    sys.argv = sys.argv[1:]
+    try:
+        runpy.run_path(path, run_name="__main__")
+    except SystemExit as exc:
+        code = exc.code
+        return code if isinstance(code, int) else (0 if code is None else 1)
+    return 0
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
+        return _run_script(sys.argv[1])
+
     import uvicorn
 
     from app.main import app

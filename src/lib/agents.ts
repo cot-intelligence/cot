@@ -110,7 +110,11 @@ const INSTALL_STEP: SetupStep = {
   detail:
     'Installs the bridge and asks which agents to wire up — it writes the hook config for you. No accounts, no network egress.',
   kind: 'shell',
-  command: `curl -fsSL ${defaultCollectorUrl}/install.sh | sh`,
+  command: `curl -fsSL ${
+    typeof window !== 'undefined' && ['127.0.0.1', 'localhost'].includes(window.location.hostname)
+      && !['4000', '5173'].includes(window.location.port)
+      ? window.location.origin : defaultCollectorUrl
+  }/install.sh | sh`,
 };
 
 export const AGENTS: Agent[] = [

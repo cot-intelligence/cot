@@ -3076,6 +3076,41 @@ def list_sessions(
     )[0]
 
 
+def session_window(days: int) -> dict[str, Any]:
+    """Totals for the Overview window over every listed session that started in
+    the last ``days`` days (0 = all time), from the same summaries the sessions
+    list shows, so the numbers agree with it."""
+    since = None
+    if days > 0:
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    summaries, _ = list_sessions_page(1_000_000_000, since=since)
+    series: dict[str, dict[str, Any]] = {}
+    projects: dict[str, dict[str, Any]] = {}
+    sources: set[str] = set()
+    for x in summaries:
+        cost = x.get("cost_usd") or 0
+        tools = x.get("tool_count") or 0
+        sources.add(x["source"])
+        day = series.setdefault((x.get("started_at") or "")[:10], {"sessions": 0, "cost": 0.0, "tools": 0})
+        day["sessions"] += 1
+        day["cost"] += cost
+        day["tools"] += tools
+        p = projects.setdefault(x.get("cwd") or "", {"cwd": x.get("cwd"), "sessions": 0, "cost": 0.0, "agents": {}})
+        p["sessions"] += 1
+        p["cost"] += cost
+        p["agents"][x["source"]] = p["agents"].get(x["source"], 0) + 1
+    return {
+        "days": days,
+        "sessions": len(summaries),
+        "cost": sum(x.get("cost_usd") or 0 for x in summaries),
+        "tools": sum(x.get("tool_count") or 0 for x in summaries),
+        "oldest": min((x["started_at"] for x in summaries if x.get("started_at")), default=None),
+        "sources": sorted(sources),
+        "series": [{"day": k, **v} for k, v in sorted(series.items()) if k],
+        "projects": sorted(projects.values(), key=lambda p: (-p["cost"], -p["sessions"])),
+    }
+
+
 def list_session_projects(archived: bool = False) -> list[dict[str, Any]]:
     """Every project name in the sessions list (last cwd segment) with its session count."""
     with store.read() as conn:
@@ -3109,6 +3144,7 @@ def list_sessions_page(
     ids: list[str] | None = None,
     sort: str = "recent",
     desc: bool = True,
+    since: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """One page of the sessions list and the total number of matching sessions.
 
@@ -3140,6 +3176,9 @@ def list_sessions_page(
     if project:
         clauses.append("(s.cwd = ? OR s.cwd LIKE ? OR s.cwd LIKE ?)")
         params.extend([project, f"%/{project}", f"%/{project}/"])
+    if since:
+        clauses.append("s.started_at >= ?")
+        params.append(since)
     if ids is not None:
         if not ids:
             return [], 0

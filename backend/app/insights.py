@@ -1081,21 +1081,36 @@ def _reconcile(store: FindingsStore, findings: list[dict[str, Any]]) -> list[dic
     return out
 
 
-def compute_insights(days: int = 30, session_id: str | None = None) -> dict[str, Any]:
+def compute_insights(
+    days: int = 30,
+    session_id: str | None = None,
+    progress: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
     """Run all rules and return findings with lifecycle status.
 
     Aggregate mode (no session_id) persists findings and reconciles their
-    lifecycle; per-session mode is ephemeral.
+    lifecycle; per-session mode is ephemeral. ``progress(done, total)`` is
+    called after the snapshot, each rule and the reconcile.
     """
+    total = len(RULES) + 2
+    step = 0
+
+    def advance() -> None:
+        nonlocal step
+        step += 1
+        if progress:
+            progress(step, total)
+
     snap = build_snapshot(
         cutoff=None if session_id else cutoff_iso(days),
         session_id=session_id,
     )
+    advance()
     findings: list[dict[str, Any]] = []
     for meta in RULES.values():
-        if session_id and meta.aggregate_only:
-            continue
-        findings.extend(meta.fn(snap))
+        if not (session_id and meta.aggregate_only):
+            findings.extend(meta.fn(snap))
+        advance()
     if session_id is None:
         with db.insight_findings_repo() as store:
             findings = _reconcile(store, findings)
@@ -1105,6 +1120,7 @@ def compute_insights(days: int = 30, session_id: str | None = None) -> dict[str,
             f["status"] = "active"
             f["first_seen"] = f["last_seen"] = None
             f["resolved_at"] = None
+    advance()
     findings.sort(key=_severity_sort_key)
     active = [f for f in findings if f["status"] == "active"]
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()

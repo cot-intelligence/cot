@@ -19,6 +19,7 @@ Run one or the other, not both.
 ```sh
 just desktop build     # cot.app
 just desktop dmg       # cot.app + DMG
+just desktop fresh     # cot Sandbox.app + DMG for onboarding tests
 just desktop dev       # dev shell; stages the collector on first run
 just desktop test      # Rust unit tests
 just desktop verify    # bundled collector answers /health
@@ -81,3 +82,23 @@ Builds are ad-hoc signed; there is no Developer ID yet. Gatekeeper warns on
 the first download (right-click > Open, or
 `xattr -dr com.apple.quarantine /Applications/cot.app`). Updates after that
 are checked against the updater signature.
+
+## Fresh onboarding DMG
+
+Run `just desktop fresh`, open the DMG under
+`desktop/src-tauri/target/release/bundle/dmg/`, and drag `cot Sandbox.app`
+into Applications. Launch it to see onboarding. This builds the current checkout,
+including local changes.
+
+Each build gets an amber TEST icon, a separate bundle identifier and an empty HOME under
+`~/Library/Application Support/cot-sandbox/<build-id>/home`. It starts its own
+collector near port 31490. Database, hooks, imports and browser storage are
+separate from your normal cot install. Update checks and start-at-login are
+disabled for this build. Copied hook install and repair scripts target the
+sandbox HOME. Import reads your real Claude, Cursor and Codex transcripts
+(read only, via `COT_IMPORT_HOME`); its progress is kept in the sandbox. Real
+agents keep using their existing hooks, so live events are not part of this
+sandbox test.
+
+Relaunching preserves that test's progress. Build again for a fresh onboarding
+run. Quit cot Sandbox before installing the next build.

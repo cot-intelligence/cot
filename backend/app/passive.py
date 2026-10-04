@@ -35,7 +35,9 @@ _GLOB = {
     "cursor": "projects/**/agent-transcripts/**/*.jsonl",
     "codex": "sessions/**/*.jsonl",
 }
-_IMPORT_TIMEOUT_S = 30 * 60
+# An import is stopped only when it goes quiet this long: the bridge reports
+# progress per transcript, so a large history can run as long as it needs.
+_IMPORT_IDLE_TIMEOUT_S = 15 * 60
 _RUNS_KEPT = 50
 _POSTED_RE = re.compile(r"done\s+\S+\s+(\d+)\s+events posted")
 _HELD_RE = re.compile(r"held back (\d+) in-progress")
@@ -89,7 +91,16 @@ def schedule_info(expr: str, now: datetime | None = None) -> dict[str, Any]:
 
 # ----------------------------------------------------------- discovery
 
+def _import_home() -> Path:
+    # Sandbox desktop builds have an empty HOME but read real transcripts; the
+    # bridge honours the same variable.
+    env = os.environ.get("COT_IMPORT_HOME")
+    return Path(env) if env else Path.home()
+
+
 def transcript_root(agent: str) -> Path:
+    if os.environ.get("COT_IMPORT_HOME"):
+        return _import_home() / _HOME_DIR[agent]
     env = os.environ.get(_HOME_ENV[agent])
     return Path(env) if env else Path.home() / _HOME_DIR[agent]
 
@@ -122,7 +133,7 @@ def scan(agent: str) -> dict[str, Any]:
     }
     try:
         resolved = root.resolve(strict=True)
-        resolved.relative_to(Path.home().resolve(strict=True))
+        resolved.relative_to(_import_home().resolve(strict=True))
     except (OSError, ValueError):
         # Missing, or outside the home folder (the bridge refuses those too).
         return out
@@ -201,6 +212,23 @@ def running() -> dict[str, Any]:
     return dict(_state)
 
 
+def _set_progress(agent: str, files_done: int, files_total: int, bytes_done: int, bytes_total: int) -> None:
+    """Record the bridge's progress for ``agent`` and the run's overall share.
+
+    Overall progress is by bytes across every agent in the run, since a few
+    large transcripts take far longer than many small ones."""
+    _state["agents"] = {
+        **_state.get("agents", {}),
+        agent: {"status": "importing", "files_done": files_done, "files_total": files_total,
+                "bytes_done": bytes_done, "bytes_total": bytes_total},
+    }
+    totals = _state.get("bytes_by_agent", {})
+    totals[agent] = bytes_total
+    done = sum(totals.get(a, 0) for a in _state.get("finished_agents", ()))
+    total = sum(totals.values())
+    _state["progress"] = {"bytes_done": done + bytes_done, "bytes_total": max(total, 1), "agent": agent}
+
+
 def _bridge_path() -> Path:
     here = Path(__file__).resolve()
     for candidate in (here.parent.parent.parent / "bridge" / "cot", here.parent.parent / "bridge" / "cot"):
@@ -213,18 +241,45 @@ def _import_agent(agent: str) -> dict[str, int]:
     """Run ``cot import --agent <agent>`` against this collector, holding back
     transcripts of sessions still in progress. Returns events posted and how
     many transcripts were held back."""
-    env = {**os.environ, "COT_ENDPOINT": self_url}
-    proc = subprocess.run(
+    env = {**os.environ, "COT_ENDPOINT": self_url, "COT_IMPORT_PROGRESS": "1", "PYTHONUNBUFFERED": "1"}
+    proc = subprocess.Popen(
         [sys.executable, str(_bridge_path()), "import", "--agent", agent, "--skip-active", str(ACTIVE_WINDOW_MIN)],
         env=env,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
-        timeout=_IMPORT_TIMEOUT_S,
     )
+    last_output = time.monotonic()
+    stalled = threading.Event()
+    finished = threading.Event()
+
+    def watchdog() -> None:
+        while not finished.wait(5):
+            if time.monotonic() - last_output > _IMPORT_IDLE_TIMEOUT_S:
+                stalled.set()
+                proc.kill()
+                return
+
+    threading.Thread(target=watchdog, daemon=True).start()
+    lines: list[str] = []
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            last_output = time.monotonic()
+            parts = line.split()
+            if len(parts) == 6 and parts[0] == "cot-progress" and parts[1] == agent:
+                _set_progress(agent, *(int(x) for x in parts[2:]))
+            else:
+                lines.append(line)
+        proc.wait()
+    finally:
+        finished.set()
+    out = "".join(lines)
+    if stalled.is_set():
+        raise RuntimeError(f"import stopped: no progress for {_IMPORT_IDLE_TIMEOUT_S // 60} minutes")
     if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or ["import failed"]
+        tail = out.strip().splitlines()[-1:] or [f"import failed (exit {proc.returncode})"]
         raise RuntimeError(tail[0][:300])
-    out = proc.stdout or ""
     posted = _POSTED_RE.search(out)
     held = _HELD_RE.search(out)
     return {"events": int(posted.group(1)) if posted else 0, "held_back": int(held.group(1)) if held else 0}
@@ -233,7 +288,10 @@ def _import_agent(agent: str) -> dict[str, int]:
 def _analyze() -> int:
     from . import insights
 
-    return len(insights.compute_insights(days=30)["insights"])
+    def progress(done: int, total: int) -> None:
+        _state["analysis"] = {"done": done, "total": total}
+
+    return len(insights.compute_insights(days=30, progress=progress)["insights"])
 
 
 def run(
@@ -252,7 +310,8 @@ def run(
     started = timeutil.now()
     cfg = config()
     detail: dict[str, Any] = {"agents": {}, "phase": "metadata"}
-    _state.update(running=True, trigger=trigger, started_at=started, phase="metadata", agents={})
+    _state.update(running=True, trigger=trigger, started_at=started, phase="metadata", agents={},
+                  finished_agents=[], bytes_by_agent={})
     _ensure_runs_table()
     with store.write() as conn:
         run_id = conn.execute(
@@ -262,9 +321,12 @@ def run(
     status = "ok"
     try:
         before = _session_counts()
+        # Sizes up front, so the overall bar counts agents not started yet.
+        scans = {agent: scan(agent) for agent in cfg["agents"]}
+        _state["bytes_by_agent"] = {a: s["bytes"] for a, s in scans.items() if s["readable"]}
         for agent in cfg["agents"]:
             info: dict[str, Any] = {"status": "skipped"}
-            if not scan(agent)["readable"]:
+            if not scans[agent]["readable"]:
                 info = {"status": "unreadable"}
             else:
                 _state["agents"] = {**_state["agents"], agent: {"status": "importing"}}
@@ -276,6 +338,7 @@ def run(
                     status = "partial"
             detail["agents"][agent] = info
             _state["agents"] = {**_state["agents"], agent: info}
+            _state["finished_agents"] = [*_state["finished_agents"], agent]
         after = _session_counts()
         detail["new_sessions"] = sum(max(0, after.get(a, 0) - before.get(a, 0)) for a in cfg["agents"])
         detail["events"] = sum(i.get("events", 0) for i in detail["agents"].values())
@@ -283,6 +346,9 @@ def run(
         # Metadata is in; the slower analysis runs next while sessions are already browsable.
         detail["phase"] = "analysis"
         _state["phase"] = "analysis"
+        if "progress" in _state:
+            _state["progress"]["bytes_done"] = _state["progress"]["bytes_total"]
+        _state["analysis"] = {"done": 0, "total": 1}
         with store.write() as conn:
             conn.execute("UPDATE passive_runs SET detail = ? WHERE id = ?", (json.dumps(detail), run_id))
         detail["findings"] = analyzer()

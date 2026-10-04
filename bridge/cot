@@ -2466,29 +2466,40 @@ def _import_read_new_lines(path: Path, offsets: dict[str, int]) -> tuple[list[st
     return lines, new_offset
 
 
+def _import_home() -> Path | None:
+    # Sandbox desktop builds run with an empty HOME but import transcripts
+    # (read only) from the real one.
+    env = os.environ.get("COT_IMPORT_HOME")
+    return Path(env) if env else None
+
+
 def _safe_transcript_root(root: Path) -> Path | None:
     try:
         resolved = root.resolve(strict=True)
-        home = Path.home().resolve(strict=True)
+        home = (_import_home() or Path.home()).resolve(strict=True)
         resolved.relative_to(home)
         return resolved
     except (OSError, ValueError):
         return None
 
 
+def _transcript_root(env_key: str, directory: str) -> Path:
+    if _import_home():
+        return _import_home() / directory
+    env = os.environ.get(env_key)
+    return Path(env) if env else Path.home() / directory
+
+
 def _claude_transcript_root() -> Path:
-    env = os.environ.get("COT_CLAUDE_HOME")
-    return Path(env) if env else Path.home() / ".claude"
+    return _transcript_root("COT_CLAUDE_HOME", ".claude")
 
 
 def _cursor_transcript_root() -> Path:
-    env = os.environ.get("COT_CURSOR_HOME")
-    return Path(env) if env else Path.home() / ".cursor"
+    return _transcript_root("COT_CURSOR_HOME", ".cursor")
 
 
 def _codex_transcript_root() -> Path:
-    env = os.environ.get("COT_CODEX_HOME")
-    return Path(env) if env else Path.home() / ".codex"
+    return _transcript_root("COT_CODEX_HOME", ".codex")
 
 
 def _discover_transcripts(agent: str) -> list[Path]:
@@ -3580,9 +3591,31 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
 
     line_parser = _ingest_line_parser(agent)
 
+    # The collector's passive import sets COT_IMPORT_PROGRESS and reads these
+    # lines to drive its progress bar: files and bytes done out of the total.
+    progress = bool(os.environ.get("COT_IMPORT_PROGRESS"))
+    sizes: list[int] = []
+    if progress:
+        for path in transcripts:
+            try:
+                sizes.append(path.stat().st_size)
+            except OSError:
+                sizes.append(0)
+    bytes_total = sum(sizes)
+    last_report = 0.0
+
+    def report(done: int, force: bool = False) -> None:
+        nonlocal last_report
+        if not progress or (not force and time.monotonic() - last_report < 0.5):
+            return
+        last_report = time.monotonic()
+        print(f"cot-progress {agent} {done} {len(transcripts)} {sum(sizes[:done])} {bytes_total}",
+              file=sys.stderr, flush=True)
+
     source = agent
     posted = 0
-    for path in transcripts:
+    for done, path in enumerate(transcripts):
+        report(done)
         # Derive session id
         if agent == "claude":
             sid = _session_id_from_claude_path(path)
@@ -3692,9 +3725,11 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
                 payload.pop("_dedup_key", None)
             _post(f"{COT_ENDPOINT}/v1/ingest/{source}", payload)
             posted += 1
+            report(done)  # throttled; keeps a long transcript from looking stalled
 
         offsets[str(path)] = new_offset
 
+    report(len(transcripts), force=True)
     return posted
 
 

@@ -18,7 +18,7 @@ static CHECKING: AtomicBool = AtomicBool::new(false);
 /// Background checks on launch and every 6 hours. Skipped in debug builds,
 /// whose 0.0.0 version would always look out of date.
 pub fn schedule(app: AppHandle) {
-    if cfg!(debug_assertions) {
+    if cfg!(debug_assertions) || crate::sandbox::enabled() {
         return;
     }
     std::thread::spawn(move || loop {
@@ -31,6 +31,9 @@ pub fn schedule(app: AppHandle) {
 /// "no update" and errors too. Background checks stay quiet unless an update
 /// is found.
 pub fn check(app: AppHandle, interactive: bool) {
+    if crate::sandbox::enabled() {
+        return;
+    }
     if CHECKING.swap(true, Ordering::SeqCst) {
         return;
     }

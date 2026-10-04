@@ -5,6 +5,7 @@
 mod chrome;
 mod collector;
 mod updates;
+mod sandbox;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
@@ -324,8 +325,8 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let reveal = MenuItem::with_id(app, "reveal-data", "Reveal Data Folder", true, None::<&str>)?;
     let open_log = MenuItem::with_id(app, "open-log", "Open Collector Log", true, None::<&str>)?;
     let at_login = app.autolaunch().is_enabled().unwrap_or(false);
-    let login = CheckMenuItem::with_id(app, "login", "Start cot at Login", true, at_login, None::<&str>)?;
-    let updates = MenuItem::with_id(app, "check-updates", "Check for Updates…", true, None::<&str>)?;
+    let login = CheckMenuItem::with_id(app, "login", "Start cot at Login", !sandbox::enabled(), at_login, None::<&str>)?;
+    let updates = MenuItem::with_id(app, "check-updates", "Check for Updates…", !sandbox::enabled(), None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit cot", true, Some("CmdOrCtrl+Q"))?;
 
     let sep = || PredefinedMenuItem::separator(app);
@@ -491,6 +492,7 @@ fn retry_collector(app: AppHandle) {
 }
 
 pub fn run() {
+    sandbox::initialize();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main_window(app)))
         .plugin(tauri_plugin_opener::init())

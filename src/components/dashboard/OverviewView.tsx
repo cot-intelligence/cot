@@ -4,12 +4,14 @@ import {
   getInsights,
   getMetrics,
   getConnections,
-  getSessions,
+  getOverviewWindow,
+  getSessionsPage,
   type AiAnalysis,
   type Connection,
   type InsightPillar,
   type InsightsResponse,
   type Metrics,
+  type OverviewWindow,
   type SessionSummary,
 } from '../../lib/api';
 import { formatDuration, formatRelative, getCategoryMeta, userTimeZone } from '../../lib/categoryMeta';
@@ -45,8 +47,6 @@ const WINDOWS = [
   { k: 90, l: '90d' },
   { k: 0, l: 'all' },
 ];
-// Daily spend and the projects table are built from the most recent sessions.
-const SESSION_SAMPLE = 500;
 const DAY_MS = 86_400_000;
 
 function shortPath(p: string | null): string {
@@ -123,8 +123,18 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
   // The window drives findings, spend and the projects table; the deeper charts below stay all-time.
   const [days, setDays] = useState<number>(() => getPrefs().range);
   const { data: ins } = usePolling<InsightsResponse>(['insights', days], () => getInsights(days, 'all'), 60000);
-  const { data: recent } = usePolling<SessionSummary[]>(['sessions', 'overview', SESSION_SAMPLE], () => getSessions({ limit: SESSION_SAMPLE }), 30000);
-  const win = useMemo(() => windowed(recent ?? [], days), [recent, days]);
+  const { data: totals } = usePolling<OverviewWindow>(['overview-window', days], () => getOverviewWindow(days), 30000);
+  const win = useMemo(() => windowed(totals, days), [totals, days]);
+  // Findings per project: only the sessions findings cite need their project.
+  const evidenceIds = useMemo(
+    () => [...new Set((ins?.insights ?? []).filter((f) => f.status === 'active').flatMap((f) => f.evidence.map((e) => e.session_id)))].sort().slice(0, 500),
+    [ins],
+  );
+  const { data: evidenceSessions } = usePolling<SessionSummary[]>(
+    ['sessions', 'overview-evidence', evidenceIds.join(',')],
+    () => (evidenceIds.length ? getSessionsPage({ ids: evidenceIds, limit: 500 }).then((p) => p.sessions) : Promise.resolve([])),
+    60000,
+  );
   const { data: connections } = usePolling<Connection[]>(['connections'], () => getConnections(), 30000);
 
   // The executive summary leads with the latest saved AI analysis, if one exists.
@@ -180,14 +190,14 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
   const active = (ins?.insights ?? []).filter((f) => f.status === 'active');
   const review = active.filter((f) => f.severity !== 'info');
   const criticals = active.filter((f) => f.severity === 'critical').length;
-  const sources = [...new Set((recent ?? []).map((x) => x.source))];
+  const sources = totals?.sources ?? [];
   const projectFindings = (cwd: string | null) => {
-    const ids = new Set(win.sessions.filter((x) => x.cwd === cwd).map((x) => x.id));
+    const ids = new Set((evidenceSessions ?? []).filter((x) => x.cwd === cwd).map((x) => x.id));
     const hits = active.filter((f) => f.evidence.some((e) => ids.has(e.session_id)));
     return { n: hits.length, critical: hits.some((f) => f.severity === 'critical') };
   };
   const kpis = [
-    { k: 'Sessions', v: fmt.n(win.sessions.length), spark: win.series.map((x) => x.sessions), note: `${t.active_sessions} live now` },
+    { k: 'Sessions', v: fmt.n(win.sessions), spark: win.series.map((x) => x.sessions), note: `${t.active_sessions} live now` },
     { k: 'Spend', v: fmt.usd(win.cost), spark: win.series.map((x) => x.cost), note: 'list price, all models' },
     { k: 'Tool calls', v: fmt.n(win.tools), spark: win.series.map((x) => x.events), note: `${fmt.pct(fun.error_rate)} errored` },
     { k: 'Needs review', v: ins ? fmt.n(review.length) : '…', spark: undefined, note: ins ? `${criticals} critical · ${active.length} open in total` : 'computing…' },
@@ -222,7 +232,6 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
             </div>
           ))}
         </div>
-        {win.partial && <p className="mono faint" style={{ fontSize: 11, margin: '8px 0 0' }}>Spend, sessions and projects cover the latest {SESSION_SAMPLE} sessions.</p>}
 
         <div className="grid-2">
           <section className="card" aria-labelledby="vf-spend">
@@ -627,42 +636,18 @@ function RankBadge({ n }: { n: number }) {
   );
 }
 
-/** Sessions, spend and tool calls inside the window, per day and per project. */
-function windowed(sessions: SessionSummary[], days: number) {
+/** The window's totals with one series point per day, empty days included. */
+function windowed(w: OverviewWindow | null | undefined, days: number) {
   const now = Date.now();
-  const start = days ? now - days * DAY_MS : 0;
-  const inWin = sessions.filter((x) => new Date(x.started_at).getTime() >= start);
-  const oldest = sessions.length ? Math.min(...sessions.map((x) => new Date(x.started_at).getTime())) : now;
-  // The sample is the newest N sessions: if it is full and doesn't reach back to the window start, say so.
-  const partial = sessions.length >= SESSION_SAMPLE && oldest > start;
-  const nDays = days || Math.max(1, Math.ceil((now - oldest) / DAY_MS));
-  const keys = Array.from({ length: Math.min(nDays, 120) }, (_, i) => new Date(now - (Math.min(nDays, 120) - 1 - i) * DAY_MS).toISOString().slice(0, 10));
-  const idx = new Map(keys.map((k, i) => [k, i]));
-  const series = keys.map((day) => ({ day, cost: 0, sessions: 0, tools: 0, events: 0 }));
-  const byProject = new Map<string, { cwd: string | null; sessions: number; cost: number; agents: Record<string, number> }>();
-  for (const x of inWin) {
-    const i = idx.get(x.started_at.slice(0, 10));
-    if (i != null) {
-      series[i].cost += x.cost_usd;
-      series[i].sessions++;
-      series[i].tools += x.tool_count;
-      series[i].events += x.tool_count;
-    }
-    const key = x.cwd ?? '';
-    const p = byProject.get(key) ?? { cwd: x.cwd, sessions: 0, cost: 0, agents: {} };
-    p.sessions++;
-    p.cost += x.cost_usd;
-    p.agents[x.source] = (p.agents[x.source] ?? 0) + 1;
-    byProject.set(key, p);
-  }
-  return {
-    sessions: inWin,
-    cost: inWin.reduce((a, x) => a + x.cost_usd, 0),
-    tools: inWin.reduce((a, x) => a + x.tool_count, 0),
-    series,
-    projects: [...byProject.values()].sort((a, b) => b.cost - a.cost || b.sessions - a.sessions),
-    partial,
-  };
+  const oldest = w?.oldest ? new Date(w.oldest).getTime() : now;
+  const nDays = Math.min(days || Math.max(1, Math.ceil((now - oldest) / DAY_MS)), 120);
+  const byDay = new Map((w?.series ?? []).map((x) => [x.day, x]));
+  const series = Array.from({ length: nDays }, (_, i) => {
+    const day = new Date(now - (nDays - 1 - i) * DAY_MS).toISOString().slice(0, 10);
+    const x = byDay.get(day);
+    return { day, cost: x?.cost ?? 0, sessions: x?.sessions ?? 0, tools: x?.tools ?? 0, events: x?.tools ?? 0 };
+  });
+  return { sessions: w?.sessions ?? 0, cost: w?.cost ?? 0, tools: w?.tools ?? 0, series, projects: w?.projects ?? [] };
 }
 
 /** Loading state in the demo's skeleton style (.sk blocks in the same layout as the loaded page). */
