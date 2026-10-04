@@ -94,6 +94,38 @@ def _spool_lines() -> list[dict]:
     return [json.loads(ln) for ln in bridge.SPOOL_PATH.read_text().splitlines() if ln.strip()]
 
 
+def test_opencode_persists_before_network_work_can_be_interrupted():
+    def run(state):
+        payload = {"session_id": "oc-durable", "hook_event_name": "Stop", "_dedup_key": "oc:stop"}
+        def interrupted_send(url, body, timeout):
+            assert _spool_lines()[0]["payload"]["_dedup_key"] == "oc:stop"
+            raise InterruptedError("process interrupted during replay")
+        bridge._send_once = interrupted_send
+        try:
+            bridge._post(INGEST.replace("claude", "opencode"), payload)
+        except InterruptedError:
+            pass
+        else:
+            raise AssertionError("fixture did not interrupt the network send")
+        assert _spool_lines()[0]["payload"]["session_id"] == "oc-durable"
+        sink = _Sink()
+        bridge._send_once = sink.send
+        assert bridge._spool_flush()
+        assert sink.delivered[0]["_dedup_key"] == "oc:stop"
+        assert _spool_lines() == []
+    _with_temp_spool(run)
+
+
+def test_opencode_failed_spool_write_is_not_acknowledged_as_success():
+    import pytest
+    def run(state):
+        # A directory at the expected file location reproduces a write error.
+        bridge.SPOOL_PATH.mkdir()
+        with pytest.raises(OSError, match="Unable to persist"):
+            bridge._post(INGEST.replace("claude", "opencode"), {"session_id": "oc"})
+    _with_temp_spool(run)
+
+
 def test_post_spools_when_collector_down():
     def body(_state):
         sink = _Sink(up=False)

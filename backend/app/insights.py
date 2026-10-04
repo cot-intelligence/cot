@@ -744,7 +744,7 @@ _EXFIL_TOOLS = re.compile(r"\b(?:curl|wget|scp|rsync|nc)\b")
 
 # Paths agents legitimately edit outside the project (configs, temp, cot itself).
 _OUT_OF_CWD_EXCLUDES = re.compile(
-    r"/\.(?:claude|cursor|codex|config|cot|cache)(?:/|$)|^/(?:private/)?tmp(?:/|$)|^/var/folders/"
+    r"/\.(?:claude|cursor|codex|opencode|config|cot|cache)(?:/|$)|^/(?:private/)?tmp(?:/|$)|^/var/folders/"
 )
 
 

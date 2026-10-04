@@ -28,7 +28,7 @@ function DirectoryName({ cwd }: { cwd: string }) {
       {copied && (
         <span
           role="tooltip"
-          className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-1 -translate-x-1/2 whitespace-nowrap rounded bg-fg px-1.5 py-0.5 font-mono text-[0.55rem] font-medium text-bg shadow-soft">
+          className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-1 -translate-x-1/2 whitespace-nowrap rounded bg-fg px-1.5 py-0.5 font-mono text-label font-medium text-bg shadow-soft">
           Copied
         </span>
       )}
@@ -37,7 +37,7 @@ function DirectoryName({ cwd }: { cwd: string }) {
         onClick={() => copy(cwd)}
         title={cwd}
         aria-label={copied ? 'Directory path copied' : `Copy directory path ${cwd}`}
-        className={`min-w-0 truncate font-mono text-[0.68rem] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-vermilion ${
+        className={`min-w-0 truncate font-mono text-data transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-hot ${
           copied ? 'text-olive' : 'text-fg/65 hover:text-fg'
         }`}>
         {name}
@@ -57,13 +57,13 @@ export function SessionMeta({ summary, links, onToggleBookmark }: SessionMetaPro
   const parents = links?.parents ?? [];
   const subagentChildren = (links?.children ?? []).filter((l) => l.type === 'subagent');
 
-  const sep = <span className="text-fg/20" aria-hidden="true">·</span>;
+  const sep = <span className="text-fg/40" aria-hidden="true">·</span>;
 
   return (
     <header className="space-y-2">
       <div className="flex items-start justify-between gap-6">
         <h1
-          className="min-w-0 truncate font-serif text-[1.35rem] font-normal leading-tight tracking-[-0.02em] text-fg sm:text-[1.6rem]"
+          className="min-w-0 truncate text-[1.375rem] font-semibold leading-tight tracking-[-0.02em] text-fg sm:text-[1.5rem]"
           title={summary.title || summary.id}>
           {summary.title || summary.id}
         </h1>
@@ -84,7 +84,7 @@ export function SessionMeta({ summary, links, onToggleBookmark }: SessionMetaPro
               aria-pressed={summary.bookmarked}
               aria-label={summary.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
               title={summary.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
-              className={`btn mt-0.5 ${summary.bookmarked ? '!border-vermilion/40 !text-vermilion hover:!border-vermilion/70' : ''}`}>
+              className={`btn mt-0.5 ${summary.bookmarked ? '!border-hot/40 !text-hot hover:!border-hot/70' : ''}`}>
               <Icon
                 name={summary.bookmarked ? 'bookmark-filled' : 'bookmark'}
                 className="h-3.5 w-3.5"
@@ -95,20 +95,20 @@ export function SessionMeta({ summary, links, onToggleBookmark }: SessionMetaPro
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[0.68rem] text-fg/45">
-        <span className="inline-flex items-center gap-1.5 uppercase tracking-[0.14em]">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-data text-fg/60">
+        <span className="inline-flex items-center gap-1.5 uppercase tracking-label">
           <AgentMark id={summary.source} className="h-3.5 w-3.5 text-fg/60" />
           {summary.source}
         </span>
         {sep}
-        <span className={`uppercase tracking-[0.14em] ${isActive ? 'text-cobalt' : ''}`}>{summary.status}</span>
+        <span className={`uppercase tracking-label ${isActive ? 'text-cobalt' : ''}`}>{summary.status}</span>
         {sep}
         <SessionHash id={summary.id} />
         {summary.imported_from && (
           <>
             {sep}
             <span
-              className="rounded border border-cobalt/30 px-1 uppercase tracking-[0.14em] text-cobalt"
+              className="rounded border border-cobalt/30 px-1 uppercase tracking-label text-cobalt"
               title={`Imported ${formatRelative(summary.imported_at)} from session ${summary.imported_from}`}>
               Imported · {summary.imported_from.slice(0, 8)}
             </span>
@@ -131,7 +131,7 @@ export function SessionMeta({ summary, links, onToggleBookmark }: SessionMetaPro
         {summary.has_cost && (
           <>
             {sep}
-            <span className="tabular-nums text-vermilion/80" title="Estimated cost (cache-aware)">
+            <span className="tabular-nums text-hot/80" title="Estimated cost (cache-aware)">
               {formatCost(summary.cost_usd)}
             </span>
           </>
@@ -139,7 +139,7 @@ export function SessionMeta({ summary, links, onToggleBookmark }: SessionMetaPro
       </div>
 
       {parents.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5 font-mono text-[0.58rem] uppercase tracking-widest text-fg/35">
+        <div className="flex flex-wrap items-center gap-1.5 font-mono text-label uppercase tracking-label text-fg/40">
           {parents.map((link) => (
             <SessionLinkPill
               key={`parent-${link.session_id}`}
@@ -151,8 +151,8 @@ export function SessionMeta({ summary, links, onToggleBookmark }: SessionMetaPro
       )}
 
       {subagentChildren.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5 font-mono text-[0.58rem] uppercase tracking-widest text-fg/35">
-          <span className="text-fg/30">
+        <div className="flex flex-wrap items-center gap-1.5 font-mono text-label uppercase tracking-label text-fg/40">
+          <span className="text-fg/40">
             {subagentChildren.length} subagent{subagentChildren.length === 1 ? '' : 's'}
           </span>
           {subagentChildren.map((link) => (
@@ -172,7 +172,7 @@ function SessionLinkPill({ link, label }: { link: SessionLink; label?: string })
       title={link.title || link.session_id}
       className="inline-flex min-w-0 items-center gap-1 rounded border border-cobalt/25 bg-cobalt/[0.04] px-1.5 py-0.5 text-cobalt transition-colors hover:border-cobalt/45 hover:bg-cobalt/[0.08]"
     >
-      {label && <span className="text-fg/35">{label}</span>}
+      {label && <span className="text-fg/40">{label}</span>}
       <span className="max-w-48 truncate">{link.title || link.session_id.slice(0, 8)}</span>
       <span className="text-cobalt/45">{link.event_count} events</span>
     </a>

@@ -1,11 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 24" role="img" aria-label="cot.">
-  <text
-    x="24"
-    y="18"
-    text-anchor="middle"
-    font-family="Georgia, 'Times New Roman', serif"
-    font-size="22"
-    font-weight="700"
-    font-style="italic"
-    fill="#111111">cot.</text>
+  <style>
+    .w { fill: #0c1a14; } .d { fill: #0f5b3e; }
+    @media (prefers-color-scheme: dark) { .w { fill: #e9f0ea; } .d { fill: #c8f169; } }
+  </style>
+  <text x="24" y="18" text-anchor="middle" font-family="Newsreader, Georgia, 'Times New Roman', serif" font-size="22" font-weight="700" font-style="italic"><tspan class="w">cot</tspan><tspan class="d">.</tspan></text>
 </svg>

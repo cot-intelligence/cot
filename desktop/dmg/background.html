@@ -1,0 +1,75 @@
+<!doctype html>
+<!-- DMG window background, in the cot.run site's look. Rendered to
+     background.png by scripts/make-dmg-background.sh. The window is 660x400;
+     Finder draws the app icon at (170,200) and Applications at (490,200)
+     (tauri.conf.json bundle.macOS.dmg), so the artwork leaves those clear.
+     Vermilion stays a hint: one glow, a short rule, a few grid markers. -->
+<html>
+<head>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Newsreader:ital,opsz,wght@1,6..72,400&display=block" rel="stylesheet">
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  html, body { width: 660px; height: 400px; overflow: hidden; }
+  body {
+    position: relative; background: #080a0c; color: #f4f0ea;
+    font-family: "JetBrains Mono", monospace; -webkit-font-smoothing: antialiased;
+  }
+  /* .instrument-grid from the site, fading out toward the bottom */
+  .grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(174, 255, 202, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(174, 255, 202, 0.05) 1px, transparent 1px);
+    background-size: 32px 32px; background-position: -1px -1px;
+    -webkit-mask-image: radial-gradient(ellipse 80% 90% at 50% 45%, black 40%, transparent 100%);
+  }
+  .glow {
+    position: absolute; left: 50%; top: 250px; width: 620px; height: 300px;
+    transform: translate(-50%, -50%);
+    background: radial-gradient(closest-side, rgba(255, 69, 0, 0.07), transparent);
+  }
+  header { position: absolute; top: 34px; left: 0; right: 0; text-align: center; }
+  .eyebrow {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.22em; text-transform: uppercase;
+    color: rgba(244, 240, 234, 0.45);
+  }
+  .logo {
+    font-family: "Newsreader", serif; font-style: italic; font-weight: 400;
+    font-size: 40px; line-height: 1; letter-spacing: -0.03em; margin-top: 10px;
+  }
+  .logo span { color: #ff4500; }
+  .rule { width: 24px; height: 1px; margin: 14px auto 0; background: #ff4500; opacity: 0.7; }
+  /* Instrument markers: small vermilion crosshairs on grid intersections */
+  .mark { position: absolute; width: 9px; height: 9px; transform: translate(-50%, -50%); opacity: 0.55; }
+  .mark::before, .mark::after { content: ""; position: absolute; background: #ff4500; }
+  .mark::before { left: 4px; top: 0; width: 1px; height: 9px; }
+  .mark::after { top: 4px; left: 0; width: 9px; height: 1px; }
+  .arrow { position: absolute; left: 262px; top: 188px; width: 136px; height: 24px; }
+  footer {
+    position: absolute; bottom: 26px; left: 0; right: 0; text-align: center;
+    font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: rgba(244, 240, 234, 0.40);
+  }
+  footer b { color: rgba(244, 240, 234, 0.75); font-weight: 700; }
+</style>
+</head>
+<body>
+  <div class="grid"></div>
+  <div class="glow"></div>
+  <header>
+    <div class="eyebrow">Agent observability</div>
+    <div class="logo">cot<span>.</span></div>
+    <div class="rule"></div>
+  </header>
+  <!-- On 32px grid intersections (grid is offset by -1px), clear of the icons. -->
+  <i class="mark" style="left:63px;top:63px"></i>
+  <i class="mark" style="left:607px;top:95px"></i>
+  <i class="mark" style="left:31px;top:319px"></i>
+  <i class="mark" style="left:639px;top:351px;opacity:0.35"></i>
+  <svg class="arrow" viewBox="0 0 136 24" fill="none">
+    <line x1="4" y1="12" x2="124" y2="12" stroke="#ff4500" stroke-width="1.5" stroke-dasharray="4 5" stroke-linecap="round"/>
+    <path d="M118 5 L128 12 L118 19" stroke="#ff4500" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+  <footer>Drag <b>cot</b> into <b>Applications</b></footer>
+</body>
+</html>

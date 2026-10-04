@@ -1,131 +1,199 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=JetBrains+Mono:wght@400;700;800&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,800;1,6..72,400;1,6..72,800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600;700&family=Newsreader:ital,opsz,wght@1,6..72,700&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
-  /* Theme follows the OS unless the user picks one (index.html sets
-     data-theme before paint). Dark tokens are the base; light inverts them. Vermilion and cobalt accents are constant; olive brightens in
-     dark mode so success states stay readable on near-black surfaces.
-     Surfaces get LIGHTER as they rise (bg < panel < surface) so panels
-     separate by elevation instead of hard borders. */
+  /* Signal Forest design system (website/.tastemaker/style-lock.md).
+     Theme follows the OS unless the user picks one (index.html sets
+     data-theme before paint). Tokens are RGB triplets so Tailwind can apply
+     alpha. Ink opacities carry the hierarchy: fg (text), fg/60 (dim, muted
+     text), fg/40 (faint, repeated hints only), line/10 hairline, line/16
+     strong hairline, fg/[0.07] wash for hover fills. */
   :root,
-  [data-theme='dark'] {
-    --bg: 11 14 17; /* #0b0e11 — site section black */
-    --fg: 244 240 234; /* cream */
-    --surface: 20 25 31; /* #14191f raised cards */
-    --panel: 16 20 25; /* #101419 code, inputs, rails */
-    --line: 244 240 234; /* single border token (used at low opacity) */
-    --brutal: 244 240 234;
-    --grid: 174 255 202; /* site "instrument" grid tint */
-    --grid-alpha: 0.035;
-    --olive: 125 184 122; /* #7DB87A — brighter sage for success on dark */
-    --shadow: 0 0 0;
-    color-scheme: dark;
-  }
   [data-theme='light'] {
-    --bg: 246 244 239; /* warm cream, softened */
-    --fg: 22 24 27; /* near-ink */
-    --surface: 255 255 253; /* raised cards */
-    --panel: 238 235 229; /* code & inputs */
-    --line: 17 17 17;
-    --brutal: 22 24 27;
-    --grid: 17 17 17;
-    --grid-alpha: 0.03;
-    --olive: 58 77 57; /* #3A4D39 — muted forest green */
-    --shadow: 30 24 16;
+    --bg: 245 246 243; /* #f5f6f3 */
+    --panel: 236 239 233; /* #ecefe9 recessed: inputs, code, tracks */
+    --rail: 228 232 225; /* #e4e8e1 collapsed nav rail */
+    --tip: 12 26 20;
+    --on-tip: 245 246 243;
+    --surface: 255 255 255; /* raised cards, menus */
+    --fg: 12 26 20; /* #0c1a14 */
+    --line: 12 26 20;
+    --hot: 15 91 62; /* #0f5b3e forest green */
+    --on-hot: 255 255 255;
+    --signal: 22 160 101; /* #16a065 marks only */
+    --alert: 217 58 63; /* #d93a3f */
+    --amber: 183 121 31; /* #b7791f */
+    --olive: 78 140 111; /* #4e8c6f */
+    --cobalt: 43 92 230; /* #2b5ce6 */
+    --shadow: 10 42 30;
+    --shadow-window: 0 40px 100px -50px rgba(10, 42, 30, 0.35);
+    --glass-panel: rgba(255, 255, 255, 0.55);
+    --glass-highlight: rgba(255, 255, 255, 0.9);
+    --grid-alpha: 0.035;
     color-scheme: light;
+  }
+  [data-theme='dark'] {
+    --bg: 10 22 18; /* #0a1612 */
+    --panel: 14 29 24; /* #0e1d18 */
+    --rail: 5 13 10; /* #050d0a */
+    --tip: 233 240 234;
+    --on-tip: 10 22 18;
+    --surface: 19 38 31; /* #13261f */
+    --fg: 233 240 234; /* #e9f0ea */
+    --line: 233 240 234;
+    --hot: 200 241 105; /* #c8f169 lime */
+    --on-hot: 10 42 30; /* never white on lime */
+    --signal: 200 241 105;
+    --alert: 242 85 90;
+    --amber: 229 176 74;
+    --olive: 143 211 166;
+    --cobalt: 127 162 245;
+    --shadow: 0 0 0;
+    --shadow-window: 0 40px 120px -40px rgba(0, 0, 0, 0.75);
+    --glass-panel: rgba(14, 29, 24, 0.6);
+    --glass-highlight: rgba(233, 240, 234, 0.07);
+    --grid-alpha: 0.03;
+    color-scheme: dark;
   }
 
   html {
     scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
   }
   body {
-    @apply bg-bg text-fg font-sans antialiased selection:bg-vermilion selection:text-cream;
-    transition: background-color 0.3s ease, color 0.3s ease;
+    @apply bg-bg font-sans text-body text-fg antialiased;
+    font-feature-settings: 'ss01', 'cv11';
+    transition: background-color 200ms ease, color 200ms ease;
   }
   h1, h2, h3, h4 {
-    @apply font-serif;
+    @apply font-sans font-semibold;
+    text-wrap: balance;
+  }
+  ::selection {
+    background-color: color-mix(in srgb, rgb(var(--hot)) 28%, transparent);
+  }
+  /* One focus treatment everywhere: hot at 75%, never removed without a replacement. */
+  :focus-visible {
+    outline: 2px solid rgb(var(--hot) / 0.75);
+    outline-offset: 2px;
+  }
+  .tabular-nums,
+  .font-mono {
+    font-variant-numeric: tabular-nums;
   }
 }
 
 @layer utilities {
-  /* Faint instrument grid, fading out toward the bottom like the site hero. */
+  /* Faint instrument grid behind the content, fading toward the bottom. */
   .grid-bg {
     background-image:
-      linear-gradient(rgb(var(--grid) / var(--grid-alpha)) 1px, transparent 1px),
-      linear-gradient(90deg, rgb(var(--grid) / var(--grid-alpha)) 1px, transparent 1px);
+      linear-gradient(rgb(var(--fg) / var(--grid-alpha)) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(var(--fg) / var(--grid-alpha)) 1px, transparent 1px);
     background-size: 32px 32px;
-    mask-image: linear-gradient(to bottom, black, transparent 70%);
+    mask-image: linear-gradient(to bottom, black, transparent 60%);
   }
-  .glow-vermilion {
-    background: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(255, 69, 0, 0.08), transparent 70%);
-  }
-  .brutal-border {
-    @apply border-3;
-    border-color: rgb(var(--fg));
-  }
-  /* Small tracked mono label — the site's section eyebrow. */
+  /* Card and control label: mono 10px 600 uppercase, faint. */
   .eyebrow {
-    @apply font-mono text-[0.625rem] font-bold uppercase tracking-[0.2em] text-fg/45;
+    @apply font-mono text-label font-semibold uppercase tracking-label text-fg/60;
   }
-  /* Raised card: a hairline border plus soft depth instead of hard shadows. */
+  /* Raised card: hairline border plus soft, rare depth. */
   .card {
-    @apply border border-line/10 bg-surface;
-    box-shadow: 0 1px 0 rgb(var(--line) / 0.03) inset, 0 12px 32px -16px rgb(var(--shadow) / 0.35);
+    @apply rounded-card border border-line/10 bg-surface;
+    box-shadow: 0 1px 2px rgb(var(--shadow) / 0.04);
   }
   .glass {
-    background: rgb(var(--surface) / 0.72);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
+    background: var(--glass-panel);
+    backdrop-filter: blur(16px) saturate(150%);
+    -webkit-backdrop-filter: blur(16px) saturate(150%);
     border: 1px solid rgb(var(--line) / 0.1);
+    box-shadow: inset 0 1px 0 var(--glass-highlight), var(--shadow-window);
   }
-  /* Session timeline: the user's messages are cobalt bubbles, the agent's
+  /* Session timeline: the user's messages are flat cobalt tints, the agent's
      replies plain raised cards. */
   .bubble-user {
-    background: linear-gradient(135deg, rgb(43 92 230 / 0.2), rgb(43 92 230 / 0.07));
-    box-shadow:
-      inset 0 0 0 1px rgb(43 92 230 / 0.3),
-      0 8px 24px -18px rgb(43 92 230 / 0.45);
+    background: rgb(var(--cobalt) / 0.1);
+    box-shadow: inset 0 0 0 1px rgb(var(--cobalt) / 0.28);
   }
   .card-agent {
     @apply bg-surface;
-    box-shadow:
-      inset 0 0 0 1px rgb(var(--line) / 0.09),
-      0 16px 40px -28px rgb(var(--shadow) / 0.7);
+    box-shadow: inset 0 0 0 1px rgb(var(--line) / 0.1), 0 1px 2px rgb(var(--shadow) / 0.04);
   }
   .fade-bottom {
     mask-image: linear-gradient(to bottom, black 45%, transparent);
   }
-  /* Tinted ring chip, as used for event kinds in the site trace viewer. */
+  /* Chip: colour tinted over the ground with an inset ring; the word always stays. */
   .chip {
-    @apply inline-flex items-center gap-1 rounded-[3px] px-1.5 py-0.5 font-mono text-[0.58rem] font-bold uppercase tracking-[0.12em] ring-1 ring-inset;
+    @apply inline-flex items-center gap-1 rounded-chip px-1.5 py-0.5 font-mono text-label font-semibold uppercase tracking-[0.12em] ring-1 ring-inset;
   }
   /* Segmented control: a recessed track with the active item raised. */
   .seg {
-    @apply inline-flex items-center gap-0.5 rounded-[5px] border border-line/10 bg-panel p-0.5;
+    @apply inline-flex items-center gap-0.5 rounded-control border border-line/10 bg-panel p-0.5;
   }
   .seg-item {
-    @apply rounded-[3px] px-2.5 py-1 font-mono text-[0.62rem] font-bold uppercase tracking-[0.12em] text-fg/50 transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-vermilion/60;
+    @apply rounded-chip px-2.5 py-1 text-small font-medium text-fg/60 transition-colors duration-150 hover:text-fg;
   }
   .seg-item[aria-pressed='true'] {
-    @apply bg-surface text-fg shadow-soft;
+    @apply bg-surface text-fg;
+    box-shadow: 0 0 0 1px rgb(var(--line) / 0.1), 0 1px 2px rgb(var(--shadow) / 0.08);
   }
-  /* Quiet secondary button. */
+  /* Buttons. Quiet: panel fill, hairline that strengthens on hover. Primary:
+     hot fill, one per view. Both press to 0.97. */
   .btn {
-    @apply inline-flex shrink-0 items-center gap-2 rounded-[5px] border border-line/15 bg-surface/60 px-3 py-1.5 font-mono text-[0.62rem] font-bold uppercase tracking-[0.12em] text-fg/75 transition-colors hover:border-line/30 hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion/50 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex shrink-0 items-center justify-center gap-2 rounded-control border border-line/10 bg-panel px-3 py-1.5 text-small font-medium text-fg disabled:cursor-not-allowed disabled:opacity-50;
+    transition: transform 150ms cubic-bezier(0.23, 1, 0.32, 1), border-color 150ms ease, background-color 150ms ease, color 150ms ease;
   }
   .btn-primary {
-    @apply inline-flex shrink-0 items-center gap-2 rounded-[5px] bg-vermilion px-3.5 py-2 font-mono text-[0.62rem] font-bold uppercase tracking-[0.12em] text-cream transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion/50 focus-visible:ring-offset-2 focus-visible:ring-offset-bg;
+    @apply inline-flex shrink-0 items-center justify-center gap-2 rounded-control bg-hot px-4 py-2 text-small font-medium text-on-hot disabled:cursor-not-allowed disabled:opacity-50;
+    transition: transform 150ms cubic-bezier(0.23, 1, 0.32, 1), opacity 150ms ease;
   }
-  /* Sidebar motion. Width eases on a soft decelerating curve; labels never
-     toggle display (which made them pop), they fade and drift in just after
-     the panel starts opening and leave quickly before it closes. Icons keep
-     one fixed position in both states, so nothing jumps sideways. */
+  .btn-ghost {
+    @apply inline-flex shrink-0 items-center justify-center gap-2 rounded-control px-3 py-1.5 text-small font-medium text-fg/60;
+    transition: transform 150ms cubic-bezier(0.23, 1, 0.32, 1), background-color 150ms ease, color 150ms ease;
+  }
+  .btn-danger {
+    @apply inline-flex shrink-0 items-center justify-center gap-2 rounded-control border border-alert/40 bg-surface px-3 py-1.5 text-small font-medium text-alert disabled:cursor-not-allowed disabled:opacity-50;
+    transition: transform 150ms cubic-bezier(0.23, 1, 0.32, 1), border-color 150ms ease, background-color 150ms ease;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .btn:hover:not(:disabled) {
+      @apply border-line/[0.16] bg-fg/[0.07];
+    }
+    .btn-primary:hover:not(:disabled) {
+      opacity: 0.92;
+    }
+    .btn-ghost:hover {
+      @apply bg-fg/[0.07] text-fg;
+    }
+    .btn-danger:hover:not(:disabled) {
+      @apply border-alert/70 bg-alert/[0.06];
+    }
+  }
+  .btn:active:not(:disabled),
+  .btn-primary:active:not(:disabled),
+  .btn-ghost:active,
+  .btn-danger:active:not(:disabled),
+  .press:active {
+    transform: scale(0.97);
+  }
+  .press {
+    transition: transform 150ms cubic-bezier(0.23, 1, 0.32, 1);
+  }
+  /* Text inputs share one recessed style. */
+  .field {
+    @apply w-full rounded-control border border-line/10 bg-panel px-3 py-2 text-body text-fg placeholder:text-fg/40 transition-colors duration-150 hover:border-line/[0.16] focus:border-hot/75 focus:outline-none;
+  }
+  .wordmark {
+    @apply font-wordmark font-bold italic leading-none tracking-tight text-fg;
+  }
+  /* Sidebar motion. Width eases on the drawer curve; labels never toggle
+     display (which made them pop), they fade in just after the panel starts
+     opening and leave quickly before it closes. */
   .rail-motion {
     transition-property: width, box-shadow, background-color;
-    transition-duration: 320ms;
+    transition-duration: 240ms;
     transition-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
   }
   .rail-label {
@@ -139,11 +207,10 @@
       opacity: 1;
       transform: none;
       transition:
-        opacity 220ms ease-out 80ms,
-        transform 300ms cubic-bezier(0.32, 0.72, 0, 1) 60ms;
+        opacity 180ms ease-out 60ms,
+        transform 220ms cubic-bezier(0.32, 0.72, 0, 1) 40ms;
     }
   }
-  /* Crossfade between a collapsed strip and its full panel. */
   .rail-swap {
     transition: opacity 180ms ease-out;
   }
@@ -154,9 +221,20 @@
     .rail-swap {
       transition: none;
     }
+    .btn:active,
+    .btn-primary:active,
+    .btn-ghost:active,
+    .btn-danger:active,
+    .press:active {
+      transform: none;
+    }
   }
   .focus-ring {
-    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion/60 focus-visible:ring-offset-0;
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-hot/75 focus-visible:ring-offset-0;
+  }
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--fg) / 0.2) transparent;
   }
   .scroll-thin::-webkit-scrollbar {
     height: 6px;
@@ -164,6 +242,7 @@
   }
   .scroll-thin::-webkit-scrollbar-thumb {
     background: rgb(var(--fg) / 0.2);
+    border-radius: 9999px;
   }
   .scroll-thin::-webkit-scrollbar-track {
     background: transparent;
@@ -171,15 +250,16 @@
   .agent-mark-cursor {
     display: none;
   }
-  [data-theme='light'] .agent-mark-cursor-light {
+  [data-theme='light'] .agent-mark-cursor-light,
+  :root:not([data-theme='dark']) .agent-mark-cursor-light {
     display: block;
   }
-  [data-theme='dark'] .agent-mark-cursor-dark,
-  :root:not([data-theme='light']) .agent-mark-cursor-dark {
+  [data-theme='dark'] .agent-mark-cursor-dark {
     display: block;
   }
   .cot-prose {
-    @apply font-sans text-sm leading-relaxed text-fg/85;
+    @apply font-sans text-body leading-relaxed text-fg/85;
+    text-wrap: pretty;
   }
   .cot-prose > * + * {
     margin-top: 0.75rem;
@@ -188,7 +268,7 @@
   .cot-prose h2,
   .cot-prose h3,
   .cot-prose h4 {
-    @apply font-serif font-bold text-fg;
+    @apply font-sans font-semibold tracking-[-0.01em] text-fg;
   }
   .cot-prose h1 {
     @apply text-xl;
@@ -199,7 +279,8 @@
   .cot-prose h3 {
     @apply text-base;
   }
-  .cot-prose p {
+  .cot-prose p,
+  .cot-prose li {
     @apply text-fg/85;
   }
   .cot-prose ul {
@@ -208,14 +289,17 @@
   .cot-prose ol {
     @apply list-decimal space-y-1 pl-5;
   }
-  .cot-prose li {
-    @apply text-fg/85;
+  .cot-prose a {
+    @apply text-hot underline decoration-hot/40 underline-offset-2 hover:decoration-hot;
+  }
+  .cot-prose code {
+    @apply rounded-chip bg-panel px-1 py-0.5 font-mono text-code;
   }
   .cot-prose blockquote {
-    @apply border-l-2 border-line/20 pl-4 italic text-fg/70;
+    @apply rounded-cell bg-fg/[0.04] px-4 py-2 text-fg/60;
   }
   .cot-prose hr {
-    @apply border-line/15;
+    @apply border-line/10;
   }
   .cot-prose strong {
     @apply font-semibold text-fg;
@@ -227,21 +311,47 @@
 
 /* Jumping to a search result: the target card pulses once (searchHighlight.ts). */
 [data-search-target] {
-  border-radius: 0.5rem;
+  border-radius: 12px;
   animation: search-target 2.4s ease-out;
 }
 @keyframes search-target {
   0%,
   40% {
-    box-shadow: 0 0 0 2px rgb(255 69 0 / 0.65);
+    box-shadow: 0 0 0 2px rgb(var(--hot) / 0.65);
   }
   100% {
-    box-shadow: 0 0 0 2px rgb(255 69 0 / 0);
+    box-shadow: 0 0 0 2px rgb(var(--hot) / 0);
   }
 }
 @media (prefers-reduced-motion: reduce) {
   [data-search-target] {
     animation: none;
-    box-shadow: 0 0 0 2px rgb(255 69 0 / 0.5);
+    box-shadow: 0 0 0 2px rgb(var(--hot) / 0.5);
+  }
+}
+
+@layer components {
+  /* Switch: track recolours, knob slides. */
+  .switch {
+    @apply relative h-[22px] w-9 shrink-0 rounded-full bg-fg/[0.16] transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-45;
+  }
+  .switch[aria-checked='true'] {
+    @apply bg-hot;
+  }
+  .switch-knob {
+    @apply absolute left-[3px] top-[3px] h-4 w-4 rounded-full bg-white shadow-sm;
+    transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
+  }
+  [data-theme='dark'] .switch[aria-checked='true'] .switch-knob {
+    background: rgb(var(--on-hot));
+  }
+  .switch[aria-checked='true'] .switch-knob {
+    transform: translateX(14px);
+  }
+  .switch:active .switch-knob {
+    transform: scale(0.92);
+  }
+  .switch[aria-checked='true']:active .switch-knob {
+    transform: translateX(14px) scale(0.92);
   }
 }

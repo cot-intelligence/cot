@@ -12,7 +12,7 @@ function DiffView({ detail }: { detail: string }) {
     parsed = JSON.parse(detail);
   } catch {
     return (
-      <pre className="scroll-thin max-h-96 overflow-auto whitespace-pre-wrap break-words font-mono text-[0.72rem] leading-relaxed text-fg/85">
+      <pre className="scroll-thin max-h-96 overflow-auto whitespace-pre-wrap break-words font-mono text-code leading-relaxed text-fg/85">
         {detail}
       </pre>
     );
@@ -24,22 +24,22 @@ function DiffView({ detail }: { detail: string }) {
     <div className="space-y-3">
       {input != null && (
         <div>
-          <span className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">Input</span>
-          <pre className="scroll-thin mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words border border-fg/10 bg-panel p-3 font-mono text-[0.72rem] text-fg/85">
+          <span className="font-mono text-label uppercase tracking-label text-fg/40">Input</span>
+          <pre className="scroll-thin mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words border rounded-cell border-line/10 bg-panel p-3 font-mono text-code text-fg/85">
             {typeof input === 'string' ? input : JSON.stringify(input, null, 2)}
           </pre>
         </div>
       )}
       {response != null && (
         <div>
-          <span className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/40">Output</span>
-          <pre className="scroll-thin mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words border border-fg/10 bg-panel p-3 font-mono text-[0.72rem] text-fg/85">
+          <span className="font-mono text-label uppercase tracking-label text-fg/40">Output</span>
+          <pre className="scroll-thin mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words border rounded-cell border-line/10 bg-panel p-3 font-mono text-code text-fg/85">
             {typeof response === 'string' ? response : JSON.stringify(response, null, 2)}
           </pre>
         </div>
       )}
       {!input && !response && (
-        <pre className="scroll-thin max-h-96 overflow-auto whitespace-pre-wrap break-words font-mono text-[0.72rem] leading-relaxed text-fg/85">
+        <pre className="scroll-thin max-h-96 overflow-auto whitespace-pre-wrap break-words font-mono text-code leading-relaxed text-fg/85">
           {detail}
         </pre>
       )}
@@ -52,7 +52,7 @@ function QaPill({ item }: { item: TimelineItem }) {
     return (
       <span
         title="This prompt event contains questions"
-        className="rounded border border-fg/20 px-1 py-px font-mono text-[0.5rem] font-bold uppercase tracking-widest text-fg/50">
+        className="rounded border border-line/[0.16] px-1 py-px font-mono text-label font-semibold uppercase tracking-label text-fg/60">
         Question
       </span>
     );
@@ -61,7 +61,7 @@ function QaPill({ item }: { item: TimelineItem }) {
     return (
       <span
         title="This prompt event stores the user answer"
-        className="rounded border border-cobalt/40 px-1 py-px font-mono text-[0.5rem] font-bold uppercase tracking-widest text-cobalt">
+        className="rounded border border-cobalt/40 px-1 py-px font-mono text-label font-semibold uppercase tracking-label text-cobalt">
         Answer
       </span>
     );
@@ -87,28 +87,28 @@ export function TimelineItemRow({ item }: TimelineItemRowProps) {
           className="flex w-full items-start justify-between gap-3 text-left">
           <div className="min-w-0 space-y-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="font-mono text-[0.55rem] tabular-nums text-fg/40">
+              <span className="font-mono text-label tabular-nums text-fg/40">
                 {formatDateTime(item.start_ts || item.ts)}
               </span>
-              <span className={`font-mono text-[0.6rem] font-bold uppercase tracking-widest ${meta.color}`}>
+              <span className={`font-mono text-label font-semibold uppercase tracking-label ${meta.color}`}>
                 {meta.label}
               </span>
               <QaPill item={item} />
               {item.ongoing && (
-                <span className="font-mono text-[0.55rem] uppercase text-cobalt">ongoing</span>
+                <span className="font-mono text-label uppercase text-cobalt">ongoing</span>
               )}
             </div>
-            <p className="font-mono text-xs font-bold text-fg">{item.title}</p>
+            <p className="font-mono text-xs font-semibold text-fg">{item.title}</p>
             {showTarget && (
-              <p className="truncate font-mono text-[0.65rem] text-fg/50">{item.target}</p>
+              <p className="truncate font-mono text-data text-fg/60">{item.target}</p>
             )}
           </div>
-          <span className="shrink-0 font-mono text-[0.6rem] tabular-nums text-fg/40">
+          <span className="shrink-0 font-mono text-label tabular-nums text-fg/40">
             {formatDuration(item.duration_ms)}
           </span>
         </button>
         {open && item.detail && (
-          <div className="mt-3 border border-fg/15 bg-surface p-4">
+          <div className="mt-3 border rounded-cell border-line/10 bg-surface p-4">
             <DiffView detail={item.detail} />
           </div>
         )}

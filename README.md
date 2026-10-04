@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src=".github/assets/banner.png" alt="cot. Self-hosted observability for Claude Code, Cursor, and Codex" width="100%">
+<img src=".github/assets/banner.png" alt="cot. Self-hosted observability for Claude Code, Cursor, Codex, and OpenCode" width="100%">
 
 <br>
 
@@ -37,7 +37,7 @@ One command:
 
 1. starts the collector in Docker, bound to localhost
 2. installs the local bridge
-3. wires up hooks for the agents you pick: **Claude Code**, **Cursor**, or **Codex**
+3. wires up the agents you pick: **Claude Code**, **Cursor**, **Codex**, or **OpenCode**
 
 Cot runs in the background and collects traces while you build. Open the dashboard at **[http://127.0.0.1:31337](http://127.0.0.1:31337)**.
 
@@ -46,6 +46,13 @@ Cot runs in the background and collects traces while you build. Open the dashboa
 > `curl -fsSL http://127.0.0.1:31337/install.sh | sh`.
 
 The default port is **31337**. If it is busy, the installer picks the next free port and saves the URL in `~/.cot/config.json`.
+
+OpenCode 1.18.29+ and OpenCode 2 use one local plugin file. The bridge installer
+places it at `~/.config/opencode/plugins/cot.js`. To add it manually after
+installing the cot bridge, download
+`http://127.0.0.1:31337/opencode-plugin.js` (using your chosen port), save it
+at that path, and restart
+OpenCode. OpenCode sessions recorded before plugin installation are not imported.
 
 | Command | What it does |
 | --- | --- |
@@ -57,7 +64,7 @@ The default port is **31337**. If it is busy, the installer picks the next free 
 
 ```mermaid
 flowchart LR
-    A["Claude Code<br/>Cursor<br/>Codex"] -- hook fires --> B["~/.cot/bin/cot<br/><sub>local bridge</sub>"]
+    A["Claude Code<br/>Cursor<br/>Codex<br/>OpenCode"] -- hook/plugin event --> B["~/.cot/bin/cot<br/><sub>local bridge</sub>"]
     B -- "POST /v1/ingest" --> C["Collector<br/><sub>FastAPI · 127.0.0.1:31337</sub>"]
     C --> D[("~/.cot/cot.db<br/><sub>SQLite</sub>")]
     D --> E["Dashboard<br/><sub>React</sub>"]

@@ -23,15 +23,15 @@ const GROUP_W = 138;
 const LEAF_X = GROUP_X + GROUP_W + 30;
 
 const ACCENT: Record<ActivityKind, { stroke: string; dot: string; text: string }> = {
-  web: { stroke: 'stroke-cobalt/60', dot: 'bg-cobalt', text: 'text-cobalt' },
-  mcp: { stroke: 'stroke-cobalt/60', dot: 'bg-cobalt', text: 'text-cobalt' },
+  web: { stroke: 'stroke-hot/55', dot: 'bg-hot', text: 'text-hot' },
+  mcp: { stroke: 'stroke-hot/55', dot: 'bg-hot', text: 'text-hot' },
   skill: { stroke: 'stroke-olive/60', dot: 'bg-olive', text: 'text-olive' },
   memory: { stroke: 'stroke-olive/60', dot: 'bg-olive', text: 'text-olive' },
-  file_edit: { stroke: 'stroke-vermilion/55', dot: 'bg-vermilion', text: 'text-vermilion' },
-  permission: { stroke: 'stroke-vermilion/55', dot: 'bg-vermilion', text: 'text-vermilion' },
+  file_edit: { stroke: 'stroke-olive/60', dot: 'bg-olive', text: 'text-olive' },
+  permission: { stroke: 'stroke-amber/60', dot: 'bg-amber', text: 'text-amber' },
   subagent: { stroke: 'stroke-fg/30', dot: 'bg-fg/55', text: 'text-fg/80' },
-  shell: { stroke: 'stroke-fg/30', dot: 'bg-fg/55', text: 'text-fg/80' },
-  file_read: { stroke: 'stroke-fg/25', dot: 'bg-fg/45', text: 'text-fg/70' },
+  shell: { stroke: 'stroke-amber/55', dot: 'bg-amber', text: 'text-amber' },
+  file_read: { stroke: 'stroke-cobalt/55', dot: 'bg-cobalt', text: 'text-cobalt' },
   context: { stroke: 'stroke-fg/25', dot: 'bg-fg/45', text: 'text-fg/70' },
 };
 
@@ -117,7 +117,7 @@ export function ActivityMap({ items, sessionId, activeKey, onJump }: ActivityMap
     return (
       <div className="flex flex-col items-center gap-1 px-3 py-10 text-center">
         <span className="font-mono text-lg text-fg/10">⦰</span>
-        <span className="font-mono text-[0.6rem] text-fg/25">No tool activity in this session yet</span>
+        <span className="font-mono text-label text-fg/40">No tool activity in this session yet</span>
       </div>
     );
   }
@@ -127,7 +127,7 @@ export function ActivityMap({ items, sessionId, activeKey, onJump }: ActivityMap
 
   return (
     <div className="px-3 pb-4 pt-3">
-      <p className="mb-3 font-mono text-[0.55rem] leading-relaxed text-fg/35">
+      <p className="mb-3 font-mono text-label leading-relaxed text-fg/40">
         Click a node to jump to its events in the transcript. Click again for the next one.
       </p>
       <div className="relative" style={{ height }}>
@@ -169,12 +169,12 @@ export function ActivityMap({ items, sessionId, activeKey, onJump }: ActivityMap
 
         {/* Agent root */}
         <div
-          className="absolute left-0 top-0 flex items-center gap-1.5 rounded-[5px] border border-line/15 bg-surface px-2 font-mono text-[0.58rem] font-bold uppercase tracking-[0.12em] text-fg/80"
+          className="absolute left-0 top-0 flex items-center gap-1.5 rounded-control border border-line/10 bg-surface px-2 font-mono text-label font-semibold uppercase tracking-label text-fg/80"
           style={{ height: AGENT_H }}
         >
-          <span className="h-1.5 w-1.5 rounded-full bg-vermilion" />
+          <span className="h-1.5 w-1.5 rounded-full bg-hot" />
           Agent
-          <span className="font-normal tabular-nums text-fg/35">{items.length}</span>
+          <span className="font-normal tabular-nums text-fg/40">{items.length}</span>
         </div>
 
         {placed.map(({ group, cy, leaves }) => {
@@ -186,16 +186,16 @@ export function ActivityMap({ items, sessionId, activeKey, onJump }: ActivityMap
                 type="button"
                 onClick={() => step(group.id, group.items)}
                 title={`${group.label}: ${group.items.length} event${group.items.length === 1 ? '' : 's'}`}
-                className={`focus-ring absolute flex items-center gap-1.5 rounded-[5px] border bg-surface px-2 text-left transition-colors hover:border-line/30 ${
-                  activeNodes.has(group.id) ? 'border-vermilion/60' : 'border-line/15'
+                className={`focus-ring absolute flex items-center gap-1.5 rounded-control border bg-surface px-2 text-left transition-colors hover:border-line/30 ${
+                  activeNodes.has(group.id) ? 'border-hot/60' : 'border-line/15'
                 }`}
                 style={{ left: GROUP_X, top: cy - 12, width: GROUP_W, height: 24 }}
               >
                 <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${accent.dot}`} />
-                <span className={`truncate font-mono text-[0.56rem] font-bold uppercase tracking-[0.12em] ${accent.text}`}>
+                <span className={`truncate font-mono text-label font-semibold uppercase tracking-label ${accent.text}`}>
                   {group.label}
                 </span>
-                <span className="ml-auto shrink-0 font-mono text-[0.55rem] tabular-nums text-fg/40">
+                <span className="ml-auto shrink-0 font-mono text-label tabular-nums text-fg/40">
                   {groupPos ?? group.items.length}
                 </span>
               </button>
@@ -221,25 +221,25 @@ export function ActivityMap({ items, sessionId, activeKey, onJump }: ActivityMap
                               leaf.errors ? `, ${leaf.errors} failed` : ''
                             }`
                     }
-                    className={`focus-ring absolute flex items-center gap-1.5 rounded-[3px] px-1.5 text-left transition-colors hover:bg-fg/[0.06] ${
-                      activeNodes.has(leaf.id) ? 'bg-vermilion/10 ring-1 ring-inset ring-vermilion/40' : ''
+                    className={`focus-ring absolute flex items-center gap-1.5 rounded-chip px-1.5 text-left transition-colors hover:bg-fg/[0.06] ${
+                      activeNodes.has(leaf.id) ? 'bg-hot/10 ring-1 ring-inset ring-hot/40' : ''
                     }`}
                     style={{ left: LEAF_X, right: 0, top: ly - 10, height: 20 }}
                   >
                     <span
-                      className={`min-w-0 truncate font-mono text-[0.62rem] ${
+                      className={`min-w-0 truncate font-mono text-label ${
                         isMore || isLess ? 'italic text-fg/40' : 'text-fg/80'
                       }`}
                     >
                       {leaf.label}
                     </span>
                     {leaf.errors > 0 && (
-                      <span className="shrink-0 rounded-[3px] bg-vermilion/15 px-1 font-mono text-[0.5rem] font-bold text-vermilion">
+                      <span className="shrink-0 rounded-chip bg-hot/15 px-1 font-mono text-label font-semibold text-hot">
                         {leaf.errors}✕
                       </span>
                     )}
                     {!isLess && (
-                      <span className="ml-auto shrink-0 font-mono text-[0.55rem] tabular-nums text-fg/35">
+                      <span className="ml-auto shrink-0 font-mono text-label tabular-nums text-fg/40">
                         {leafPos ?? `×${leaf.items.length}`}
                       </span>
                     )}
