@@ -240,6 +240,23 @@ mac action="build":
       *) printf '%s\n' "unknown action: {{action}} (build|app|run|clean)" >&2; exit 2 ;;
     esac
 
+# Fresh web install in a sandbox: runs `curl cot.run/install | sh` with HOME in a
+# temp dir, so the collector container, ~/.cot and hook files never touch yours.
+#   just fresh            collector built from origin/main
+#   just fresh release    the published image users pull today
+#   just fresh down       remove the container and sandbox
+# COT_FRESH_HISTORY=1 imports your real transcripts read-only.
+# Fresh web install in a sandbox: up | release | down
+fresh action="up":
+    #!/usr/bin/env sh
+    set -eu
+    case "{{action}}" in
+      up)      scripts/fresh-install.sh ;;
+      release) scripts/fresh-install.sh --release ;;
+      down)    scripts/fresh-install.sh down ;;
+      *) printf '%s\n' "unknown action: {{action}} (up|release|down)" >&2; exit 2 ;;
+    esac
+
 # Desktop app (Tauri): cot.app that runs the frozen collector, self-updates.
 #   just desktop dev      run the shell in dev mode (stages the collector once)
 #   just desktop build    build cot.app (dashboard + frozen collector + shell)
@@ -251,7 +268,7 @@ mac action="build":
 #   just desktop prod     install origin/main like a release: clean build, install, bridge + hooks
 #   just desktop test     Rust unit tests
 #   just desktop clean    drop build output and staged resources
-# Desktop app: dev | build | shell | dmg | verify | install | deploy | test | clean
+# Desktop app: dev | build | shell | dmg | verify | install | deploy | prod | test | clean
 desktop action="build":
     #!/usr/bin/env sh
     set -eu
