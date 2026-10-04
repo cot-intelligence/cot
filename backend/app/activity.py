@@ -1,4 +1,5 @@
-"""Activity: what agents ran in the shell and fetched from the web.
+"""Activity: what agents ran in the shell, fetched from the web, called over MCP
+and loaded as skills.
 
 Turns raw shell/web events into answers: which programs agents lean on, what
 keeps failing (with the error), what is slow, what is risky. Command parsing is
@@ -20,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import db, store
+from . import db, extension_usage, store
 from .insights import RISKY_COMMAND_PATTERNS, SECRET_PATTERNS, mask_secret
 
 # Prefixes that run the real command rather than being it.
@@ -449,7 +450,21 @@ def _parse_row(row: dict[str, Any], category: str) -> dict[str, Any]:
     }
 
 
-def load(category: str, days: int, project: str | None, source: str | None) -> list[dict[str, Any]]:
+CATEGORIES = ("shell", "web", "mcp", "skill")
+# MCP calls and skill loads are grouped by extension (``key``), shell by program.
+_EXTENSION_CATEGORIES = ("mcp", "skill")
+
+
+def _group_key(category: str) -> str:
+    return "program" if category == "shell" else "key"
+
+
+def load(
+    category: str, days: int, project: str | None, source: str | None, plugin: str | None = None
+) -> list[dict[str, Any]]:
+    if category in _EXTENSION_CATEGORIES:
+        items = extension_usage.activity_items(category, _since(days), project, source)
+        return [it for it in items if it["plugin"] == plugin] if plugin else items
     rows = db.activity_rows(category, _since(days), project, source)
     return [_item(r, category) for r in rows]
 
@@ -458,14 +473,30 @@ def _ref(item: dict[str, Any]) -> dict[str, Any]:
     return {"session_id": item["session_id"], "event_id": item["event_id"], "ts": item["ts"]}
 
 
-def summarize(category: str, days: int, project: str | None = None, source: str | None = None) -> dict[str, Any]:
+def summarize(
+    category: str, days: int, project: str | None = None, source: str | None = None, plugin: str | None = None
+) -> dict[str, Any]:
+    if category in _EXTENSION_CATEGORIES:
+        # Reused until a new MCP call / skill load, a config change or the minute rolls over.
+        return extension_usage.cached(
+            ("summary", category, days, project, source, plugin),
+            lambda: _summarize(category, days, project, source, plugin),
+        )
+    return _summarize(category, days, project, source, plugin)
+
+
+def _summarize(
+    category: str, days: int, project: str | None = None, source: str | None = None, plugin: str | None = None
+) -> dict[str, Any]:
     # Load the whole history once: the window is summarized, and everything
     # before it is the baseline that anomalies are measured against.
-    history = load(category, 0, project, source)
+    unfiltered = load(category, 0, project, source)
+    history = [it for it in unfiltered if it.get("plugin") == plugin] if plugin else unfiltered
     since = _since(days)
     items = [it for it in history if since is None or (it["ts"] or "") >= since]
     baseline = [it for it in history if since is not None and (it["ts"] or "") < since]
-    group_key = "key" if category == "web" else "program"
+    group_key = _group_key(category)
+    extension = category in _EXTENSION_CATEGORIES
 
     groups: dict[str, dict[str, Any]] = {}
     verbs: dict[str, Counter[str]] = defaultdict(Counter)
@@ -480,15 +511,21 @@ def summarize(category: str, days: int, project: str | None = None, source: str 
             if category == "web":
                 g["local"] = it["local"]
                 g["kind"] = it["kind"]
+            elif extension:
+                g["ext_key"] = it["ext_key"]
+                g["plugin"] = it["plugin"]
+                g["installed"] = it["installed"]
+                g["origin"] = it["origin"]
             else:
                 g["tool"] = it["tool"]
         g["runs"] += 1
         g["failed"] += it["failed"]
         g["elevated"] += bool(it.get("elevated"))
         g["total_ms"] += it["duration_ms"] or 0
-        if category == "shell" and it["verb"]:
-            verbs[key][it["verb"]] += 1
-        group_via[key].update(it.get("via") or [])
+        if category != "web" and it.get("verb"):
+            verbs[key][it["verb"]] += 1  # shell: git *commit*; MCP: the tool; skills: how it loaded
+        if not extension:
+            group_via[key].update(it.get("via") or [])
     top = sorted(groups.values(), key=lambda g: g["runs"], reverse=True)
     for g in top:
         g["verbs"] = [{"key": v, "runs": c} for v, c in verbs[g["key"]].most_common(4)]
@@ -500,7 +537,11 @@ def summarize(category: str, days: int, project: str | None = None, source: str 
     for it in items:
         if it.get("tool"):
             continue  # a Grep/Glob that matched nothing is not a failure worth chasing
-        norm = " ".join((it.get("core") or it["target"]).split())[:300] if category == "shell" else it["key"]
+        norm = (
+            " ".join((it.get("core") or it["target"]).split())[:300]
+            if category == "shell"
+            else it["target"] if extension else it["key"]
+        )
         f = fail_groups.get(norm)
         if f is None:
             f = fail_groups[norm] = {
@@ -566,6 +607,16 @@ def summarize(category: str, days: int, project: str | None = None, source: str 
         "via": [{"key": k, "runs": n} for k, n in Counter(v for it in items for v in it.get("via") or []).most_common()],
     }
     result["attention"] = worth_a_look(find_anomalies(category, items, baseline, days), failing, risky)
+    if extension:
+        # The plugin filter lists every plugin in the unfiltered window, so picking one never hides the rest.
+        window_all = [it for it in unfiltered if since is None or (it["ts"] or "") >= since]
+        plugins = Counter(it["plugin"] for it in window_all if it.get("plugin"))
+        result["plugins"] = [{"key": k, "label": k.partition(":")[2], "runs": n} for k, n in plugins.most_common()]
+        if category == "mcp":
+            result["summary"]["tools"] = len({(it["key"], it["verb"]) for it in items})
+        else:
+            result["summary"]["slash"] = sum(1 for it in items if it["via"] == ["/command"])
+        result["via"] = [{"key": k, "runs": n} for k, n in Counter(v for it in items for v in it["via"]).most_common()]
     if category == "web":
         searches = Counter(it["key"] for it in items if it["kind"] == "search")
         result["searches"] = [{"query": q, "runs": n} for q, n in searches.most_common(12)]
@@ -586,7 +637,7 @@ _LOOP_MIN_RUNS = 5
 _LOOP_WINDOW_S = 15 * 60
 # Below this much history, "first time" says more about cot than about the agent.
 # Web traffic is far lower volume than shell, so it needs less.
-_MIN_BASELINE_RUNS = {"shell": 200, "web": 50}
+_MIN_BASELINE_RUNS = {"shell": 200, "web": 50, "mcp": 50, "skill": 20}
 _SEVERITY_RANK = {"critical": 0, "warn": 1, "info": 2}
 
 
@@ -634,7 +685,7 @@ def find_anomalies(
     there is not enough history to compare against.
     """
     found: list[dict[str, Any]] = []
-    key_of = (lambda it: it["key"]) if category == "web" else (lambda it: it["program"])
+    key_of = (lambda it: it["program"]) if category == "shell" else (lambda it: it["key"])
     runs_only = [it for it in window if not it.get("tool") and not (category == "web" and it["kind"] == "search")]
     base_runs = [it for it in baseline if not it.get("tool") and not (category == "web" and it["kind"] == "search")]
 
@@ -704,11 +755,17 @@ def find_anomalies(
         if plain:
             names = [k for k, _n, _r in plain]
             shown = ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
+            title, noun = {
+                "shell": (f"First time using {shown}", "Tools"),
+                "web": (f"First requests to {shown}", "Domains"),
+                "mcp": (f"First calls to {shown}", "MCP servers"),
+                "skill": (f"First time loading {shown}", "Skills"),
+            }[category]
             found.append({
                 "kind": "first_seen",
                 "severity": "info",
-                "title": f"First time using {shown}" if category == "shell" else f"First requests to {shown}",
-                "detail": ("Tools" if category == "shell" else "Domains") + " no agent had used before this range.",
+                "title": title,
+                "detail": f"{noun} no agent had used before this range.",
                 "subject": None,
                 "names": names,
                 "ref": _ref(plain[0][2]),
@@ -769,11 +826,13 @@ def find_anomalies(
                     "ref": _ref(last_fail),
                 })
 
-    # 5. Unusually slow: far slower than the same kind of command usually takes.
-    if category == "shell":
+    # 5. Unusually slow: far slower than the same kind of command (or MCP tool) usually takes.
+    if category in ("shell", "mcp"):
         durations: dict[str, list[float]] = defaultdict(list)
 
         def kind_of(it: dict[str, Any]) -> str:
+            if category == "mcp":
+                return f"{it['key']} {it['verb']}"
             return f"{it['program']} {it['verb']}" if it.get("verb") else it["program"]
 
         for it in base_runs + runs_only:
@@ -874,11 +933,12 @@ def log(
     failed_only: bool = False,
     risky_only: bool = False,
     via: str | None = None,
+    plugin: str | None = None,
     offset: int = 0,
     limit: int = 50,
 ) -> dict[str, Any]:
-    items = load(category, days, project, source)
-    group_key = "key" if category == "web" else "program"
+    items = load(category, days, project, source, plugin)
+    group_key = _group_key(category)
     needle = (q or "").strip().lower()
     out = [
         it

@@ -203,7 +203,7 @@ export function TimelineTab({ items, runs, focusEventId, focusQuery, sessionId, 
       <div className="shrink-0 border-y border-line/10 px-6 py-2.5 sm:px-8">
         <div className="mx-auto flex max-w-7xl items-center gap-3">
           {tabs}
-          <span className="font-mono text-[0.6rem] tabular-nums text-fg/35">
+          <span className="font-mono text-label tabular-nums text-fg/40">
             {sorted.length}/{items.length} events
           </span>
           <div className="ml-auto flex min-w-0 items-center gap-1.5">
@@ -216,10 +216,10 @@ export function TimelineTab({ items, runs, focusEventId, focusQuery, sessionId, 
                     key={m.model}
                     type="button"
                     onClick={() => toggleModel(m.model)}
-                    className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[0.55rem] tabular-nums transition-colors ${
+                    className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-label tabular-nums transition-colors ${
                       on
-                        ? 'bg-vermilion/10 text-vermilion'
-                        : 'bg-fg/5 text-fg/25 line-through decoration-fg/15'
+                        ? 'bg-hot/10 text-hot'
+                        : 'bg-fg/5 text-fg/40 line-through decoration-fg/15'
                     }`}
                     title={m.model}
                   >
@@ -244,7 +244,7 @@ export function TimelineTab({ items, runs, focusEventId, focusQuery, sessionId, 
               title={expansionRequest.open ? 'Collapse all session events' : 'Expand all session events'}
               aria-label={expansionRequest.open ? 'Collapse all session events' : 'Expand all session events'}
               aria-pressed={expansionRequest.open}
-              className="flex shrink-0 items-center gap-1.5 rounded-md border border-line/15 px-2.5 py-1.5 font-mono text-[0.62rem] uppercase tracking-widest text-fg/70 transition-colors hover:border-line/30 hover:text-fg"
+              className="btn shrink-0 gap-1.5"
             >
               <Icon name={expansionRequest.open ? 'chevron-up' : 'chevron-down'} className="h-3 w-3" />
               {expansionRequest.open ? 'Collapse' : 'Expand'}
@@ -253,7 +253,7 @@ export function TimelineTab({ items, runs, focusEventId, focusQuery, sessionId, 
               type="button"
               onClick={() => setTimeSort((s) => (s === 'asc' ? 'desc' : 'asc'))}
               title={timeSort === 'asc' ? 'Oldest first — click for newest' : 'Newest first — click for oldest'}
-              className="flex items-center gap-1.5 rounded-md border border-line/15 px-2.5 py-1.5 font-mono text-[0.62rem] uppercase tracking-widest text-fg/70 transition-colors hover:border-line/30 hover:text-fg"
+              className="btn gap-1.5"
             >
               <Icon name={timeSort === 'asc' ? 'chevron-up' : 'chevron-down'} className="h-3 w-3" />
               {timeSort === 'asc' ? 'Oldest' : 'Newest'}
@@ -319,10 +319,10 @@ export function TimelineTab({ items, runs, focusEventId, focusQuery, sessionId, 
             {sorted.length === 0 && items.length > 0 ? (
               <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
                 <span className="font-mono text-3xl text-fg/10">⦰</span>
-                <p className="font-mono text-xs text-fg/35">
+                <p className="font-mono text-xs text-fg/40">
                   {items.length} event{items.length === 1 ? '' : 's'} in this session
                 </p>
-                <p className="font-mono text-[0.65rem] text-fg/25">
+                <p className="font-mono text-data text-fg/40">
                   Use the filters to choose which event types to show
                 </p>
               </div>
@@ -343,11 +343,11 @@ export function TimelineTab({ items, runs, focusEventId, focusQuery, sessionId, 
       {/* Footer */}
       <div className="shrink-0 border-t border-line/10 bg-bg px-6 py-1.5 sm:px-8">
         <div className="mx-auto flex max-w-7xl items-center justify-between">
-          <span className="font-mono text-[0.55rem] uppercase tracking-widest text-fg/30">
+          <span className="font-mono text-label uppercase tracking-label text-fg/40">
             {sorted.length} event{sorted.length === 1 ? '' : 's'}
             {hidden.size > 0 && ` · ${items.length - sorted.length} hidden`}
           </span>
-          <span className="font-mono text-[0.55rem] tabular-nums text-fg/25">
+          <span className="font-mono text-label tabular-nums text-fg/40">
             {activeKey != null && `#${activeKey.split(':').pop()}`}
           </span>
         </div>
@@ -381,24 +381,24 @@ function SidebarList({
               type="button"
               data-sidebar-key={key}
               onClick={() => onSelect(item)}
-              className={`flex w-full items-start gap-2 border-l-2 px-3 py-1.5 text-left transition-colors ${
+              className={`flex w-full items-start gap-2 px-3 py-1.5 text-left transition-colors ${
                 active
-                  ? 'border-l-vermilion bg-surface'
-                  : 'border-l-transparent hover:bg-surface/50'
+                  ? 'bg-surface ring-1 ring-inset ring-line/[0.16]'
+                  : 'hover:bg-fg/[0.04]'
               }`}
             >
               <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${meta.dot}`} />
               <span className="min-w-0 flex-1 space-y-0.5">
                 <span className="flex items-center justify-between gap-1">
-                  <span className={`truncate font-mono text-[0.5rem] font-bold uppercase tracking-widest ${meta.color}`}>
+                  <span className={`truncate font-mono text-label font-semibold uppercase tracking-label ${meta.color}`}>
                     {meta.label}
                     {item.provenance ? ` · ${PROVENANCE_META[item.provenance].sidebar}` : ''}
                   </span>
-                  <span className="shrink-0 font-mono text-[0.48rem] tabular-nums text-fg/25" title={formatDateTime(item.start_ts || item.ts)}>
+                  <span className="shrink-0 font-mono text-label tabular-nums text-fg/40" title={formatDateTime(item.start_ts || item.ts)}>
                     {formatClock(item.start_ts || item.ts)}
                   </span>
                 </span>
-                <span className="block truncate font-mono text-[0.68rem] font-bold text-fg">
+                <span className="block truncate font-mono text-data font-semibold text-fg">
                   {item.title}
                 </span>
               </span>
@@ -409,7 +409,7 @@ function SidebarList({
       {!items.length && (
         <li className="flex flex-col items-center gap-1 px-3 py-10 text-center">
           <span className="font-mono text-lg text-fg/10">⦰</span>
-          <span className="font-mono text-[0.6rem] text-fg/25">Use filters to show events</span>
+          <span className="font-mono text-label text-fg/40">Use filters to show events</span>
         </li>
       )}
     </ul>
@@ -463,12 +463,12 @@ function FilterDropdown({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1.5 rounded-md border border-line/15 px-2.5 py-1.5 font-mono text-[0.62rem] uppercase tracking-widest text-fg/70 transition-colors hover:border-line/30 hover:text-fg"
+        className="btn gap-1.5"
       >
         <Icon name="list" className="h-3 w-3" />
         Filter
         {!allOn && (
-          <span className="rounded bg-vermilion/15 px-1 py-px font-bold text-vermilion">
+          <span className="rounded bg-hot/15 px-1 py-px font-semibold text-hot">
             {activeFilters}/{totalFilters}
           </span>
         )}
@@ -476,26 +476,26 @@ function FilterDropdown({
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full z-50 mt-1 min-w-56 rounded-lg border border-line/15 bg-bg py-1 shadow-soft-md">
+        <div className="absolute right-0 top-full z-50 mt-1 min-w-56 rounded-lg border border-line/10 bg-bg py-1 shadow-soft-md">
           {/* Select all */}
           <button
             type="button"
             onClick={onToggleAll}
-            className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left font-mono text-[0.62rem] uppercase tracking-widest text-fg/60 transition-colors hover:bg-surface"
+            className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left font-mono text-label uppercase tracking-label text-fg/60 transition-colors hover:bg-fg/[0.04]"
           >
             <span className={`flex h-3.5 w-3.5 items-center justify-center rounded border ${
-              allOn ? 'border-vermilion bg-vermilion text-cream' : 'border-fg/25'
+              allOn ? 'border-hot bg-hot text-on-hot' : 'border-line/[0.16]'
             }`}>
-              {allOn && <span className="text-[0.5rem]">✓</span>}
+              {allOn && <span className="text-label">✓</span>}
             </span>
             All
-            <span className="ml-auto tabular-nums text-fg/30">{total}</span>
+            <span className="ml-auto tabular-nums text-fg/40">{total}</span>
           </button>
 
           <div className="my-1 border-t border-line/10" />
 
           {/* Categories */}
-          <div className="px-3 py-1 font-mono text-[0.5rem] uppercase tracking-widest text-fg/25">Categories</div>
+          <div className="px-3 py-1 font-mono text-label uppercase tracking-label text-fg/40">Categories</div>
           {categories.map((c) => {
             const on = !hidden.has(c.cat);
             const meta = getCategoryMeta(c.cat);
@@ -504,18 +504,18 @@ function FilterDropdown({
                 key={c.cat}
                 type="button"
                 onClick={() => onToggle(c.cat)}
-                className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left font-mono text-[0.62rem] transition-colors hover:bg-surface"
+                className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left font-mono text-label transition-colors hover:bg-fg/[0.04]"
               >
                 <span className={`flex h-3.5 w-3.5 items-center justify-center rounded border ${
-                  on ? 'border-vermilion bg-vermilion text-cream' : 'border-fg/25'
+                  on ? 'border-hot bg-hot text-on-hot' : 'border-line/[0.16]'
                 }`}>
-                  {on && <span className="text-[0.5rem]">✓</span>}
+                  {on && <span className="text-label">✓</span>}
                 </span>
                 <span className={`h-1.5 w-1.5 rounded-full ${meta.dot}`} />
-                <span className={`uppercase tracking-widest ${on ? 'text-fg/70' : 'text-fg/30'}`}>
+                <span className={`uppercase tracking-label ${on ? 'text-fg/70' : 'text-fg/40'}`}>
                   {c.label}
                 </span>
-                <span className="ml-auto tabular-nums text-fg/30">{c.count}</span>
+                <span className="ml-auto tabular-nums text-fg/40">{c.count}</span>
               </button>
             );
           })}
@@ -524,7 +524,7 @@ function FilterDropdown({
           {models.length > 0 && (
             <>
               <div className="my-1 border-t border-line/10" />
-              <div className="px-3 py-1 font-mono text-[0.5rem] uppercase tracking-widest text-fg/25">Models</div>
+              <div className="px-3 py-1 font-mono text-label uppercase tracking-label text-fg/40">Models</div>
               {models.map((m) => {
                 const on = !hiddenModels.has(m.model);
                 return (
@@ -532,17 +532,17 @@ function FilterDropdown({
                     key={m.model}
                     type="button"
                     onClick={() => onToggleModel(m.model)}
-                    className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left font-mono text-[0.62rem] transition-colors hover:bg-surface"
+                    className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left font-mono text-label transition-colors hover:bg-fg/[0.04]"
                   >
                     <span className={`flex h-3.5 w-3.5 items-center justify-center rounded border ${
-                      on ? 'border-vermilion bg-vermilion text-cream' : 'border-fg/25'
+                      on ? 'border-hot bg-hot text-on-hot' : 'border-line/[0.16]'
                     }`}>
-                      {on && <span className="text-[0.5rem]">✓</span>}
+                      {on && <span className="text-label">✓</span>}
                     </span>
-                    <span className={`rounded-full px-1.5 py-px text-[0.5rem] ${on ? 'bg-vermilion/10 text-vermilion' : 'bg-fg/5 text-fg/30'}`}>
+                    <span className={`rounded-full px-1.5 py-px text-label ${on ? 'bg-hot/10 text-hot' : 'bg-fg/5 text-fg/40'}`}>
                       {m.label}
                     </span>
-                    <span className="ml-auto tabular-nums text-fg/30">{m.count}</span>
+                    <span className="ml-auto tabular-nums text-fg/40">{m.count}</span>
                   </button>
                 );
               })}

@@ -49,6 +49,8 @@ export interface SessionSummary {
   /** Session Replay copies only: the id the session had where it was exported. */
   imported_from?: string;
   imported_at?: string | null;
+  /** Context typed at import time: why this trace was brought in. */
+  import_note?: string | null;
 }
 
 export interface TimelineItem {
@@ -286,7 +288,7 @@ export interface Settings {
   ui_sidebar_open: boolean;
   /** Onboarding finished on this install, and the agents picked there. */
   ui_onboarded: boolean;
-  ui_onboarding_agents: ('claude' | 'cursor' | 'codex')[];
+  ui_onboarding_agents: AgentId[];
 }
 
 export async function getSettings(): Promise<Settings> {
@@ -467,9 +469,9 @@ export async function getMetricsHistory(
   return data.items;
 }
 
-// --- Activity (shell + web) ---
+// --- Activity (shell, web, MCP calls, skill loads) ---
 
-export type ActivityCategory = 'shell' | 'web';
+export type ActivityCategory = 'shell' | 'web' | 'mcp' | 'skill';
 
 export interface ActivityRef {
   session_id: string;
@@ -503,6 +505,12 @@ export interface ActivityGroup {
   tool?: string | null;
   /** Web: localhost / file:// rather than the internet. */
   local?: boolean;
+  /** MCP / skills: the extension this group is, for linking to its details page. */
+  ext_key?: string;
+  plugin?: string | null;
+  installed?: boolean;
+  /** Set when no config lists it but its source is known, e.g. "Claude app built-in". */
+  origin?: string | null;
 }
 
 export interface ActivityFailure {
@@ -541,6 +549,10 @@ export interface ActivitySummary {
     risky: number;
     elevated: number;
     local?: number;
+    /** MCP: distinct server + tool pairs called. */
+    tools?: number;
+    /** Skills: loads you started with a /command. */
+    slash?: number;
   };
   groups: ActivityGroup[];
   /** Commands that failed at least twice in the window. */
@@ -556,6 +568,8 @@ export interface ActivitySummary {
   via: { key: string; runs: number }[];
   /** Ranked: anomalies against the history before the window, repeated failures, risky commands. */
   attention: ActivityAttention[];
+  /** MCP / skills: plugins whose servers or skills ran in the window, for the plugin filter. */
+  plugins?: { key: string; label: string; runs: number }[];
 }
 
 export interface ActivityItem {
@@ -588,18 +602,25 @@ export interface ActivityItem {
   key?: string;
   kind?: 'fetch' | 'search';
   local?: boolean;
+  // MCP / skills
+  ext_key?: string;
+  plugin?: string | null;
+  path?: string | null;
 }
 
 export interface ActivityFilters {
   days: number;
   project?: string;
   source?: string;
+  /** MCP / skills: only the servers or skills this plugin ships. */
+  plugin?: string;
 }
 
 function activityParams(category: ActivityCategory, f: ActivityFilters): URLSearchParams {
   const params = new URLSearchParams({ category, days: String(f.days) });
   if (f.project) params.set('project', f.project);
   if (f.source) params.set('source', f.source);
+  if (f.plugin) params.set('plugin', f.plugin);
   return params;
 }
 
@@ -839,6 +860,82 @@ export async function getSessions(filters: SessionFilters = {}): Promise<Session
   return data.sessions;
 }
 
+export type SessionSort = 'recent' | 'events' | 'duration' | 'cost';
+
+export interface SessionPageQuery extends SessionFilters {
+  offset?: number;
+  /** Last path segment of the working directory, as the dashboard names projects. */
+  project?: string;
+  /** Only these sessions (the "with findings" filter). An empty list matches nothing. */
+  ids?: string[];
+  sort?: SessionSort;
+  order?: 'asc' | 'desc';
+}
+
+export interface SessionPage {
+  sessions: SessionSummary[];
+  total: number;
+  has_more: boolean;
+  /** Older collector: only its newest 500 sessions were searched, so there may be more. */
+  capped?: boolean;
+}
+
+/** One page of the sessions list, filtered and sorted by the collector, plus the total. */
+export async function getSessionsPage(f: SessionPageQuery): Promise<SessionPage> {
+  const params = new URLSearchParams();
+  if (f.limit) params.set('limit', String(f.limit));
+  if (f.offset) params.set('offset', String(f.offset));
+  if (f.status) params.set('status', f.status);
+  if (f.source) params.set('source', f.source);
+  if (f.q) params.set('q', f.q);
+  if (f.project) params.set('project', f.project);
+  if (f.ids) params.set('ids', f.ids.join(','));
+  if (f.sort && f.sort !== 'recent') params.set('sort', f.sort);
+  if (f.order === 'asc') params.set('order', 'asc');
+  if (f.archived) params.set('archived', 'true');
+  if (f.bookmarked) params.set('bookmarked', 'true');
+  const page = await json<Partial<SessionPage> & { sessions: SessionSummary[] }>(await fetch(`/v1/sessions?${params.toString()}`));
+  if (typeof page.total === 'number') return page as SessionPage;
+  return legacySessionsPage(f);
+}
+
+const LEGACY_LIMIT = 500;
+
+/** Collectors from before server-side paging ignore offset/project/ids/sort and send no total:
+ *  take their newest 500 and page, filter and sort them here instead. */
+async function legacySessionsPage(f: SessionPageQuery): Promise<SessionPage> {
+  const all = await getSessions({ limit: LEGACY_LIMIT, status: f.status, source: f.source, q: f.q, archived: f.archived, bookmarked: f.bookmarked });
+  const projectOf = (cwd: string | null) => cwd?.split('/').filter(Boolean).pop() ?? '';
+  const ids = f.ids ? new Set(f.ids) : null;
+  const q = f.q?.toLowerCase();
+  const rows = all.filter(
+    (s) =>
+      (!f.project || projectOf(s.cwd) === f.project) &&
+      (!ids || ids.has(s.id)) &&
+      // Old collectors don't search titles; match them here too.
+      (!q || s.id.toLowerCase().includes(q) || (s.cwd ?? '').toLowerCase().includes(q) || (s.title ?? '').toLowerCase().includes(q)),
+  );
+  const val = (s: SessionSummary) =>
+    f.sort === 'events' ? s.event_count : f.sort === 'duration' ? s.duration_seconds ?? 0 : f.sort === 'cost' ? s.cost_usd : new Date(s.last_activity ?? s.started_at).getTime();
+  rows.sort((a, b) => (f.order === 'asc' ? val(a) - val(b) : val(b) - val(a)));
+  const offset = f.offset ?? 0;
+  const limit = f.limit ?? 20;
+  return { sessions: rows.slice(offset, offset + limit), total: rows.length, has_more: offset + limit < rows.length, capped: all.length >= LEGACY_LIMIT && rows.length === all.length };
+}
+
+/** Every project name with its session count, for the Sessions project filter. */
+export async function getSessionProjects(archived = false): Promise<{ project: string; sessions: number }[]> {
+  const res = await fetch(`/v1/sessions/projects${archived ? '?archived=true' : ''}`);
+  if (res.ok) return (await json<{ projects: { project: string; sessions: number }[] }>(res)).projects;
+  // Older collectors have no project list (the request falls through to a session lookup): count from the recent sessions.
+  const counts = new Map<string, number>();
+  for (const x of await getSessions({ limit: LEGACY_LIMIT, archived })) {
+    const name = x.cwd?.split('/').filter(Boolean).pop();
+    if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return [...counts].map(([project, sessions]) => ({ project, sessions })).sort((a, b) => a.project.localeCompare(b.project));
+}
+
 export async function getSessionDetail(id: string, store: Store = 'main'): Promise<SessionDetail> {
   return json<SessionDetail>(await fetch(inStore(`/v1/sessions/${id}`, store)));
 }
@@ -900,6 +997,17 @@ export async function importReplaySession(file: File): Promise<ReplayImportResul
     throw new Error(body?.detail || `Import failed (${res.status})`);
   }
   return (await res.json()) as ReplayImportResult;
+}
+
+/** Set (or clear, with an empty string) the context note on a Session Replay import. */
+export async function setImportNote(id: string, note: string): Promise<void> {
+  await json(
+    await fetch(inStore(`/v1/sessions/${encodeURIComponent(id)}/import-note`, 'replay'), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    }),
+  );
 }
 
 /** Delete an imported session, with every session its file brought along. */
@@ -1166,6 +1274,18 @@ export async function sendTestEvent(source: AgentId): Promise<string> {
     for (const ev of events) {
       await ingest('codex', { ...base, ...ev });
     }
+  } else if (source === 'opencode') {
+    const base = { session_id: sid, cwd, model: 'openai/gpt-5' };
+    const events: Record<string, unknown>[] = [
+      { hook_event_name: 'SessionStart', timestamp: ts() },
+      { hook_event_name: 'UserPromptSubmit', prompt: 'Inspect the parser and fix the failing test.', timestamp: ts() },
+      { hook_event_name: 'PreToolUse', tool_name: 'bash', tool_input: { command: 'npm test' }, timestamp: ts() },
+      { hook_event_name: 'PostToolUse', tool_name: 'bash', tool_input: { command: 'npm test' }, tool_response: 'Tests passed', timestamp: ts() },
+      { hook_event_name: 'afterAgentResponse', response: 'The parser test now passes.', timestamp: ts() },
+      { hook_event_name: 'OpenCodeUsage', usage: { input_tokens: 120, output_tokens: 40 }, timestamp: ts() },
+      { hook_event_name: 'Stop', timestamp: ts() },
+    ];
+    for (const ev of events) await ingest('opencode', { ...base, ...ev });
   } else {
     const base = { conversation_id: sid, workspace_roots: [cwd], cwd };
     const events: Record<string, unknown>[] = [
@@ -1233,4 +1353,352 @@ export async function sendTestEvent(source: AgentId): Promise<string> {
     }
   }
   return sid;
+}
+
+// ---------------------------------------------------------------- passive mode
+
+export type PassiveAgent = 'claude' | 'cursor' | 'codex';
+
+/** What's on disk for one agent (a scan, nothing imported) plus sessions already in cot. */
+export interface PassiveAgentDetail {
+  agent: PassiveAgent;
+  root: string;
+  readable: boolean;
+  transcripts: number;
+  bytes: number;
+  projects: number;
+  oldest: string | null;
+  newest: string | null;
+  /** Transcripts written to in the last few minutes: sessions still running, left for the next run. */
+  active: number;
+  sessions: number;
+}
+
+export interface PassiveRunAgent {
+  status: 'ok' | 'error' | 'unreadable' | 'skipped' | 'importing';
+  events?: number;
+  held_back?: number;
+  error?: string;
+}
+
+export interface PassiveRun {
+  id: number;
+  trigger: 'manual' | 'schedule' | string;
+  started_at: string;
+  finished_at: string | null;
+  status: 'running' | 'ok' | 'partial' | 'error';
+  phase?: 'metadata' | 'analysis' | 'done';
+  agents?: Partial<Record<PassiveAgent, PassiveRunAgent>>;
+  events?: number;
+  new_sessions?: number;
+  held_back?: number;
+  findings?: number;
+  error?: string;
+}
+
+export interface PassiveSchedule {
+  cron: string;
+  description: string;
+  next_runs: string[];
+}
+
+export interface PassiveStatus {
+  enabled: boolean;
+  agents: PassiveAgent[];
+  cron: string;
+  schedule: PassiveSchedule;
+  next_scheduled: string | null;
+  running: { running: boolean; phase?: 'metadata' | 'analysis'; started_at?: string; trigger?: string; agents?: Partial<Record<PassiveAgent, PassiveRunAgent>> };
+  agents_detail: PassiveAgentDetail[];
+  runs: PassiveRun[];
+  presets: { id: string; label: string; cron: string }[];
+}
+
+/** Thrown when the collector predates passive mode (no /v1/passive): the app needs updating. */
+export class PassiveUnsupportedError extends Error {
+  constructor() {
+    super('This collector does not support passive import yet');
+  }
+}
+
+export async function getPassive(): Promise<PassiveStatus> {
+  const res = await fetch('/v1/passive');
+  if (res.status === 404) throw new PassiveUnsupportedError();
+  return json<PassiveStatus>(res);
+}
+
+export async function updatePassive(patch: { enabled?: boolean; agents?: PassiveAgent[]; cron?: string }): Promise<PassiveStatus> {
+  const res = await fetch('/v1/passive', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(body?.detail || `Couldn't save (${res.status})`);
+  }
+  return (await res.json()) as PassiveStatus;
+}
+
+export async function previewSchedule(cron: string): Promise<({ valid: true } & PassiveSchedule) | { valid: false; error: string }> {
+  return json(
+    await fetch('/v1/passive/schedule/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cron }),
+    }),
+  );
+}
+
+export async function runPassiveNow(): Promise<{ started: boolean }> {
+  return json(await fetch('/v1/passive/run', { method: 'POST' }));
+}
+
+/** Light progress check (no transcript scan) for the dashboard banner. */
+export async function getPassiveRunning(): Promise<{ running: PassiveStatus['running']; last_run: PassiveRun | null }> {
+  return json(await fetch('/v1/passive/running'));
+}
+
+// ----------------------------------------------------------------- task tray
+
+export type TaskRunning =
+  | { id: string; kind: 'session'; session_id: string; title: string; source: string; cwd: string | null; events: number; started_at: string; last_activity: string | null }
+  | { id: string; kind: 'passive'; phase: 'metadata' | 'analysis'; trigger?: string; started_at?: string }
+  | { id: string; kind: 'index'; title: string };
+
+export interface TaskRecent {
+  id: string;
+  kind: 'passive';
+  status: 'ok' | 'partial' | 'error';
+  finished_at: string;
+  trigger: string;
+  new_sessions: number;
+  findings?: number;
+  held_back: number;
+  error?: string;
+}
+
+/** In-progress work for the top-bar tray, plus passive runs that finished in the last day.
+ *  Collectors from before /v1/tasks still report live sessions through the sessions list. */
+export async function getTasks(): Promise<{ running: TaskRunning[]; recent: TaskRecent[] }> {
+  const res = await fetch('/v1/tasks');
+  if (res.status !== 404) return json(res);
+  const live = await getSessions({ limit: 20, status: 'active' });
+  return {
+    running: live.map((x) => ({
+      id: `session:${x.id}`,
+      kind: 'session' as const,
+      session_id: x.id,
+      title: x.title || 'Untitled session',
+      source: x.source,
+      cwd: x.cwd,
+      events: x.event_count,
+      started_at: x.started_at,
+      last_activity: x.last_activity ?? null,
+    })),
+    recent: [],
+  };
+}
+
+// --- Extensions (plugins, skills, MCP servers) ------------------------------
+
+export type ExtensionKind = 'plugin' | 'skill' | 'mcp';
+export type ExtensionScope = 'user' | 'project' | 'local' | 'plugin' | 'builtin' | 'managed' | 'desktop';
+export type RiskLevel = 'ok' | 'low' | 'medium' | 'high' | 'critical' | null;
+
+export interface ExtensionUsage {
+  sessions: number;
+  calls: number;
+  errors: number;
+  error_rate: number;
+  p50_ms: number | null;
+  first_used: string | null;
+  last_used: string | null;
+  agents: Record<string, number>;
+  projects: number;
+  trend: number[];
+  recent_calls: number;
+}
+
+export interface ExtensionRisk {
+  level: RiskLevel;
+  findings: number;
+  verdict: 'approved' | 'review' | 'rejected' | null;
+  score: number | null;
+  scanned: boolean;
+}
+
+export interface PluginContents {
+  skills: string[];
+  mcp_servers: string[];
+  commands: number;
+  agents: number;
+  hooks: number;
+}
+
+export interface ExtensionItem {
+  key: string;
+  kind: ExtensionKind;
+  name: string;
+  display_name: string;
+  description: string | null;
+  version: string | null;
+  marketplace: string | null;
+  plugin: string | null;
+  installed: boolean;
+  origin: string | null;
+  enabled: boolean | null;
+  agents: string[];
+  scopes: ExtensionScope[];
+  projects: string[];
+  transport: string | null;
+  contents: PluginContents | null;
+  native_usage: { count: number | null; last_used: string | null } | null;
+  usage: ExtensionUsage;
+  risk: ExtensionRisk;
+  /** Used at least once in all history (usage itself may be limited to a window). */
+  ever_used?: boolean;
+}
+
+export interface ExtensionKindSummary {
+  installed: number;
+  used: number;
+  used_30d: number;
+  unused: number;
+  project_scoped: number;
+  not_installed: number;
+  flagged: number;
+}
+
+export interface ScanProgress {
+  running: boolean;
+  done: number;
+  total: number;
+}
+
+export interface ExtensionsResponse {
+  generated_at: string;
+  summary: Record<ExtensionKind, ExtensionKindSummary>;
+  projects: string[];
+  items: ExtensionItem[];
+  scan: ScanProgress;
+}
+
+export interface ExtensionInstall {
+  agent: string;
+  scope: ExtensionScope;
+  path: string | null;
+  project: string | null;
+  enabled: boolean | null;
+  plugin: string | null;
+  config_file: string | null;
+}
+
+export interface McpConfigSummary {
+  transport: string;
+  command?: string | null;
+  command_path?: string | null;
+  args: string[];
+  url_host?: string | null;
+  url_scheme?: string | null;
+  env_keys: string[];
+  header_keys: string[];
+  cwd?: string | null;
+}
+
+export interface ConfigRisk {
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  rule: string;
+  title: string;
+  detail: string;
+  agent?: string;
+  scope?: string;
+  project?: string | null;
+}
+
+export interface SecurityFinding {
+  perspective: string;
+  rule: string;
+  severity: 'info' | 'low' | 'medium' | 'high' | 'critical';
+  title: string;
+  detail: string;
+  file: string | null;
+  line: number | null;
+  excerpt: string | null;
+}
+
+export interface SecurityReport {
+  score: number;
+  grade: string;
+  verdict: 'approved' | 'review' | 'rejected';
+  perspectives: { id: string; label: string; description: string; status: 'pass' | 'warn' | 'fail' | 'skipped'; score: number | null }[];
+  findings: SecurityFinding[];
+  digest: string;
+  scanned_at: string;
+}
+
+export interface ExtensionDetail extends Omit<ExtensionItem, 'usage' | 'transport'> {
+  author: string | null;
+  license: string | null;
+  homepage: string | null;
+  repository: string | null;
+  category?: string | null;
+  keywords?: string[] | null;
+  allowed_tools?: string[] | null;
+  installed_at?: string | null;
+  updated_at?: string | null;
+  git_sha?: string | null;
+  files?: number;
+  size_bytes?: number;
+  paths: string[];
+  shadows: { agent: string; project: string; overrides: string | null }[] | null;
+  installs: ExtensionInstall[];
+  mcp?: McpConfigSummary | null;
+  risks?: ConfigRisk[];
+  usage: ExtensionUsage;
+  tools: { tool: string; calls: number; errors: number; p50_ms: number | null }[];
+  projects_used: { path: string; sessions: number; installed_here: boolean }[];
+  sessions: { id: string; source: string; cwd: string | null; uses: number; last_used: string | null; first_event_id: number }[];
+  children: ExtensionItem[];
+  security: SecurityReport | null;
+  mcp_tools_known: { tool: string; description: string | null }[] | null;
+}
+
+export interface SessionExtension {
+  key: string;
+  kind: ExtensionKind;
+  name: string;
+  display_name: string;
+  installed: boolean;
+  scopes: ExtensionScope[];
+  plugin: string | null;
+  calls: number;
+  errors: number;
+  tools: string[];
+}
+
+/** `days` > 0 limits uses, sessions and failures to that window; last used is always all-time. */
+export async function getExtensions(refresh = false, days = 0): Promise<ExtensionsResponse> {
+  const params = new URLSearchParams();
+  if (refresh) params.set('refresh', 'true');
+  if (days) params.set('days', String(days));
+  const qs = params.toString();
+  return json<ExtensionsResponse>(await fetch(`/v1/extensions${qs ? `?${qs}` : ''}`));
+}
+
+export async function getExtensionDetail(key: string): Promise<ExtensionDetail> {
+  return json<ExtensionDetail>(await fetch(`/v1/extensions/detail?key=${encodeURIComponent(key)}`));
+}
+
+export async function scanExtension(key: string): Promise<SecurityReport> {
+  return json<SecurityReport>(await fetch(`/v1/extensions/scan?key=${encodeURIComponent(key)}`, { method: 'POST' }));
+}
+
+export async function scanAllExtensions(): Promise<ScanProgress> {
+  return json<ScanProgress>(await fetch('/v1/extensions/scan-all', { method: 'POST' }));
+}
+
+export async function getSessionExtensions(id: string): Promise<SessionExtension[]> {
+  const r = await json<{ extensions: SessionExtension[] }>(await fetch(`/v1/sessions/${encodeURIComponent(id)}/extensions`));
+  return r.extensions;
 }

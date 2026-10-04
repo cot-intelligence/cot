@@ -65,14 +65,14 @@ export function UpdateBanner() {
           <motion.div
             whileHover={{ x: -2, y: -2 }}
             transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-            className="flex items-start gap-3 border border-vermilion/60 bg-vermilion px-4 py-3 text-cream shadow-soft-lg">
+            className="flex items-start gap-3 border rounded-control border-hot/60 bg-hot px-4 py-3 text-on-hot shadow-soft-lg">
             <Icon name="bell" className="mt-0.5 h-4 w-4 shrink-0" />
             <div className="min-w-0 flex-1">
-              <p className="font-mono text-xs font-bold uppercase tracking-wide">
+              <p className="font-mono text-xs font-semibold uppercase tracking-wide">
                 New version available
               </p>
               <p className="mt-0.5 text-sm">
-                v{info.current} &rarr; <span className="font-bold">v{info.latest}</span>
+                v{info.current} &rarr; <span className="font-semibold">v{info.latest}</span>
               </p>
               {info.url && (
                 <a
@@ -88,7 +88,7 @@ export function UpdateBanner() {
               type="button"
               onClick={handleDismiss}
               aria-label="Dismiss"
-              className="-mr-1 -mt-1 shrink-0 px-1 text-lg leading-none text-cream/80 transition-colors hover:text-cream">
+              className="-mr-1 -mt-1 shrink-0 px-1 text-lg leading-none text-on-hot/80 transition-colors hover:text-on-hot">
               &times;
             </button>
           </motion.div>

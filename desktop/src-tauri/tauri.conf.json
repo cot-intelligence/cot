@@ -1,0 +1,65 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "cot",
+  "version": "0.0.0",
+  "identifier": "run.cot.app",
+  "build": {
+    "frontendDist": "../loading",
+    "beforeDevCommand": "scripts/prepare-collector.sh --if-missing"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "category": "DeveloperTool",
+    "copyright": "cot",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "resources/cot-collector/": "cot-collector/",
+      "resources/static/": "static/"
+    },
+    "createUpdaterArtifacts": false,
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "entitlements": "Entitlements.plist",
+      "signingIdentity": "-",
+      "dmg": {
+        "background": "../dmg/background.png",
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 170,
+          "y": 200
+        },
+        "applicationFolderPosition": {
+          "x": 490,
+          "y": 200
+        }
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY",
+      "endpoints": [
+        "https://cot.run/version.json"
+      ]
+    }
+  }
+}
