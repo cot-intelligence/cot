@@ -28,7 +28,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       signature: ${{ steps.artifacts.outputs.signature }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
@@ -109,7 +109,7 @@ jobs:
     if: vars.SITE_REPO != '' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: ${{ vars.SITE_REPO }}
           token: ${{ secrets.SITE_REPO_TOKEN }}
