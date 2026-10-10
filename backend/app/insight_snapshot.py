@@ -75,6 +75,7 @@ class Event:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     cwd: str | None = None
+    source: str | None = None
 
     def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
@@ -100,9 +101,11 @@ class Snapshot:
     session_last_ts: dict[str, Any] = field(default_factory=dict)
     session_tool_calls: dict[str, int] = field(default_factory=dict)
     trend_events: list[Event] = field(default_factory=list)
+    # (event, facts) pairs for user rules, built on first use (``user_rules.snapshot_facts``).
+    rule_facts: list[Any] | None = field(default=None, repr=False)
 
 
-def _event_from_row(row: Any) -> Event:
+def event_from_row(row: Any) -> Event:
     return Event(
         id=row["id"],
         session_id=row["session_id"],
@@ -121,6 +124,7 @@ def _event_from_row(row: Any) -> Event:
         cache_read_tokens=row["cache_read_tokens"] or 0,
         cache_write_tokens=row["cache_write_tokens"] or 0,
         cwd=row["cwd"],
+        source=row.get("source") if hasattr(row, "get") else row["source"],
     )
 
 
@@ -137,10 +141,10 @@ def build_snapshot(*, cutoff: str | None, session_id: str | None) -> Snapshot:
 
     data = db.read_insight_inputs(cutoff=cutoff, session_id=session_id, trend_since=trend_since)
     return Snapshot(
-        events=[_event_from_row(r) for r in data["events"]],
+        events=[event_from_row(r) for r in data["events"]],
         session_id=session_id,
         now=now,
         session_last_ts=data["session_last_ts"],
         session_tool_calls=data["session_tool_calls"],
-        trend_events=[_event_from_row(r) for r in data["trend_events"]],
+        trend_events=[event_from_row(r) for r in data["trend_events"]],
     )

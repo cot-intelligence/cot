@@ -36,7 +36,10 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, activity, ai_insights, cron, db, extension_usage, insights, passive, store, timeutil
+from . import (
+    __version__, activity, ai_insights, cron, db, extension_usage, insights, passive, store,
+    timeutil, user_rules,
+)
 
 app = FastAPI(title="cot collector", version=__version__)
 
@@ -1410,6 +1413,75 @@ def dismiss_insight(fingerprint: str) -> dict[str, Any]:
 def restore_insight(fingerprint: str) -> dict[str, Any]:
     if not insights.set_finding_status(fingerprint, "active"):
         raise HTTPException(status_code=404, detail="Finding not found")
+    return {"ok": True}
+
+
+# --- user rules ------------------------------------------------------------------
+
+
+class RuleBody(BaseModel):
+    spec: dict[str, Any] | None = None
+    enabled: bool | None = None
+
+
+class RulePreviewBody(BaseModel):
+    spec: dict[str, Any]
+    days: int = 30
+
+
+def _spec_error(exc: user_rules.SpecError) -> HTTPException:
+    return HTTPException(status_code=422, detail={"path": exc.path, "message": exc.message})
+
+
+@app.get("/v1/rules/schema")
+def get_rules_schema() -> dict[str, Any]:
+    """Fields, operators and choices the rule builder renders from."""
+    return user_rules.schema()
+
+
+@app.get("/v1/rules")
+def get_rules() -> dict[str, Any]:
+    return {"rules": user_rules.list_rules()}
+
+
+@app.post("/v1/rules")
+def create_rule(body: RuleBody) -> dict[str, Any]:
+    if body.spec is None:
+        raise HTTPException(status_code=422, detail={"path": "", "message": "spec is required"})
+    try:
+        rule = user_rules.create_rule(body.spec, True if body.enabled is None else body.enabled)
+    except user_rules.SpecError as exc:
+        raise _spec_error(exc)
+    db.record_audit_event("rules.created", target=rule["id"], detail={"name": rule["spec"]["name"]})
+    return rule
+
+
+@app.post("/v1/rules/preview")
+def preview_rule(body: RulePreviewBody) -> dict[str, Any]:
+    """Dry-run an unsaved rule over recent history; nothing is stored."""
+    try:
+        return user_rules.preview(body.spec, max(1, min(body.days, 365)))
+    except user_rules.SpecError as exc:
+        raise _spec_error(exc)
+
+
+@app.put("/v1/rules/{rule_id}")
+def update_rule(rule_id: str, body: RuleBody) -> dict[str, Any]:
+    try:
+        rule = user_rules.update_rule(rule_id, body.spec, body.enabled)
+    except user_rules.SpecError as exc:
+        raise _spec_error(exc)
+    if rule is None:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    db.record_audit_event("rules.updated", target=rule_id, detail={"enabled": rule["enabled"]})
+    return rule
+
+
+@app.delete("/v1/rules/{rule_id}")
+def delete_rule(rule_id: str) -> dict[str, Any]:
+    if not user_rules.delete_rule(rule_id):
+        raise HTTPException(status_code=404, detail="Rule not found")
+    db.record_audit_event("rules.deleted", target=rule_id)
     return {"ok": True}
 
 

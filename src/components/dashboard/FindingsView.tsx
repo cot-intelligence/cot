@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   dismissInsight,
   getInsights,
+  getRules,
   getSessions,
   restoreInsight,
   type ActionableInsight,
@@ -10,6 +11,7 @@ import {
   type InsightsResponse,
   type InsightStatus,
   type SessionSummary,
+  type UserRule,
 } from '../../lib/api';
 import { usePolling } from '../../lib/usePolling';
 import { agentLabel } from '../forest/AgentMark';
@@ -49,6 +51,8 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
   );
   // Same key as the Overview's sample, for the evidence lines (project · agent).
   const { data: recent } = usePolling<SessionSummary[]>(['sessions', 'overview', 500], () => getSessions({ limit: 500 }), 30000);
+  const { data: myRules } = usePolling<UserRule[]>(['rules'], () => getRules(), 60000);
+  const userRules = (myRules ?? []).filter((r) => r.enabled).length;
   const byId = useMemo(() => new Map((recent ?? []).map((s) => [s.id, s])), [recent]);
 
   useEffect(() => {
@@ -96,7 +100,7 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
           <div>
             <span className="label">Govern</span>
             <h1>Findings</h1>
-            <p>{RULE_COUNT} rules across security, cost and usability, run on {days ? `the last ${days} days` : 'all history'}.</p>
+            <p>{RULE_COUNT} built-in rules{userRules ? ` and ${userRules} of yours` : ''} across security, cost and usability, run on {days ? `the last ${days} days` : 'all history'}. <a href="#/rules">Manage rules</a></p>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <Seg id="vf-fwin" value={days} onChange={(k) => { setDays(k); setSel(null); }} options={WINDOWS} />
@@ -153,7 +157,7 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
                           onClick={() => setSel(f.fingerprint)}
                           aria-current={on}
                           style={{ width: '100%', textAlign: 'left', border: 0, background: on ? 'var(--v-bg)' : 'none', borderRadius: 10, padding: '10px 12px', display: 'grid', gap: 4, boxShadow: on ? '0 0 0 1px var(--v-mute)' : undefined }}>
-                          <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Sev s={f.severity} /><span className="mono faint truncate" style={{ fontSize: 11 }}>{f.id}</span></span>
+                          <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Sev s={f.severity} /><span className="mono faint truncate" style={{ fontSize: 11 }}>{f.id.startsWith('user.') ? `your rule · ${f.group_title}` : f.id}</span></span>
                           <span className="truncate" style={{ fontWeight: 500, fontSize: 13 }}>{f.title}</span>
                         </button>
                       </motion.li>

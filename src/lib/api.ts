@@ -1733,3 +1733,140 @@ export async function getSessionExtensions(id: string): Promise<SessionExtension
   const r = await json<{ extensions: SessionExtension[] }>(await fetch(`/v1/sessions/${encodeURIComponent(id)}/extensions`));
   return r.extensions;
 }
+
+// --- user rules (backend/app/user_rules.py) ---------------------------------------
+
+export type RuleFieldKind = 'text' | 'number' | 'enum';
+export type RuleType = 'match' | 'threshold';
+export type RuleAction = 'finding' | 'ask' | 'deny';
+
+export interface RuleField {
+  name: string;
+  label: string;
+  kind: RuleFieldKind;
+  /** `pre`: known before the tool runs (a rule over only these could block). */
+  phase: 'pre' | 'post';
+  options: string[];
+  groupable: boolean;
+}
+
+export interface RuleOperator {
+  name: string;
+  label: string;
+  kinds: RuleFieldKind[];
+  value: 'none' | 'one' | 'list';
+}
+
+export interface RuleSchema {
+  version: number;
+  types: RuleType[];
+  pillars: InsightPillar[];
+  severities: InsightSeverity[];
+  actions: RuleAction[];
+  enforcement_enabled: boolean;
+  sources: string[];
+  fields: RuleField[];
+  operators: RuleOperator[];
+  aggregates: ('count' | 'sum' | 'distinct')[];
+}
+
+export interface RuleLeaf {
+  field: string;
+  op: string;
+  value?: string | number | string[];
+}
+export type RuleCondition = RuleLeaf | { all: RuleCondition[] } | { any: RuleCondition[] } | { not: RuleCondition };
+
+export interface RuleThreshold {
+  group_by: string[];
+  aggregate: 'count' | 'sum' | 'distinct';
+  field?: string;
+  op: 'gt' | 'gte' | 'lt' | 'lte' | 'eq';
+  value: number;
+}
+
+export interface RuleSpec {
+  version?: number;
+  name: string;
+  description?: string | null;
+  pillar: InsightPillar;
+  severity: InsightSeverity;
+  type: RuleType;
+  scope?: { sources: string[]; projects: string[] };
+  when: RuleCondition;
+  subject?: string;
+  threshold?: RuleThreshold;
+  recommendation?: string | null;
+  action?: RuleAction;
+}
+
+export interface UserRule {
+  id: string;
+  spec: RuleSpec;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+  /** False when a stored spec no longer validates (it is skipped, not run). */
+  valid: boolean;
+  error: string | null;
+  /** Decidable before the tool runs, so it could block once enforcement ships. */
+  enforceable: boolean;
+}
+
+export interface RulePreview {
+  spec: RuleSpec;
+  enforceable: boolean;
+  window_days: number;
+  events_scanned: number;
+  events_matched: number;
+  sessions_matched: number;
+  findings: ActionableInsight[];
+}
+
+/** A rule spec the collector rejected; `path` points into the spec (e.g. `when.all[1].value`). */
+export class RuleSpecError extends Error {
+  constructor(public path: string, message: string) {
+    super(message);
+  }
+}
+
+async function ruleJson<T>(res: Response): Promise<T> {
+  if (res.status === 422) {
+    const body = await res.json().catch(() => null);
+    const d = body?.detail;
+    if (d && typeof d === 'object' && 'message' in d) throw new RuleSpecError(String(d.path ?? ''), String(d.message));
+  }
+  return json<T>(res);
+}
+
+const JSON_HEADERS = { 'Content-Type': 'application/json' };
+
+export async function getRuleSchema(): Promise<RuleSchema> {
+  return json<RuleSchema>(await fetch('/v1/rules/schema'));
+}
+
+export async function getRules(): Promise<UserRule[]> {
+  return (await json<{ rules: UserRule[] }>(await fetch('/v1/rules'))).rules;
+}
+
+export async function createRule(spec: RuleSpec, enabled = true): Promise<UserRule> {
+  return ruleJson<UserRule>(
+    await fetch('/v1/rules', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ spec, enabled }) }),
+  );
+}
+
+export async function updateRule(id: string, patch: { spec?: RuleSpec; enabled?: boolean }): Promise<UserRule> {
+  return ruleJson<UserRule>(
+    await fetch(`/v1/rules/${encodeURIComponent(id)}`, { method: 'PUT', headers: JSON_HEADERS, body: JSON.stringify(patch) }),
+  );
+}
+
+export async function deleteRule(id: string): Promise<void> {
+  await json<{ ok: boolean }>(await fetch(`/v1/rules/${encodeURIComponent(id)}`, { method: 'DELETE' }));
+}
+
+export async function previewRule(spec: RuleSpec, days = 30, signal?: AbortSignal): Promise<RulePreview> {
+  return ruleJson<RulePreview>(
+    await fetch('/v1/rules/preview', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ spec, days }), signal }),
+  );
+}

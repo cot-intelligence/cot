@@ -9,7 +9,7 @@ import { usePrefs } from '../../lib/prefs';
 
 export type ActivityTab = 'shell' | 'web' | 'mcp' | 'skill' | 'plugin';
 export type NavKey =
-  | 'sessions' | 'overview' | 'replay' | 'findings' | 'governance' | 'settings'
+  | 'sessions' | 'overview' | 'replay' | 'findings' | 'rules' | 'governance' | 'settings'
   | `activity-${ActivityTab}`;
 
 // Markup and classes follow the demo's sidebar (demo-variants/src/variants/forest/App.tsx) one to one;
@@ -37,6 +37,7 @@ const NAV: { group: string; items: { key: NavKey; label: string; href: string; i
     group: 'Govern',
     items: [
       { key: 'findings', label: 'Findings', href: '#/findings', icon: 'findings' },
+      { key: 'rules', label: 'Rules', href: '#/rules', icon: 'filter' },
       { key: 'governance', label: 'Governance', href: '#/governance', icon: 'governance' },
     ],
   },

@@ -18,6 +18,10 @@ never "Breached". False positives are expected and cheap to dismiss.
 3. Put its thresholds in ``CONSTANTS[rule_id]``.
 4. Add a fires / doesn't-fire test pair in ``backend/tests/test_insights.py``.
 
+Rules end users write in the dashboard are not Python: they are declarative
+specs in ``user_rules.py``, compiled at runtime and run after the built-ins
+here, feeding the same lifecycle.
+
 The finding's ``subject`` must be the stable entity the finding is about
 (command string, path, cwd, session id) — it drives the lifecycle
 fingerprint, so re-detections refresh the same finding instead of creating
@@ -57,7 +61,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from . import db
+from . import db, user_rules
 from .insight_lifecycle import FindingsStore
 from .insight_snapshot import Event, Snapshot, build_snapshot
 from .pricing import cost_for, normalize_model
@@ -1009,7 +1013,9 @@ def _stored_to_finding(r: Any) -> dict[str, Any]:
     return {
         "id": r["rule_id"],
         "fingerprint": r["fingerprint"],
-        "group_title": GROUP_TITLES.get(r["rule_id"], r["pillar"]),
+        "group_title": (
+            GROUP_TITLES.get(r["rule_id"]) or user_rules.group_title(r["rule_id"]) or r["pillar"]
+        ),
         "pillar": r["pillar"],
         "tier": r["tier"],
         "severity": r["severity"],
@@ -1022,6 +1028,7 @@ def _stored_to_finding(r: Any) -> dict[str, Any]:
         "first_seen": r["first_seen"],
         "last_seen": r["last_seen"],
         "resolved_at": r["resolved_at"],
+        "user_rule": r["rule_id"].startswith(user_rules.ID_PREFIX),
     }
 
 
@@ -1092,7 +1099,8 @@ def compute_insights(
     lifecycle; per-session mode is ephemeral. ``progress(done, total)`` is
     called after the snapshot, each rule and the reconcile.
     """
-    total = len(RULES) + 2
+    custom = user_rules.active_rules()
+    total = len(RULES) + len(custom) + 2
     step = 0
 
     def advance() -> None:
@@ -1110,6 +1118,9 @@ def compute_insights(
     for meta in RULES.values():
         if not (session_id and meta.aggregate_only):
             findings.extend(meta.fn(snap))
+        advance()
+    for custom_rule in custom:
+        findings.extend(custom_rule.run(snap))
         advance()
     if session_id is None:
         with db.insight_findings_repo() as store:

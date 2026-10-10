@@ -209,6 +209,14 @@ CREATE TABLE IF NOT EXISTS ai_analyses (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ai_analyses_created ON ai_analyses(created_at);
+
+CREATE TABLE IF NOT EXISTS user_rules (
+    id          TEXT PRIMARY KEY,
+    spec        TEXT NOT NULL,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
 """
 
 
@@ -4192,8 +4200,30 @@ _INSIGHT_EVENT_COLUMNS = (
     "e.id, e.session_id, e.ts, e.category, e.tool, e.target, e.status, e.hook,"
     " e.title, e.detail, e.model, e.duration_ms,"
     " e.input_tokens, e.output_tokens, e.cache_read_tokens, e.cache_write_tokens,"
-    " s.cwd"
+    " s.cwd, e.source"
 )
+
+
+def read_rule_events(*, cutoff: str | None, with_detail: bool) -> list[dict[str, Any]]:
+    """The insight working set alone, for dry-running one user rule.
+
+    Skips the cross-session views and, unless the rule reads it, the ``detail``
+    column — most of the events table's bytes — so a preview stays interactive.
+    """
+    cols = _INSIGHT_EVENT_COLUMNS if with_detail else _INSIGHT_EVENT_COLUMNS.replace(" e.detail,", " NULL AS detail,")
+    where, params = " WHERE s.archived = 0", []
+    if cutoff:
+        where += " AND e.ts >= ?"
+        params.append(cutoff)
+    with store.read() as conn:
+        return [
+            dict(r)
+            for r in conn.execute(
+                "SELECT " + cols + " FROM events e JOIN sessions s ON s.id = e.session_id"
+                + where + " ORDER BY e.session_id, e.ts, e.id",
+                params,
+            ).fetchall()
+        ]
 
 
 def read_insight_inputs(
@@ -4320,6 +4350,50 @@ def insight_findings_repo() -> Iterator[InsightFindingsRepo]:
     """A findings repository over a single connection/transaction."""
     with store.write() as conn:
         yield InsightFindingsRepo(conn)
+
+
+def delete_insight_findings_for_rule(rule_id: str) -> None:
+    """Drop every stored finding of one rule (a deleted or disabled user rule)."""
+    with store.write() as conn:
+        conn.execute("DELETE FROM insight_findings WHERE rule_id = ?", (rule_id,))
+
+
+# --- user rules ---------------------------------------------------------------
+
+
+def list_user_rules() -> list[sqlite3.Row]:
+    with store.read() as conn:
+        return conn.execute("SELECT * FROM user_rules ORDER BY created_at").fetchall()
+
+
+def get_user_rule(rule_id: str) -> sqlite3.Row | None:
+    with store.read() as conn:
+        return conn.execute("SELECT * FROM user_rules WHERE id = ?", (rule_id,)).fetchone()
+
+
+def upsert_user_rule(rule_id: str, spec_json: str, enabled: bool) -> None:
+    ts = timeutil.now()
+    with store.write() as conn:
+        conn.execute(
+            "INSERT INTO user_rules (id, spec, enabled, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET"
+            " spec = excluded.spec, enabled = excluded.enabled, updated_at = excluded.updated_at",
+            (rule_id, spec_json, 1 if enabled else 0, ts, ts),
+        )
+
+
+def delete_user_rule(rule_id: str) -> bool:
+    with store.write() as conn:
+        return conn.execute("DELETE FROM user_rules WHERE id = ?", (rule_id,)).rowcount > 0
+
+
+def user_rules_version() -> tuple[Any, ...]:
+    """Cheap change token for the compiled-rule cache: count, newest edit, enabled count."""
+    with store.read() as conn:
+        r = conn.execute(
+            "SELECT COUNT(*) n, MAX(updated_at) t, SUM(enabled) e FROM user_rules"
+        ).fetchone()
+    return (str(store.path()), r["n"], r["t"], r["e"])
 
 
 def set_insight_finding_status(fingerprint: str, status: str, dismissed_at: str | None) -> bool:

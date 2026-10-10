@@ -598,3 +598,16 @@
 /* Workspace card lives at the bottom of the sidebar, under the collector status. */
 .vf .side > .ws { margin: 0 12px 12px; }
 .vf .side-foot { border-top: 1px solid var(--v-line); }
+
+/* Rules (RulesView) */
+.vf .rule-row { display: flex; gap: 16px; align-items: center; justify-content: space-between; padding: 12px 20px; border-top: 1px solid var(--v-line); }
+.vf .rule-row:first-child { border-top: 0; }
+.vf .rule-templates { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 10px; }
+.vf .rule-template { display: grid; gap: 6px; padding: 14px 16px; text-align: left; align-content: start; }
+.vf .rule-form { display: grid; gap: 22px; }
+.vf .rule-sec { display: grid; gap: 8px; }
+.vf .rule-line { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.vf .rule-sec.rule-line { gap: 20px; align-items: start; }
+.vf .input.textarea { height: auto; width: 100%; padding: 8px 10px; line-height: 18px; resize: vertical; }
+.vf .rule-err { margin: 0; font-size: 12px; color: var(--v-alert); }
+@media (max-width: 640px) { .vf .rule-row { flex-direction: column; align-items: stretch; } }
