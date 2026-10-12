@@ -144,3 +144,11 @@ def test_batched_read_keeps_rows_and_order(monkeypatch):
     batched = db.read_insight_inputs(cutoff=None, session_id=None, trend_since=None)["events"]
     assert [e["id"] for e in batched] == [e["id"] for e in whole]
     assert [(e["session_id"], e["ts"]) for e in batched] == sorted((e["session_id"], e["ts"]) for e in batched)
+
+
+def test_task_poll_does_not_take_the_write_lock(monkeypatch):
+    from app import passive
+
+    passive.runs()
+    monkeypatch.setattr(store, "write", lambda: (_ for _ in ()).throw(AssertionError("poll wrote")))
+    assert passive.runs() == []

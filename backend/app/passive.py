@@ -179,7 +179,17 @@ _lock = threading.Lock()
 _state: dict[str, Any] = {"running": False}
 
 
+# DB paths whose passive_runs table is known to exist. runs() sits behind the
+# task tray's poll, and a CREATE ... IF NOT EXISTS still takes the write lock,
+# so doing it on every poll turned a read into a write that failed with
+# "database is locked" whenever anything else was writing.
+_runs_table_ready: set[str] = set()
+
+
 def _ensure_runs_table() -> None:
+    path = str(store.path())
+    if path in _runs_table_ready:
+        return
     with store.write() as conn:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS passive_runs ("
@@ -187,6 +197,7 @@ def _ensure_runs_table() -> None:
             " trigger TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT,"
             " status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '{}')"
         )
+    _runs_table_ready.add(path)
 
 
 def runs(limit: int = 10) -> list[dict[str, Any]]:
