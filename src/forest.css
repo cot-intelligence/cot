@@ -515,8 +515,10 @@
 .vf .set-nav { position: sticky; top: 0; display: grid; gap: 2px; }
 .vf .set-nav .nav-i { font-size: 13px; }
 .vf .set-nav .nav-i[aria-current='true'] { color: var(--v-fg); background: var(--v-surface); box-shadow: 0 0 0 1px var(--v-line); }
-.vf .set-body { display: grid; gap: 16px; max-width: 760px; }
-.vf .set-sec { padding: 4px 20px 8px; scroll-margin-top: 16px; }
+/* minmax(0, 1fr), not the implicit auto track: WebKit sizes an auto track to its widest
+   section's min-content, which pushed the cards past the window in the Mac app. */
+.vf .set-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; max-width: 760px; min-width: 0; }
+.vf .set-sec { padding: 4px 20px 8px; scroll-margin-top: 16px; min-width: 0; }
 .vf .set-h { padding: 18px 0 14px; border-bottom: 1px solid var(--v-line); }
 .vf .set-h h2 { margin: 0; font-size: 16px; line-height: 22px; font-weight: 600; letter-spacing: -0.01em; }
 .vf .set-h p { margin: 2px 0 0; font-size: 13px; line-height: 20px; max-width: 60ch; }
