@@ -47,7 +47,7 @@ type DashboardRoute =
   | { view: 'settings' }
   | { view: 'findings'; pillar?: InsightPillar }
   | { view: 'governance' }
-  | { view: 'rules' }
+  | { view: 'rules'; fromEvent?: number }
   | { view: 'extension'; key: string };
 
 type MetricsHistoryTab = 'shell' | 'web' | 'mcp' | 'skill' | 'plugin';
@@ -63,7 +63,8 @@ function parseHash(): DashboardRoute {
   const hash = window.location.hash.replace(/^#\/?/, '');
   if (hash === 'settings') return { view: 'settings' };
   if (hash === 'governance') return { view: 'governance' };
-  if (hash === 'rules') return { view: 'rules' };
+  const rulesMatch = hash.match(/^rules(?:\?from=(\d+))?$/);
+  if (rulesMatch) return { view: 'rules', fromEvent: rulesMatch[1] ? Number(rulesMatch[1]) : undefined };
   const extPage = hash.match(/^extensions\/(.+)$/);
   if (extPage) return { view: 'extension', key: decodeURIComponent(extPage[1]) };
   // The old Extensions list now lives in Activity (MCP / Skills → Installed, Plugins).
@@ -488,7 +489,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
             </main>
           ) : onRules ? (
             <main className="flex min-w-0 flex-1 flex-col">
-              <RulesView />
+              <RulesView fromEvent={route.view === 'rules' ? route.fromEvent : undefined} />
             </main>
           ) : onGovernance ? (
             <main className="flex min-w-0 flex-1 flex-col">

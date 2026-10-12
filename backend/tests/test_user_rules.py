@@ -314,3 +314,126 @@ def test_api_crud_preview_and_errors(client):
     assert updated["enabled"] is False
     assert client.delete(f"/v1/rules/{created['id']}").json() == {"ok": True}
     assert client.delete(f"/v1/rules/{created['id']}").status_code == 404
+
+
+# --- regex safety, edits, examples ----------------------------------------------------
+
+
+@pytest.mark.parametrize("pattern", [r"(a+)+", r"(.*x)*", r"([a-z]+){2,}"])
+def test_nested_quantifiers_rejected(pattern):
+    with pytest.raises(user_rules.SpecError) as exc:
+        user_rules.validate(_spec(when={"field": "target", "op": "regex", "value": pattern}))
+    assert exc.value.path == "when.value"
+
+
+def test_editing_spec_clears_stale_findings():
+    _event("s1", category="shell", target="psql -h prod-db", status="ok")
+    rule = user_rules.create_rule(_spec())
+    assert any(f["id"] == rule["id"] for f in insights.compute_insights()["insights"])
+    user_rules.update_rule(rule["id"], spec=_spec(when={"field": "target", "op": "contains", "value": "nothing-matches"}))
+    assert not any(f["id"] == rule["id"] for f in insights.compute_insights()["insights"])
+
+
+def test_preview_returns_examples_by_frequency():
+    for _ in range(3):
+        _event("s1", category="shell", target="npm install", status="ok")
+    _event("s1", category="shell", target="npm install left-pad", status="ok")
+    p = user_rules.preview(_spec(when={"field": "target", "op": "contains", "value": "npm install"}))
+    assert p["examples"][0] == {**p["examples"][0], "label": "npm install", "count": 3}
+    assert p["distinct_examples"] == 2
+
+
+# --- drafts -----------------------------------------------------------------------------
+
+
+def test_draft_from_shell_event_generalizes():
+    from app import rule_drafts
+
+    eid = _event("s1", category="shell", tool="Bash", target="cd /work/app && npm install left-pad", status="ok")
+    d = rule_drafts.from_event(eid)
+    labels = [c["label"] for c in d["choices"]]
+    assert labels[0].startswith("Exactly")
+    assert any("npm install" in label for label in labels)
+    picked = d["choices"][d["picked"]]["conditions"][0]
+    assert picked == {"field": "target", "op": "contains", "value": "npm install"}
+    assert {"field": "category", "op": "eq", "value": "shell"} in d["spec"]["when"]["all"]
+
+
+def test_draft_from_failed_file_read_adds_status():
+    from app import rule_drafts
+
+    eid = _event("s1", category="file_read", tool="Read", target="/work/app/config/.env.local", status="error")
+    d = rule_drafts.from_event(eid)
+    assert any("`.env.local`" in c["label"] for c in d["choices"])
+    assert {"field": "status", "op": "eq", "value": "error"} in d["spec"]["when"]["all"]
+    assert d["spec"]["pillar"] == "usability"
+
+
+def test_draft_from_mcp_event_offers_server():
+    from app import rule_drafts
+
+    eid = _event("s1", category="mcp", tool="mcp__github__search_issues", target="repo:x", status="ok")
+    d = rule_drafts.from_event(eid)
+    assert any(c["conditions"] == [{"field": "mcp_server", "op": "eq", "value": "github"}] for c in d["choices"])
+
+
+def test_draft_unknown_event():
+    from app import rule_drafts
+
+    with pytest.raises(rule_drafts.DraftError):
+        rule_drafts.from_event(999_999)
+
+
+def test_draft_from_text_validates_and_repairs(monkeypatch):
+    import json as _json
+
+    from app import ai_insights, rule_drafts
+
+    good = _json.dumps(_spec(name="Env reads", when={"field": "target", "op": "is_sensitive_path"}))
+    replies = iter(['{"name": "x", "when": {"field": "nope", "op": "eq", "value": 1}}', f"```json\n{good}\n```"])
+    calls = []
+    monkeypatch.setattr(ai_insights, "complete", lambda system, user: calls.append(user) or next(replies))
+    d = rule_drafts.from_text("tell me when agents read secrets")
+    assert d["spec"]["name"] == "Env reads"
+    assert len(calls) == 2 and "rejected" in calls[1]
+
+
+def test_draft_from_text_gives_up_after_one_repair(monkeypatch):
+    from app import ai_insights, rule_drafts
+
+    monkeypatch.setattr(ai_insights, "complete", lambda system, user: '{"name": ""}')
+    with pytest.raises(rule_drafts.DraftError):
+        rule_drafts.from_text("something")
+
+
+def test_draft_api_errors(client, monkeypatch):
+    from app import ai_insights
+
+    assert client.get("/v1/rules/draft/event/424242").status_code == 404
+    monkeypatch.setattr(ai_insights, "resolve_config", lambda: None)
+    assert client.post("/v1/rules/draft/describe", json={"text": "x"}).status_code == 409
+
+
+def test_program_field_is_derived_lazily():
+    facts = user_rules.facts_from_event(Event(id=1, session_id="s", ts=_ts(), category="shell", target="cd /x && rtk git status"))
+    assert "program" not in facts
+    rule = user_rules.compile_rule("user.p", user_rules.validate(_spec(when={"field": "program", "op": "eq", "value": "git"})))
+    assert rule.matches(facts) and facts["program"] == "git"
+    other = user_rules.facts_from_event(Event(id=2, session_id="s", ts=_ts(), category="file_read", target="/x/git"))
+    assert not rule.matches(other)
+
+
+def test_draft_offers_program_choice():
+    from app import rule_drafts
+
+    eid = _event("s1", category="shell", tool="Bash", target="sed -i '' 's/a/b/' file.txt", status="ok")
+    d = rule_drafts.from_event(eid)
+    assert {"field": "program", "op": "eq", "value": "sed"} in [c["conditions"][0] for c in d["choices"]]
+
+
+def test_draft_from_clipped_command_drops_ellipsis():
+    from app import rule_drafts
+
+    eid = _event("s1", category="shell", tool="Bash", target="npm run build && npm test -- --watch=false…", status="ok")
+    exact = rule_drafts.from_event(eid)["choices"][0]["conditions"][0]
+    assert exact["value"] == "npm run build && npm test -- --watch=false"

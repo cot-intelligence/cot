@@ -611,3 +611,13 @@
 .vf .input.textarea { height: auto; width: 100%; padding: 8px 10px; line-height: 18px; resize: vertical; }
 .vf .rule-err { margin: 0; font-size: 12px; color: var(--v-alert); }
 @media (max-width: 640px) { .vf .rule-row { flex-direction: column; align-items: stretch; } }
+.vf .rule-sentence { display: grid; gap: 12px; font-size: 15px; }
+.vf .rule-sline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.vf .rule-join { border: 1px solid var(--v-line); background: var(--v-panel); border-radius: 6px; padding: 2px 8px; font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--v-dim); cursor: pointer; }
+.vf .rule-adds { display: flex; gap: 6px 14px; flex-wrap: wrap; align-items: center; }
+.vf .rule-adds:empty { display: none; }
+.vf .rule-add { border: 0; background: none; padding: 4px 0; font-size: 13px; color: var(--v-dim); cursor: pointer; display: inline-flex; gap: 4px; align-items: center; }
+.vf .rule-add[aria-pressed="true"] { color: var(--v-hot); }
+@media (hover: hover) and (pointer: fine) { .vf .rule-add:hover, .vf .rule-join:hover { color: var(--v-fg); } }
+.vf .rule-details { padding: 12px 20px 16px; border-top: 1px solid var(--v-line); }
+.vf .rule-example { display: flex; justify-content: space-between; gap: 12px; padding: 8px 12px; color: inherit; text-decoration: none; }

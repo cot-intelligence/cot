@@ -38,7 +38,7 @@ from pydantic import BaseModel, Field
 
 from . import (
     __version__, activity, ai_insights, cron, db, extension_usage, insights, passive, store,
-    timeutil, user_rules,
+    rule_drafts, timeutil, user_rules,
 )
 
 app = FastAPI(title="cot collector", version=__version__)
@@ -1463,6 +1463,36 @@ def preview_rule(body: RulePreviewBody) -> dict[str, Any]:
         return user_rules.preview(body.spec, max(1, min(body.days, 365)))
     except user_rules.SpecError as exc:
         raise _spec_error(exc)
+
+
+class RuleDescribeBody(BaseModel):
+    text: str
+
+
+@app.get("/v1/rules/draft/event/{event_id}")
+def draft_rule_from_event(event_id: int) -> dict[str, Any]:
+    """A starting rule built from one event ("Make a rule from this")."""
+    try:
+        return rule_drafts.from_event(event_id)
+    except rule_drafts.DraftError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.post("/v1/rules/draft/describe")
+def draft_rule_from_text(body: RuleDescribeBody) -> dict[str, Any]:
+    """Plain English to a rule via the user's AI provider. Explicit action; costs money."""
+    try:
+        draft = rule_drafts.from_text(body.text)
+    except ai_insights.AiDisabledError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ai_insights.AiNotConfiguredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ai_insights.AiProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except rule_drafts.DraftError as exc:
+        raise HTTPException(status_code=422, detail={"path": "", "message": str(exc)})
+    db.record_audit_event("rules.drafted.ai", target="ai")
+    return draft
 
 
 @app.put("/v1/rules/{rule_id}")

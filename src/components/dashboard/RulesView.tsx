@@ -1,18 +1,18 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   createRule,
   deleteRule,
   getRules,
   getRuleSchema,
-  previewRule,
+  draftRuleFromEvent,
   RuleSpecError,
   updateRule,
   type RuleCondition,
   type RuleField,
   type RuleLeaf,
-  type RulePreview,
+  type RuleEventDraft,
   type RuleSchema,
   type RuleSpec,
   type RuleThreshold,
@@ -24,6 +24,9 @@ import { fmt } from '../forest/format';
 import { Icon } from '../forest/icons';
 import { listItem, listParent } from '../forest/motion';
 import { Seg, Sev, Switch } from '../forest/ui';
+import { autoName, blankSentence, fromSpec, toSpec, type Sentence } from '../../lib/ruleSentence';
+import { useRulePreview } from '../../lib/useRulePreview';
+import { RulePreviewCard, RuleSentenceEditor } from './RuleSentenceEditor';
 
 const PILLAR_ICON: Record<string, string> = { security: 'lock', cost: 'dollar', usability: 'bolt' };
 const PREVIEW_DAYS = 30;
@@ -110,16 +113,6 @@ const TEMPLATES: { title: string; blurb: string; spec: RuleSpec }[] = [
   },
 ];
 
-const BLANK: RuleSpec = {
-  name: '',
-  pillar: 'security',
-  severity: 'warn',
-  type: 'match',
-  when: { all: [{ field: 'category', op: 'eq', value: 'shell' }] },
-  subject: 'target',
-  recommendation: '',
-};
-
 const THRESHOLD_OPS: { k: RuleThreshold['op']; l: string }[] = [
   { k: 'gte', l: '≥' },
   { k: 'gt', l: '>' },
@@ -153,6 +146,8 @@ function describeLeaf(l: RuleLeaf, schema: RuleSchema): string {
 }
 
 function describe(spec: RuleSpec, schema: RuleSchema): string {
+  const sentence = fromSpec(spec);
+  if (sentence) return autoName({ ...sentence, nameTouched: false });
   const flat = flatten(spec.when);
   const when = flat
     ? flat.leaves.map((l) => describeLeaf(l, schema)).join(flat.mode === 'all' ? ' and ' : ' or ')
@@ -176,20 +171,58 @@ function invalidateFindings(qc: ReturnType<typeof useQueryClient>) {
 
 // --- page --------------------------------------------------------------------------
 
-type Editing = { id: string | null; spec: RuleSpec };
+type Editing = {
+  id: string | null;
+  spec: RuleSpec;
+  mode: 'simple' | 'advanced';
+  /** The sentence to open the simple editor on (else read from `spec`). */
+  sentence?: Sentence;
+  draft?: RuleEventDraft;
+};
 
-export function RulesView() {
+/** Open a spec in the simple editor when a sentence can express it, else the advanced one. */
+function openSpec(id: string | null, spec: RuleSpec): Editing {
+  const sentence = fromSpec(spec);
+  return sentence ? { id, spec, mode: 'simple', sentence } : { id, spec, mode: 'advanced' };
+}
+
+export function RulesView({ fromEvent }: { fromEvent?: number }) {
   const qc = useQueryClient();
   const [schema, setSchema] = useState<RuleSchema | null>(null);
   const [rules, setRules] = useState<UserRule[] | null>(null);
   const [error, setError] = useState(false);
   const [editing, setEditing] = useState<Editing | null>(null);
 
+  const [draftError, setDraftError] = useState<string | null>(null);
+
   const load = () => getRules().then(setRules).catch(() => setError(true));
   useEffect(() => {
     getRuleSchema().then(setSchema).catch(() => setError(true));
     void load();
   }, []);
+
+  // "Make a rule from this" lands here as #/rules?from=<event id>.
+  useEffect(() => {
+    if (fromEvent == null) return;
+    window.history.replaceState(null, '', '#/rules');
+    setDraftError(null);
+    draftRuleFromEvent(fromEvent)
+      .then((draft) => {
+        const sentence = fromSpec(draft.spec);
+        setEditing(sentence
+          ? { id: null, spec: draft.spec, mode: 'simple', sentence: { ...sentence, nameTouched: false }, draft }
+          : { id: null, spec: draft.spec, mode: 'advanced' });
+      })
+      .catch(() => setDraftError("Couldn't make a rule from that event. Rules can be made from commands, files, web requests and tool calls."));
+  }, [fromEvent]);
+
+  const saveSpec = async (id: string | null, spec: RuleSpec) => {
+    if (id) await updateRule(id, { spec });
+    else await createRule(spec);
+    setEditing(null);
+    invalidateFindings(qc);
+    void load();
+  };
 
   const toggle = async (r: UserRule) => {
     setRules((rs) => rs?.map((x) => (x.id === r.id ? { ...x, enabled: !r.enabled } : x)) ?? rs);
@@ -207,9 +240,26 @@ export function RulesView() {
     void load();
   };
 
+  if (editing && schema && editing.mode === 'simple') {
+    return (
+      <RuleSentenceEditor
+        key={`${editing.id}-${editing.draft?.event.id ?? ''}`}
+        schema={schema}
+        title={editing.id ? 'Edit rule' : editing.draft ? 'Rule from this event' : 'New rule'}
+        initial={editing.sentence ?? fromSpec(editing.spec) ?? blankSentence()}
+        draft={editing.draft}
+        onCancel={() => setEditing(null)}
+        onSave={(spec) => saveSpec(editing.id, spec)}
+        onAdvanced={(spec) => setEditing({ id: editing.id, spec, mode: 'advanced' })}
+      />
+    );
+  }
+
   if (editing && schema) {
     return (
       <RuleEditor
+        key={editing.id ?? 'new'}
+        onSimple={(spec) => setEditing(openSpec(editing.id, spec))}
         schema={schema}
         initial={editing}
         onCancel={() => setEditing(null)}
@@ -231,10 +281,12 @@ export function RulesView() {
             <h1>Rules</h1>
             <p>Your own checks. They run next to the built-in ones, and what they catch shows up in Findings.</p>
           </div>
-          <button type="button" className="vbtn vbtn-primary vbtn-sm" disabled={!schema} onClick={() => setEditing({ id: null, spec: BLANK })}>
+          <button type="button" className="vbtn vbtn-primary vbtn-sm" disabled={!schema} onClick={() => setEditing({ id: null, spec: toSpec(blankSentence()), mode: 'simple', sentence: blankSentence() })}>
             New rule
           </button>
         </div>
+
+        {draftError && <div className="card" style={{ marginBottom: 16 }}><div className="card-b"><p className="rule-err">{draftError}</p></div></div>}
 
         {error && !rules ? (
           <div className="card empty">Collector offline. Rules are unavailable.</div>
@@ -266,7 +318,7 @@ export function RulesView() {
                       </div>
                       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                         <Switch on={r.enabled} onChange={() => void toggle(r)} label={`${r.enabled ? 'Turn off' : 'Turn on'} ${r.spec.name}`} />
-                        <button type="button" className="vbtn vbtn-quiet vbtn-sm" onClick={() => setEditing({ id: r.id, spec: r.spec })}>Edit</button>
+                        <button type="button" className="vbtn vbtn-quiet vbtn-sm" onClick={() => setEditing(openSpec(r.id, r.spec))}>Edit</button>
                         <button type="button" className="iconbtn" aria-label={`Delete ${r.spec.name}`} title="Delete" onClick={() => void remove(r)}><Icon name="trash" size={15} /></button>
                       </div>
                     </motion.li>
@@ -279,7 +331,7 @@ export function RulesView() {
               <span className="label" id="vf-templates">Start from a template</span>
               <div className="rule-templates">
                 {TEMPLATES.map((t) => (
-                  <button key={t.title} type="button" className="card hov rule-template" disabled={!schema} onClick={() => setEditing({ id: null, spec: t.spec })}>
+                  <button key={t.title} type="button" className="card hov rule-template" disabled={!schema} onClick={() => setEditing(openSpec(null, t.spec))}>
                     <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                       <Icon name={PILLAR_ICON[t.spec.pillar]} size={14} />
                       <span style={{ fontWeight: 500, fontSize: 13 }}>{t.title}</span>
@@ -298,20 +350,18 @@ export function RulesView() {
 
 // --- editor ------------------------------------------------------------------------
 
-function RuleEditor({ schema, initial, onCancel, onSaved }: {
+function RuleEditor({ schema, initial, onCancel, onSaved, onSimple }: {
   schema: RuleSchema;
   initial: Editing;
   onCancel: () => void;
   onSaved: () => void;
+  onSimple: (spec: RuleSpec) => void;
 }) {
   const [spec, setSpec] = useState<RuleSpec>(() => ({ scope: { sources: [], projects: [] }, ...structuredClone(initial.spec) }));
   const flat = flatten(spec.when);
   const [jsonMode, setJsonMode] = useState(flat === null);
   const [jsonText, setJsonText] = useState(() => JSON.stringify(initial.spec, null, 2));
   const [jsonError, setJsonError] = useState<string | null>(null);
-  const [preview, setPreview] = useState<RulePreview | null>(null);
-  const [problem, setProblem] = useState<RuleSpecError | null>(null);
-  const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const fieldBy = useMemo(() => new Map(schema.fields.map((f) => [f.name, f])), [schema]);
@@ -320,40 +370,7 @@ function RuleEditor({ schema, initial, onCancel, onSaved }: {
   const setThreshold = (patch: Partial<RuleThreshold>) =>
     set({ threshold: { group_by: [], aggregate: 'count', op: 'gte', value: 5, ...spec.threshold, ...patch } });
 
-  // Live dry run over recent history; the collector is the one validator. A
-  // preview scans the whole window server-side and an aborted fetch doesn't
-  // stop that work, so keep one request in flight and run only the latest spec.
-  const key = JSON.stringify(spec);
-  const latest = useRef(key);
-  latest.current = key;
-  const flight = useRef<{ busy: boolean; next: string | null }>({ busy: false, next: null });
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; };
-  }, []);
-  useEffect(() => {
-    const run = (body: string) => {
-      flight.current.busy = true;
-      setLoading(true);
-      const s = JSON.parse(body) as RuleSpec;
-      const current = () => mounted.current && body === latest.current;
-      previewRule({ ...s, name: s.name?.trim() || 'Untitled rule' }, PREVIEW_DAYS)
-        .then((p) => { if (current()) { setPreview(p); setProblem(null); } })
-        .catch((e) => { if (current() && e instanceof RuleSpecError) { setProblem(e); setPreview(null); } })
-        .finally(() => {
-          const next = flight.current.next;
-          flight.current = { busy: false, next: null };
-          if (next && mounted.current) run(next);
-          else if (mounted.current) setLoading(false);
-        });
-    };
-    const t = window.setTimeout(() => {
-      if (flight.current.busy) flight.current.next = key;
-      else run(key);
-    }, 500);
-    return () => window.clearTimeout(t);
-  }, [key]);
+  const { preview, problem, setProblem, loading } = useRulePreview(spec, PREVIEW_DAYS);
 
   const switchToJson = () => {
     setJsonText(JSON.stringify(spec, null, 2));
@@ -405,6 +422,7 @@ function RuleEditor({ schema, initial, onCancel, onSaved }: {
             <p>Describe the activity to watch for. The preview shows what it would have caught in the last {PREVIEW_DAYS} days.</p>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
+            {!jsonMode && fromSpec(spec) && <button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={() => onSimple(spec)}>Simple editor</button>}
             <button type="button" className="vbtn vbtn-quiet vbtn-sm" onClick={jsonMode ? switchToForm : switchToJson}>{jsonMode ? 'Edit as form' : 'Edit as JSON'}</button>
             <button type="button" className="vbtn vbtn-primary vbtn-sm" disabled={saving || !!jsonError || !spec.name?.trim()} onClick={() => void save()}>
               {saving ? 'Saving…' : 'Save rule'}
@@ -538,7 +556,9 @@ function RuleEditor({ schema, initial, onCancel, onSaved }: {
             </div>
           </section>
 
-          <PreviewPanel preview={preview} loading={loading} problem={problem} />
+          <div style={{ alignSelf: 'start', position: 'sticky', top: 0 }}>
+            <RulePreviewCard preview={preview} loading={loading} failed={!!problem} />
+          </div>
         </div>
       </div>
     </div>
@@ -611,47 +631,5 @@ function ConditionRow({ leaf, schema, fieldBy, error, onChange, onRemove }: {
       </div>
       {error && <p className="rule-err">{error}</p>}
     </div>
-  );
-}
-
-function PreviewPanel({ preview, loading, problem }: { preview: RulePreview | null; loading: boolean; problem: RuleSpecError | null }) {
-  return (
-    <section className="card" style={{ alignSelf: 'start', position: 'sticky', top: 0 }} aria-live="polite" aria-busy={loading}>
-      <div className="card-h">
-        <span className="card-t">Preview</span>
-        <span className="mono faint" style={{ fontSize: 11 }}>{loading ? 'running…' : `last ${PREVIEW_DAYS} days`}</span>
-      </div>
-      <div className="card-b" style={{ display: 'grid', gap: 12 }}>
-        {problem ? (
-          <p className="dim" style={{ margin: 0 }}>Fix the highlighted field to see a preview.</p>
-        ) : !preview ? (
-          <span className="sk" style={{ height: 18, width: 200 }} />
-        ) : (
-          <>
-            <p style={{ margin: 0 }}>
-              Matched <b className="tnum">{fmt.n(preview.events_matched)}</b> of {fmt.n(preview.events_scanned)} events in{' '}
-              <b className="tnum">{fmt.n(preview.sessions_matched)}</b> session{preview.sessions_matched === 1 ? '' : 's'}.{' '}
-              {preview.findings.length ? `${preview.findings.length} finding${preview.findings.length === 1 ? '' : 's'}.` : 'No findings.'}
-            </p>
-            {preview.events_scanned > 0 && preview.events_matched / preview.events_scanned > 0.2 && (
-              <p className="faint" style={{ margin: 0, fontSize: 12 }}>This matches a large share of your activity. Narrow it down so findings stay worth reading.</p>
-            )}
-            {preview.findings.length > 0 && (
-              <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 6 }}>
-                {preview.findings.slice(0, 8).map((f) => (
-                  <li key={f.fingerprint} style={{ padding: '8px 10px', borderRadius: 10, border: '1px solid var(--v-line)', display: 'grid', gap: 2 }}>
-                    <span className="truncate" style={{ fontSize: 13, fontWeight: 500 }}>{f.title}</span>
-                    <span className="faint" style={{ fontSize: 11, overflowWrap: 'anywhere' }}>{f.detail}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <p className="faint" style={{ margin: 0, fontSize: 11, display: 'flex', gap: 6, alignItems: 'center' }}>
-              {preview.enforceable ? <><Icon name="check" size={12} />{PRE_RUN_HINT}</> : 'Uses details only known after a tool runs, so it stays a detection rule.'}
-            </p>
-          </>
-        )}
-      </div>
-    </section>
   );
 }

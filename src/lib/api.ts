@@ -1813,9 +1813,19 @@ export interface UserRule {
   enforceable: boolean;
 }
 
+export interface RuleExample {
+  label: string;
+  count: number;
+  session_id: string;
+  event_id: number;
+}
+
 export interface RulePreview {
   spec: RuleSpec;
   enforceable: boolean;
+  /** Most frequent distinct things the rule matched (command, path, URL…). */
+  examples: RuleExample[];
+  distinct_examples: number;
   window_days: number;
   events_scanned: number;
   events_matched: number;
@@ -1869,4 +1879,32 @@ export async function previewRule(spec: RuleSpec, days = 30, signal?: AbortSigna
   return ruleJson<RulePreview>(
     await fetch('/v1/rules/preview', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ spec, days }), signal }),
   );
+}
+
+/** A generalization offered when drafting a rule from one event. */
+export interface RuleDraftChoice {
+  label: string;
+  conditions: RuleLeaf[];
+}
+
+export interface RuleEventDraft {
+  spec: RuleSpec;
+  choices: RuleDraftChoice[];
+  picked: number;
+  event: { id: number; session_id: string; category: string; tool: string | null; target: string | null; failed: boolean };
+}
+
+export async function draftRuleFromEvent(eventId: number): Promise<RuleEventDraft> {
+  return json<RuleEventDraft>(await fetch(`/v1/rules/draft/event/${eventId}`));
+}
+
+/** Plain English to a rule through the user's AI provider; throws RuleSpecError with a readable message. */
+export async function draftRuleFromText(text: string): Promise<RuleSpec> {
+  const res = await fetch('/v1/rules/draft/describe', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ text }) });
+  if (!res.ok && res.status !== 422) {
+    const body = await res.json().catch(() => null);
+    const msg = typeof body?.detail === 'string' ? body.detail : 'The AI request failed.';
+    throw new RuleSpecError('', res.status === 409 ? 'Add an AI key in Settings to describe rules in plain English.' : msg);
+  }
+  return (await ruleJson<{ spec: RuleSpec }>(res)).spec;
 }

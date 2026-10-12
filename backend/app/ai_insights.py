@@ -246,14 +246,14 @@ def _post_json(url: str, headers: dict[str, str], body: dict[str, Any]) -> dict[
         raise AiProviderError(f"provider unreachable: {exc}") from exc
 
 
-def _call_anthropic(cfg: AiConfig, payload_json: str) -> str:
+def _call_anthropic(cfg: AiConfig, payload_json: str, system: str = SYSTEM_PROMPT) -> str:
     data = _post_json(
         provider_call_endpoint("anthropic", cfg.endpoint),
         {"x-api-key": cfg.api_key, "anthropic-version": "2023-06-01"},
         {
             "model": cfg.model,
             "max_tokens": MAX_OUTPUT_TOKENS,
-            "system": SYSTEM_PROMPT,
+            "system": system,
             "messages": [{"role": "user", "content": payload_json}],
         },
     )
@@ -263,14 +263,14 @@ def _call_anthropic(cfg: AiConfig, payload_json: str) -> str:
     raise AiProviderError("provider response contained no text content")
 
 
-def _call_openai(cfg: AiConfig, payload_json: str) -> str:
+def _call_openai(cfg: AiConfig, payload_json: str, system: str = SYSTEM_PROMPT) -> str:
     data = _post_json(
         provider_call_endpoint("openai", cfg.endpoint),
         {"Authorization": f"Bearer {cfg.api_key}"},
         {
             "model": cfg.model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system},
                 {"role": "user", "content": payload_json},
             ],
             "response_format": {"type": "json_object"},
@@ -319,6 +319,20 @@ def parse_result(text: str) -> dict[str, Any]:
     if not result["summary"] and not any(sections.values()):
         raise AiProviderError("model returned an empty analysis")
     return result
+
+
+def complete(system: str, user: str) -> str:
+    """One JSON-mode completion with the configured provider (rule drafting).
+
+    Same gates as :func:`run_analysis`: the env off switch, then a key.
+    """
+    if env_disabled():
+        raise AiDisabledError("AI is disabled via COT_DISABLE_LLM")
+    cfg = resolve_config()
+    if cfg is None:
+        raise AiNotConfiguredError("no API key configured for AI")
+    call = _call_anthropic if cfg.provider == "anthropic" else _call_openai
+    return call(cfg, user, system)
 
 
 def run_analysis(days: int = 30) -> dict[str, Any]:

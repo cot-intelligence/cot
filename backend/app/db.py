@@ -4204,6 +4204,17 @@ _INSIGHT_EVENT_COLUMNS = (
 )
 
 
+def get_rule_event(event_id: int) -> dict[str, Any] | None:
+    """One event joined to its session, in the insight row shape (rule drafts)."""
+    with store.read() as conn:
+        row = conn.execute(
+            "SELECT " + _INSIGHT_EVENT_COLUMNS
+            + " FROM events e JOIN sessions s ON s.id = e.session_id WHERE e.id = ?",
+            (event_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def read_rule_events(*, cutoff: str | None, with_detail: bool) -> list[dict[str, Any]]:
     """The insight working set alone, for dry-running one user rule.
 

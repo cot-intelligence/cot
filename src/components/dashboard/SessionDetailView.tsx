@@ -227,7 +227,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
                 <div className="card-b">
                   <ol className="tl">
                     {list.slice(0, shown).map((e) => (
-                      <TraceRow key={e.id} e={e} live={s.status === 'active'} open={open === e.id} focusQuery={e.id === focusEventId ? focusQuery : undefined} onToggle={() => setOpen((o) => (o === e.id ? null : e.id))} sessionId={sessionId} onJump={revealEvent} />
+                      <TraceRow key={e.id} e={e} live={s.status === 'active'} open={open === e.id} focusQuery={e.id === focusEventId ? focusQuery : undefined} onToggle={() => setOpen((o) => (o === e.id ? null : e.id))} sessionId={sessionId} onJump={revealEvent} ruleable={store === 'main'} />
                     ))}
                   </ol>
                   {list.length === 0 && <div className="empty">No events{cat ? ' of this kind' : ''}.</div>}
@@ -282,7 +282,10 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   );
 }
 
-function TraceRow({ e, open, live, focusQuery, onToggle, sessionId, onJump }: { e: TimelineItem; open: boolean; live: boolean; focusQuery?: string; onToggle: () => void; sessionId: string; onJump: (id: number) => void }) {
+// Events a rule can be drafted from (rule_drafts.from_event): commands, files, web, tools.
+const RULEABLE = new Set(['shell', 'file_read', 'context_read', 'file_edit', 'web', 'mcp']);
+
+function TraceRow({ e, open, live, focusQuery, onToggle, sessionId, onJump, ruleable }: { e: TimelineItem; open: boolean; live: boolean; focusQuery?: string; onToggle: () => void; sessionId: string; onJump: (id: number) => void; ruleable: boolean }) {
   const failed = e.status === 'error' || e.status === 'failed';
   const text = TEXT_KINDS.has(e.category) ? e.detail?.trim() : '';
   return (
@@ -299,6 +302,12 @@ function TraceRow({ e, open, live, focusQuery, onToggle, sessionId, onJump }: { 
           <div className="tl-detail">
             <EventDetailPanel item={e} sessionId={sessionId} onJump={onJump} compact />
             {focusQuery && <p className="mono faint" style={{ fontSize: 11, margin: '8px 0 0' }}>Matched “{focusQuery}”</p>}
+            {ruleable && RULEABLE.has(e.category) && (e.target || e.tool) && (
+              // A merged span's end half carries the result, so draft from it when there is one.
+              <a className="vbtn vbtn-ghost vbtn-sm" style={{ marginTop: 8, marginLeft: -10 }} href={`#/rules?from=${e.end_id ?? e.id}`}>
+                <Icon name="filter" size={13} />Make a rule from this
+              </a>
+            )}
           </div>
         )}
       </div>

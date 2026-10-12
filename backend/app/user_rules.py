@@ -105,6 +105,10 @@ _MAX_REC = 1000
 # Regexes only ever see this much of a value, which bounds backtracking cost.
 _MATCH_CHARS = 4096
 _MAX_FINDINGS_PER_RULE = 25
+# A quantified group that itself contains a quantifier — ``(a+)+``, ``(.*x)*`` —
+# is the classic catastrophic-backtracking shape. Python's ``re`` has no
+# timeout, and these will run inside a hook once rules can block, so refuse them.
+_NESTED_QUANTIFIER = re.compile(r"\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d*,)")
 _OP_SYMBOL = {"gt": ">", "gte": "≥", "lt": "<", "lte": "≤", "eq": "="}
 _EVIDENCE_CAP = 8
 
@@ -112,7 +116,7 @@ _EVIDENCE_CAP = 8
 # --- facts ----------------------------------------------------------------------
 
 
-def _mcp_server(tool: str | None) -> str | None:
+def mcp_server(tool: str | None) -> str | None:
     if tool and tool.startswith("mcp__"):
         parts = tool.split("__", 2)
         if len(parts) == 3:
@@ -125,16 +129,38 @@ def _hour(ts: Any) -> int | None:
     return parsed.astimezone().hour if parsed else None
 
 
-def _base_facts(m: Mapping[str, Any]) -> dict[str, Any]:
+def _program(facts: Mapping[str, Any]) -> str | None:
+    """The program a shell command really runs (``git`` for ``cd x && rtk git status``)."""
+    from .activity import parse_command  # activity imports insights, which imports us
+
+    if facts.get("category") != "shell" or not facts.get("target"):
+        return None
+    return parse_command(str(facts["target"])[:_MATCH_CHARS]).program or None
+
+
+# Facts that cost something to compute, filled in only when a rule reads them.
+_DERIVED: dict[str, Callable[[Mapping[str, Any]], Any]] = {"program": _program}
+
+
+class Facts(dict):
+    """A facts mapping whose derived fields are computed on first read."""
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key not in self and key in _DERIVED:
+            self[key] = _DERIVED[key](self)
+        return super().get(key, default)
+
+
+def _base_facts(m: Mapping[str, Any]) -> Facts:
     tool = m.get("tool")
-    return {
+    return Facts({
         "source": m.get("source"),
         "project": m.get("cwd"),
         "session": m.get("session_id"),
         "hook": m.get("hook"),
         "category": m.get("category"),
         "tool": tool,
-        "mcp_server": _mcp_server(tool),
+        "mcp_server": mcp_server(tool),
         "target": m.get("target"),
         "title": m.get("title"),
         "detail": m.get("detail"),
@@ -142,10 +168,10 @@ def _base_facts(m: Mapping[str, Any]) -> dict[str, Any]:
         "status": m.get("status"),
         "duration_ms": m.get("duration_ms"),
         "hour": _hour(m.get("ts")),
-    }
+    })
 
 
-def facts_from_event(e: Event) -> dict[str, Any]:
+def facts_from_event(e: Event) -> Facts:
     """Facts for a stored event (detection path)."""
     facts = _base_facts({k: e[k] for k in e.keys()})
     tokens = e.input_tokens + e.output_tokens + e.cache_read_tokens + e.cache_write_tokens
@@ -167,7 +193,7 @@ def snapshot_facts(snap: Snapshot) -> list[tuple[Event, dict[str, Any]]]:
     return snap.rule_facts
 
 
-def facts_from_hook(source: str, body: Mapping[str, Any]) -> dict[str, Any]:
+def facts_from_hook(source: str, body: Mapping[str, Any]) -> Facts:
     """Facts for a live hook payload (future enforcement path).
 
     Runs the collector's own ``normalize`` so category/tool/target mean exactly
@@ -205,6 +231,7 @@ FIELDS: dict[str, FieldDef] = {
         FieldDef("session", "Session", "text", "pre"),
         FieldDef("category", "Activity type", "enum", "pre", CATEGORIES),
         FieldDef("tool", "Tool name", "text", "pre"),
+        FieldDef("program", "Program (shell)", "text", "pre"),
         FieldDef("mcp_server", "MCP server", "text", "pre"),
         FieldDef("target", "Command / path / URL", "text", "pre"),
         FieldDef("title", "Title", "text", "pre"),
@@ -382,6 +409,11 @@ def _validate_condition(node: Any, path: str, depth: int, counter: _Counter) -> 
                     re.compile(value)
                 except re.error as exc:
                     raise SpecError(f"{path}.value", f"invalid regex: {exc}") from None
+                if _NESTED_QUANTIFIER.search(value):
+                    raise SpecError(
+                        f"{path}.value",
+                        "this pattern repeats a repeated group, which can hang matching — simplify it",
+                    )
         out["value"] = value
     elif od.value == "list":
         if not isinstance(value, list) or not value:
@@ -844,8 +876,9 @@ def update_rule(rule_id: str, spec: Any | None = None, enabled: bool | None = No
         return None
     spec_json = json.dumps(validate(spec)) if spec is not None else row["spec"]
     db.upsert_user_rule(rule_id, spec_json, bool(row["enabled"]) if enabled is None else enabled)
-    if enabled is False:
-        # A disabled rule's findings would otherwise linger until the grace period.
+    if enabled is False or spec is not None:
+        # A disabled or rewritten rule's old findings would otherwise linger as
+        # active until the grace period; the next compute re-detects what still matches.
         db.delete_insight_findings_for_rule(rule_id)
     _invalidate()
     return get_rule(rule_id)
@@ -871,9 +904,18 @@ def preview(spec: Any, days: int = 30) -> dict[str, Any]:
     snap = Snapshot(events=[event_from_row(r) for r in rows])
     matched = rule.matching(snap)
     findings = rule.run(snap)
+    examples: dict[str, dict[str, Any]] = {}
+    for e, facts in matched:
+        label = _as_text(facts.get("target") or facts.get("tool") or facts.get("title"))[:300] or "(no detail)"
+        ex = examples.setdefault(label, {"label": label, "count": 0, "session_id": e.session_id, "event_id": e.id})
+        ex["count"] += 1
+        ex["session_id"], ex["event_id"] = e.session_id, e.id  # newest wins: events are ts-ordered per session
+    top = sorted(examples.values(), key=lambda x: x["count"], reverse=True)[:6]
     return {
         "spec": canonical,
         "enforceable": rule.enforceable,
+        "examples": top,
+        "distinct_examples": len(examples),
         "window_days": days,
         "events_scanned": len(snap.events),
         "events_matched": len(matched),
