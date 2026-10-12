@@ -4201,9 +4201,10 @@ QUESTION_TOOLS = session_read.QUESTION_TOOLS
 # every other row made the findings read several times longer, and in
 # rollback-journal mode every other request queues behind a long read once a
 # write is pending. The CASE leaves the other rows' overflow pages unread.
+_INSIGHT_DETAIL_COLUMN = "CASE WHEN e.category IN ('prompt', 'shell') THEN e.detail END AS detail"
 _INSIGHT_EVENT_COLUMNS = (
     "e.id, e.session_id, e.ts, e.category, e.tool, e.target, e.status, e.hook,"
-    " e.title, CASE WHEN e.category IN ('prompt', 'shell') THEN e.detail END AS detail,"
+    " e.title, " + _INSIGHT_DETAIL_COLUMN + ","
     " e.model, e.duration_ms,"
     " e.input_tokens, e.output_tokens, e.cache_read_tokens, e.cache_write_tokens,"
     " s.cwd, e.source"
@@ -4238,26 +4239,50 @@ def get_rule_event(event_id: int) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def _read_working_set(cutoff: str | None, session_id: str | None, columns: str) -> list[dict[str, Any]]:
+    """Non-archived events (optionally windowed / one session), ordered by
+    (session, ts, id), read a batch of sessions per query: one query for a month
+    of events held the read lock for seconds on a cold cache, and in
+    rollback-journal mode every other request queues behind it once a write is
+    pending. Rows become dicts after each connection closes."""
+
+    def rows(sql: str, args: Any = ()) -> list[Any]:
+        with store.read() as conn:
+            return conn.execute(sql, args).fetchall()
+
+    if session_id:
+        session_ids = [session_id]
+    else:
+        session_ids = [r["id"] for r in rows("SELECT id FROM sessions WHERE archived = 0 ORDER BY id")]
+    window = " AND e.ts >= ?" if cutoff else ""
+    events: list[dict[str, Any]] = []
+    for i in range(0, len(session_ids), _INSIGHT_SESSION_BATCH):
+        batch = session_ids[i:i + _INSIGHT_SESSION_BATCH]
+        events.extend(
+            dict(r)
+            for r in rows(
+                "SELECT " + columns
+                + " FROM events e JOIN sessions s ON s.id = e.session_id"
+                " WHERE s.archived = 0 AND e.session_id IN (" + ",".join("?" * len(batch)) + ")"
+                + window
+                + " ORDER BY e.session_id, e.ts, e.id",
+                [*batch, *([cutoff] if cutoff else [])],
+            )
+        )
+    return events
+
+
 def read_rule_events(*, cutoff: str | None, with_detail: bool) -> list[dict[str, Any]]:
     """The insight working set alone, for dry-running one user rule.
 
     Skips the cross-session views and, unless the rule reads it, the ``detail``
     column — most of the events table's bytes — so a preview stays interactive.
     """
-    cols = _INSIGHT_EVENT_COLUMNS if with_detail else _INSIGHT_EVENT_COLUMNS.replace(" e.detail,", " NULL AS detail,")
-    where, params = " WHERE s.archived = 0", []
-    if cutoff:
-        where += " AND e.ts >= ?"
-        params.append(cutoff)
-    with store.read() as conn:
-        return [
-            dict(r)
-            for r in conn.execute(
-                "SELECT " + cols + " FROM events e JOIN sessions s ON s.id = e.session_id"
-                + where + " ORDER BY e.session_id, e.ts, e.id",
-                params,
-            ).fetchall()
-        ]
+    cols = (
+        _INSIGHT_EVENT_COLUMNS if with_detail
+        else _INSIGHT_EVENT_COLUMNS.replace(_INSIGHT_DETAIL_COLUMN, "NULL AS detail")
+    )
+    return _read_working_set(cutoff, None, cols)
 
 
 def read_insight_inputs(
@@ -4284,28 +4309,7 @@ def read_insight_inputs(
         with store.read() as conn:
             return conn.execute(sql, args).fetchall()
 
-    # The working set is read a batch of sessions at a time (in session order,
-    # so the result keeps its (session, ts, id) ordering): one query for a
-    # month of events held the read lock for seconds on a cold cache.
-    if session_id:
-        session_ids = [session_id]
-    else:
-        session_ids = [r["id"] for r in rows("SELECT id FROM sessions WHERE archived = 0 ORDER BY id")]
-    window = " AND e.ts >= ?" if cutoff else ""
-    events: list[dict[str, Any]] = []
-    for i in range(0, len(session_ids), _INSIGHT_SESSION_BATCH):
-        batch = session_ids[i:i + _INSIGHT_SESSION_BATCH]
-        events.extend(
-            dict(r)
-            for r in rows(
-                "SELECT " + _INSIGHT_EVENT_COLUMNS
-                + " FROM events e JOIN sessions s ON s.id = e.session_id"
-                " WHERE s.archived = 0 AND e.session_id IN (" + ",".join("?" * len(batch)) + ")"
-                + window
-                + " ORDER BY e.session_id, e.ts, e.id",
-                [*batch, *([cutoff] if cutoff else [])],
-            )
-        )
+    events = _read_working_set(cutoff, session_id, _INSIGHT_EVENT_COLUMNS)
     session_last_ts = {
         r["session_id"]: r["t"]
         for r in rows(

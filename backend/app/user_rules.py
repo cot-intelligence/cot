@@ -237,7 +237,8 @@ FIELDS: dict[str, FieldDef] = {
         FieldDef("title", "Title", "text", "pre"),
         FieldDef("hook", "Hook event", "text", "pre"),
         FieldDef("hour", "Hour of day (local)", "number", "pre"),
-        FieldDef("detail", "Detail / output", "text", "post", groupable=False),
+        # Read for prompts and shell commands only (see db._INSIGHT_DETAIL_COLUMN).
+        FieldDef("detail", "Prompt text or command output", "text", "post", groupable=False),
         FieldDef("model", "Model", "text", "post"),
         FieldDef("status", "Result", "enum", "post", ("ok", "error")),
         FieldDef("duration_ms", "Duration (ms)", "number", "post", groupable=False),
