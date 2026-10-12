@@ -217,11 +217,11 @@ def db_path() -> Path:
 
 
 def db_size_bytes() -> int:
-    """On-disk size of the database, including a transient rollback journal.
-    DELETE journal mode means there is no persistent -wal/-shm to account for."""
+    """On-disk size of the database, including its journal: a transient
+    rollback journal, or the -wal/-shm files when the desktop app runs in WAL mode."""
     p = store.path()
     total = 0
-    for path in (p, p.with_name(p.name + "-journal")):
+    for path in (p, *(p.with_name(p.name + suffix) for suffix in ("-journal", "-wal", "-shm"))):
         try:
             total += path.stat().st_size
         except OSError:
