@@ -251,6 +251,9 @@ fn spawn(home: &CotHome, bundle: &Bundle, port: u16) -> std::io::Result<Child> {
         .env("COT_HOST", "127.0.0.1")
         .env("COT_PORT", port.to_string())
         .env("COT_DB_PATH", home.database_file())
+        // A local process owns the DB here, so WAL is safe: dashboard reads never
+        // wait on hook writes. The Docker image keeps the rollback journal (store.py).
+        .env("COT_DB_JOURNAL_MODE", "wal")
         .env("COT_STATIC_DIR", &bundle.static_dir)
         // The collector exits on its own if this app dies without cleaning up.
         .env("COT_PARENT_PID", std::process::id().to_string())
