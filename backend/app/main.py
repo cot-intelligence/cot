@@ -13,6 +13,8 @@ import os
 import platform as _platform
 import re
 import shlex
+import sqlite3
+import sys
 import threading
 import time
 import urllib.parse
@@ -225,10 +227,25 @@ def _build_search_index() -> None:
         db.ensure_search_index()
     finally:
         _search_index_building = False
+    # Same reason as the search index: a first build on a large DB is a scan.
+    try:
+        db.ensure_insight_indexes()
+    except sqlite3.Error:
+        pass  # findings still work without it, only slower; retried next start
+
+
+# A findings pass is seconds of pure-Python work, and every SQLite call drops
+# and re-takes the GIL. At the default 5ms switch interval a request thread that
+# holds a DB lock waits up to 5ms per call to get the GIL back, so a small ingest
+# write could hold its lock for seconds while a pass ran, stalling every other
+# request behind it. 0.5ms cut those stalls from ~5s to under 1s under load
+# (the pass itself got faster too: less convoying).
+_GIL_SWITCH_INTERVAL_S = 0.0005
 
 
 @app.on_event("startup")
 async def _startup() -> None:
+    sys.setswitchinterval(_GIL_SWITCH_INTERVAL_S)
     db.init_db(build_search_index=False)
     # A first-time search index build can take longer than the desktop app waits
     # for /health; search scans until it lands.
@@ -1390,7 +1407,7 @@ def get_insights(
         raise HTTPException(status_code=400, detail=f"severity must be one of {insights.SEVERITIES}")
     if status not in insights.STATUSES and status != "all":
         raise HTTPException(status_code=400, detail=f"status must be one of {insights.STATUSES} or 'all'")
-    result = insights.compute_insights(days=max(0, min(days, 365)))
+    result = insights.compute_insights_shared(days=max(0, min(days, 365)))
     items = result["insights"]
     if status != "all":
         items = [f for f in items if f["status"] == status]
