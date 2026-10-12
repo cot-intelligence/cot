@@ -12,6 +12,7 @@ import {
 import {
   autoName,
   fromSpec,
+  isSpecific,
   opsFor,
   PER,
   toSpec,
@@ -47,9 +48,14 @@ export function RuleSentenceEditor({ schema, title, initial, draft, onCancel, on
   const [details, setDetails] = useState(false);
   const [saving, setSaving] = useState(false);
   const spec = toSpec(s);
-  const { preview, problem, setProblem, loading } = useRulePreview(spec, PREVIEW_DAYS);
+  const specific = isSpecific(s);
+  const [needsDetail, setNeedsDetail] = useState(false);
+  const { preview, problem, setProblem, loading } = useRulePreview(specific ? spec : null, PREVIEW_DAYS);
   const v = verbOf(s.verb);
-  const set = (patch: Partial<Sentence>) => setS((cur) => ({ ...cur, ...patch }));
+  const set = (patch: Partial<Sentence>) => {
+    setNeedsDetail(false);
+    setS((cur) => ({ ...cur, ...patch }));
+  };
   const setCond = (i: number, c: RuleLeaf) => set({ conds: s.conds.map((x, j) => (j === i ? c : x)) });
 
   const pickVerb = (verb: VerbKey) => {
@@ -69,6 +75,10 @@ export function RuleSentenceEditor({ schema, title, initial, draft, onCancel, on
   };
 
   const save = async () => {
+    if (!specific) {
+      setNeedsDetail(true);
+      return;
+    }
     setSaving(true);
     try {
       await onSave(spec);
@@ -93,7 +103,7 @@ export function RuleSentenceEditor({ schema, title, initial, draft, onCancel, on
           <div>
             <button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={onCancel} style={{ marginLeft: -10, marginBottom: 6 }}><Icon name="back" size={14} />Rules</button>
             <h1>{title}</h1>
-            <p>Say what to watch for. Underneath you'll see what it would have caught in the last {PREVIEW_DAYS} days.</p>
+            <p>Say what to watch for. Once you do, you'll see what it would have caught in the last {PREVIEW_DAYS} days.</p>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={() => onAdvanced(spec)}>Advanced editor</button>
@@ -190,6 +200,7 @@ export function RuleSentenceEditor({ schema, title, initial, draft, onCancel, on
               <div className="rule-adds"><button type="button" className="rule-add" onClick={() => setDetails(true)}>+ only in some projects</button></div>
             )}
 
+            {needsDetail && <p className="rule-err">Say what to look for first, for example what the {v.noun} contains. Without it, this rule would flag every {v.noun}.</p>}
             {problem && <p className="rule-err">{problem.message}</p>}
           </div>
 
@@ -229,7 +240,7 @@ export function RuleSentenceEditor({ schema, title, initial, draft, onCancel, on
           </div>
         </section>
 
-        <RulePreviewCard preview={preview} loading={loading} failed={!!problem} noun={v.noun} />
+        {specific && <RulePreviewCard preview={preview} loading={loading} failed={!!problem} noun={v.noun} />}
       </div>
     </div>
   );

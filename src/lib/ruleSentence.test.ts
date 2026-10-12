@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { RuleSpec } from './api';
-import { autoName, blankSentence, fromSpec, toSpec } from './ruleSentence';
+import { autoName, blankSentence, fromSpec, isSpecific, toSpec } from './ruleSentence';
 
 const base = { pillar: 'security', severity: 'warn' } as const;
 
@@ -79,5 +79,16 @@ describe('rule sentence', () => {
     expect(toSpec(s).name).toBe('Mine');
     expect(toSpec(s).subject).toBe('tool');
     expect(autoName({ ...s, nameTouched: false })).toBe('Agent calls an MCP tool');
+  });
+});
+
+describe('isSpecific', () => {
+  it('needs something to look for', () => {
+    expect(isSpecific(blankSentence('shell'))).toBe(false);
+    expect(isSpecific({ ...blankSentence('shell'), agent: 'cursor', limit: { count: 3, per: 'session' } })).toBe(false);
+    expect(isSpecific({ ...blankSentence('shell'), conds: [{ field: 'target', op: 'contains', value: 'npm' }] })).toBe(true);
+    expect(isSpecific({ ...blankSentence('read'), conds: [{ field: 'target', op: 'is_sensitive_path' }] })).toBe(true);
+    expect(isSpecific({ ...blankSentence('mcp'), fails: true })).toBe(true);
+    expect(isSpecific(blankSentence('spend'))).toBe(true);
   });
 });

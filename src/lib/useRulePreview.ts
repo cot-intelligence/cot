@@ -23,7 +23,11 @@ export function useRulePreview(spec: RuleSpec | null, days: number) {
   }, []);
 
   useEffect(() => {
-    if (!key) return;
+    if (!key) {
+      setPreview(null);
+      setProblem(null);
+      return;
+    }
     const run = (body: string) => {
       flight.current.busy = true;
       setLoading(true);

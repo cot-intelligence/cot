@@ -119,6 +119,17 @@ const opLabel = (op: string) => SIMPLE_OPS.find((o) => o.op === op)?.label ?? op
 const filled = (c: RuleLeaf) =>
   SIMPLE_OPS.find((o) => o.op === c.op)?.none || (c.value !== undefined && String(c.value).trim() !== '');
 
+/**
+ * Whether the sentence says what to look for. Until it does, the rule would
+ * match everything of its kind ("Agent runs a command"), so there is nothing
+ * worth previewing or saving yet. A budget, a failure, or one filled-in
+ * condition each make it specific; agent, projects and repeat limits narrow a
+ * rule but don't say what it is about.
+ */
+export function isSpecific(s: Sentence): boolean {
+  return s.verb === 'spend' || s.fails || s.conds.some(filled);
+}
+
 /** "Agent runs a command that contains npm install, at least 3 times per session". */
 export function autoName(s: Sentence): string {
   const v = verbOf(s.verb);
