@@ -53,6 +53,8 @@ import hashlib
 import json
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -1140,6 +1142,51 @@ def compute_insights(
     }
 
 
+# The sidebar badge, Overview and Findings all ask for the same window when the
+# dashboard opens, and each pass is a multi-second read plus reconcile. Requests
+# that arrive while a pass is running wait for it and share its result, and a
+# result stays good for a few seconds. Dismiss/restore drops it.
+_SHARED_MAX_AGE_S = 5.0
+_shared_lock = threading.Lock()
+_shared_running: dict[tuple[str, int], threading.Event] = {}
+_shared_done: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
+
+
+def _shared_copy(result: dict[str, Any]) -> dict[str, Any]:
+    # Callers replace top-level keys (e.g. the filtered ``insights`` list).
+    return {**result, "insights": list(result["insights"])}
+
+
+def compute_insights_shared(days: int = 30) -> dict[str, Any]:
+    """:func:`compute_insights` for the aggregate view, one pass per burst of requests."""
+    key = (str(db.db_path()), days)  # tests and the replay store swap DBs in-process
+    while True:
+        with _shared_lock:
+            done = _shared_done.get(key)
+            if done and time.monotonic() - done[0] < _SHARED_MAX_AGE_S:
+                return _shared_copy(done[1])
+            running = _shared_running.get(key)
+            if running is None:
+                running = _shared_running[key] = threading.Event()
+                break
+        running.wait()
+        # Loop: take the leader's fresh result, or lead a pass if it failed.
+    try:
+        result = compute_insights(days=days)
+        with _shared_lock:
+            _shared_done[key] = (time.monotonic(), result)
+        return _shared_copy(result)
+    finally:
+        with _shared_lock:
+            _shared_running.pop(key, None)
+        running.set()
+
+
+def forget_shared_insights() -> None:
+    with _shared_lock:
+        _shared_done.clear()
+
+
 def session_exists(session_id: str) -> bool:
     return db.session_exists(session_id)
 
@@ -1147,6 +1194,7 @@ def session_exists(session_id: str) -> bool:
 def set_finding_status(fingerprint: str, status: str) -> bool:
     """Manual lifecycle control: dismiss or restore. Returns False if unknown."""
     assert status in ("dismissed", "active")
+    forget_shared_insights()
     return db.set_insight_finding_status(
         fingerprint, status, db.now() if status == "dismissed" else None
     )
