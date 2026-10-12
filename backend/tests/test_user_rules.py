@@ -448,3 +448,10 @@ def test_listing_rules_is_served_from_memory(monkeypatch):
     monkeypatch.setattr(db, "list_user_rules", lambda: (_ for _ in ()).throw(AssertionError("hit the DB")))
     assert [r["id"] for r in user_rules.list_rules()] == [rule["id"]]
     assert user_rules.get_rule(rule["id"])["spec"]["name"] == "Prod database access"
+
+
+def test_saving_a_rule_drops_shared_findings():
+    _event("s1", category="shell", target="psql -h prod-db", status="ok")
+    insights.compute_insights_shared(30)  # cached without the rule
+    rule = user_rules.create_rule(_spec())
+    assert any(f["id"] == rule["id"] for f in insights.compute_insights_shared(30)["insights"])

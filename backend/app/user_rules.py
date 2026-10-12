@@ -813,6 +813,11 @@ _cache: dict[str, Any] = {"path": None, "rows": None, "compiled": None}
 
 def _invalidate() -> None:
     _cache.update(path=None, rows=None, compiled=None)
+    # Findings computed with the old rule set are shared for a few seconds;
+    # drop them so a saved rule shows up straight away.
+    from .insights import forget_shared_insights  # insights imports this module
+
+    forget_shared_insights()
 
 
 def _rows() -> list[dict[str, Any]]:
