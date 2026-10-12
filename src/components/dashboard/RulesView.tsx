@@ -1,4 +1,4 @@
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -188,18 +188,17 @@ function openSpec(id: string | null, spec: RuleSpec): Editing {
 
 export function RulesView({ fromEvent }: { fromEvent?: number }) {
   const qc = useQueryClient();
-  const [schema, setSchema] = useState<RuleSchema | null>(null);
-  const [rules, setRules] = useState<UserRule[] | null>(null);
-  const [error, setError] = useState(false);
+  // Shared cache keys: Findings polls ['rules'] too, so arriving from there is instant.
+  const schemaQ = useQuery({ queryKey: ['ruleSchema'], queryFn: getRuleSchema, staleTime: Infinity });
+  const rulesQ = useQuery({ queryKey: ['rules'], queryFn: getRules });
+  const schema = schemaQ.data ?? null;
+  const rules = rulesQ.data ?? null;
+  const error = schemaQ.isError || rulesQ.isError;
   const [editing, setEditing] = useState<Editing | null>(null);
 
   const [draftError, setDraftError] = useState<string | null>(null);
 
-  const load = () => getRules().then(setRules).catch(() => setError(true));
-  useEffect(() => {
-    getRuleSchema().then(setSchema).catch(() => setError(true));
-    void load();
-  }, []);
+  const load = () => qc.invalidateQueries({ queryKey: ['rules'] });
 
   // "Make a rule from this" lands here as #/rules?from=<event id>.
   useEffect(() => {
@@ -225,7 +224,7 @@ export function RulesView({ fromEvent }: { fromEvent?: number }) {
   };
 
   const toggle = async (r: UserRule) => {
-    setRules((rs) => rs?.map((x) => (x.id === r.id ? { ...x, enabled: !r.enabled } : x)) ?? rs);
+    qc.setQueryData<UserRule[]>(['rules'], (rs) => rs?.map((x) => (x.id === r.id ? { ...x, enabled: !r.enabled } : x)));
     try {
       await updateRule(r.id, { enabled: !r.enabled });
       invalidateFindings(qc);
@@ -298,7 +297,14 @@ export function RulesView({ fromEvent }: { fromEvent?: number }) {
                 {rules && <span className="mono faint" style={{ fontSize: 11 }}>{rules.filter((r) => r.enabled).length} of {rules.length} on</span>}
               </div>
               {!rules || !schema ? (
-                <div className="card-b"><span className="sk" style={{ height: 18, width: 220 }} /></div>
+                <div aria-busy="true" style={{ marginTop: 8 }}>
+                  {[0, 1].map((i) => (
+                    <div key={i} className="rule-row" style={{ display: 'grid', gap: 6, justifyContent: 'stretch' }}>
+                      <span className="sk" style={{ height: 16, width: 240 }} />
+                      <span className="sk" style={{ height: 12, width: '60%' }} />
+                    </div>
+                  ))}
+                </div>
               ) : rules.length === 0 ? (
                 <div className="card-b"><p className="dim" style={{ margin: 0 }}>No rules yet. Start from a template below, or write one from scratch.</p></div>
               ) : (

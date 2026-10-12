@@ -801,26 +801,40 @@ def decide(facts: Mapping[str, Any], rules: list[CompiledRule] | None = None) ->
 
 # --- storage & cache --------------------------------------------------------------
 
-_cache: dict[str, Any] = {"key": None, "rules": []}
+# The collector is the only writer of ``user_rules`` (every write goes through
+# this module), so the stored rows live in memory after the first read and are
+# dropped on each write. Listing rules then never touches SQLite, which matters
+# because a read there can queue for seconds behind a long findings pass plus a
+# pending writer (rollback-journal mode). Keyed by DB path: tests and the replay
+# store swap databases under the same process.
+_cache: dict[str, Any] = {"path": None, "rows": None, "compiled": None}
 
 
 def _invalidate() -> None:
-    _cache["key"] = None
+    _cache.update(path=None, rows=None, compiled=None)
+
+
+def _rows() -> list[dict[str, Any]]:
+    path = str(db.db_path())
+    if _cache["path"] != path or _cache["rows"] is None:
+        rows = [dict(r) for r in db.list_user_rules()]
+        _cache.update(path=path, rows=rows, compiled=None)
+    return _cache["rows"]
 
 
 def compiled_rules() -> list[CompiledRule]:
-    """All stored rules, compiled once per change (cached on the rule set's version)."""
-    key = db.user_rules_version()
-    if _cache["key"] != key:
+    """All stored rules, compiled once per change."""
+    rows = _rows()
+    if _cache["compiled"] is None:
         rules = []
-        for row in db.list_user_rules():
+        for row in rows:
             try:
                 spec = validate(json.loads(row["spec"]), allow_enforcement=True)
             except (SpecError, json.JSONDecodeError):
                 continue  # a spec that no longer validates is skipped, never crashes compute
             rules.append(compile_rule(row["id"], spec, bool(row["enabled"])))
-        _cache["key"], _cache["rules"] = key, rules
-    return _cache["rules"]
+        _cache["compiled"] = rules
+    return _cache["compiled"]
 
 
 def active_rules() -> list[CompiledRule]:
@@ -854,11 +868,11 @@ def _row_out(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def list_rules() -> list[dict[str, Any]]:
-    return [_row_out(r) for r in db.list_user_rules()]
+    return [_row_out(r) for r in _rows()]
 
 
 def get_rule(rule_id: str) -> dict[str, Any] | None:
-    row = db.get_user_rule(rule_id)
+    row = next((r for r in _rows() if r["id"] == rule_id), None)
     return _row_out(row) if row else None
 
 
@@ -871,7 +885,7 @@ def create_rule(spec: Any, enabled: bool = True) -> dict[str, Any]:
 
 
 def update_rule(rule_id: str, spec: Any | None = None, enabled: bool | None = None) -> dict[str, Any] | None:
-    row = db.get_user_rule(rule_id)
+    row = next((r for r in _rows() if r["id"] == rule_id), None)
     if row is None:
         return None
     spec_json = json.dumps(validate(spec)) if spec is not None else row["spec"]

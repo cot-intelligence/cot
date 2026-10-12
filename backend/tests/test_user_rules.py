@@ -275,6 +275,7 @@ def test_invalid_stored_spec_is_skipped_not_fatal():
     from app import db
 
     db.upsert_user_rule("user.broken", '{"name": "x", "when": {"field": "gone"}}', True)
+    user_rules._invalidate()  # written behind the module's back
     insights.compute_insights()  # must not raise
     listed = user_rules.list_rules()
     assert listed[0]["valid"] is False
@@ -437,3 +438,13 @@ def test_draft_from_clipped_command_drops_ellipsis():
     eid = _event("s1", category="shell", tool="Bash", target="npm run build && npm test -- --watch=false…", status="ok")
     exact = rule_drafts.from_event(eid)["choices"][0]["conditions"][0]
     assert exact["value"] == "npm run build && npm test -- --watch=false"
+
+
+def test_listing_rules_is_served_from_memory(monkeypatch):
+    from app import db
+
+    rule = user_rules.create_rule(_spec())
+    user_rules.list_rules()
+    monkeypatch.setattr(db, "list_user_rules", lambda: (_ for _ in ()).throw(AssertionError("hit the DB")))
+    assert [r["id"] for r in user_rules.list_rules()] == [rule["id"]]
+    assert user_rules.get_rule(rule["id"])["spec"]["name"] == "Prod database access"

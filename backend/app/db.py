@@ -4377,11 +4377,6 @@ def list_user_rules() -> list[sqlite3.Row]:
         return conn.execute("SELECT * FROM user_rules ORDER BY created_at").fetchall()
 
 
-def get_user_rule(rule_id: str) -> sqlite3.Row | None:
-    with store.read() as conn:
-        return conn.execute("SELECT * FROM user_rules WHERE id = ?", (rule_id,)).fetchone()
-
-
 def upsert_user_rule(rule_id: str, spec_json: str, enabled: bool) -> None:
     ts = timeutil.now()
     with store.write() as conn:
@@ -4396,15 +4391,6 @@ def upsert_user_rule(rule_id: str, spec_json: str, enabled: bool) -> None:
 def delete_user_rule(rule_id: str) -> bool:
     with store.write() as conn:
         return conn.execute("DELETE FROM user_rules WHERE id = ?", (rule_id,)).rowcount > 0
-
-
-def user_rules_version() -> tuple[Any, ...]:
-    """Cheap change token for the compiled-rule cache: count, newest edit, enabled count."""
-    with store.read() as conn:
-        r = conn.execute(
-            "SELECT COUNT(*) n, MAX(updated_at) t, SUM(enabled) e FROM user_rules"
-        ).fetchone()
-    return (str(store.path()), r["n"], r["t"], r["e"])
 
 
 def set_insight_finding_status(fingerprint: str, status: str, dismissed_at: str | None) -> bool:
