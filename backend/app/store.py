@@ -58,15 +58,61 @@ def use(db_file: Path) -> Iterator[None]:
         _path_override.reset(token)
 
 
+# Journal mode. The default is the rollback journal ("delete"): the Docker image
+# keeps the DB on a host bind mount (~/.cot -> /data), and WAL's shared-memory
+# file is not reliable across that boundary (SQLite: WAL does not work over a
+# network filesystem). The Mac app runs its collector as a plain local process,
+# where WAL is safe, so it sets COT_DB_JOURNAL_MODE=wal (desktop collector.rs):
+# readers then never wait for a writer, which is what stalled the dashboard and
+# dropped hook events under load. The mode is stored in the file, so whichever
+# collector opens it next converts it to its own mode.
+_JOURNAL_MODES = ("delete", "wal")
+
+
+def journal_mode() -> str:
+    mode = os.environ.get("COT_DB_JOURNAL_MODE", "delete").strip().lower()
+    return mode if mode in _JOURNAL_MODES else "delete"
+
+
+# In WAL mode SQLite checkpoints and deletes the -wal/-shm files whenever the
+# last connection to the DB closes. Connections here are per request, so that
+# would happen constantly; one idle connection per DB file, held for the life
+# of the process, keeps the WAL in place between requests.
+_wal_keepalive: dict[Path, sqlite3.Connection] = {}
+_keepalive_lock = threading.Lock()
+
+
+def _keep_wal_open(db_file: Path) -> None:
+    if db_file in _wal_keepalive:
+        return
+    with _keepalive_lock:
+        if db_file not in _wal_keepalive:
+            keep = sqlite3.connect(db_file, check_same_thread=False, timeout=30.0)
+            # A connection only joins the WAL once it has read something.
+            keep.execute("PRAGMA schema_version").fetchone()
+            _wal_keepalive[db_file] = keep
+
+
+def close_wal_keepalives() -> None:
+    """Release the idle WAL connections (tests; switching a file back to delete mode)."""
+    with _keepalive_lock:
+        for conn in _wal_keepalive.values():
+            conn.close()
+        _wal_keepalive.clear()
+
+
 def _connect() -> sqlite3.Connection:
     db_file = path()
     db_file.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_file, check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000;")
-    journal_mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
-    if str(journal_mode).lower() != "delete":
-        conn.execute("PRAGMA journal_mode=DELETE;")
+    want = journal_mode()
+    current = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+    if str(current).lower() != want:
+        conn.execute(f"PRAGMA journal_mode={want.upper()};")
+    if want == "wal":
+        _keep_wal_open(db_file)
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.execute("PRAGMA temp_store=MEMORY;")
     return conn
@@ -110,6 +156,10 @@ def vacuum() -> None:
         try:
             conn.isolation_level = None
             conn.execute("VACUUM")
+            if journal_mode() == "wal":
+                # In WAL mode the rebuilt pages land in the -wal file; copy them
+                # back and truncate it, or the disk space isn't returned.
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         finally:
             conn.close()
 

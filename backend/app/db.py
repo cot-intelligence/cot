@@ -217,11 +217,11 @@ def db_path() -> Path:
 
 
 def db_size_bytes() -> int:
-    """On-disk size of the database, including a transient rollback journal.
-    DELETE journal mode means there is no persistent -wal/-shm to account for."""
+    """On-disk size of the database, including its journal: a transient
+    rollback journal, or the -wal/-shm files when the desktop app runs in WAL mode."""
     p = store.path()
     total = 0
-    for path in (p, p.with_name(p.name + "-journal")):
+    for path in (p, *(p.with_name(p.name + suffix) for suffix in ("-journal", "-wal", "-shm"))):
         try:
             total += path.stat().st_size
         except OSError:
@@ -4188,69 +4188,111 @@ live_status = timeutil.live_status
 build_clarifications = session_read.build_clarifications
 QUESTION_TOOLS = session_read.QUESTION_TOOLS
 
+# ``detail`` (tool output, prompt text) is most of the events table's bytes, and
+# only the secrets rule reads it, for prompts and shell commands. Fetching it for
+# every other row made the findings read several times longer, and in
+# rollback-journal mode every other request queues behind a long read once a
+# write is pending. The CASE leaves the other rows' overflow pages unread.
 _INSIGHT_EVENT_COLUMNS = (
     "e.id, e.session_id, e.ts, e.category, e.tool, e.target, e.status, e.hook,"
-    " e.title, e.detail, e.model, e.duration_ms,"
+    " e.title, CASE WHEN e.category IN ('prompt', 'shell') THEN e.detail END AS detail,"
+    " e.model, e.duration_ms,"
     " e.input_tokens, e.output_tokens, e.cache_read_tokens, e.cache_write_tokens,"
     " s.cwd"
 )
+
+# Serves the per-session tool-call counts (``model_mismatch``) from a small
+# index instead of a scan of the events table. Built off the startup path by
+# :func:`ensure_insight_indexes`; the query is correct (just slower) without it.
+_TOOL_CALLS_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_events_tool_calls ON events(session_id)"
+    " WHERE tool IS NOT NULL AND status IS NOT NULL"
+)
+
+
+_INSIGHT_SESSION_BATCH = 50
+
+
+def ensure_insight_indexes() -> None:
+    """Create the findings indexes if missing (a few seconds on a large DB, once)."""
+    with store.write() as conn:
+        conn.execute(_TOOL_CALLS_INDEX_SQL)
 
 
 def read_insight_inputs(
     *, cutoff: str | None, session_id: str | None, trend_since: str | None
 ) -> "InsightInputs":
-    """One read of the store for the insight rules.
+    """The store's reads for the insight rules.
 
     Returns the working set (non-archived events, optionally windowed to
     ``cutoff`` / narrowed to ``session_id``, joined to their session cwd) plus
     the cross-cutting views rules need outside that window: per-session last
     activity, per-session tool-call counts, and — when ``trend_since`` is set —
-    the priced events since then for the trend rule.
+    the priced events since then for the trend rule. In session mode the
+    per-session views cover just that session, the only one rules look up.
+
+    Each query is its own short read, and rows become dicts after the
+    connection closes, so a writer waiting to commit (which blocks every new
+    reader in rollback-journal mode) gets in between them. Reads can therefore
+    straddle a write; the rules are heuristics over history, so a few events
+    landing mid-pass don't matter.
     """
-    where = " WHERE s.archived = 0"
-    params: list[Any] = []
-    if cutoff:
-        where += " AND e.ts >= ?"
-        params.append(cutoff)
+    per_session = (" WHERE session_id = ?", (session_id,)) if session_id else ("", ())
+
+    def rows(sql: str, args: Any = ()) -> list[Any]:
+        with store.read() as conn:
+            return conn.execute(sql, args).fetchall()
+
+    # The working set is read a batch of sessions at a time (in session order,
+    # so the result keeps its (session, ts, id) ordering): one query for a
+    # month of events held the read lock for seconds on a cold cache.
     if session_id:
-        where += " AND e.session_id = ?"
-        params.append(session_id)
-    with store.read() as conn:
-        events = [
+        session_ids = [session_id]
+    else:
+        session_ids = [r["id"] for r in rows("SELECT id FROM sessions WHERE archived = 0 ORDER BY id")]
+    window = " AND e.ts >= ?" if cutoff else ""
+    events: list[dict[str, Any]] = []
+    for i in range(0, len(session_ids), _INSIGHT_SESSION_BATCH):
+        batch = session_ids[i:i + _INSIGHT_SESSION_BATCH]
+        events.extend(
             dict(r)
-            for r in conn.execute(
+            for r in rows(
                 "SELECT " + _INSIGHT_EVENT_COLUMNS
                 + " FROM events e JOIN sessions s ON s.id = e.session_id"
-                + where
+                " WHERE s.archived = 0 AND e.session_id IN (" + ",".join("?" * len(batch)) + ")"
+                + window
                 + " ORDER BY e.session_id, e.ts, e.id",
-                params,
-            ).fetchall()
+                [*batch, *([cutoff] if cutoff else [])],
+            )
+        )
+    session_last_ts = {
+        r["session_id"]: r["t"]
+        for r in rows(
+            "SELECT session_id, MAX(ts) t FROM events" + per_session[0] + " GROUP BY session_id",
+            per_session[1],
+        )
+    }
+    tool_where = " AND session_id = ?" if session_id else ""
+    session_tool_calls = {
+        r["session_id"]: r["n"]
+        for r in rows(
+            "SELECT session_id, COUNT(*) n FROM events"
+            " WHERE tool IS NOT NULL AND status IS NOT NULL" + tool_where + " GROUP BY session_id",
+            per_session[1],
+        )
+    }
+    trend_events: list[dict[str, Any]] = []
+    if trend_since is not None:
+        trend_events = [
+            dict(r)
+            for r in rows(
+                "SELECT " + _INSIGHT_EVENT_COLUMNS
+                + " FROM events e JOIN sessions s ON s.id = e.session_id"
+                " WHERE s.archived = 0 AND e.ts >= ?"
+                " AND e.model IS NOT NULL AND e.model != ''",
+                (trend_since,),
+            )
         ]
-        session_last_ts = {
-            r["session_id"]: r["t"]
-            for r in conn.execute(
-                "SELECT session_id, MAX(ts) t FROM events GROUP BY session_id"
-            ).fetchall()
-        }
-        session_tool_calls = {
-            r["session_id"]: r["n"]
-            for r in conn.execute(
-                "SELECT session_id, COUNT(*) n FROM events"
-                " WHERE tool IS NOT NULL AND status IS NOT NULL GROUP BY session_id"
-            ).fetchall()
-        }
-        trend_events: list[dict[str, Any]] = []
-        if trend_since is not None:
-            trend_events = [
-                dict(r)
-                for r in conn.execute(
-                    "SELECT " + _INSIGHT_EVENT_COLUMNS
-                    + " FROM events e JOIN sessions s ON s.id = e.session_id"
-                    " WHERE s.archived = 0 AND e.ts >= ?"
-                    " AND e.model IS NOT NULL AND e.model != ''",
-                    (trend_since,),
-                ).fetchall()
-            ]
     return {
         "events": events,
         "session_last_ts": session_last_ts,
