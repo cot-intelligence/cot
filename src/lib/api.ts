@@ -46,6 +46,8 @@ export interface SessionSummary {
   };
   cost_usd: number;
   has_cost: boolean;
+  /** Session-level thumbs from its annotation: 1 up, -1 down. */
+  rating?: Rating | null;
   /** Session Replay copies only: the id the session had where it was exported. */
   imported_from?: string;
   imported_at?: string | null;
@@ -982,6 +984,42 @@ export async function setSessionArchived(id: string, archived: boolean): Promise
 export async function setSessionBookmarked(id: string, bookmarked: boolean): Promise<void> {
   const action = bookmarked ? 'bookmark' : 'unbookmark';
   await json(await fetch(`/v1/sessions/${id}/${action}`, { method: 'POST' }));
+}
+
+export type Rating = 1 | -1;
+
+/** What the person thought of a session (`event_id` null) or one event in it. */
+export interface Annotation {
+  session_id: string;
+  event_id: number | null;
+  rating: Rating | null;
+  labels: string[];
+  note: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface SessionAnnotations {
+  session: Annotation | null;
+  events: Annotation[];
+}
+
+export async function getSessionAnnotations(sessionId: string): Promise<SessionAnnotations> {
+  return json<SessionAnnotations>(await fetch(`/v1/sessions/${encodeURIComponent(sessionId)}/annotations`));
+}
+
+/** Replaces the annotation; no rating, labels or note clears it. */
+export async function putAnnotation(
+  sessionId: string,
+  body: { event_id?: number | null; rating: Rating | null; labels: string[]; note: string | null },
+): Promise<Annotation> {
+  return json<Annotation>(
+    await fetch(`/v1/sessions/${encodeURIComponent(sessionId)}/annotations`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  );
 }
 
 /** Downloads the whole session (untrimmed events, raw hook rows) as JSON. */

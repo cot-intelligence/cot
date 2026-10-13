@@ -209,6 +209,20 @@ CREATE TABLE IF NOT EXISTS ai_analyses (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ai_analyses_created ON ai_analyses(created_at);
+
+-- What the person thought of a session (event_id 0) or of one event in it:
+-- a thumbs rating, short labels and a note. Ground truth for insights and rules.
+CREATE TABLE IF NOT EXISTS annotations (
+    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    event_id    INTEGER NOT NULL DEFAULT 0,
+    rating      INTEGER,
+    labels      TEXT,
+    note        TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (session_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_annotations_updated ON annotations(updated_at);
 """
 
 
@@ -2323,7 +2337,23 @@ def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any
         "tokens": _tokens_dict(tok),
         "cost_usd": round(cost_usd, 6),
         "has_cost": has_cost,
+        "rating": _session_ratings(conn, [row["id"]]).get(row["id"]),
         **_import_fields(row),
+    }
+
+
+def _session_ratings(conn: sqlite3.Connection, session_ids: list[str]) -> dict[str, int]:
+    """Session-level thumbs (``annotations`` with event_id 0), by session."""
+    if not session_ids:
+        return {}
+    placeholders = ",".join("?" for _ in session_ids)
+    return {
+        r["session_id"]: r["rating"]
+        for r in conn.execute(
+            f"SELECT session_id, rating FROM annotations"
+            f" WHERE event_id = 0 AND rating IS NOT NULL AND session_id IN ({placeholders})",
+            session_ids,
+        )
     }
 
 
@@ -2369,6 +2399,7 @@ def _batched_session_summaries(
         session_ids,
     ).fetchall():
         model_rows_by_session.setdefault(r["session_id"], []).append(r)
+    ratings = _session_ratings(conn, session_ids)
 
     summaries: list[dict[str, Any]] = []
     for row in rows:
@@ -2401,6 +2432,7 @@ def _batched_session_summaries(
                 "tokens": _tokens_from_parts(row["i"], row["o"], row["cr"], row["cw"]),
                 "cost_usd": round(cost_usd, 6),
                 "has_cost": has_cost,
+                "rating": ratings.get(row["id"]),
                 **_import_fields(row),
             }
         )
@@ -2831,6 +2863,141 @@ def set_bookmarked(session_id: str, bookmarked: bool) -> bool:
             (1 if bookmarked else 0, session_id),
         )
         return cur.rowcount > 0
+
+
+ANNOTATION_LABELS_MAX = 8
+ANNOTATION_LABEL_MAX = 40
+ANNOTATION_NOTE_MAX = 4000
+
+
+def _annotation_dict(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        labels = json.loads(row["labels"] or "[]")
+    except json.JSONDecodeError:
+        labels = []
+    return {
+        "session_id": row["session_id"],
+        "event_id": row["event_id"] or None,
+        "rating": row["rating"],
+        "labels": labels if isinstance(labels, list) else [],
+        "note": row["note"],
+        "created_at": timeutil.format_ts(row["created_at"]),
+        "updated_at": timeutil.format_ts(row["updated_at"]),
+    }
+
+
+def _clean_labels(labels: list[Any] | None) -> list[str]:
+    out: list[str] = []
+    for label in labels or []:
+        text = " ".join(str(label or "").split())[:ANNOTATION_LABEL_MAX].lower()
+        if text and text not in out:
+            out.append(text)
+    return out[:ANNOTATION_LABELS_MAX]
+
+
+def get_annotations(session_id: str) -> dict[str, Any] | None:
+    """The session's own annotation and each annotated event's, or None when
+    the session does not exist."""
+    with store.read() as conn:
+        if conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone() is None:
+            return None
+        rows = conn.execute(
+            "SELECT * FROM annotations WHERE session_id = ? ORDER BY event_id", (session_id,)
+        ).fetchall()
+    found = [_annotation_dict(r) for r in rows]
+    return {
+        "session": next((a for a in found if a["event_id"] is None), None),
+        "events": [a for a in found if a["event_id"] is not None],
+    }
+
+
+def set_annotation(
+    session_id: str,
+    event_id: int | None,
+    *,
+    rating: int | None,
+    labels: list[Any] | None,
+    note: str | None,
+) -> dict[str, Any] | None:
+    """Replace the annotation on a session (``event_id`` None) or one of its
+    events. An empty annotation (no rating, labels or note) is removed, and
+    comes back empty. Returns None when the session or event does not exist."""
+    if rating not in (None, 1, -1):
+        raise ValueError("rating must be 1, -1 or null")
+    clean = _clean_labels(labels)
+    text = (note or "").strip()[:ANNOTATION_NOTE_MAX] or None
+    eid = int(event_id or 0)
+    now = timeutil.now()
+    with store.write() as conn:
+        if conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone() is None:
+            return None
+        if eid and conn.execute(
+            "SELECT 1 FROM events WHERE id = ? AND session_id = ?", (eid, session_id)
+        ).fetchone() is None:
+            return None
+        if rating is None and not clean and not text:
+            conn.execute("DELETE FROM annotations WHERE session_id = ? AND event_id = ?", (session_id, eid))
+            return {
+                "session_id": session_id, "event_id": eid or None, "rating": None, "labels": [],
+                "note": None, "created_at": None, "updated_at": None,
+            }
+        conn.execute(
+            "INSERT INTO annotations (session_id, event_id, rating, labels, note, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(session_id, event_id) DO UPDATE SET"
+            " rating = excluded.rating, labels = excluded.labels, note = excluded.note,"
+            " updated_at = excluded.updated_at",
+            (session_id, eid, rating, json.dumps(clean) if clean else None, text, now, now),
+        )
+        row = conn.execute(
+            "SELECT * FROM annotations WHERE session_id = ? AND event_id = ?", (session_id, eid)
+        ).fetchone()
+    return _annotation_dict(row)
+
+
+def list_annotations(
+    rating: int | None = None,
+    label: str | None = None,
+    since: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Annotations across sessions, newest first, with enough of the session
+    and event to read them without opening each one."""
+    clauses = ["1 = 1"]
+    params: list[Any] = []
+    if rating is not None:
+        clauses.append("a.rating = ?")
+        params.append(rating)
+    if label:
+        clauses.append("EXISTS (SELECT 1 FROM json_each(a.labels) j WHERE j.value = ?)")
+        params.append(label.strip().lower())
+    if since:
+        clauses.append("a.updated_at >= ?")
+        params.append(since)
+    params.append(limit)
+    with store.read() as conn:
+        rows = conn.execute(
+            "SELECT a.*, s.source, s.cwd, e.category AS event_category, e.title AS event_title,"
+            " e.target AS event_target,"
+            " (SELECT fp.detail FROM events fp WHERE fp.session_id = a.session_id"
+            "  AND fp.category = 'prompt' ORDER BY fp.id ASC LIMIT 1) AS prompt_detail"
+            " FROM annotations a JOIN sessions s ON s.id = a.session_id"
+            " LEFT JOIN events e ON e.id = NULLIF(a.event_id, 0)"
+            f" WHERE {' AND '.join(clauses)} ORDER BY a.updated_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+    out = []
+    for r in rows:
+        item = _annotation_dict(r)
+        item.update({
+            "source": r["source"],
+            "cwd": r["cwd"],
+            "session_title": _summary_title(r["prompt_detail"]),
+            "event": {"category": r["event_category"], "title": r["event_title"], "target": r["event_target"]}
+            if item["event_id"] else None,
+        })
+        out.append(item)
+    return out
 
 
 def set_subagent_links(links: list[dict[str, Any]]) -> int:

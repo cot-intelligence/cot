@@ -971,6 +971,52 @@ def unbookmark_session(session_id: str) -> dict[str, Any]:
     return {"ok": True, "bookmarked": False}
 
 
+class AnnotationBody(BaseModel):
+    event_id: int | None = None
+    rating: int | None = None
+    labels: list[str] | None = None
+    note: str | None = None
+
+
+@app.get("/v1/sessions/{session_id}/annotations")
+def get_session_annotations(session_id: str) -> dict[str, Any]:
+    found = db.get_annotations(session_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return found
+
+
+@app.put("/v1/sessions/{session_id}/annotations")
+def put_session_annotation(session_id: str, body: AnnotationBody) -> dict[str, Any]:
+    """Rate (1 / -1), label or note a session, or one event with ``event_id``.
+    Sending no rating, labels or note clears it."""
+    try:
+        saved = db.set_annotation(
+            session_id, body.event_id, rating=body.rating, labels=body.labels, note=body.note
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if saved is None:
+        raise HTTPException(status_code=404, detail="Session or event not found")
+    db.record_audit_event(
+        "session.annotated", target=f"{session_id}#{body.event_id}" if body.event_id else session_id
+    )
+    _bump_revision()
+    return saved
+
+
+@app.get("/v1/annotations")
+def get_annotations(
+    rating: int | None = Query(None, ge=-1, le=1),
+    label: str | None = None,
+    days: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=1000),
+) -> dict[str, Any]:
+    """Every annotation, newest first: ground truth for what went well or badly."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat() if days else None
+    return {"items": db.list_annotations(rating=rating, label=label, since=since, limit=limit)}
+
+
 @app.get("/v1/sessions/origins")
 def get_session_origins() -> dict[str, Any]:
     return {"origins": db.session_origins()}
