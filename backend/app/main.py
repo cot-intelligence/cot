@@ -13,6 +13,7 @@ import os
 import platform as _platform
 import re
 import shlex
+import sqlite3
 import threading
 import time
 import urllib.parse
@@ -36,7 +37,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, activity, ai_insights, context_cost, cron, db, extension_usage, insights, passive, store, timeutil
+from . import __version__, activity, ai_insights, context_cost, cron, db, extension_usage, insights, otlp, passive, store, timeutil
 
 app = FastAPI(title="cot collector", version=__version__)
 
@@ -841,6 +842,67 @@ async def ingest(source: str, request: Request) -> dict[str, Any]:
     result = db.record_ingest(source, body)
     _bump_revision()
     return result
+
+
+def _otlp_reply(request: Request, status_code: int = 200, message: str | None = None) -> Response:
+    """An empty Export*ServiceResponse in the encoding the exporter sent."""
+    protobuf = "protobuf" in (request.headers.get("content-type") or "")
+    if status_code != 200:
+        return JSONResponse({"code": 3, "message": message or "bad request"}, status_code=status_code)
+    if protobuf:
+        return Response(b"", media_type="application/x-protobuf")
+    return JSONResponse({})
+
+
+def _ingest_otlp(records: list[dict[str, Any]]) -> int:
+    stored = 0
+    for source, body in otlp.to_bodies(records):
+        result = db.record_ingest(source, body)
+        stored += bool(result.get("event_id")) and not result.get("duplicate")
+    return stored
+
+
+async def _otlp(request: Request, signal: str) -> Response:
+    raw = await request.body()
+    if len(raw) > otlp.MAX_BODY_BYTES:
+        return _otlp_reply(request, 413, "body too large")
+    try:
+        records = otlp.decode(
+            raw, request.headers.get("content-type"), request.headers.get("content-encoding"), signal
+        )
+    except ValueError as exc:
+        return _otlp_reply(request, 400, str(exc))
+    try:
+        stored = await asyncio.to_thread(_ingest_otlp, records)
+    except sqlite3.OperationalError:
+        # Busy DB: 503 is retryable under OTLP, and the retry dedups on span ids.
+        reply = _otlp_reply(request, 503, "collector busy, retry")
+        reply.headers["Retry-After"] = "2"
+        return reply
+    if stored:
+        _bump_revision()
+    return _otlp_reply(request)
+
+
+@app.post("/v1/traces")
+async def otlp_traces(request: Request) -> Response:
+    """OTLP/HTTP spans (JSON or protobuf). Point an agent's exporter at the
+    collector: ``OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:31337``."""
+    return await _otlp(request, "traces")
+
+
+@app.post("/v1/logs")
+async def otlp_logs(request: Request) -> Response:
+    """OTLP/HTTP log records: agents emit prompts, tool results and API usage as events."""
+    return await _otlp(request, "logs")
+
+
+@app.post("/v1/metrics")
+async def otlp_metrics(request: Request) -> Response:
+    """Accepted and dropped: per-request events carry the same numbers, and an
+    exporter that gets errors here retries and logs noise."""
+    await request.body()
+    return _otlp_reply(request)
 
 
 # In-process change counter. A single uvicorn worker serves this collector, so a

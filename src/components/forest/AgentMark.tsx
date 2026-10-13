@@ -15,6 +15,10 @@ export const AGENT_LABELS: Record<string, string> = {
   codex: 'Codex',
   opencode: 'OpenCode',
   cowork: 'Cowork',
+  // Agents that arrive over OpenTelemetry, named from their service.name.
+  'gemini-cli': 'Gemini CLI',
+  'github-copilot': 'GitHub Copilot',
+  otel: 'OpenTelemetry',
 };
 export const agentLabel = (id: string) => AGENT_LABELS[id] ?? id[0].toUpperCase() + id.slice(1);
 
