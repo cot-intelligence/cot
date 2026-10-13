@@ -538,9 +538,10 @@ export interface ActivityFailure {
   last: ActivityRef | null;
 }
 
-/** One entry in "Worth a look": an anomaly, a repeated failure or a risky command. */
+/** One entry in "Worth a look": an anomaly, a repeated failure, a risky command, or
+ *  extensions that sit in every prompt without being used (`idle_overhead`, no ref). */
 export interface ActivityAttention {
-  kind: 'loop' | 'failure_spike' | 'failing' | 'risky' | 'first_seen' | 'slow';
+  kind: 'loop' | 'failure_spike' | 'failing' | 'risky' | 'first_seen' | 'slow' | 'idle_overhead';
   severity: 'critical' | 'warn' | 'info';
   title: string;
   detail: string | null;
@@ -549,7 +550,8 @@ export interface ActivityAttention {
   program?: string | null;
   /** Grouped "first time" entries list every name. */
   names?: string[];
-  ref: ActivityRef;
+  /** The run to open; null when there is none (idle extensions). */
+  ref: ActivityRef | null;
 }
 
 export interface ActivitySummary {

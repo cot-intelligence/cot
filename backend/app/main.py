@@ -36,7 +36,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, activity, ai_insights, cron, db, extension_usage, insights, passive, store, timeutil
+from . import __version__, activity, ai_insights, context_cost, cron, db, extension_usage, insights, passive, store, timeutil
 
 app = FastAPI(title="cot collector", version=__version__)
 
@@ -1488,6 +1488,19 @@ def _json_payload(request: Request, payload: Any) -> Response:
 def get_extensions(request: Request, refresh: bool = False, days: int = Query(0, ge=0)) -> Response:
     """Installed plugins, skills and MCP servers across agents, with usage (``days`` > 0: in that window)."""
     return _json_payload(request, extension_usage.overview(refresh=refresh, days=days))
+
+
+@app.get("/v1/context")
+def get_context(
+    request: Request,
+    days: int = Query(30, ge=0),
+    project: str | None = None,
+    source: str | None = None,
+) -> Response:
+    """What the fixed part of every prompt is made of: memory files, skill
+    listings and MCP tool definitions, per agent, with idle extensions flagged.
+    Request counts and floors are measured; the split is estimated from disk."""
+    return _json_payload(request, context_cost.cached_report(days, project, source))
 
 
 @app.get("/v1/extensions/detail")

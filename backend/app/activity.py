@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
-from . import db, extension_usage, store
+from . import context_cost, db, extension_usage, store
 from .insights import RISKY_COMMAND_PATTERNS, SECRET_PATTERNS, mask_secret
 
 # Prefixes that run the real command rather than being it.
@@ -606,7 +606,11 @@ def _summarize(
         # What commands ran through (rtk, sudo, timeout, env vars…), for the log's Via filter.
         "via": [{"key": k, "runs": n} for k, n in Counter(v for it in items for v in it.get("via") or []).most_common()],
     }
-    result["attention"] = worth_a_look(find_anomalies(category, items, baseline, days), failing, risky)
+    anomalies = find_anomalies(category, items, baseline, days)
+    if extension and not plugin:
+        # Installed but unused, yet still in every prompt: there is no run to point at.
+        anomalies += context_cost.idle_attention(category, days, project, source)
+    result["attention"] = worth_a_look(anomalies, failing, risky)
     if extension:
         # The plugin filter lists every plugin in the unfiltered window, so picking one never hides the rest.
         window_all = [it for it in unfiltered if since is None or (it["ts"] or "") >= since]
@@ -882,7 +886,7 @@ def _is_tool_name(category: str, key: str) -> bool:
 
 
 # Order within a severity: the most actionable first.
-_KIND_ORDER = {"risky": 0, "loop": 1, "failure_spike": 2, "failing": 3, "first_seen": 4, "slow": 5}
+_KIND_ORDER = {"risky": 0, "loop": 1, "failure_spike": 2, "failing": 3, "first_seen": 4, "slow": 5, "idle_overhead": 6}
 
 
 def worth_a_look(
