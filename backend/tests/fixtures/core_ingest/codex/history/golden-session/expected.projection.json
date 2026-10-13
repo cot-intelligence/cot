@@ -939,6 +939,7 @@
     "models": [
       "gpt-5.5"
     ],
+    "rating": null,
     "source": "codex",
     "started_at": "2026-06-01T10:00:00+00:00",
     "status": "completed",

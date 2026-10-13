@@ -81,6 +81,8 @@ const RANGES: { days: number; label: string; short: string }[] = [
 /** How many "Worth a look" entries show before "Show more". */
 const ATTENTION_SHOWN = 3;
 
+const ATTENTION_ROW: React.CSSProperties = { width: '100%', textAlign: 'left', borderRadius: 10, padding: '10px 12px', display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr)', gap: '4px 10px', alignItems: 'center' };
+
 /**
  * What agents ran (shell), fetched (web), called (MCP) or loaded (skills). Four
  * numbers, a short ranked list of what is worth a look (measured against the
@@ -199,9 +201,10 @@ function UsageView({ onSelect, tab, initialGroup }: { onSelect: (sessionId: stri
                 <div className="card-b dim" style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}><FIcon name="check" size={15} style={{ color: 'var(--v-olive)' }} />Nothing unusual in this range.</div>
               ) : (
                 <ul style={{ listStyle: 'none', margin: 0, padding: '0 8px 8px' }}>
-                  {(moreAttention ? attention : attention.slice(0, ATTENTION_SHOWN)).map((a, i) => (
-                    <li key={`${a.kind}-${a.title}-${i}`}>
-                      <button type="button" className="hov" onClick={() => onSelect(a.ref.session_id, a.ref.event_id)} style={{ width: '100%', textAlign: 'left', border: 0, background: 'none', borderRadius: 10, padding: '10px 12px', display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr)', gap: '4px 10px', alignItems: 'center' }}>
+                  {(moreAttention ? attention : attention.slice(0, ATTENTION_SHOWN)).map((a, i) => {
+                    const ref = a.ref;
+                    const body = (
+                      <>
                         <Sev s={a.severity} />
                         <span className="truncate" style={{ fontSize: 13, fontWeight: 500 }}>{a.title}</span>
                         {(a.subject || a.names || a.detail) && (
@@ -209,9 +212,18 @@ function UsageView({ onSelect, tab, initialGroup }: { onSelect: (sessionId: stri
                             {a.names ? a.names.join(', ') : a.subject ?? ''}{a.detail ? `${a.subject || a.names ? ' · ' : ''}${a.detail}` : ''}
                           </span>
                         )}
-                      </button>
-                    </li>
-                  ))}
+                      </>
+                    );
+                    return (
+                      <li key={`${a.kind}-${a.title}-${i}`}>
+                        {ref ? (
+                          <button type="button" className="hov" onClick={() => onSelect(ref.session_id, ref.event_id)} style={{ ...ATTENTION_ROW, border: 0, background: 'none' }}>{body}</button>
+                        ) : (
+                          <div style={ATTENTION_ROW}>{body}</div>
+                        )}
+                      </li>
+                    );
+                  })}
                   {attention.length > ATTENTION_SHOWN && (
                     <li><button type="button" className="vbtn vbtn-ghost vbtn-sm" style={{ margin: '4px 4px 0' }} onClick={() => setMoreAttention((x) => !x)}>{moreAttention ? 'Show fewer' : `Show all ${attention.length}`}</button></li>
                   )}

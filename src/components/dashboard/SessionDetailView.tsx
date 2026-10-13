@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getSessionDetail, getSessionExtensions, sessionExportUrl, setSessionBookmarked, type ComponentEntry, type SessionDetail, type Store, type TimelineItem } from '../../lib/api';
+import { getSessionDetail, getSessionExtensions, sessionExportUrl, setSessionBookmarked, type Annotation, type ComponentEntry, type SessionDetail, type Store, type TimelineItem } from '../../lib/api';
 import { setDocumentTitle } from '../../lib/documentTitle';
 import { sessionHref, SessionStoreContext } from '../../lib/sessionStore';
 import { categoryLabel, fmt, modelLabel, project } from '../forest/format';
@@ -11,6 +11,7 @@ import { extensionPageHref, SCOPE_LABEL } from './ExtensionsView';
 import { ActivityMap } from './session/ActivityMap';
 import { AttachmentTags } from './session/AttachmentTags';
 import { EventDetailPanel } from './session/EventDetailPanel';
+import { Feedback, RatingMark, useAnnotations } from './session/Feedback';
 import { InsightsTab } from './session/tabs/InsightsTab';
 
 interface SessionDetailViewProps {
@@ -53,6 +54,10 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
     enabled: store === 'main',
     refetchInterval: store === 'main' && detail?.summary.status === 'active' ? 30000 : false,
   });
+
+  // Thumbs, labels and notes; only traced sessions take them.
+  const { data: annotations } = useAnnotations(sessionId, store === 'main');
+  const ratedEvents = useMemo(() => new Map((annotations?.events ?? []).map((a) => [a.event_id, a])), [annotations]);
 
   useEffect(() => {
     setTab('timeline');
@@ -194,6 +199,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
                   ))}
                 </div>
               )}
+              {store === 'main' && <div style={{ marginTop: 12 }}><Feedback sessionId={sessionId} /></div>}
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
               <a className="vbtn vbtn-quiet vbtn-sm" href={sessionExportUrl(s.id, store)} download><Icon name="download" size={14} />Export</a>
@@ -227,7 +233,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
                 <div className="card-b">
                   <ol className="tl">
                     {list.slice(0, shown).map((e) => (
-                      <TraceRow key={e.id} e={e} live={s.status === 'active'} open={open === e.id} focusQuery={e.id === focusEventId ? focusQuery : undefined} onToggle={() => setOpen((o) => (o === e.id ? null : e.id))} sessionId={sessionId} onJump={revealEvent} />
+                      <TraceRow key={e.id} e={e} live={s.status === 'active'} open={open === e.id} focusQuery={e.id === focusEventId ? focusQuery : undefined} onToggle={() => setOpen((o) => (o === e.id ? null : e.id))} sessionId={sessionId} onJump={revealEvent} annotatable={store === 'main'} annotation={ratedEvents.get(e.id)} />
                     ))}
                   </ol>
                   {list.length === 0 && <div className="empty">No events{cat ? ' of this kind' : ''}.</div>}
@@ -282,7 +288,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   );
 }
 
-function TraceRow({ e, open, live, focusQuery, onToggle, sessionId, onJump }: { e: TimelineItem; open: boolean; live: boolean; focusQuery?: string; onToggle: () => void; sessionId: string; onJump: (id: number) => void }) {
+function TraceRow({ e, open, live, focusQuery, onToggle, sessionId, onJump, annotatable, annotation }: { e: TimelineItem; open: boolean; live: boolean; focusQuery?: string; onToggle: () => void; sessionId: string; onJump: (id: number) => void; annotatable: boolean; annotation?: Annotation }) {
   const failed = e.status === 'error' || e.status === 'failed';
   const text = TEXT_KINDS.has(e.category) ? e.detail?.trim() : '';
   return (
@@ -290,7 +296,7 @@ function TraceRow({ e, open, live, focusQuery, onToggle, sessionId, onJump }: { 
       <span className="tl-ic"><Icon name={CATEGORY_ICON[e.category] ?? 'file'} size={15} /></span>
       <div style={{ minWidth: 0 }}>
         <button type="button" onClick={onToggle} aria-expanded={open} style={{ all: 'unset', cursor: 'pointer', display: 'block', width: '100%' }}>
-          <div className="tl-t">{e.tool ?? categoryLabel(e.category)}{failed ? <span className="vchip c-critical" style={{ marginLeft: 8 }}>failed</span> : null}{live && e.ongoing === true ? <span className="vchip c-ok" style={{ marginLeft: 8 }}><span className="dot" />running</span> : null}</div>
+          <div className="tl-t">{e.tool ?? categoryLabel(e.category)}{failed ? <span className="vchip c-critical" style={{ marginLeft: 8 }}>failed</span> : null}{live && e.ongoing === true ? <span className="vchip c-ok" style={{ marginLeft: 8 }}><span className="dot" />running</span> : null}<RatingMark annotation={annotation} /></div>
           {e.target && <div className="tl-x" title={e.target}>{e.target}</div>}
         </button>
         {text && <TraceText kind={e.category} text={text} />}
@@ -298,6 +304,7 @@ function TraceRow({ e, open, live, focusQuery, onToggle, sessionId, onJump }: { 
         {open && (
           <div className="tl-detail">
             <EventDetailPanel item={e} sessionId={sessionId} onJump={onJump} compact />
+            {annotatable && <div style={{ marginTop: 10 }}><Feedback sessionId={sessionId} eventId={e.id} compact /></div>}
             {focusQuery && <p className="mono faint" style={{ fontSize: 11, margin: '8px 0 0' }}>Matched “{focusQuery}”</p>}
           </div>
         )}

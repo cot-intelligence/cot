@@ -159,7 +159,7 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
             "duration_ms": duration_ms,
         }
 
-    if hook == "OpenCodeUsage":
+    if hook in ("OpenCodeUsage", "ModelUsage"):
         return {
             "category": "lifecycle",
             "title": "Model usage",
@@ -424,7 +424,8 @@ def normalize(source: Source, body: dict[str, Any] | None) -> dict[str, Any]:
         tool = _cursor_tool(hook, body)
     else:
         # Claude Code, Codex, and OpenCode use the same bridge payload shape.
-        if source not in ("codex", "opencode"):
+        # OpenTelemetry records keep the agent otlp.py named from service.name.
+        if source not in ("codex", "opencode") and not body.get("_otel"):
             source = "claude"
         session_id = body.get("session_id") or "unknown"
         cwd = body.get("cwd")

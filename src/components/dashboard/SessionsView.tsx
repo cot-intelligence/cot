@@ -209,6 +209,11 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                           {s.status === 'active' && <span className="live" title="Live" />}
                           <span className="truncate" style={{ fontWeight: 500 }}>{s.title || 'Untitled session'}</span>
+                          {s.rating && (
+                            <span role="img" aria-label={s.rating === 1 ? 'Rated good' : 'Rated bad'} title={s.rating === 1 ? 'Rated good' : 'Rated bad'} style={{ display: 'inline-flex', color: s.rating === 1 ? 'var(--v-olive)' : 'var(--v-alert)' }}>
+                              <Icon name={s.rating === 1 ? 'thumb-up' : 'thumb-down'} size={13} />
+                            </span>
+                          )}
                           {sev && <Sev s={sev} />}
                         </div>
                         <span className="mono faint" style={{ fontSize: 11 }}>{project(s.cwd)} · {shortId(s.id)}</span>

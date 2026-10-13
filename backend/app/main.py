@@ -38,7 +38,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, activity, ai_insights, cron, db, extension_usage, insights, passive, store, timeutil
+from . import __version__, activity, ai_insights, context_cost, cron, db, extension_usage, insights, otlp, passive, store, timeutil
 
 app = FastAPI(title="cot collector", version=__version__)
 
@@ -860,6 +860,67 @@ async def ingest(source: str, request: Request) -> dict[str, Any]:
     return result
 
 
+def _otlp_reply(request: Request, status_code: int = 200, message: str | None = None) -> Response:
+    """An empty Export*ServiceResponse in the encoding the exporter sent."""
+    protobuf = "protobuf" in (request.headers.get("content-type") or "")
+    if status_code != 200:
+        return JSONResponse({"code": 3, "message": message or "bad request"}, status_code=status_code)
+    if protobuf:
+        return Response(b"", media_type="application/x-protobuf")
+    return JSONResponse({})
+
+
+def _ingest_otlp(records: list[dict[str, Any]]) -> int:
+    stored = 0
+    for source, body in otlp.to_bodies(records):
+        result = db.record_ingest(source, body)
+        stored += bool(result.get("event_id")) and not result.get("duplicate")
+    return stored
+
+
+async def _otlp(request: Request, signal: str) -> Response:
+    raw = await request.body()
+    if len(raw) > otlp.MAX_BODY_BYTES:
+        return _otlp_reply(request, 413, "body too large")
+    try:
+        records = otlp.decode(
+            raw, request.headers.get("content-type"), request.headers.get("content-encoding"), signal
+        )
+    except ValueError as exc:
+        return _otlp_reply(request, 400, str(exc))
+    try:
+        stored = await asyncio.to_thread(_ingest_otlp, records)
+    except sqlite3.OperationalError:
+        # Busy DB: 503 is retryable under OTLP, and the retry dedups on span ids.
+        reply = _otlp_reply(request, 503, "collector busy, retry")
+        reply.headers["Retry-After"] = "2"
+        return reply
+    if stored:
+        _bump_revision()
+    return _otlp_reply(request)
+
+
+@app.post("/v1/traces")
+async def otlp_traces(request: Request) -> Response:
+    """OTLP/HTTP spans (JSON or protobuf). Point an agent's exporter at the
+    collector: ``OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:31337``."""
+    return await _otlp(request, "traces")
+
+
+@app.post("/v1/logs")
+async def otlp_logs(request: Request) -> Response:
+    """OTLP/HTTP log records: agents emit prompts, tool results and API usage as events."""
+    return await _otlp(request, "logs")
+
+
+@app.post("/v1/metrics")
+async def otlp_metrics(request: Request) -> Response:
+    """Accepted and dropped: per-request events carry the same numbers, and an
+    exporter that gets errors here retries and logs noise."""
+    await request.body()
+    return _otlp_reply(request)
+
+
 # In-process change counter. A single uvicorn worker serves this collector, so a
 # plain integer is a sufficient "something changed" signal for the live stream —
 # the dashboard refetches through the existing endpoints when it advances,
@@ -986,6 +1047,52 @@ def unbookmark_session(session_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Session not found")
     db.record_audit_event("session.unbookmarked", target=session_id)
     return {"ok": True, "bookmarked": False}
+
+
+class AnnotationBody(BaseModel):
+    event_id: int | None = None
+    rating: int | None = None
+    labels: list[str] | None = None
+    note: str | None = None
+
+
+@app.get("/v1/sessions/{session_id}/annotations")
+def get_session_annotations(session_id: str) -> dict[str, Any]:
+    found = db.get_annotations(session_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return found
+
+
+@app.put("/v1/sessions/{session_id}/annotations")
+def put_session_annotation(session_id: str, body: AnnotationBody) -> dict[str, Any]:
+    """Rate (1 / -1), label or note a session, or one event with ``event_id``.
+    Sending no rating, labels or note clears it."""
+    try:
+        saved = db.set_annotation(
+            session_id, body.event_id, rating=body.rating, labels=body.labels, note=body.note
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if saved is None:
+        raise HTTPException(status_code=404, detail="Session or event not found")
+    db.record_audit_event(
+        "session.annotated", target=f"{session_id}#{body.event_id}" if body.event_id else session_id
+    )
+    _bump_revision()
+    return saved
+
+
+@app.get("/v1/annotations")
+def get_annotations(
+    rating: int | None = Query(None, ge=-1, le=1),
+    label: str | None = None,
+    days: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=1000),
+) -> dict[str, Any]:
+    """Every annotation, newest first: ground truth for what went well or badly."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat() if days else None
+    return {"items": db.list_annotations(rating=rating, label=label, since=since, limit=limit)}
 
 
 @app.get("/v1/sessions/origins")
@@ -1505,6 +1612,29 @@ def _json_payload(request: Request, payload: Any) -> Response:
 def get_extensions(request: Request, refresh: bool = False, days: int = Query(0, ge=0)) -> Response:
     """Installed plugins, skills and MCP servers across agents, with usage (``days`` > 0: in that window)."""
     return _json_payload(request, extension_usage.overview(refresh=refresh, days=days))
+
+
+@app.get("/v1/context")
+def get_context(
+    request: Request,
+    days: int = Query(30, ge=0),
+    project: str | None = None,
+    source: str | None = None,
+) -> Response:
+    """What the fixed part of every prompt is made of: memory files, skill
+    listings and MCP tool definitions, per agent, with idle extensions flagged.
+    Request counts and floors are measured; the split is estimated from disk."""
+    return _json_payload(request, context_cost.cached_report(days, project, source))
+
+
+@app.get("/v1/sessions/{session_id}/cost")
+def get_session_cost(session_id: str) -> dict[str, Any]:
+    """Where one session's tokens went: per model, the heaviest events, cache
+    share, and the preamble (memory, skills, MCP) every request carried."""
+    found = context_cost.session_cost(session_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return found
 
 
 @app.get("/v1/extensions/detail")
