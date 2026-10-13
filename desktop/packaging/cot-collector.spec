@@ -1,12 +1,12 @@
 # PyInstaller spec for the collector binary embedded in cot.app.
-# Built from macos/build.sh; `pathex` points at backend/ so `app.main` resolves.
+# Built by desktop/scripts/prepare-collector.sh; `pathex` points at backend/ so `app.main` resolves.
 
 import os
 
 REPO = os.environ["COT_REPO_ROOT"]
 
 a = Analysis(
-    [os.path.join(REPO, "macos", "packaging", "collector_entry.py")],
+    [os.path.join(REPO, "desktop", "packaging", "collector_entry.py")],
     pathex=[os.path.join(REPO, "backend")],
     binaries=[],
     datas=[
