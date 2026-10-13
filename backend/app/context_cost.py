@@ -400,6 +400,83 @@ def report(days: int = 30, project: str | None = None, source: str | None = None
     }
 
 
+def session_cost(session_id: str) -> dict[str, Any] | None:
+    """Where one session's tokens went: per model, the heaviest events, how
+    much was served from cache, and the preamble every request carried.
+    ``requests`` counts token-bearing events, a lower bound on model calls."""
+    with store.read() as conn:
+        sess = conn.execute("SELECT id, source, cwd FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if sess is None:
+            return None
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id, ts, category, title, target, model, input_tokens AS i, output_tokens AS o,"
+            " cache_read_tokens AS cr, cache_write_tokens AS cw FROM events WHERE session_id = ?"
+            " AND (input_tokens > 0 OR output_tokens > 0 OR cache_read_tokens > 0 OR cache_write_tokens > 0)",
+            (session_id,),
+        )]
+        children = conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE parent_session_id = ?", (session_id,)
+        ).fetchone()[0]
+    agent = _agent(sess["source"])
+    models: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        m = models.setdefault(r["model"] or "unknown", {"model": r["model"], "requests": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
+        m["requests"] += 1
+        m["input"] += int(r["i"] or 0)
+        m["output"] += int(r["o"] or 0)
+        m["cache_read"] += int(r["cr"] or 0)
+        m["cache_write"] += int(r["cw"] or 0)
+    total_cost = 0.0
+    priced = False
+    for m in models.values():
+        c = cost_for(m["model"], m["input"], m["output"], m["cache_read"], m["cache_write"])
+        m["cost_usd"] = round(c, 4) if c is not None else None
+        if c is not None:
+            total_cost += c
+            priced = True
+    prompts = [_prompt_size(r) for r in rows]
+    read = sum(int(r["cr"] or 0) for r in rows)
+    heaviest = sorted(rows, key=lambda r: -(_prompt_size(r) + int(r["o"] or 0)))[:8]
+
+    pre = _Context(extension_usage.inventory()).of(agent, sess["cwd"])
+    buckets = {
+        "memory": sum(t for _, t in pre["memory"]),
+        "skills": sum(pre["skills"].values()),
+        "mcp": sum(t for t in pre["mcp"].values() if t),
+    }
+    return {
+        "session_id": session_id,
+        "agent": agent,
+        "requests": len(rows),
+        "subagent_sessions": children,
+        "cost_usd": round(total_cost, 4) if priced else None,
+        "models": sorted(models.values(), key=lambda m: -(m["cost_usd"] or 0)),
+        "prompt_tokens": {
+            "floor": min((p for p in prompts if p > 0), default=None) if agent in _PER_REQUEST_SOURCES else None,
+            "median": int(statistics.median(prompts)) if prompts else None,
+            "max": max(prompts, default=None),
+            "total": sum(prompts),
+        },
+        # Share of prompt tokens served from cache (cheap) rather than read fresh.
+        "cache_read_share": round(read / sum(prompts), 3) if sum(prompts) else None,
+        # An event can carry several model calls' usage (the bridge folds the
+        # usage of calls it does not record onto the next event it keeps).
+        "heaviest_events": [
+            {
+                "event_id": r["id"], "ts": timeutil.format_ts(r["ts"]), "category": r["category"],
+                "title": r["title"], "target": (r["target"] or "")[:160] or None, "model": r["model"],
+                "prompt_tokens": _prompt_size(r), "output_tokens": int(r["o"] or 0),
+            }
+            for r in heaviest
+        ],
+        "preamble_per_request": {
+            **buckets,
+            "unmeasured_mcp": sum(1 for t in pre["mcp"].values() if t is None),
+            "estimated_total": sum(buckets.values()) * len(rows),
+        },
+    }
+
+
 def cached_report(days: int = 30, project: str | None = None, source: str | None = None) -> dict[str, Any]:
     """:func:`report`, reused until a new MCP call or skill load, a config change
     or the minute rolls over (the Extensions view's cache)."""

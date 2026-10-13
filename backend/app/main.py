@@ -1549,6 +1549,16 @@ def get_context(
     return _json_payload(request, context_cost.cached_report(days, project, source))
 
 
+@app.get("/v1/sessions/{session_id}/cost")
+def get_session_cost(session_id: str) -> dict[str, Any]:
+    """Where one session's tokens went: per model, the heaviest events, cache
+    share, and the preamble (memory, skills, MCP) every request carried."""
+    found = context_cost.session_cost(session_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return found
+
+
 @app.get("/v1/extensions/detail")
 def get_extension_detail(request: Request, key: str, refresh: bool = False) -> Response:
     """One extension: where it is installed, how it is used, and its security scan.

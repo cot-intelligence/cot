@@ -171,3 +171,25 @@ def test_claude_skill_descriptions_are_capped_by_the_listing_budget(homes, monke
     # Each keeps its name and half the 100-char budget.
     assert capped["skill:a"] == context_cost._tokens(1 + context_cost._SKILL_LISTING_OVERHEAD + 50)
     assert uncapped["skill:a"] == context_cost._tokens(1 + context_cost._SKILL_LISTING_OVERHEAD + 1000)
+
+
+def test_session_cost_breaks_down_one_session(homes):
+    from fastapi.testclient import TestClient
+
+    from app import main
+
+    proj = str(homes["project"])
+    _session("c1", "claude", proj)
+    _request("c1", "claude", i=5, cr=20_000, cw=1_000, category="prompt")
+    _request("c1", "claude", i=5, cr=90_000, category="shell", target="pytest -q")
+    client = TestClient(main.app, base_url="http://127.0.0.1")
+
+    r = client.get("/v1/sessions/c1/cost").json()
+    assert r["requests"] == 2
+    assert r["prompt_tokens"]["floor"] == 21_005
+    assert r["prompt_tokens"]["max"] == 90_005
+    assert r["heaviest_events"][0]["target"] == "pytest -q"
+    assert r["models"][0]["cache_read"] == 110_000 and r["cost_usd"] > 0
+    assert 0.9 < r["cache_read_share"] < 1
+    assert r["preamble_per_request"]["memory"] > 0
+    assert client.get("/v1/sessions/nope/cost").status_code == 404
