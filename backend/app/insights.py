@@ -1074,6 +1074,12 @@ def _reconcile(store: FindingsStore, findings: list[dict[str, Any]]) -> list[dic
         prev = stored.get(fp)
         if prev is None:
             store.insert(f, now)
+            # Notify about new critical/warn findings and every user-rule match,
+            # but not on the very first pass (an empty store), which would flood
+            # the inbox with history.
+            notify = getattr(store, "notify_new_finding", None)
+            if notify and stored and (f.get("severity") in ("critical", "warn") or f.get("user_rule")):
+                notify(f, now)
             f["status"], f["first_seen"], f["last_seen"] = "active", now, now
         else:
             # Re-detection: refresh the snapshot; reopen resolved, keep dismissed hidden.

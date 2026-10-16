@@ -209,6 +209,21 @@ CREATE TABLE IF NOT EXISTS ai_analyses (
 
 CREATE INDEX IF NOT EXISTS idx_ai_analyses_created ON ai_analyses(created_at);
 
+-- Things worth telling the person about (a new finding, a rule match), shown in
+-- the dashboard's inbox and, in the Mac app, as macOS notifications.
+CREATE TABLE IF NOT EXISTS notifications (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,
+    severity    TEXT,
+    title       TEXT NOT NULL,
+    body        TEXT,
+    href        TEXT,
+    dedup_key   TEXT UNIQUE,
+    created_at  TEXT NOT NULL,
+    read_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(read_at, id);
+
 CREATE TABLE IF NOT EXISTS user_rules (
     id          TEXT PRIMARY KEY,
     spec        TEXT NOT NULL,
@@ -4878,6 +4893,19 @@ class InsightFindingsRepo:
             for r in self._conn.execute("SELECT * FROM insight_findings").fetchall()
         }
 
+    def notify_new_finding(self, finding: Any, now: str) -> None:
+        """Queue a notification for a newly detected finding (same transaction)."""
+        _insert_notification(
+            self._conn,
+            kind="finding",
+            severity=finding.get("severity"),
+            title=finding.get("title") or "New finding",
+            body=finding.get("recommendation") or finding.get("detail"),
+            href=f"#/findings?pillar={finding.get('pillar')}" if finding.get("pillar") else "#/findings",
+            dedup_key=f"finding:{finding['fingerprint']}",
+            now=now,
+        )
+
     def insert(self, finding: Any, now: str) -> None:
         self._conn.execute(
             "INSERT INTO insight_findings (fingerprint, rule_id, pillar, tier, severity,"
@@ -4923,6 +4951,56 @@ class InsightFindingsRepo:
 
     def commit(self) -> None:
         self._conn.commit()
+
+
+def _insert_notification(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    title: str,
+    now: str,
+    severity: str | None = None,
+    body: str | None = None,
+    href: str | None = None,
+    dedup_key: str | None = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO notifications (kind, severity, title, body, href, dedup_key, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(dedup_key) DO NOTHING",
+        (kind, severity, title[:300], (body or "")[:1000] or None, href, dedup_key, now),
+    )
+
+
+def list_notifications(limit: int = 30, after: int | None = None) -> dict[str, Any]:
+    """Newest notifications (or only those after ``after``, oldest first, for
+    the Mac app's poller), with the unread count."""
+    limit = max(1, min(limit, 200))
+    with store.read() as conn:
+        if after is not None:
+            rows = conn.execute(
+                "SELECT * FROM notifications WHERE id > ? ORDER BY id ASC LIMIT ?", (after, limit)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM notifications ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        unread = conn.execute("SELECT COUNT(*) FROM notifications WHERE read_at IS NULL").fetchone()[0]
+        latest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM notifications").fetchone()[0]
+    return {"items": [dict(r) for r in rows], "unread": unread, "latest_id": latest}
+
+
+def mark_notifications_read(ids: list[int] | None = None) -> int:
+    """Mark the given notifications (or all) read; returns the unread count left."""
+    now = timeutil.now()
+    with store.write() as conn:
+        if ids:
+            conn.execute(
+                f"UPDATE notifications SET read_at = ? WHERE read_at IS NULL AND id IN ({','.join('?' * len(ids))})",
+                (now, *ids),
+            )
+        else:
+            conn.execute("UPDATE notifications SET read_at = ? WHERE read_at IS NULL", (now,))
+        return conn.execute("SELECT COUNT(*) FROM notifications WHERE read_at IS NULL").fetchone()[0]
 
 
 @contextmanager

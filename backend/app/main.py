@@ -609,6 +609,8 @@ def get_settings() -> dict[str, Any]:
         "ui_sidebar_open": db.get_setting("ui_sidebar_open", "1") != "0",
         "ui_onboarded": db.get_setting("ui_onboarded") == "1",
         "ui_onboarding_agents": _stored_onboarding_agents(),
+        # macOS notifications from the Mac app for new inbox items.
+        "notify_desktop": db.get_setting("notify_desktop", "1") != "0",
     }
 
 
@@ -653,7 +655,7 @@ async def update_settings(request: Request) -> dict[str, Any]:
         # choice takes effect without waiting for the daily cycle.
         if enabled and not _telemetry_env_disabled():
             threading.Thread(target=_send_telemetry, args=(True,), daemon=True).start()
-    for key in ("ui_nav_collapsed", "ui_sidebar_open", "ui_onboarded"):
+    for key in ("ui_nav_collapsed", "ui_sidebar_open", "ui_onboarded", "notify_desktop"):
         if key in body:
             db.set_setting(key, "1" if bool(body[key]) else "0")
     if "ui_onboarding_agents" in body:
@@ -1167,6 +1169,25 @@ def get_project(name: str, days: int = 30) -> dict[str, Any]:
     """One project's page (see db.project_overview); 0 days = all time."""
     days = max(0, days)
     return _cached_aggregate("project", (name, days), lambda: db.project_overview(name, days))
+
+
+@app.get("/v1/notifications")
+def get_notifications(limit: int = 30, after: int | None = None) -> dict[str, Any]:
+    """The inbox. ``after`` returns only newer items, oldest first (the Mac app
+    polls with it to post macOS notifications); ``notify_desktop`` says whether
+    it should."""
+    out = db.list_notifications(limit, after)
+    out["notify_desktop"] = db.get_setting("notify_desktop", "1") != "0"
+    return out
+
+
+class ReadBody(BaseModel):
+    ids: list[int] | None = None
+
+
+@app.post("/v1/notifications/read")
+def read_notifications(body: ReadBody | None = None) -> dict[str, Any]:
+    return {"unread": db.mark_notifications_read(body.ids if body else None)}
 
 
 @app.get("/v1/overview/window")
