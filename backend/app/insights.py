@@ -1032,8 +1032,8 @@ def _stored_to_finding(r: Any) -> dict[str, Any]:
         "first_seen": r["first_seen"],
         "last_seen": r["last_seen"],
         "resolved_at": r["resolved_at"],
-        "dismissed_at": r["dismissed_at"],
-        "dismiss_reason": r["dismiss_reason"],
+        "dismissed_at": r["dismissed_at"] if "dismissed_at" in r.keys() else None,
+        "dismiss_reason": r["dismiss_reason"] if "dismiss_reason" in r.keys() else None,
         "user_rule": r["rule_id"].startswith(user_rules.ID_PREFIX),
     }
 
@@ -1081,7 +1081,10 @@ def _reconcile(store: FindingsStore, findings: list[dict[str, Any]]) -> list[dic
             store.refresh(f, status, now)
             f["status"], f["first_seen"], f["last_seen"] = status, prev["first_seen"], now
             if status == "dismissed":
-                f["dismissed_at"], f["dismiss_reason"] = prev["dismissed_at"], prev["dismiss_reason"]
+                # Rows (sqlite3.Row or a store's dicts) may predate these fields.
+                keys = prev.keys()
+                f["dismissed_at"] = prev["dismissed_at"] if "dismissed_at" in keys else None
+                f["dismiss_reason"] = prev["dismiss_reason"] if "dismiss_reason" in keys else None
         f["resolved_at"] = None
         out.append(f)
     for fp, r in stored.items():

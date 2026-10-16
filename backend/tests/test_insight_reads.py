@@ -102,7 +102,7 @@ def test_dismiss_patches_the_shared_result(monkeypatch):
     monkeypatch.setattr(
         insights, "compute_insights", lambda days=30, **_: calls.append(days) or {"insights": [dict(finding)], "counts": {}}
     )
-    monkeypatch.setattr(db, "set_insight_finding_status", lambda fp, status, at: fp == "fp1")
+    monkeypatch.setattr(db, "set_insight_finding_status", lambda fp, status, at, reason=None: fp == "fp1")
     insights.compute_insights_shared(30)
     assert insights.set_finding_status("fp1", "dismissed")
     out = insights.compute_insights_shared(30)
