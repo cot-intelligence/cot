@@ -5,6 +5,7 @@ import { getSessionDetail, getSessionExtensions, sessionExportUrl, setSessionBoo
 import { setDocumentTitle } from '../../lib/documentTitle';
 import { cachedSessionSummary, seededSessionDetail, sessionDetailKey } from '../../lib/sessionDetailQuery';
 import { useFullEventDetail } from '../../lib/useFullEventDetail';
+import { BackToTop } from '../ui/BackToTop';
 import { sessionHref, SessionStoreContext } from '../../lib/sessionStore';
 import { categoryLabel, fmt, modelLabel, project } from '../forest/format';
 import { CATEGORY_ICON, Icon } from '../forest/icons';
@@ -173,6 +174,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   return (
     <SessionStoreContext.Provider value={store}>
       <div className="scroll" id="vf-scroll">
+        <BackToTop />
         <div className="page">
           <a href={back.href} className="vbtn vbtn-ghost vbtn-sm" style={{ marginLeft: -10, marginBottom: 8 }}><Icon name="back" size={14} />{back.label}</a>
           <div className="ph" style={{ alignItems: 'flex-start' }}>
