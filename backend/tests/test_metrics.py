@@ -61,7 +61,7 @@ def test_local_time_buckets_match_per_row_conversion(fresh_db: Path):
 def test_breakdowns_same_with_and_without_metrics_indexes(fresh_db: Path):
     _seed()
     before = db.metrics("UTC")
-    db.ensure_metrics_indexes()
+    db.ensure_query_indexes()
     after = db.metrics("UTC")
     assert before == after
     assert after["totals"]["errors"] == 1

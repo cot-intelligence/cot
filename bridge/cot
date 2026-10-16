@@ -4,16 +4,15 @@
 from __future__ import annotations
 
 import base64
+# subprocess, shutil and mimetypes are imported where used: every hook event
+# starts this script, and they are ~15 ms of import time it never needs.
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
-import mimetypes
 import os
 import re
-import shutil
 import socket
 import struct
-import subprocess
 import sys
 import threading
 import time
@@ -190,6 +189,24 @@ def _probe_health() -> bool:
         return False
 
 
+# Spooled events per request when the collector takes batches.
+_SPOOL_POST_BATCH = 100
+
+
+def _collector_accepts_batches(endpoint: str | None = None) -> bool:
+    """Whether the collector advertises batched ingest. An older one rejects an
+    array as malformed, and a rejected send counts as delivered, so batches
+    only go to a collector that says it takes them."""
+    try:
+        with urllib.request.urlopen(
+            f"{(endpoint or COT_ENDPOINT).rstrip('/')}/health", timeout=_PROBE_TIMEOUT_S
+        ) as resp:
+            body = json.loads(resp.read() or b"{}")
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return False
+    return isinstance(body, dict) and "ingest_batch" in (body.get("features") or [])
+
+
 def _collector_reachable() -> bool:
     """False while a recent unreachable send says the collector is down, so a
     hung collector costs one timeout rather than one per send. After the
@@ -212,7 +229,7 @@ def _collector_reachable() -> bool:
     return False
 
 
-def _send_once(url: str, payload: dict, timeout: float) -> bool:
+def _send_once(url: str, payload: dict | list[dict], timeout: float) -> bool:
     """POST one payload. Returns True on success, False if the collector could
     not be reached (the only condition that should trigger spooling)."""
     data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
@@ -316,20 +333,34 @@ def _spool_flush(timeout: float = 3.0, *, endpoint: str | None = None) -> bool:
                 pass
             return True
         reachable = True
+        limit = min(len(lines), _SPOOL_FLUSH_BATCH)
+        # Consecutive events for the same endpoint go as one request (one write
+        # transaction on the collector) when it takes batches; order is kept.
+        per_post = _SPOOL_POST_BATCH if limit > 1 and _collector_accepts_batches(endpoint) else 1
         i = 0
-        for i in range(min(len(lines), _SPOOL_FLUSH_BATCH)):
-            try:
-                rec = json.loads(lines[i])
-            except json.JSONDecodeError:
-                continue  # skip a corrupt line rather than wedge the queue
-            target = _spool_target(rec, endpoint)
-            if not target:
-                continue
-            if not _send_once(target, rec.get("payload", {}), timeout):
+        while i < limit:
+            group: list[dict] = []
+            target = ""
+            j = i
+            while j < limit and len(group) < per_post:
+                try:
+                    rec = json.loads(lines[j])
+                except json.JSONDecodeError:
+                    j += 1  # skip a corrupt line rather than wedge the queue
+                    continue
+                rec_target = _spool_target(rec, endpoint)
+                if not rec_target:
+                    j += 1
+                    continue
+                if target and rec_target != target:
+                    break
+                target = rec_target
+                group.append(rec.get("payload", {}))
+                j += 1
+            if group and not _send_once(target, group if per_post > 1 else group[0], timeout):
                 reachable = False
                 break
-        else:
-            i = min(len(lines), _SPOOL_FLUSH_BATCH)
+            i = j
         remaining = lines[i:]
         try:
             if remaining:
@@ -492,6 +523,8 @@ def _decode_data_url(value: str) -> tuple[str | None, bytes | None]:
 
 def _uploaded_documents_from_text(text: str) -> list[dict]:
     """Cursor records chat uploads as an uploaded_documents text preamble."""
+    import mimetypes
+
     match = re.search(r"<uploaded_documents>(.*?)</uploaded_documents>", text, re.S)
     if not match:
         return []
@@ -524,6 +557,8 @@ def _uploaded_documents_from_text(text: str) -> list[dict]:
 
 def _codex_files_from_text(text: str) -> list[dict]:
     """Codex records some uploads only as a leading Files-mentioned preamble."""
+    import mimetypes
+
     stripped = text.lstrip()
     if not stripped.startswith("# Files mentioned by the user:"):
         return []
@@ -557,6 +592,8 @@ def _codex_files_from_text(text: str) -> list[dict]:
 
 
 def _file_attachment_meta(attachment: dict) -> dict | None:
+    import mimetypes
+
     if attachment.get("type") != "file":
         return None
     filename = attachment.get("filename")
@@ -1608,6 +1645,8 @@ def _latest_backup(agent: str) -> dict | None:
 
 
 def _backup_config(agent: str, path: Path, action: str) -> dict | None:
+    import shutil
+
     if not path.exists():
         return None
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1979,10 +2018,14 @@ def _container_name() -> str:
 
 
 def _docker_available() -> bool:
+    import shutil
+
     return shutil.which("docker") is not None
 
 
 def _docker_container_names(*filters: str) -> tuple[list[str], str | None]:
+    import subprocess
+
     result = subprocess.run(
         ["docker", "ps", "-a", *filters, "--format", "{{.Names}}"],
         capture_output=True,
@@ -2013,6 +2056,8 @@ def _collector_container_names(container: str) -> tuple[list[str], str | None]:
 
 
 def _docker_rm_collector(container: str) -> tuple[bool, str]:
+    import subprocess
+
     if not _docker_available():
         return False, "Docker is not installed or not on PATH."
     targets, err = _collector_container_names(container)
@@ -2028,6 +2073,8 @@ def _docker_rm_collector(container: str) -> tuple[bool, str]:
 
 
 def _docker_running_map(targets: list[str]) -> tuple[dict[str, bool], str | None]:
+    import subprocess
+
     if not targets:
         return {}, None
     result = subprocess.run(
@@ -2045,6 +2092,8 @@ def _docker_running_map(targets: list[str]) -> tuple[dict[str, bool], str | None
 
 
 def _docker_start_collectors(container: str) -> tuple[bool, str]:
+    import subprocess
+
     if not _docker_available():
         return False, "Docker is not installed or not on PATH."
     targets, err = _collector_container_names(container)
@@ -2066,6 +2115,8 @@ def _docker_start_collectors(container: str) -> tuple[bool, str]:
 
 
 def _docker_stop_collectors(container: str) -> tuple[bool, str]:
+    import subprocess
+
     if not _docker_available():
         return False, "Docker is not installed or not on PATH."
     targets, err = _collector_container_names(container)
@@ -2121,6 +2172,8 @@ def _wait_for_health(endpoint: str, attempts: int = 60) -> bool:
 
 
 def _docker_run_collector(container: str) -> tuple[bool, str]:
+    import subprocess
+
     global COT_ENDPOINT
     image = os.environ.get("COT_IMAGE") or "ghcr.io/cot-intelligence/cot:latest"
     port = int(os.environ.get("COT_PORT") or _endpoint_port(COT_ENDPOINT))
@@ -2250,6 +2303,8 @@ def _confirm_purge(assume_yes: bool) -> bool:
 
 
 def _cmd_purge(args: list[str]) -> int:
+    import shutil
+
     assume_yes = False
     if args:
         if len(args) == 1 and args[0] in ("-y", "--yes"):

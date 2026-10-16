@@ -68,7 +68,10 @@ def _with_temp_spool(fn):
             bridge.COLLECTOR_DOWN_PATH,
             bridge._send_once,
             bridge._probe_health,
+            bridge._collector_accepts_batches,
         )
+        # Never ask a real collector (the default endpoint may be a live one).
+        bridge._collector_accepts_batches = lambda endpoint=None: False
         bridge.STATE_DIR = state
         bridge.SPOOL_PATH = state / "spool.jsonl"
         bridge.SPOOL_LOCK_PATH = state / "spool.lock"
@@ -84,6 +87,7 @@ def _with_temp_spool(fn):
                 bridge.COLLECTOR_DOWN_PATH,
                 bridge._send_once,
                 bridge._probe_health,
+                bridge._collector_accepts_batches,
             ) = orig
             bridge._down_since = None
 
@@ -436,3 +440,31 @@ def _run_all():
 
 if __name__ == "__main__":
     _run_all()
+
+
+def test_spool_replays_in_batches_per_endpoint_when_the_collector_takes_them():
+    def run(state):
+        lines = []
+        for i in range(5):
+            source = "codex" if i == 2 else "claude"
+            lines.append(json.dumps({"path": f"/v1/ingest/{source}", "payload": {"n": i}}))
+        bridge.SPOOL_PATH.write_text("\n".join(lines) + "\n")
+        bridge._collector_accepts_batches = lambda endpoint=None: True
+        posts: list[tuple[str, object]] = []
+
+        def send(url, payload, timeout):
+            posts.append((url.rsplit("/", 1)[-1], payload))
+            return len(posts) < 3  # the third request fails
+
+        bridge._send_once = send
+        assert bridge._spool_flush() is False
+        # In order, grouped by endpoint, one request per run of the same one.
+        assert posts == [
+            ("claude", [{"n": 0}, {"n": 1}]),
+            ("codex", [{"n": 2}]),
+            ("claude", [{"n": 3}, {"n": 4}]),
+        ]
+        # The failed group stays queued.
+        assert [r["payload"]["n"] for r in _spool_lines()] == [3, 4]
+
+    _with_temp_spool(run)

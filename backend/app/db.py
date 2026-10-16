@@ -100,7 +100,6 @@ CREATE TABLE IF NOT EXISTS events (
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_session_category ON events(session_id, category);
 CREATE INDEX IF NOT EXISTS idx_events_session_model ON events(session_id, model);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
@@ -1389,6 +1388,9 @@ def init_db(build_search_index: bool = True) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)"
         )
+        # A prefix of idx_events_session_agg, which serves every lookup it did
+        # (the cascade delete's included); one fewer B-tree to update per insert.
+        conn.execute("DROP INDEX IF EXISTS idx_events_session")
         stored = conn.execute(
             "SELECT value FROM settings WHERE key = 'migrations_version'"
         ).fetchone()
@@ -2057,11 +2059,24 @@ def mark_raw_ingest(
     projection_error: str | None = None,
 ) -> None:
     with store.write() as conn:
-        conn.execute(
-            "UPDATE raw_ingest_events SET status = ?, event_id = ?, projection_error = ?"
-            " WHERE id = ?",
-            (status, event_id, projection_error, raw_ingest_id),
+        _mark_raw_ingest(
+            conn, raw_ingest_id, status, event_id=event_id, projection_error=projection_error
         )
+
+
+def _mark_raw_ingest(
+    conn: sqlite3.Connection,
+    raw_ingest_id: int,
+    status: str,
+    *,
+    event_id: int | None = None,
+    projection_error: str | None = None,
+) -> None:
+    conn.execute(
+        "UPDATE raw_ingest_events SET status = ?, event_id = ?, projection_error = ?"
+        " WHERE id = ?",
+        (status, event_id, projection_error, raw_ingest_id),
+    )
 
 
 def raw_ingest_events(limit: int = 100) -> list[dict[str, Any]]:
@@ -2098,11 +2113,34 @@ def record_malformed_ingest(
 
 
 def record_ingest(source: str, raw: dict[str, Any]) -> dict[str, Any]:
-    raw_id = append_raw_ingest(source, raw, origin="import" if raw.get("_import") else "hook")
+    return record_ingests([(source, raw)])[0]
+
+
+def record_ingests(items: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Store and project hook bodies, all in one write transaction.
+
+    Each body is appended to the raw ingest ledger, projected into an Event and
+    its ledger row marked, as one unit per body (a savepoint), so a body whose
+    projection fails still keeps its raw row, marked failed. One commit for the
+    lot instead of three per body: a batch (OTLP spans, a replayed spool) holds
+    the write lock once."""
+    results: list[dict[str, Any]] = []
+    with store.write() as conn:
+        for source, raw in items:
+            results.append(_record_ingest(conn, source, raw))
+    return results
+
+
+def _record_ingest(conn: sqlite3.Connection, source: str, raw: dict[str, Any]) -> dict[str, Any]:
+    raw_id = _append_raw_ingest(
+        conn, source, raw, origin="import" if raw.get("_import") else "hook"
+    )
+    conn.execute("SAVEPOINT project_event")
     try:
         norm = normalize(source, raw)
         if should_ignore_event(norm, raw):
-            mark_raw_ingest(raw_id, "ignored")
+            conn.execute("RELEASE project_event")
+            _mark_raw_ingest(conn, raw_id, "ignored")
             return {
                 "ok": True,
                 "ignored": True,
@@ -2113,11 +2151,14 @@ def record_ingest(source: str, raw: dict[str, Any]) -> dict[str, Any]:
                 "hook": norm["hook"],
                 "category": norm.get("category"),
             }
-        session_id, event_id, inserted = record_event(
-            norm, raw, raw_ingest_id=raw_id, return_status=True
+        session_id, event_id, inserted = _record_event(
+            conn, norm, raw, raw_ingest_id=raw_id, return_status=True
         )
+        conn.execute("RELEASE project_event")
     except Exception as exc:
-        mark_raw_ingest(raw_id, "failed", projection_error=str(exc))
+        conn.execute("ROLLBACK TO project_event")
+        conn.execute("RELEASE project_event")
+        _mark_raw_ingest(conn, raw_id, "failed", projection_error=str(exc))
         return {
             "ok": True,
             "raw_ingest_id": raw_id,
@@ -2129,7 +2170,7 @@ def record_ingest(source: str, raw: dict[str, Any]) -> dict[str, Any]:
         }
 
     raw_status = "projected" if inserted else "duplicate"
-    mark_raw_ingest(raw_id, raw_status, event_id=event_id)
+    _mark_raw_ingest(conn, raw_id, raw_status, event_id=event_id)
     return {
         "ok": True,
         "raw_ingest_id": raw_id,
@@ -2150,124 +2191,137 @@ def record_event(
     raw_ingest_id: int | None = None,
     return_status: bool = False,
 ) -> tuple[str, int] | tuple[str, int, bool]:
+    with store.write() as conn:
+        return _record_event(
+            conn, norm, raw, raw_ingest_id=raw_ingest_id, return_status=return_status
+        )
+
+
+def _record_event(
+    conn: sqlite3.Connection,
+    norm: dict[str, Any],
+    raw: dict[str, Any],
+    *,
+    raw_ingest_id: int | None = None,
+    return_status: bool = False,
+) -> tuple[str, int] | tuple[str, int, bool]:
     sid = norm["session_id"]
     ts = norm["ts"]
     origin = "import" if raw.get("_import") else "hook"
     explicit_dk = raw.get("_dedup_key")
     dk = str(explicit_dk) if explicit_dk else _dedup_key(raw)
 
-    with store.write() as conn:
-        if explicit_dk:
-            # Import path: dedup on (session_id, dedup_key) with no time window.
-            dup = conn.execute(
-                "SELECT id FROM events WHERE session_id = ? AND dedup_key = ? LIMIT 1",
-                (sid, dk),
-            ).fetchone()
-        else:
-            # Live hook path: 5s payload-hash window (Cursor double-posts).
-            cutoff = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
-            dup = conn.execute(
-                "SELECT id FROM events WHERE session_id = ? AND dedup_key = ? AND created_at >= ?"
-                " ORDER BY id DESC LIMIT 1",
-                (sid, dk, cutoff),
-            ).fetchone()
-        if dup is not None:
-            event_id = int(dup["id"])
-            if raw_ingest_id is not None:
-                conn.execute(
-                    "UPDATE raw_ingest_events SET status = 'duplicate', event_id = ?"
-                    " WHERE id = ?",
-                    (event_id, raw_ingest_id),
-                )
-            return (sid, event_id, False) if return_status else (sid, event_id)
-
-        boundary = lifecycle_boundary(norm["source"], norm["hook"])
-        row = conn.execute("SELECT id FROM sessions WHERE id = ?", (sid,)).fetchone()
-        if row is None or boundary == "session_start":
-            if row is None:
-                conn.execute(
-                    "INSERT INTO sessions (id, source, cwd, started_at, status, created_at)"
-                    " VALUES (?, ?, ?, ?, 'active', ?)",
-                    (sid, norm["source"], norm["cwd"], ts, timeutil.now()),
-                )
-            elif boundary == "session_start":
-                conn.execute(
-                    "UPDATE sessions SET status = 'active', ended_at = NULL,"
-                    " cwd = COALESCE(?, cwd)"
-                    " WHERE id = ?",
-                    (norm["cwd"], sid),
-                )
-        elif norm["cwd"]:
+    if explicit_dk:
+        # Import path: dedup on (session_id, dedup_key) with no time window.
+        dup = conn.execute(
+            "SELECT id FROM events WHERE session_id = ? AND dedup_key = ? LIMIT 1",
+            (sid, dk),
+        ).fetchone()
+    else:
+        # Live hook path: 5s payload-hash window (Cursor double-posts).
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+        dup = conn.execute(
+            "SELECT id FROM events WHERE session_id = ? AND dedup_key = ? AND created_at >= ?"
+            " ORDER BY id DESC LIMIT 1",
+            (sid, dk, cutoff),
+        ).fetchone()
+    if dup is not None:
+        event_id = int(dup["id"])
+        if raw_ingest_id is not None:
             conn.execute(
-                "UPDATE sessions SET cwd = COALESCE(cwd, ?) WHERE id = ?",
+                "UPDATE raw_ingest_events SET status = 'duplicate', event_id = ?"
+                " WHERE id = ?",
+                (event_id, raw_ingest_id),
+            )
+        return (sid, event_id, False) if return_status else (sid, event_id)
+
+    boundary = lifecycle_boundary(norm["source"], norm["hook"])
+    row = conn.execute("SELECT id FROM sessions WHERE id = ?", (sid,)).fetchone()
+    if row is None or boundary == "session_start":
+        if row is None:
+            conn.execute(
+                "INSERT INTO sessions (id, source, cwd, started_at, status, created_at)"
+                " VALUES (?, ?, ?, ?, 'active', ?)",
+                (sid, norm["source"], norm["cwd"], ts, timeutil.now()),
+            )
+        elif boundary == "session_start":
+            conn.execute(
+                "UPDATE sessions SET status = 'active', ended_at = NULL,"
+                " cwd = COALESCE(?, cwd)"
+                " WHERE id = ?",
                 (norm["cwd"], sid),
             )
-
-        if norm["source"] == "opencode" and raw.get("parent_session_id"):
-            parent = str(raw["parent_session_id"])
-            if parent != sid:
-                conn.execute(
-                    "UPDATE sessions SET parent_session_id = ?,"
-                    " subagent_label = COALESCE(subagent_label, ?) WHERE id = ?",
-                    (parent, raw.get("session_title"), sid),
-                )
-
-        # Imported events carry historical timestamps; ensure the session's
-        # started_at reflects the earliest event we've seen.
-        if origin == "import":
-            conn.execute(
-                "UPDATE sessions SET started_at = ? WHERE id = ?"
-                " AND (started_at IS NULL OR ? < started_at)",
-                (ts, sid, ts),
-            )
-
-        if boundary == "session_end":
-            conn.execute(
-                "UPDATE sessions SET status = 'completed', ended_at = ? WHERE id = ?",
-                (ts, sid),
-            )
-
-        event_id = _insert_normalized_event(
-            conn,
-            norm,
-            raw,
-            dk,
-            ts=ts,
-            origin=origin,
-            raw_ingest_id=raw_ingest_id,
+    elif norm["cwd"]:
+        conn.execute(
+            "UPDATE sessions SET cwd = COALESCE(cwd, ?) WHERE id = ?",
+            (norm["cwd"], sid),
         )
 
-        if (
-            norm["source"] == "cursor"
-            and norm["hook"] == "preToolUse"
-            and norm.get("tool") in ("Task", "Subagent")
-            and norm.get("target")
-        ):
+    if norm["source"] == "opencode" and raw.get("parent_session_id"):
+        parent = str(raw["parent_session_id"])
+        if parent != sid:
             conn.execute(
-                "UPDATE events SET phase = 'superseded'"
-                " WHERE session_id = ? AND source = 'cursor'"
-                " AND hook = 'subagentStart' AND target = ? AND phase = 'start'",
-                (sid, norm["target"]),
+                "UPDATE sessions SET parent_session_id = ?,"
+                " subagent_label = COALESCE(subagent_label, ?) WHERE id = ?",
+                (parent, raw.get("session_title"), sid),
             )
 
-        # Hook data wins: if a live event arrives for a session that the importer
-        # had also ingested (timing race), drop the imported approximation and
-        # reset the session's start to the real events. No-op after the first.
-        if origin == "hook":
-            purged = conn.execute(
-                "DELETE FROM events WHERE session_id = ? AND origin = 'import'", (sid,)
-            ).rowcount
-            if purged:
-                bounds = conn.execute(
-                    "SELECT MIN(ts) mn FROM events WHERE session_id = ?", (sid,)
-                ).fetchone()
-                if bounds and bounds["mn"]:
-                    conn.execute(
-                        "UPDATE sessions SET started_at = ? WHERE id = ?",
-                        (bounds["mn"], sid),
-                    )
+    # Imported events carry historical timestamps; ensure the session's
+    # started_at reflects the earliest event we've seen.
+    if origin == "import":
+        conn.execute(
+            "UPDATE sessions SET started_at = ? WHERE id = ?"
+            " AND (started_at IS NULL OR ? < started_at)",
+            (ts, sid, ts),
+        )
 
-        return (sid, event_id, True) if return_status else (sid, event_id)
+    if boundary == "session_end":
+        conn.execute(
+            "UPDATE sessions SET status = 'completed', ended_at = ? WHERE id = ?",
+            (ts, sid),
+        )
+
+    event_id = _insert_normalized_event(
+        conn,
+        norm,
+        raw,
+        dk,
+        ts=ts,
+        origin=origin,
+        raw_ingest_id=raw_ingest_id,
+    )
+
+    if (
+        norm["source"] == "cursor"
+        and norm["hook"] == "preToolUse"
+        and norm.get("tool") in ("Task", "Subagent")
+        and norm.get("target")
+    ):
+        conn.execute(
+            "UPDATE events SET phase = 'superseded'"
+            " WHERE session_id = ? AND source = 'cursor'"
+            " AND hook = 'subagentStart' AND target = ? AND phase = 'start'",
+            (sid, norm["target"]),
+        )
+
+    # Hook data wins: if a live event arrives for a session that the importer
+    # had also ingested (timing race), drop the imported approximation and
+    # reset the session's start to the real events. No-op after the first.
+    if origin == "hook":
+        purged = conn.execute(
+            "DELETE FROM events WHERE session_id = ? AND origin = 'import'", (sid,)
+        ).rowcount
+        if purged:
+            bounds = conn.execute(
+                "SELECT MIN(ts) mn FROM events WHERE session_id = ?", (sid,)
+            ).fetchone()
+            if bounds and bounds["mn"]:
+                conn.execute(
+                    "UPDATE sessions SET started_at = ? WHERE id = ?",
+                    (bounds["mn"], sid),
+                )
+
+    return (sid, event_id, True) if return_status else (sid, event_id)
 
 
 def _summary_title(detail: Any) -> str | None:
@@ -4555,11 +4609,10 @@ def ensure_insight_indexes() -> None:
         conn.execute(_TOOL_CALLS_INDEX_SQL)
 
 
-# Serve /v1/metrics from indexes. Without them its status, source, model,
-# attachment and file-target breakdowns each read the whole events table
-# (payload and detail blobs included): seconds apiece on a multi-GB DB. Built
-# off the startup path like the findings index; metrics are correct without them.
-_METRICS_INDEX_SQL = (
+# Indexes for hot queries that otherwise read rows past their payload/detail
+# blobs. Built off the startup path like the findings index (a first build is a
+# scan of a large table); every query is correct, just slower, without them.
+_QUERY_INDEX_SQL = (
     # Covers the model, source and status breakdowns, and connections().
     "CREATE INDEX IF NOT EXISTS idx_events_metrics ON events("
     " model, source, status, session_id, ts,"
@@ -4567,6 +4620,12 @@ _METRICS_INDEX_SQL = (
     # The few events that carry attachments. The WHERE matches metrics()' query.
     "CREATE INDEX IF NOT EXISTS idx_events_attachments ON events(id)"
     " WHERE attachments IS NOT NULL AND attachments != ''",
+    # The ingest dedup check (record_event) runs on every hook event.
+    "CREATE INDEX IF NOT EXISTS idx_events_dedup ON events(session_id, dedup_key)",
+    # Imported (transcript) rows by session: every live hook event deletes its
+    # session's imported approximation, which otherwise inspects every row of the
+    # session (reading past its payload/detail) under the write lock.
+    "CREATE INDEX IF NOT EXISTS idx_events_import ON events(session_id) WHERE origin = 'import'",
     # Distinct files touched. The WHERE matches metrics()' query; leading with
     # category makes this strictly better than idx_events_category for it, which
     # the planner otherwise picks (there are no ANALYZE stats to say otherwise).
@@ -4575,10 +4634,10 @@ _METRICS_INDEX_SQL = (
 )
 
 
-def ensure_metrics_indexes() -> None:
-    """Create the metrics indexes if missing, one write at a time so ingest
-    gets in between builds."""
-    for sql in _METRICS_INDEX_SQL:
+def ensure_query_indexes() -> None:
+    """Create the query indexes if missing, one write at a time so ingest gets
+    in between builds."""
+    for sql in _QUERY_INDEX_SQL:
         with store.write() as conn:
             conn.execute(sql)
 

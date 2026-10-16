@@ -5,8 +5,9 @@ import { subscribeStream, type StreamChange } from './useServerRevision';
 
 // Coalesce bursts of live-change signals into at most one invalidation per
 // window. A busy session emits many events per second; without this every one
-// would refetch all active queries.
-const LIVE_COALESCE_MS = 1500;
+// would refetch its detail and the lists. The collector pushes changes as they
+// land (no polling delay there), so this window is the whole live latency.
+const LIVE_COALESCE_MS = 1000;
 
 // Aggregates over the whole history. Each costs the collector a scan of the
 // events table, so a live ingest only marks them stale: a mounted view still

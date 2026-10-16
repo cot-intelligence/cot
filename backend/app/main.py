@@ -267,9 +267,9 @@ def _build_search_index() -> None:
     except sqlite3.Error:
         pass  # findings still work without it, only slower; retried next start
     try:
-        db.ensure_metrics_indexes()
+        db.ensure_query_indexes()
     except sqlite3.Error:
-        pass  # metrics still work without them, only slower; retried next start
+        pass  # queries still work without them, only slower; retried next start
     try:
         db.backfill_composer_mode()
     except sqlite3.Error:
@@ -309,7 +309,15 @@ async def _startup() -> None:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "version": __version__, "db_path": str(store.path())}
+    return {
+        "status": "ok",
+        "version": __version__,
+        "db_path": str(store.path()),
+        # What this collector accepts beyond the original API, for a bridge that
+        # may be newer or older than it. ingest_batch: /v1/ingest/{source}
+        # takes a JSON array of hook bodies.
+        "features": ["ingest_batch"],
+    }
 
 
 def _hook_status_path() -> Path:
@@ -695,12 +703,43 @@ async def update_settings(request: Request) -> dict[str, Any]:
 # a 502 the tracker silently ignores. Disable entirely with COT_DISABLE_ANALYTICS=1.
 
 _UMAMI_UPSTREAM = os.environ.get("COT_UMAMI_HOST", "https://cloud.umami.is").rstrip("/")
-_UMAMI_SCRIPT_TTL = 6 * 60 * 60  # cache the tracker JS for 6h
-_umami_script_cache: dict[str, Any] = {"body": None, "fetched_at": 0.0}
+_UMAMI_SCRIPT_TTL = 6 * 60 * 60  # refresh the tracker JS every 6h
+# After a failed fetch (offline / air-gapped) don't try again for a while, so
+# page loads don't each pay the upstream timeout.
+_UMAMI_RETRY_AFTER = 10 * 60
+_umami_script_cache: dict[str, Any] = {"body": None, "fetched_at": 0.0, "failed_at": 0.0}
+_umami_refreshing = threading.Lock()
 
 
 def _analytics_env_disabled() -> bool:
     return os.environ.get("COT_DISABLE_ANALYTICS") in ("1", "true", "yes")
+
+
+def _umami_disk_cache() -> Path:
+    # Beside the DB, so a restarted collector serves it without going upstream.
+    return store.main_path().parent / "umami-script.js"
+
+
+def _fetch_umami_script() -> None:
+    cache = _umami_script_cache
+    if not _umami_refreshing.acquire(blocking=False):
+        return  # another request is already fetching it
+    try:
+        req = urllib.request.Request(
+            f"{_UMAMI_UPSTREAM}/script.js",
+            headers={"User-Agent": f"cot/{__version__}"},
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            body = resp.read()
+        cache["body"], cache["fetched_at"] = body, time.time()
+        try:
+            _umami_disk_cache().write_bytes(body)
+        except OSError:
+            pass
+    except Exception:
+        cache["failed_at"] = time.time()
+    finally:
+        _umami_refreshing.release()
 
 
 @app.get("/stats/script.js")
@@ -709,18 +748,22 @@ def umami_script() -> Response:
         return Response(status_code=404)
     now = time.time()
     cache = _umami_script_cache
-    if cache["body"] is None or now - cache["fetched_at"] > _UMAMI_SCRIPT_TTL:
+    if cache["body"] is None:
         try:
-            req = urllib.request.Request(
-                f"{_UMAMI_UPSTREAM}/script.js",
-                headers={"User-Agent": f"cot/{__version__}"},
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                cache["body"] = resp.read()
-                cache["fetched_at"] = now
-        except Exception:
-            if cache["body"] is None:
-                return Response(status_code=502)
+            disk = _umami_disk_cache()
+            cache["body"], cache["fetched_at"] = disk.read_bytes(), disk.stat().st_mtime
+        except OSError:
+            pass
+    recently_failed = now - cache["failed_at"] < _UMAMI_RETRY_AFTER
+    if cache["body"] is None:
+        # Nothing to serve yet: fetch inline, once per retry window.
+        if not recently_failed:
+            _fetch_umami_script()
+        if cache["body"] is None:
+            return Response(status_code=502)
+    elif now - cache["fetched_at"] > _UMAMI_SCRIPT_TTL and not recently_failed:
+        # Serve what we have; refresh it for next time.
+        threading.Thread(target=_fetch_umami_script, name="umami-refresh", daemon=True).start()
     return Response(
         content=cache["body"],
         media_type="application/javascript",
@@ -872,15 +915,20 @@ async def _json_body(request: Request) -> dict[str, Any]:
     return body
 
 
-async def _ingest_body(request: Request) -> tuple[dict[str, Any] | None, str | None]:
+async def _ingest_body(
+    request: Request,
+) -> tuple[dict[str, Any] | list[dict[str, Any]] | None, str | None]:
     raw = await request.body()
     try:
         body = json.loads(raw.decode("utf-8") if raw else "{}")
     except Exception as exc:
         text = raw.decode("utf-8", errors="replace")
         return None, str(exc) or f"Malformed JSON: {text[:80]}"
+    # A JSON array is a batch of hook bodies (e.g. a replayed spool).
+    if isinstance(body, list) and body and all(isinstance(b, dict) for b in body):
+        return body, None
     if not isinstance(body, dict):
-        return None, "Hook payload must be a JSON object"
+        return None, "Hook payload must be a JSON object or a non-empty array of them"
     return body, None
 
 
@@ -889,15 +937,27 @@ async def ingest(source: str, request: Request) -> dict[str, Any]:
     if source not in AGENTS:
         raise HTTPException(status_code=404, detail=f"Unknown source: {source}")
     body, malformed_error = await _ingest_body(request)
+    # The writes below are synchronous SQLite calls (and may wait on the write
+    # lock), so they run on a worker thread rather than stalling the event loop
+    # that serves the live stream and every other async request.
     if body is None:
         raw_text = (await request.body()).decode("utf-8", errors="replace")
-        result = db.record_malformed_ingest(source, raw_text, origin="hook", error=malformed_error)
+        result = await asyncio.to_thread(
+            db.record_malformed_ingest, source, raw_text, origin="hook", error=malformed_error
+        )
         _bump_revision(result.get("session_id"))
         return result
 
+    if isinstance(body, list):
+        results = await asyncio.to_thread(db.record_ingests, [(source, b) for b in body])
+        for r in results:
+            _bump_revision(r.get("session_id"))
+        return {"ok": True, "results": results}
+
     # Attachment metadata folds onto the matching prompt event, not a new row.
     if body.get("_attach_to_prompt"):
-        attached = db.attach_to_prompt(
+        attached = await asyncio.to_thread(
+            db.attach_to_prompt,
             str(body.get("session_id") or ""),
             body.get("text"),
             body.get("attachments") or [],
@@ -906,7 +966,7 @@ async def ingest(source: str, request: Request) -> dict[str, Any]:
         _bump_revision(str(body.get("session_id") or ""))
         return {"ok": True, "attached": attached}
 
-    result = db.record_ingest(source, body)
+    result = await asyncio.to_thread(db.record_ingest, source, body)
     _bump_revision(result.get("session_id"))
     return result
 
@@ -922,11 +982,9 @@ def _otlp_reply(request: Request, status_code: int = 200, message: str | None = 
 
 
 def _ingest_otlp(records: list[dict[str, Any]]) -> int:
-    stored = 0
-    for source, body in otlp.to_bodies(records):
-        result = db.record_ingest(source, body)
-        stored += bool(result.get("event_id")) and not result.get("duplicate")
-    return stored
+    # Every span of one export request in one write transaction.
+    results = db.record_ingests(list(otlp.to_bodies(records)))
+    return sum(bool(r.get("event_id")) and not r.get("duplicate") for r in results)
 
 
 async def _otlp(request: Request, signal: str) -> Response:
@@ -984,11 +1042,22 @@ _revision_lock = threading.Lock()
 _recent_changes: deque[tuple[int, str | None]] = deque(maxlen=4096)
 
 
+# Open /v1/stream connections, each woken the moment the revision moves instead
+# of polling it. Bumps come from worker threads as well as the event loop.
+_stream_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
+
+
 def _bump_revision(session_id: str | None = None) -> None:
     global _revision
     with _revision_lock:
         _revision += 1
         _recent_changes.append((_revision, session_id or None))
+        waiters = list(_stream_waiters)
+    for loop, event in waiters:
+        try:
+            loop.call_soon_threadsafe(event.set)
+        except RuntimeError:
+            pass  # that loop has closed
 
 
 def _changed_sessions(after: int, upto: int) -> list[str] | None:
@@ -1043,24 +1112,36 @@ async def stream(request: Request) -> StreamingResponse:
     hold one connection instead of each polling the DB every few seconds."""
 
     async def gen() -> Any:
-        last = _revision
-        yield f"event: hello\ndata: {json.dumps({'revision': last})}\n\n"
-        idle = 0
-        while True:
-            if await request.is_disconnected():
-                break
-            current = _revision
-            if current != last:
-                changed = {"revision": current, "sessions": _changed_sessions(last, current)}
-                yield f"event: change\ndata: {json.dumps(changed)}\n\n"
-                last = current
-                idle = 0
-            else:
-                idle += 1
-                if idle >= 15:
-                    idle = 0
+        woken = asyncio.Event()
+        waiter = (asyncio.get_running_loop(), woken)
+        with _revision_lock:
+            _stream_waiters.add(waiter)
+        try:
+            last = _revision
+            yield f"event: hello\ndata: {json.dumps({'revision': last})}\n\n"
+            while True:
+                try:
+                    # Wake on the next change; every 15 s without one, send a
+                    # keepalive (and notice a client that went away).
+                    await asyncio.wait_for(woken.wait(), timeout=15)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        break
                     yield ": keepalive\n\n"
-            await asyncio.sleep(1)
+                    continue
+                woken.clear()
+                if await request.is_disconnected():
+                    break
+                current = _revision
+                if current != last:
+                    changed = {"revision": current, "sessions": _changed_sessions(last, current)}
+                    yield f"event: change\ndata: {json.dumps(changed)}\n\n"
+                    last = current
+                # A burst of ingests becomes one change per ~100 ms, not one each.
+                await asyncio.sleep(0.1)
+        finally:
+            with _revision_lock:
+                _stream_waiters.discard(waiter)
 
     return StreamingResponse(
         gen(),
