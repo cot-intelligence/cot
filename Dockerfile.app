@@ -30,7 +30,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     COT_STATIC_DIR=/app/static
 
 COPY backend/requirements.txt ./
-RUN pip install --no-cache-dir --no-compile -r requirements.txt \
+# uvloop + httptools: uvicorn's C event loop and HTTP parser (what
+# uvicorn[standard] adds, minus the dev-reload extras). The Mac app's frozen
+# collector keeps the pure-Python defaults it is packaged with.
+RUN pip install --no-cache-dir --no-compile -r requirements.txt uvloop==0.23.0 httptools==0.9.0 \
     && find /usr/local -type d -name __pycache__ -prune -exec rm -rf {} + \
     && find /usr/local/lib/python3.12 -type d \( -name test -o -name tests \) -prune -exec rm -rf {} + \
     && rm -rf \

@@ -113,6 +113,23 @@ bridge/        Installer and cot bridge CLI
 src/           React and TypeScript dashboard
 ```
 
+### Performance
+
+Every collector response carries an `X-Response-Time` header (and `Server-Timing`
+for the browser's DevTools), and reads or writes that hold the database longer
+than `COT_SLOW_QUERY_MS` (default 100; 0 turns it off) are logged with the code
+that ran them. To time the hot endpoints against a running collector:
+
+```bash
+scripts/bench_api.sh http://127.0.0.1:31337
+```
+
+The Mac app keeps its database in WAL mode, so the dashboard's reads never wait
+on hook writes. The Docker image defaults to SQLite's rollback journal, because
+WAL is not safe across Docker Desktop's file sharing. On a Linux host, where
+`~/.cot` is a local filesystem, set `COT_DB_JOURNAL_MODE=wal` on the container
+for the same behavior.
+
 ### Development
 
 ```bash
