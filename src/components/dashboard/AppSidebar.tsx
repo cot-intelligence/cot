@@ -7,6 +7,11 @@ import { Wordmark } from '../forest/ui';
 import { WorkspaceAvatar } from '../forest/avatars';
 import { usePrefs } from '../../lib/prefs';
 
+// Teams and enterprise: the plan on cot.run (opens in the browser; in the Mac
+// app every target="_blank" link goes to the default browser).
+const TEAMS_URL = 'https://cot.run/pricing#enterprise';
+const TEAMS_NOTE = 'Opens cot.run in your browser, so it needs an internet connection. Nothing is sent from cot.';
+
 export type ActivityTab = 'shell' | 'web' | 'mcp' | 'skill' | 'plugin';
 export type NavKey =
   | 'sessions' | 'overview' | 'replay' | 'findings' | 'rules' | 'governance' | 'settings'
@@ -125,6 +130,9 @@ export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, on
         </nav>
         {rail ? (
           <div className="rail-foot">
+            <a href={TEAMS_URL} target="_blank" rel="noopener noreferrer" className="nav-i" aria-label={`For teams. ${TEAMS_NOTE}`} data-tip={`For teams: ${TEAMS_NOTE}`}>
+              <Icon name="users" />
+            </a>
             <a href="#/settings" className="nav-i" aria-current={active === 'settings' ? 'page' : undefined} aria-label="Settings" data-tip="Settings">
               {active === 'settings' && <motion.span layoutId="vf-pill" className="pill" transition={pill} />}
               <Icon name="sliders" />
@@ -139,6 +147,10 @@ export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, on
         ) : (
           <>
             <div className="nav-g" style={{ marginTop: 'auto', paddingBottom: 8 }}>
+              <a href={TEAMS_URL} target="_blank" rel="noopener noreferrer" className="nav-i" title={TEAMS_NOTE} onClick={onMobileClose}>
+                <Icon name="users" />
+                <span>For teams</span>
+              </a>
               <a href="#/settings" className="nav-i" aria-current={active === 'settings' ? 'page' : undefined} onClick={onMobileClose}>
                 {active === 'settings' && <motion.span layoutId="vf-pill" className="pill" transition={pill} />}
                 <Icon name="sliders" />
