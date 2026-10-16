@@ -24,9 +24,47 @@ _EVENT_INSERT_SQL = (
     "INSERT INTO events (session_id, source, hook, tool, phase, ts, payload,"
     " category, title, detail, target, status, duration_ms, model,"
     " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
-    " attachments, dedup_key, origin, raw_ingest_id, created_at)"
-    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    " attachments, dedup_key, origin, raw_ingest_id, created_at, composer_mode)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
+
+# Every events column a display read needs: all but ``payload``, the raw hook
+# body (the largest column), which reads only used for ``composer_mode`` before
+# that had a column of its own.
+_EVENT_READ_COLUMNS = (
+    "id, session_id, source, hook, tool, phase, ts, category, title, detail, target,"
+    " status, duration_ms, model, input_tokens, output_tokens, cache_read_tokens,"
+    " cache_write_tokens, attachments, dedup_key, origin, raw_ingest_id, created_at,"
+    " composer_mode"
+)
+# Rows from before the column are filled in by a background backfill; until it
+# finishes, reads also fetch ``payload`` and event_row falls back to it.
+_composer_backfilled: dict[Path, bool] = {}
+
+
+def event_columns() -> str:
+    """The SELECT list for display reads of events (see event_row)."""
+    if _composer_backfilled.get(path()):
+        return _EVENT_READ_COLUMNS
+    return _EVENT_READ_COLUMNS + ", payload"
+
+
+def mark_composer_backfilled(done: bool = True) -> None:
+    _composer_backfilled[path()] = done
+
+
+def _composer_mode(payload: Any) -> str | None:
+    if isinstance(payload, Mapping):
+        mode = payload.get("composer_mode")
+    elif isinstance(payload, str) and '"composer_mode"' in payload:
+        try:
+            body = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        mode = body.get("composer_mode") if isinstance(body, dict) else None
+    else:
+        return None
+    return mode if isinstance(mode, str) else None
 
 
 # The DB file this request (or thread) reads and writes. Unset means the main
@@ -274,6 +312,7 @@ def insert_event(
             origin,
             raw_ingest_id,
             created_at or timeutil.now(),
+            _composer_mode(payload),
         ),
     )
     return int(cursor.lastrowid)
@@ -296,12 +335,10 @@ def event_row(row: sqlite3.Row) -> dict[str, Any]:
         "model": row["model"],
         "attachments": json.loads(row["attachments"]) if row["attachments"] else None,
     }
-    if row["payload"]:
-        try:
-            body = json.loads(row["payload"])
-        except (json.JSONDecodeError, TypeError):
-            body = {}
-        mode = body.get("composer_mode")
-        if isinstance(mode, str) and mode != "agent":
-            out["composer_mode"] = mode
+    keys = row.keys()
+    mode = row["composer_mode"] if "composer_mode" in keys else None
+    if mode is None and "payload" in keys:
+        mode = _composer_mode(row["payload"])
+    if isinstance(mode, str) and mode != "agent":
+        out["composer_mode"] = mode
     return out

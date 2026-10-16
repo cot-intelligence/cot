@@ -270,6 +270,10 @@ def _build_search_index() -> None:
         db.ensure_metrics_indexes()
     except sqlite3.Error:
         pass  # metrics still work without them, only slower; retried next start
+    try:
+        db.backfill_composer_mode()
+    except sqlite3.Error:
+        pass  # reads keep falling back to the payload; resumes next start
     # Compute the default findings window now, so the dashboard's first request
     # for it is served from memory instead of waiting on a multi-second pass.
     try:

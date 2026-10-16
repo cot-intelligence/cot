@@ -429,15 +429,20 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
     return items
 
 
+def _session_event_rows(conn: sqlite3.Connection, session_id: str) -> list[sqlite3.Row]:
+    """A session's events in timeline order: one read feeds both the
+    clarifications and the timeline items."""
+    return conn.execute(
+        f"SELECT {store.event_columns()} FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
+        (session_id,),
+    ).fetchall()
+
+
 def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
     """Build display timeline items, merging start/end hook pairs into spans."""
     with store.read() as conn:
-        rows = conn.execute(
-            "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
-            (session_id,),
-        ).fetchall()
-        events = [store.event_row(r) for r in rows]
-    return _build_timeline_items_from_events(events)
+        rows = _session_event_rows(conn, session_id)
+    return _build_timeline_items_from_events([store.event_row(r) for r in rows])
 
 
 def _fetch_inlined_session_events(
@@ -447,15 +452,12 @@ def _fetch_inlined_session_events(
     skip_history_dump: bool,
     inline_kind: InlineKind,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    raw_rows = conn.execute(
-        "SELECT * FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
-        (session_id,),
-    ).fetchall()
+    raw_rows = _session_event_rows(conn, session_id)
     clarifications, annotations = build_clarifications(raw_rows)
     _stamp_clarification_session(clarifications, session_id)
 
     out: list[dict[str, Any]] = []
-    for row in build_timeline_items(session_id):
+    for row in _build_timeline_items_from_events([store.event_row(r) for r in raw_rows]):
         if skip_history_dump and row.get("category") == "prompt" and _is_approval_history_dump(row.get("detail")):
             continue
         item: dict[str, Any] = dict(row)
@@ -721,13 +723,16 @@ def _assign_run_membership(events: list[dict[str, Any]], runs: list[dict[str, An
             item["run_id"] = run["id"]
             item["run_kind"] = run["kind"]
 
+    # Subagent runs claim their child session's events: group those once
+    # instead of scanning every event per run.
+    by_owner: dict[Any, list[dict[str, Any]]] = {}
+    for item in events:
+        by_owner.setdefault(item.get("owner_session_id"), []).append(item)
     for run in runs:
         child_session_id = run.get("child_session_id")
         if child_session_id:
             members = [
-                item
-                for item in events
-                if item.get("owner_session_id") == child_session_id and item.get("id") != run["id"]
+                item for item in by_owner.get(child_session_id, []) if item.get("id") != run["id"]
             ]
         else:
             members = [
@@ -775,15 +780,11 @@ def build_session_detail(session_id: str, *, full_detail: bool = False) -> dict[
         if row is None:
             return None
         summary = db.session_summary(conn, row)
-        ev_rows = conn.execute(
-            "SELECT id, category, detail, ts, hook, tool FROM events"
-            " WHERE session_id=? ORDER BY ts ASC, id ASC",
-            (session_id,),
-        ).fetchall()
+        ev_rows = _session_event_rows(conn, session_id)
         links = db.session_links(conn, session_id)
         clarifications, annotations = build_clarifications(ev_rows)
         _stamp_clarification_session(clarifications, session_id)
-        timeline_items = build_timeline_items(session_id)
+        timeline_items = _build_timeline_items_from_events([store.event_row(r) for r in ev_rows])
         events = [dict(item) for item in timeline_items]
 
         for item in events:

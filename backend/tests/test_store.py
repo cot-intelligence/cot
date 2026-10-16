@@ -175,3 +175,27 @@ def test_slow_read_and_write_are_logged_with_the_caller(fresh_db: Path, monkeypa
     assert len(lines) == 2
     assert lines[0].startswith("slow read: ") and "test_slow_read_and_write_are_logged_with_the_caller" in lines[0]
     assert lines[1].startswith("slow write: ")
+
+
+def test_composer_mode_is_read_without_the_payload_once_backfilled(fresh_db: Path):
+    with store.write() as conn:
+        _insert_session(conn, "cur")
+        new = store.insert_event(conn, session_id="cur", source="cursor", payload={"composer_mode": "plan"})
+        old = store.insert_event(conn, session_id="cur", source="cursor", payload={"composer_mode": "ask"})
+        agent = store.insert_event(conn, session_id="cur", source="cursor", payload={"composer_mode": "agent"})
+        # A row from before the column existed.
+        conn.execute("UPDATE events SET composer_mode = NULL WHERE id = ?", (old,))
+    store.mark_composer_backfilled(False)
+    db.set_setting("composer_mode_backfill", "0")
+
+    def modes() -> dict[int, str | None]:
+        with store.read() as conn:
+            rows = conn.execute(f"SELECT {store.event_columns()} FROM events ORDER BY id").fetchall()
+        return {r["id"]: store.event_row(r).get("composer_mode") for r in rows}
+
+    assert "payload" in store.event_columns()
+    assert modes() == {new: "plan", old: "ask", agent: None}  # payload fallback
+    db.backfill_composer_mode(batch=1)
+    assert "payload" not in store.event_columns()
+    assert modes() == {new: "plan", old: "ask", agent: None}
+    assert db.get_setting("composer_mode_backfill") == "done"

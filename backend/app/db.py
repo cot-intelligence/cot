@@ -342,6 +342,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("dedup_key", "TEXT"),
         ("origin", "TEXT"),
         ("raw_ingest_id", "INTEGER"),
+        ("composer_mode", "TEXT"),
     ):
         _add_column_if_missing(conn, "events", name, col_def, event_cols)
     conn.execute(
@@ -2382,12 +2383,15 @@ def session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[d
 
     children: list[dict[str, Any]] = []
     seen: set[str] = set()
+    # A review prompt names the session it reviews, so only prompts that contain
+    # this id (LIKE is ASCII case-insensitive, like the lowercased match below)
+    # need the regex.
     rows = conn.execute(
         "SELECT session_id, detail, MIN(ts) AS first_ts FROM events"
-        " WHERE category='prompt' AND detail LIKE ?"
+        " WHERE category='prompt' AND detail LIKE ? AND detail LIKE ? ESCAPE '\\'"
         " GROUP BY session_id, detail"
         " ORDER BY first_ts ASC",
-        (f"{APPROVAL_REVIEW_PREFIX}%",),
+        (f"{APPROVAL_REVIEW_PREFIX}%", f"%{_like_escape(session_id)}%"),
     ).fetchall()
     for row in rows:
         review_session_id = row["session_id"]
@@ -4512,6 +4516,37 @@ _TOOL_CALLS_INDEX_SQL = (
 
 
 _INSIGHT_SESSION_BATCH = 50
+
+
+def backfill_composer_mode(batch: int = 2000) -> None:
+    """Copy ``composer_mode`` out of the raw payload into its own column for rows
+    written before the column existed, in short write transactions so ingest gets
+    in between, resuming where a previous run stopped. Display reads stop
+    fetching ``payload`` once it is done (store.event_columns)."""
+    if get_setting("composer_mode_backfill") == "done":
+        store.mark_composer_backfilled()
+        return
+    start = int(get_setting("composer_mode_backfill") or 0)
+    with store.read() as conn:
+        last = conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
+    # Rows after ``last`` were inserted with the column set.
+    while start < last:
+        end = start + batch
+        with store.write() as conn:
+            conn.execute(
+                "UPDATE events SET composer_mode = json_extract(payload, '$.composer_mode')"
+                " WHERE id > ? AND id <= ? AND composer_mode IS NULL"
+                " AND payload LIKE '%\"composer_mode\"%' AND json_valid(payload)",
+                (start, end),
+            )
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('composer_mode_backfill', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(end),),
+            )
+        start = end
+    set_setting("composer_mode_backfill", "done")
+    store.mark_composer_backfilled()
 
 
 def ensure_insight_indexes() -> None:
