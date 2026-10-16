@@ -3,6 +3,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getSessionDetail, getSessionExtensions, sessionExportUrl, setSessionBookmarked, type Annotation, type ComponentEntry, type SessionDetail, type Store, type TimelineItem } from '../../lib/api';
 import { setDocumentTitle } from '../../lib/documentTitle';
+import { cachedSessionSummary, seededSessionDetail, sessionDetailKey } from '../../lib/sessionDetailQuery';
 import { sessionHref, SessionStoreContext } from '../../lib/sessionStore';
 import { categoryLabel, fmt, modelLabel, project } from '../forest/format';
 import { CATEGORY_ICON, Icon } from '../forest/icons';
@@ -41,13 +42,18 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   const [open, setOpen] = useState<number | null>(focusEventId ?? null);
   const [shown, setShown] = useState(PAGE);
   const queryClient = useQueryClient();
-  const key = store === 'main' ? ['sessionDetail', sessionId] : ['sessionDetail', store, sessionId];
+  const key = sessionDetailKey(sessionId, store);
   // Only a live session changes, so only a live one refetches: a finished trace can be large,
   // and re-reading it every 15s holds up whatever the collector is asked next.
-  const { data: detail } = useQuery({
+  // Until it arrives, the row from the sessions list (if cached) paints the header and figures.
+  const { data: detail, isPlaceholderData: seeded } = useQuery({
     queryKey: key,
     queryFn: () => getSessionDetail(sessionId, store),
     refetchInterval: (q) => (store === 'main' && q.state.data?.summary.status === 'active' ? 15000 : false),
+    placeholderData: () => {
+      const row = store === 'main' ? cachedSessionSummary(queryClient, sessionId) : undefined;
+      return row ? seededSessionDetail(row) : undefined;
+    },
   });
 
   // Which plugins, skills and MCP servers this session (and its subagents) used.
@@ -156,8 +162,8 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
     }
   };
   const tabs: { k: Tab; l: string }[] = [
-    { k: 'timeline', l: `Timeline · ${events.length}` },
-    { k: 'files', l: `Files · ${fileCount}` },
+    { k: 'timeline', l: `Timeline · ${seeded ? s.event_count : events.length}` },
+    { k: 'files', l: seeded ? 'Files' : `Files · ${fileCount}` },
     { k: 'findings', l: 'Findings' },
     { k: 'map', l: 'Map' },
   ];
@@ -230,7 +236,17 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
             ))}
           </div>
 
-          {tab === 'timeline' && (
+          {seeded && (
+            <div className="card" aria-busy="true">
+              <div className="card-b" style={{ display: 'grid', gap: 14 }}>
+                {[72, 54, 86, 61, 78, 47].map((w, i) => (
+                  <span key={i} className="sk" style={{ display: 'block', height: 18, width: `${w}%` }} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {!seeded && tab === 'timeline' && (
             <div className="grid-2 grid-trace" style={{ marginTop: 0 }}>
               <div className="card">
                 <div className="card-b">
@@ -265,7 +281,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
             </div>
           )}
 
-          {tab === 'files' && (
+          {!seeded && tab === 'files' && (
             <div className="grid-2e" style={{ marginTop: 0 }}>
               <FileCard title="Edited" icon="edit" color="var(--v-olive)" items={c.files_edited} strip={strip} />
               <FileCard title="Read" icon="file" color="var(--v-cobalt)" items={c.files_read} strip={strip} />
@@ -276,11 +292,11 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
             </div>
           )}
 
-          {tab === 'findings' && (
+          {!seeded && tab === 'findings' && (
             <div className="card"><div className="card-b"><Suspense fallback={null}><InsightsTab detail={detail} /></Suspense></div></div>
           )}
 
-          {tab === 'map' && (
+          {!seeded && tab === 'map' && (
             <div className="card"><div className="card-b" style={{ overflowX: 'auto' }}>
               <ActivityMap items={events} sessionId={sessionId} activeKey={null} onJump={(it) => revealEvent(it.id)} />
             </div></div>

@@ -1,4 +1,5 @@
 import { QueryClient } from '@tanstack/react-query';
+import { persistQueryCache } from './persistCache';
 
 // Shared cache for all dashboard data. Navigating between views (sessions,
 // overview, settings, …) unmounts the previous view, so its data used to be
@@ -23,3 +24,5 @@ export const queryClient = new QueryClient({
     },
   },
 });
+
+persistQueryCache(queryClient);

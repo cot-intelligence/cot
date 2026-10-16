@@ -14,6 +14,7 @@ import { AppSidebar, type NavKey } from './AppSidebar';
 import { CommandPalette, type PaletteCommand, type PaletteScope } from './CommandPalette';
 import { PassiveBanner } from '../passive/PassiveBanner';
 import { TaskTray } from './TaskTray';
+import { FetchBar } from '../ui/FetchBar';
 import { SessionsView } from './SessionsView';
 
 // Code-split: the sessions list (the landing view) ships in the main bundle;
@@ -48,6 +49,11 @@ function prefetchSessionDetail(): () => void {
   // WKWebView (the Mac app) has no requestIdleCallback.
   const id = window.setTimeout(run, 1500);
   return () => window.clearTimeout(id);
+}
+
+function sameRoute(a: DashboardRoute, b: DashboardRoute): boolean {
+  const strip = (r: DashboardRoute) => ('focusNonce' in r ? { ...r, focusNonce: undefined } : r);
+  return JSON.stringify(strip(a)) === JSON.stringify(strip(b));
 }
 
 interface DashboardProps {
@@ -181,7 +187,11 @@ export function Dashboard({ onSetup }: DashboardProps) {
   useEffect(() => {
     const onHash = () => {
       canonicalizeHash();
-      setRoute(parseHash());
+      // In-app navigation sets the route and then the hash; the hashchange that
+      // follows parses the same route again. Keep the current one then, or every
+      // navigation renders twice (and re-runs focus effects keyed on the nonce).
+      const next = parseHash();
+      setRoute((prev) => (sameRoute(prev, next) ? prev : next));
     };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
@@ -457,6 +467,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
           </button>
           <TaskTray />
         </header>
+        <FetchBar />
         <PassiveBanner />
 
         <div className="relative z-10 flex min-h-0 flex-1 overflow-hidden">

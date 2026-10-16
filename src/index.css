@@ -405,3 +405,30 @@
     transform: translateX(14px) scale(0.92);
   }
 }
+
+/* Background revalidation indicator (components/ui/FetchBar). */
+.fetch-bar {
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 2px;
+  z-index: 60;
+  pointer-events: none;
+  background: var(--v-hot, currentColor);
+  transform-origin: left;
+  transform: scaleX(0);
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+.fetch-bar[data-on='true'] {
+  opacity: 0.8;
+  animation: fetch-bar 1.2s cubic-bezier(0.23, 1, 0.32, 1) infinite;
+}
+@keyframes fetch-bar {
+  0% { transform: scaleX(0); transform-origin: left; }
+  50% { transform: scaleX(1); transform-origin: left; }
+  50.01% { transform-origin: right; }
+  100% { transform: scaleX(0); transform-origin: right; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fetch-bar[data-on='true'] { animation: none; transform: scaleX(1); opacity: 0.5; }
+}

@@ -127,11 +127,13 @@ function FluidReveal({
         animate(radius, to, { duration, ease, delay, onComplete: () => resolve() });
       });
 
+    // About half a second in all: long enough to read as a transition, short
+    // enough not to feel like waiting.
     (async () => {
-      await play(maxDist, 0.5);
+      await play(maxDist, 0.25);
       if (cancelled) return;
       onCovered();
-      await play(0, 0.6, 0.08);
+      await play(0, 0.25);
       if (cancelled) return;
       onDone();
     })();
