@@ -10,7 +10,7 @@ export const queryClient = new QueryClient({
       // Serve cache without a refetch for this long. Freshness does NOT rely on
       // this window: the collector's SSE stream invalidates what changed (see
       // QueryProvider), so staleTime only dedupes rapid navigation.
-      staleTime: 30_000,
+      staleTime: 60_000,
       // Keep an unmounted view's data cached for a few minutes so bouncing
       // between pages doesn't re-hit the collector.
       gcTime: 5 * 60_000,

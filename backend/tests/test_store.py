@@ -153,3 +153,20 @@ def test_path_follows_cot_db_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     with store.read():
         pass
     assert expected.parent.is_dir()
+
+
+def test_slow_read_and_write_are_logged_with_the_caller(fresh_db: Path, monkeypatch, caplog):
+    import time
+
+    monkeypatch.setenv("COT_SLOW_QUERY_MS", "5")
+    with caplog.at_level("WARNING", logger="uvicorn.error"):
+        with store.read():
+            time.sleep(0.02)
+        with store.write():
+            time.sleep(0.02)
+        with store.read():
+            pass  # fast: not logged
+    lines = [r.getMessage() for r in caplog.records]
+    assert len(lines) == 2
+    assert lines[0].startswith("slow read: ") and "test_slow_read_and_write_are_logged_with_the_caller" in lines[0]
+    assert lines[1].startswith("slow write: ")

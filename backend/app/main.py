@@ -210,6 +210,36 @@ app.add_middleware(CORSMiddleware, **_cors_kwargs)
 # (the extensions list, which caches its gzipped body).
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
+
+class _ResponseTiming:
+    """Stamp each response with how long the collector took to produce it
+    (``Server-Timing: app;dur=…`` for DevTools, ``X-Response-Time`` for curl),
+    so a slow view can be traced to its endpoint without server logs. Measured
+    to the response headers, so a stream reports its setup time, not its life."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = time.perf_counter()
+
+        async def send_timed(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                ms = (time.perf_counter() - started) * 1000
+                headers = list(message.get("headers", []))
+                headers.append((b"server-timing", f"app;dur={ms:.1f}".encode()))
+                headers.append((b"x-response-time", f"{ms:.1f}ms".encode()))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_timed)
+
+
+app.add_middleware(_ResponseTiming)
+
 def _bridge_dir() -> Path:
     here = Path(__file__).resolve()
     for candidate in (here.parent.parent.parent / "bridge", here.parent.parent / "bridge"):

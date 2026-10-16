@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getSessionDetail, getSessionExtensions, sessionExportUrl, setSessionBookmarked, type Annotation, type ComponentEntry, type SessionDetail, type Store, type TimelineItem } from '../../lib/api';
 import { setDocumentTitle } from '../../lib/documentTitle';
@@ -12,7 +12,10 @@ import { ActivityMap } from './session/ActivityMap';
 import { AttachmentTags } from './session/AttachmentTags';
 import { EventDetailPanel } from './session/EventDetailPanel';
 import { Feedback, RatingMark, useAnnotations } from './session/Feedback';
-import { InsightsTab } from './session/tabs/InsightsTab';
+
+// The findings tab draws charts (recharts); load it when the tab is opened, not
+// with every session.
+const InsightsTab = lazy(() => import('./session/tabs/InsightsTab').then((m) => ({ default: m.InsightsTab })));
 
 interface SessionDetailViewProps {
   sessionId: string;
@@ -274,7 +277,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
           )}
 
           {tab === 'findings' && (
-            <div className="card"><div className="card-b"><InsightsTab detail={detail} /></div></div>
+            <div className="card"><div className="card-b"><Suspense fallback={null}><InsightsTab detail={detail} /></Suspense></div></div>
           )}
 
           {tab === 'map' && (
