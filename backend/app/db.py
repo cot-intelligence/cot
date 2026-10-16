@@ -397,14 +397,26 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
 
     now = timeutil.now()
-    conn.execute(
-        "UPDATE events SET ts = ? WHERE ts IS NULL OR ts = ''",
-        (now,),
-    )
-    conn.execute(
-        "UPDATE events SET created_at = ? WHERE created_at IS NULL OR created_at = ''",
-        (now,),
-    )
+    # Events from before ts/created_at existed get a value once. Every insert
+    # sets both, so this never finds anything again, but as written it scans
+    # the whole events table (created_at has no index): seconds per start on a
+    # multi-GB DB, against the Mac app's 15 s startup limit. Run it once.
+    done = conn.execute(
+        "SELECT 1 FROM settings WHERE key = 'events_blank_ts_backfilled'"
+    ).fetchone()
+    if not done:
+        conn.execute(
+            "UPDATE events SET ts = ? WHERE ts IS NULL OR ts = ''",
+            (now,),
+        )
+        conn.execute(
+            "UPDATE events SET created_at = ? WHERE created_at IS NULL OR created_at = ''",
+            (now,),
+        )
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('events_blank_ts_backfilled', '1')"
+            " ON CONFLICT(key) DO NOTHING"
+        )
     conn.execute(
         "UPDATE sessions SET started_at = ? WHERE started_at IS NULL OR started_at = ''",
         (now,),
