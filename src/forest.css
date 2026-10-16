@@ -259,7 +259,7 @@
 .vf .onb-mode-h b { font-size: 15px; font-weight: 600; }
 .vf .onb-mode-ic { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; border: 1px solid var(--v-line); color: var(--v-dim); }
 .vf .onb-mode[aria-checked='true'] .onb-mode-ic { background: var(--v-hot); border-color: var(--v-hot); color: var(--v-onHot); }
-.vf .onb-radio { position: relative; margin-left: auto; width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--v-mute); transition: border-color 150ms ease; }
+.vf .onb-radio { position: relative; margin-left: auto; width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--v-mute); background: var(--v-surface); transition: border-color 150ms ease; flex: none; }
 .vf .onb-mode[aria-checked='true'] .onb-radio { border-color: var(--v-hot); }
 .vf .onb-mode-lead { font-size: 13px; line-height: 20px; color: var(--v-dim); }
 .vf .onb-mode ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
@@ -296,7 +296,7 @@
 /* ---- Onboarding motion. First-run only, so it can afford a little choreography; every value
    comes from the shared tokens. Step swaps are Framer (direction-aware, in Onboarding.tsx);
    everything here is CSS so it stays smooth while the scan and import requests are in flight. */
-.vf .onb-radio::after { content: ''; position: absolute; inset: 2.5px; border-radius: 50%; background: var(--v-hot); opacity: 0; transform: scale(0.4); transition: opacity 160ms var(--v-ease-out), transform 160ms var(--v-ease-out); }
+.vf .onb-radio::after { content: ''; position: absolute; inset: 3.5px; border-radius: 50%; background: var(--v-hot); opacity: 0; transform: scale(0.4); transition: opacity 160ms var(--v-ease-out), transform 160ms var(--v-ease-out); }
 .vf .onb-mode[aria-checked='true'] .onb-radio::after { opacity: 1; transform: scale(1); }
 .vf .onb-mode { transition: border-color 150ms ease, background-color 150ms ease, transform 150ms var(--v-ease-out); }
 .vf .onb-mode:active { transform: scale(0.99); }
