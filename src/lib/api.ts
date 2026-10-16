@@ -297,6 +297,8 @@ export interface Settings {
   /** Onboarding finished on this install, and the agents picked there. */
   ui_onboarded: boolean;
   ui_onboarding_agents: AgentId[];
+  /** The Mac app posts new inbox items as macOS notifications. */
+  notify_desktop: boolean;
 }
 
 export async function getSettings(): Promise<Settings> {
@@ -762,6 +764,40 @@ export async function getSessionInsights(
   return json<InsightsResponse>(
     await fetch(inStore(`/v1/sessions/${encodeURIComponent(sessionId)}/insights`, store)),
   );
+}
+
+export interface InboxItem {
+  id: number;
+  kind: string;
+  severity: 'critical' | 'warn' | 'info' | null;
+  title: string;
+  body: string | null;
+  href: string | null;
+  created_at: string;
+  read_at: string | null;
+}
+
+export interface Inbox {
+  items: InboxItem[];
+  unread: number;
+  latest_id: number;
+  notify_desktop: boolean;
+}
+
+export async function getInbox(limit = 8): Promise<Inbox> {
+  return json<Inbox>(await fetch(`/v1/notifications?limit=${limit}`));
+}
+
+/** Mark some notifications (or all, with no ids) read; resolves to the unread count left. */
+export async function markInboxRead(ids?: number[]): Promise<number> {
+  const res = await json<{ unread: number }>(
+    await fetch('/v1/notifications/read', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: ids ?? null }),
+    }),
+  );
+  return res.unread;
 }
 
 /** Dismiss a finding, optionally saying why (kept with it, cleared on reopen). */
