@@ -274,7 +274,7 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
 
         <div className="grid-2">
           <section className="card" aria-labelledby="vf-proj" style={{ overflow: 'hidden' }}>
-            <div className="card-h" style={{ paddingBottom: 12 }}><span className="card-t" id="vf-proj">Projects</span><span className="label">by spend</span></div>
+            <div className="card-h" style={{ paddingBottom: 12 }}><span className="card-t" id="vf-proj">Projects</span><a href="#/projects" className="vbtn vbtn-ghost vbtn-sm">All <FIcon name="arrow" size={14} /></a></div>
             <div style={{ overflowX: 'auto' }}>
               <table className="t">
                 <thead><tr><th>Project</th><th>Agents</th><th className="num">Sessions</th><th className="num">Spend</th><th className="num">Findings</th></tr></thead>

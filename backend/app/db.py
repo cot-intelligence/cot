@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from .insight_snapshot import InsightInputs
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import __version__, session_read, store, timeutil
+from . import __version__, repo_info, session_read, store, timeutil
 from .normalize import APPROVAL_REVIEW_PREFIX, categorize, lifecycle_boundary, normalize
 from .pricing import cost_for, normalize_model
 from .question_recovery import ANSWER_SOURCE_ASSISTANT_SUMMARY, recover_cursor_question_response
@@ -3586,6 +3586,46 @@ def project_overview(name: str, days: int) -> dict[str, Any]:
         "session_ids": session_ids,
         "recent": summaries[:12],
     }
+
+
+def project_list(days: int) -> list[dict[str, Any]]:
+    """Every project with sessions that started in the last ``days`` days (0 = all
+    time): its totals, which agents worked in it, the folders it ran in, and what
+    its newest folder looks like on disk (see repo_info.describe)."""
+    since = None
+    if days > 0:
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    summaries, _ = list_sessions_page(1_000_000_000, since=since)
+    projects: dict[str, dict[str, Any]] = {}
+    for x in summaries:
+        cwd = x.get("cwd") or ""
+        name = next((part for part in reversed(cwd.split("/")) if part), None)
+        if not name:
+            continue
+        p = projects.setdefault(name, {
+            "name": name, "sessions": 0, "active": 0, "cost": 0.0, "tools": 0,
+            "agents": {}, "paths": {}, "first_seen": None, "last_active": None,
+        })
+        p["sessions"] += 1
+        p["active"] += 1 if x.get("status") == "active" else 0
+        p["cost"] += x.get("cost_usd") or 0
+        p["tools"] += x.get("tool_count") or 0
+        p["agents"][x["source"]] = p["agents"].get(x["source"], 0) + 1
+        last = x.get("last_activity") or x.get("started_at")
+        # Each folder keeps its newest activity, so the newest folder leads.
+        if last and last > p["paths"].get(cwd, ""):
+            p["paths"][cwd] = last
+        if last and (p["last_active"] is None or last > p["last_active"]):
+            p["last_active"] = last
+        start = x.get("started_at")
+        if start and (p["first_seen"] is None or start < p["first_seen"]):
+            p["first_seen"] = start
+    out = []
+    for p in projects.values():
+        paths = sorted(p["paths"], key=lambda c: p["paths"][c], reverse=True)
+        out.append({**p, "paths": paths, "location": repo_info.describe(paths[0] if paths else None)})
+    out.sort(key=lambda p: p["last_active"] or "", reverse=True)
+    return out
 
 
 def list_session_projects(archived: bool = False) -> list[dict[str, Any]]:

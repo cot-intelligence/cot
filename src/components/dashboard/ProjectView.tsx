@@ -87,7 +87,7 @@ export function ProjectView({ name, onSelect }: { name: string; onSelect: (id: s
   return (
     <div className="scroll" id="vf-scroll">
       <div className="page proj">
-        <a href="#/overview" className="vbtn vbtn-ghost vbtn-sm" style={{ marginLeft: -10, marginBottom: 8 }}><Icon name="back" size={14} />Overview</a>
+        <a href="#/projects" className="vbtn vbtn-ghost vbtn-sm" style={{ marginLeft: -10, marginBottom: 8 }}><Icon name="back" size={14} />Projects</a>
         <div className="ph">
           <div style={{ minWidth: 0 }}>
             <span className="label">Project</span>

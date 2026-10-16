@@ -35,6 +35,7 @@ const FindingsView = lazy(() => import('./FindingsView').then((m) => ({ default:
 const GovernanceView = lazy(() => import('./GovernanceView').then((m) => ({ default: m.GovernanceView })));
 const RulesView = lazy(() => import('./RulesView').then((m) => ({ default: m.RulesView })));
 const ProjectView = lazy(() => import('./ProjectView').then((m) => ({ default: m.ProjectView })));
+const ProjectsView = lazy(() => import('./ProjectsView').then((m) => ({ default: m.ProjectsView })));
 const ExtensionDetailView = lazy(() =>
   import('./ExtensionsView').then((m) => ({ default: m.ExtensionDetailView })),
 );
@@ -74,6 +75,7 @@ type DashboardRoute =
   | { view: 'governance' }
   | { view: 'rules'; fromEvent?: number }
   | { view: 'project'; name: string }
+  | { view: 'projects' }
   | { view: 'extension'; key: string };
 
 type MetricsHistoryTab = 'shell' | 'web' | 'mcp' | 'skill' | 'plugin';
@@ -89,6 +91,7 @@ function parseHash(): DashboardRoute {
   const hash = window.location.hash.replace(/^#\/?/, '');
   if (hash === 'settings') return { view: 'settings' };
   if (hash === 'governance') return { view: 'governance' };
+  if (hash === 'projects') return { view: 'projects' };
   const rulesMatch = hash.match(/^rules(?:\?from=(\d+))?$/);
   if (rulesMatch) return { view: 'rules', fromEvent: rulesMatch[1] ? Number(rulesMatch[1]) : undefined };
   const projectPage = hash.match(/^project\/(.+)$/);
@@ -235,6 +238,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
     else if (route.view === 'governance') setDocumentTitle('Governance');
     else if (route.view === 'rules') setDocumentTitle('Rules');
     else if (route.view === 'project') setDocumentTitle(route.name);
+    else if (route.view === 'projects') setDocumentTitle('Projects');
     else if (route.view === 'extension') setDocumentTitle(route.key.split(':').slice(1).join(':'));
   }, [route.view, route.view === 'metrics-history' ? route.tab : undefined]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -300,10 +304,11 @@ export function Dashboard({ onSetup }: DashboardProps) {
   const onGovernance = route.view === 'governance';
   const onRules = route.view === 'rules';
   const onProject = route.view === 'project';
+  const onProjects = route.view === 'projects';
   const extensionKey = route.view === 'extension' ? route.key : null;
   const extensionKind = extensionKey ? (extensionKey.split(':')[0] as 'mcp' | 'skill' | 'plugin') : null;
   const onExtensions = !!extensionKey;
-  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay && !onFindings && !onGovernance && !onRules && !onExtensions && !onProject;
+  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay && !onFindings && !onGovernance && !onRules && !onExtensions && !onProject && !onProjects;
 
   // Counts for the navigation: sessions traced, and findings that still need a look.
   // /v1/stats carries them all, so the shell never pays for metrics or an insights pass.
@@ -435,8 +440,10 @@ export function Dashboard({ onSetup }: DashboardProps) {
       ? 'rules'
       : onSettings
     ? 'settings'
-    : onOverview || onProject
+    : onOverview
       ? 'overview'
+      : onProject || onProjects
+      ? 'projects'
       : onMetricsHistory
         ? (`activity-${route.view === 'metrics-history' ? route.tab ?? 'shell' : 'shell'}` as NavKey)
         : onReplay
@@ -459,7 +466,9 @@ export function Dashboard({ onSetup }: DashboardProps) {
               { label: extensionKey.split(':').slice(1).join(':') },
             ]
         : route.view === 'project'
-          ? [{ label: 'Overview', href: '#/overview' }, { label: route.name }]
+          ? [{ label: 'Projects', href: '#/projects' }, { label: route.name }]
+        : onProjects
+          ? [{ label: 'Projects' }]
         : onMetricsHistory
       ? [{ label: 'Activity', href: '#/metrics-history' }, { label: ACTIVITY_LABEL[route.view === 'metrics-history' ? route.tab ?? 'shell' : 'shell'] }]
       : [{ label: onFindings ? 'Findings' : onGovernance ? 'Governance' : onRules ? 'Rules' : onSettings ? 'Settings' : onOverview ? 'Overview' : 'Sessions' }];
@@ -530,6 +539,12 @@ export function Dashboard({ onSetup }: DashboardProps) {
             <main className="flex min-w-0 flex-1 flex-col">
               <Suspense fallback={<MetricsSkeleton />}>
                 <ProjectView key={route.name} name={route.name} onSelect={selectSession} />
+              </Suspense>
+            </main>
+          ) : onProjects ? (
+            <main className="flex min-w-0 flex-1 flex-col">
+              <Suspense fallback={<MetricsSkeleton />}>
+                <ProjectsView />
               </Suspense>
             </main>
           ) : onRules ? (

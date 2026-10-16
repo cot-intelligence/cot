@@ -461,6 +461,39 @@ export interface OverviewWindow {
   projects: { cwd: string | null; sessions: number; cost: number; agents: Record<string, number> }[];
 }
 
+/** A project's newest folder as the collector sees it on disk. */
+export interface ProjectLocation {
+  /** null: a folder macOS guards (Documents, Desktop, Downloads), left unread. */
+  exists: boolean | null;
+  git?: {
+    root: string;
+    branch: string | null;
+    detached: string | null;
+    remote: string | null;
+    worktree_of: string | null;
+    last_commit: { at: number; subject: string } | null;
+  } | null;
+  stacks?: string[];
+}
+
+/** One row of the projects list: totals in the window, folders, and git details. */
+export interface ProjectListItem {
+  name: string;
+  sessions: number;
+  active: number;
+  cost: number;
+  tools: number;
+  agents: Record<string, number>;
+  paths: string[];
+  first_seen: string | null;
+  last_active: string | null;
+  location: ProjectLocation;
+}
+
+export async function getProjects(days: number): Promise<{ days: number; projects: ProjectListItem[] }> {
+  return json(await fetch(`/v1/projects?days=${days}`));
+}
+
 /** One project's page: its sessions in a window (0 = all time) and what they did. */
 export interface ProjectOverview {
   name: string;

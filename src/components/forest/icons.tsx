@@ -52,6 +52,8 @@ const P: Record<string, string> = {
   trash: 'M4 7h16M10 7V4h4v3M6 7l1 13h10l1-13M10 11v6M14 11v6',
   bell: 'M6 9a6 6 0 0 1 12 0c0 6 2.5 8 2.5 8h-17S6 15 6 9M10 20.5a2.2 2.2 0 0 0 4 0',
   archive: 'M4 5h16v4H4zM5 9v10h14V9M10 13h4',
+  folder: 'M3 6h6l2 2h10v11H3z',
+  branch: 'M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9',
 };
 
 export type IconName = keyof typeof P;

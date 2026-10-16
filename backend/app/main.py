@@ -1164,6 +1164,13 @@ def get_stats() -> dict[str, Any]:
     return db.stats()
 
 
+@app.get("/v1/projects")
+def get_projects(days: int = 0) -> dict[str, Any]:
+    """Every project in the window with its totals and folder details; 0 days = all time."""
+    days = max(0, days)
+    return {"days": days, "projects": _cached_aggregate("projects", (days,), lambda: db.project_list(days))}
+
+
 @app.get("/v1/projects/{name}")
 def get_project(name: str, days: int = 30) -> dict[str, Any]:
     """One project's page (see db.project_overview); 0 days = all time."""
