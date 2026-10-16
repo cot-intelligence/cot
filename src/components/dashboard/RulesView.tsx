@@ -563,7 +563,7 @@ function RuleEditor({ schema, initial, onCancel, onSaved, onSimple }: {
           </section>
 
           <div style={{ alignSelf: 'start', position: 'sticky', top: 0 }}>
-            <RulePreviewCard preview={preview} loading={loading} failed={!!problem} />
+            <RulePreviewCard preview={preview} loading={loading} failed={!!problem} flush />
           </div>
         </div>
       </div>

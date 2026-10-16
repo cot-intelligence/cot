@@ -303,9 +303,11 @@ function BackticksAsMono({ text }: { text: string }) {
 }
 
 /** What the rule would have caught: counts, then the most frequent real examples. */
-export function RulePreviewCard({ preview, loading, failed, noun = 'event' }: { preview: RulePreview | null; loading: boolean; failed: boolean; noun?: string }) {
+export function RulePreviewCard({ preview, loading, failed, noun = 'event', flush = false }: { preview: RulePreview | null; loading: boolean; failed: boolean; noun?: string; flush?: boolean }) {
+  // Stacked under the sentence builder it needs a gap; beside the form
+  // (`flush`) its top lines up with the form card's.
   return (
-    <section className="card" style={{ marginTop: 16 }} aria-live="polite" aria-busy={loading}>
+    <section className="card" style={flush ? undefined : { marginTop: 16 }} aria-live="polite" aria-busy={loading}>
       <div className="card-h">
         <span className="card-t">Would have caught</span>
         <span className="mono faint" style={{ fontSize: 11 }}>{loading ? 'checking…' : `last ${PREVIEW_DAYS} days`}</span>
