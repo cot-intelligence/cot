@@ -185,7 +185,8 @@ def test_telemetry_uses_one_database_snapshot_during_concurrent_ingest(
         ) -> sqlite3.Cursor:
             nonlocal writer
             result = self._conn.execute(sql, parameters)
-            if not self._interleaved and sql == "SELECT COUNT(*) n FROM events":
+            # Right after metrics reads its event total, mid-snapshot.
+            if not self._interleaved and "SUM(event_count)" in sql:
                 self._interleaved = True
                 writer = threading.Thread(target=insert_concurrent_event)
                 writer.start()

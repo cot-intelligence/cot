@@ -1228,6 +1228,145 @@ def ensure_search_index() -> None:
         _ensure_search_index(conn)
 
 
+# --- session_stats: per-session rollup of the events table -------------------
+# The sessions list, stats, metrics and summaries all need each session's event
+# and tool counts, first/last timestamp and token sums. Deriving them with a
+# GROUP BY over every event made each of those a scan of the whole table. This
+# table holds them per session, kept exact by triggers on ``events`` so every
+# write path (hooks, imports, recategorizing migrations, dedup, retention
+# cascades) maintains it without knowing about it. Deletes decrement, and only
+# re-seek first/last ts (through idx_events_session_agg) when the deleted row
+# held one of them. Bump the version to rebuild after changing the definitions.
+_SESSION_STATS_VERSION = "1"
+
+_SESSION_STATS_COLUMNS = (
+    "session_id, event_count, content_count, tool_count, first_ts, last_ts,"
+    " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, first_prompt_id"
+)
+
+_SESSION_STATS_TABLE = """
+CREATE TABLE session_stats (
+    session_id         TEXT PRIMARY KEY,
+    event_count        INTEGER NOT NULL DEFAULT 0,
+    -- Events with a category other than 'lifecycle': a session with none is
+    -- only hook bookkeeping and stays out of the list.
+    content_count      INTEGER NOT NULL DEFAULT 0,
+    tool_count         INTEGER NOT NULL DEFAULT 0,
+    first_ts           TEXT,
+    last_ts            TEXT,
+    input_tokens       INTEGER NOT NULL DEFAULT 0,
+    output_tokens      INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    -- The first prompt (its detail is the session title).
+    first_prompt_id    INTEGER
+)
+"""
+
+
+def _session_stats_add(row: str) -> str:
+    """Fold one events row (``NEW``) into its session's stats."""
+    return f"""
+    INSERT INTO session_stats ({_SESSION_STATS_COLUMNS})
+    VALUES ({row}.session_id, 1,
+        {row}.category IS NOT NULL AND {row}.category != 'lifecycle',
+        {row}.tool IS NOT NULL, {row}.ts, {row}.ts,
+        COALESCE({row}.input_tokens, 0), COALESCE({row}.output_tokens, 0),
+        COALESCE({row}.cache_read_tokens, 0), COALESCE({row}.cache_write_tokens, 0),
+        CASE WHEN {row}.category = 'prompt' THEN {row}.id END)
+    ON CONFLICT(session_id) DO UPDATE SET
+        event_count = event_count + 1,
+        content_count = content_count + excluded.content_count,
+        tool_count = tool_count + excluded.tool_count,
+        first_ts = CASE WHEN first_ts IS NULL OR excluded.first_ts < first_ts
+            THEN COALESCE(excluded.first_ts, first_ts) ELSE first_ts END,
+        last_ts = CASE WHEN last_ts IS NULL OR excluded.last_ts > last_ts
+            THEN COALESCE(excluded.last_ts, last_ts) ELSE last_ts END,
+        input_tokens = input_tokens + excluded.input_tokens,
+        output_tokens = output_tokens + excluded.output_tokens,
+        cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+        cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
+        first_prompt_id = CASE WHEN excluded.first_prompt_id IS NOT NULL
+            AND (first_prompt_id IS NULL OR excluded.first_prompt_id < first_prompt_id)
+            THEN excluded.first_prompt_id ELSE first_prompt_id END;
+"""
+
+
+def _session_stats_remove(row: str) -> str:
+    """Take one events row (``OLD``) out of its session's stats."""
+    return f"""
+    UPDATE session_stats SET
+        event_count = event_count - 1,
+        content_count = content_count - ({row}.category IS NOT NULL AND {row}.category != 'lifecycle'),
+        tool_count = tool_count - ({row}.tool IS NOT NULL),
+        input_tokens = input_tokens - COALESCE({row}.input_tokens, 0),
+        output_tokens = output_tokens - COALESCE({row}.output_tokens, 0),
+        cache_read_tokens = cache_read_tokens - COALESCE({row}.cache_read_tokens, 0),
+        cache_write_tokens = cache_write_tokens - COALESCE({row}.cache_write_tokens, 0)
+    WHERE session_id = {row}.session_id;
+    UPDATE session_stats SET
+        first_ts = (SELECT MIN(ts) FROM events WHERE session_id = {row}.session_id),
+        last_ts = (SELECT MAX(ts) FROM events WHERE session_id = {row}.session_id)
+    WHERE session_id = {row}.session_id AND ({row}.ts = first_ts OR {row}.ts = last_ts);
+    UPDATE session_stats SET first_prompt_id = (
+        SELECT MIN(id) FROM events WHERE session_id = {row}.session_id AND category = 'prompt')
+    WHERE session_id = {row}.session_id AND first_prompt_id = {row}.id;
+    DELETE FROM session_stats WHERE session_id = {row}.session_id AND event_count <= 0;
+"""
+
+
+_SESSION_STATS_TRIGGERS = (
+    "CREATE TRIGGER session_stats_insert AFTER INSERT ON events BEGIN"
+    + _session_stats_add("NEW") + "END",
+    "CREATE TRIGGER session_stats_delete AFTER DELETE ON events BEGIN"
+    + _session_stats_remove("OLD") + "END",
+    "CREATE TRIGGER session_stats_update AFTER UPDATE OF"
+    " session_id, ts, category, tool,"
+    " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens"
+    " ON events BEGIN" + _session_stats_remove("OLD") + _session_stats_add("NEW") + "END",
+)
+
+# One pass over idx_events_session_agg (session_id, ts, tool, category, tokens;
+# the rowid comes free), not the events table.
+_SESSION_STATS_BACKFILL = f"""
+INSERT INTO session_stats ({_SESSION_STATS_COLUMNS})
+SELECT session_id, COUNT(*),
+    SUM(category IS NOT NULL AND category != 'lifecycle'),
+    SUM(tool IS NOT NULL), MIN(ts), MAX(ts),
+    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+    COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0),
+    MIN(CASE WHEN category = 'prompt' THEN id END)
+FROM events INDEXED BY idx_events_session_agg
+GROUP BY session_id
+"""
+
+
+def _ensure_session_stats(conn: sqlite3.Connection) -> None:
+    """Create, or rebuild after a definition change, the session_stats rollup.
+    Runs inside init_db's write transaction, so no event lands between the
+    backfill and the triggers that take over from it."""
+    stored = conn.execute(
+        "SELECT value FROM settings WHERE key = 'session_stats_version'"
+    ).fetchone()
+    has_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_stats'"
+    ).fetchone()
+    if has_table and stored and stored["value"] == _SESSION_STATS_VERSION:
+        return
+    for name in ("session_stats_insert", "session_stats_delete", "session_stats_update"):
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+    conn.execute("DROP TABLE IF EXISTS session_stats")
+    conn.execute(_SESSION_STATS_TABLE)
+    conn.execute(_SESSION_STATS_BACKFILL)
+    for trigger in _SESSION_STATS_TRIGGERS:
+        conn.execute(trigger)
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES ('session_stats_version', ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (_SESSION_STATS_VERSION,),
+    )
+
+
 def init_db(build_search_index: bool = True) -> None:
     """``build_search_index=False`` leaves a first-time index build to
     :func:`ensure_search_index`; the server runs that after it starts, because
@@ -1237,6 +1376,7 @@ def init_db(build_search_index: bool = True) -> None:
             if statement.strip():
                 conn.execute(statement)
         _migrate(conn)
+        _ensure_session_stats(conn)
         if build_search_index:
             _ensure_search_index(conn)
         conn.execute(
@@ -2279,38 +2419,30 @@ def session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[d
 
 
 def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
-    agg = conn.execute(
-        "SELECT COUNT(*) AS events,"
-        " SUM(CASE WHEN tool IS NOT NULL THEN 1 ELSE 0 END) AS tools,"
-        " MIN(ts) AS first_ts, MAX(ts) AS last_ts"
-        " FROM events WHERE session_id = ?",
+    stats = conn.execute(
+        "SELECT event_count, tool_count, first_ts, last_ts, input_tokens AS i,"
+        " output_tokens AS o, cache_read_tokens AS cr, cache_write_tokens AS cw"
+        " FROM session_stats WHERE session_id = ?",
         (row["id"],),
     ).fetchone()
+    agg = {
+        "events": stats["event_count"] if stats else 0,
+        "tools": stats["tool_count"] if stats else 0,
+        "first_ts": stats["first_ts"] if stats else None,
+        "last_ts": stats["last_ts"] if stats else None,
+    }
     last_ts = agg["last_ts"]
-    models = [
-        r["model"]
-        for r in conn.execute(
-            "SELECT DISTINCT model FROM events"
-            " WHERE session_id = ? AND model IS NOT NULL AND model != ''"
-            " ORDER BY model",
-            (row["id"],),
-        ).fetchall()
-    ]
-    tok = conn.execute(
-        "SELECT COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o,"
-        " COALESCE(SUM(cache_read_tokens),0) cr, COALESCE(SUM(cache_write_tokens),0) cw"
-        " FROM events WHERE session_id = ?",
-        (row["id"],),
-    ).fetchone()
-    # Per-model token sums for cost calculation.
+    tok = stats or {"i": 0, "o": 0, "cr": 0, "cw": 0}
+    # Per-model token sums for cost calculation (and the model list).
     model_rows = conn.execute(
         "SELECT model,"
         " COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o,"
         " COALESCE(SUM(cache_read_tokens),0) cr, COALESCE(SUM(cache_write_tokens),0) cw"
         " FROM events WHERE session_id = ? AND model IS NOT NULL AND model != ''"
-        " GROUP BY model",
+        " GROUP BY model ORDER BY model",
         (row["id"],),
     ).fetchall()
+    models = [mr["model"] for mr in model_rows]
     cost_usd = 0.0
     has_cost = False
     for mr in model_rows:
@@ -2535,24 +2667,22 @@ def metrics(
         rows = lambda sql, *p: conn.execute(sql, p).fetchall()  # noqa: E731
 
         sessions = one("SELECT COUNT(*) n FROM sessions")["n"]
-        events = one("SELECT COUNT(*) n FROM events")["n"]
-        tool_calls = one("SELECT COUNT(*) n FROM events WHERE tool IS NOT NULL")["n"]
+        events, tool_calls = one(
+            "SELECT COALESCE(SUM(event_count), 0) e, COALESCE(SUM(tool_count), 0) t FROM session_stats"
+        )
         projects = one("SELECT COUNT(DISTINCT cwd) n FROM sessions WHERE cwd IS NOT NULL")["n"]
 
-        last_rows = rows("SELECT session_id, MAX(ts) lt FROM events GROUP BY session_id")
+        last_rows = rows("SELECT session_id, last_ts lt FROM session_stats")
         active = sum(1 for r in last_rows if timeutil.live_status(r["lt"]) == "active")
 
-        durs = rows(
-            "SELECT (julianday(MAX(ts))-julianday(MIN(ts)))*86400 d"
-            " FROM events GROUP BY session_id"
-        )
+        durs = rows("SELECT (julianday(last_ts)-julianday(first_ts))*86400 d FROM session_stats")
         dvals = [r["d"] for r in durs if r["d"] is not None]
         avg_duration = round(sum(dvals) / len(dvals), 2) if dvals else None
 
         tok = one(
             "SELECT COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o,"
             " COALESCE(SUM(cache_read_tokens),0) cr, COALESCE(SUM(cache_write_tokens),0) cw"
-            " FROM events"
+            " FROM session_stats"
         )
         tokens = _tokens_dict(tok)
 
@@ -2634,8 +2764,9 @@ def metrics(
                 "last_activity": timeutil.format_ts(r["lt"]),
             }
             for r in rows(
-                "SELECT s.cwd, COUNT(DISTINCT s.id) s, COUNT(ev.id) e, MAX(ev.ts) lt"
-                " FROM sessions s LEFT JOIN events ev ON ev.session_id = s.id"
+                "SELECT s.cwd, COUNT(DISTINCT s.id) s, COALESCE(SUM(st.event_count), 0) e,"
+                " MAX(st.last_ts) lt"
+                " FROM sessions s LEFT JOIN session_stats st ON st.session_id = s.id"
                 " WHERE s.cwd IS NOT NULL GROUP BY s.cwd ORDER BY e DESC LIMIT 10"
             )
         ]
@@ -2648,9 +2779,9 @@ def metrics(
         busiest_sessions = [
             {"session_id": r["session_id"], "events": r["n"], "cwd": r["cwd"]}
             for r in rows(
-                "SELECT e.session_id, COUNT(*) n, s.cwd"
-                " FROM events e LEFT JOIN sessions s ON s.id = e.session_id"
-                " GROUP BY e.session_id ORDER BY n DESC LIMIT 8"
+                "SELECT st.session_id, st.event_count n, s.cwd"
+                " FROM session_stats st LEFT JOIN sessions s ON s.id = st.session_id"
+                " ORDER BY n DESC LIMIT 8"
             )
         ]
 
@@ -3000,8 +3131,8 @@ def list_annotations(
         rows = conn.execute(
             "SELECT a.*, s.source, s.cwd, e.category AS event_category, e.title AS event_title,"
             " e.target AS event_target,"
-            " (SELECT fp.detail FROM events fp WHERE fp.session_id = a.session_id"
-            "  AND fp.category = 'prompt' ORDER BY fp.id ASC LIMIT 1) AS prompt_detail"
+            " (SELECT fp.detail FROM session_stats ss JOIN events fp ON fp.id = ss.first_prompt_id"
+            "  WHERE ss.session_id = a.session_id) AS prompt_detail"
             " FROM annotations a JOIN sessions s ON s.id = a.session_id"
             " LEFT JOIN events e ON e.id = NULLIF(a.event_id, 0)"
             f" WHERE {' AND '.join(clauses)} ORDER BY a.updated_at DESC LIMIT ?",
@@ -3106,25 +3237,11 @@ def export_sessions(
             f" s.status, s.archived, s.bookmarked, s.created_at,"
             f" s.imported_from, s.imported_at, s.import_note,"
             f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
-            f" e.i, e.o, e.cr, e.cw,"
-            f" (SELECT fp.detail FROM events fp"
-            f"  WHERE fp.session_id = s.id AND fp.category = 'prompt'"
-            f"  ORDER BY fp.id ASC LIMIT 1) AS prompt_detail"
+            f" e.input_tokens AS i, e.output_tokens AS o,"
+            f" e.cache_read_tokens AS cr, e.cache_write_tokens AS cw,"
+            f" (SELECT fp.detail FROM events fp WHERE fp.id = e.first_prompt_id) AS prompt_detail"
             f" FROM sessions s"
-            f" JOIN ("
-            f"   SELECT session_id,"
-            f"     COUNT(*) AS event_count,"
-            f"     SUM(CASE WHEN tool IS NOT NULL THEN 1 ELSE 0 END) AS tool_count,"
-            f"     MIN(ts) AS first_ts,"
-            f"     MAX(ts) AS last_ts,"
-            f"     COALESCE(SUM(input_tokens),0) AS i,"
-            f"     COALESCE(SUM(output_tokens),0) AS o,"
-            f"     COALESCE(SUM(cache_read_tokens),0) AS cr,"
-            f"     COALESCE(SUM(cache_write_tokens),0) AS cw"
-            f"   FROM events"
-            f"   GROUP BY session_id"
-            f"   HAVING SUM(CASE WHEN category IS NOT NULL AND category != 'lifecycle' THEN 1 ELSE 0 END) > 0"
-            f" ) e ON e.session_id = s.id"
+            f" JOIN session_stats e ON e.session_id = s.id AND e.content_count > 0"
             f" {where}"
             f" ORDER BY COALESCE(s.ended_at, e.last_ts, s.started_at) DESC"
             f" LIMIT ?",
@@ -3357,8 +3474,7 @@ def list_sessions_page(
         # The title is the first prompt, so search it along with the id and path.
         clauses.append(
             "(s.id LIKE ? OR s.cwd LIKE ? OR (SELECT fp.detail FROM events fp"
-            " WHERE fp.session_id = s.id AND fp.category = 'prompt'"
-            " ORDER BY fp.id ASC LIMIT 1) LIKE ?)"
+            " WHERE fp.id = e.first_prompt_id) LIKE ?)"
         )
         params.extend([f"%{q}%"] * 3)
     if project:
@@ -3376,22 +3492,11 @@ def list_sessions_page(
     sort = sort if sort in SESSION_SORTS else "recent"
     direction = "DESC" if desc else "ASC"
     recency = "COALESCE(s.ended_at, e.last_ts, s.started_at)"
+    # Per-session counts come from the session_stats rollup; a session with only
+    # lifecycle events is hook bookkeeping and doesn't list.
     joined = (
         " FROM sessions s"
-        " JOIN ("
-        "   SELECT session_id,"
-        "     COUNT(*) AS event_count,"
-        "     SUM(CASE WHEN tool IS NOT NULL THEN 1 ELSE 0 END) AS tool_count,"
-        "     MIN(ts) AS first_ts,"
-        "     MAX(ts) AS last_ts,"
-        "     COALESCE(SUM(input_tokens),0) AS i,"
-        "     COALESCE(SUM(output_tokens),0) AS o,"
-        "     COALESCE(SUM(cache_read_tokens),0) AS cr,"
-        "     COALESCE(SUM(cache_write_tokens),0) AS cw"
-        "   FROM events"
-        "   GROUP BY session_id"
-        "   HAVING SUM(CASE WHEN category IS NOT NULL AND category != 'lifecycle' THEN 1 ELSE 0 END) > 0"
-        " ) e ON e.session_id = s.id"
+        " JOIN session_stats e ON e.session_id = s.id AND e.content_count > 0"
         f" {where}"
     )
     select = (
@@ -3399,10 +3504,9 @@ def list_sessions_page(
         " s.status, s.archived, s.bookmarked, s.created_at,"
         " s.imported_from, s.imported_at, s.import_note,"
         " e.event_count, e.tool_count, e.first_ts, e.last_ts,"
-        " e.i, e.o, e.cr, e.cw,"
-        " (SELECT fp.detail FROM events fp"
-        "  WHERE fp.session_id = s.id AND fp.category = 'prompt'"
-        "  ORDER BY fp.id ASC LIMIT 1) AS prompt_detail"
+        " e.input_tokens AS i, e.output_tokens AS o,"
+        " e.cache_read_tokens AS cr, e.cache_write_tokens AS cw,"
+        " (SELECT fp.detail FROM events fp WHERE fp.id = e.first_prompt_id) AS prompt_detail"
     )
     in_sql = sort in ("recent", "events") and not status
     order = f"e.event_count {direction}, {recency} DESC" if sort == "events" else f"{recency} {direction}"
@@ -4339,11 +4443,9 @@ def stats() -> dict[str, Any]:
         # Effective status is recency-derived, so count live sessions from each
         # session's most recent event rather than the stored flag.
         event_rows = conn.execute(
-            "SELECT session_id, MAX(ts) AS last_ts,"
-            " COUNT(*) AS events,"
-            " SUM(CASE WHEN tool IS NOT NULL THEN 1 ELSE 0 END) AS tools,"
-            " (julianday(MAX(ts)) - julianday(MIN(ts))) * 86400 AS duration"
-            " FROM events GROUP BY session_id"
+            "SELECT session_id, last_ts, event_count AS events, tool_count AS tools,"
+            " (julianday(last_ts) - julianday(first_ts)) * 86400 AS duration"
+            " FROM session_stats"
         ).fetchall()
         active = sum(1 for r in event_rows if timeutil.live_status(r["last_ts"]) == "active")
         by_status = {"active": active, "completed": max(sessions - active, 0)}
@@ -4495,7 +4597,7 @@ def read_insight_inputs(
     session_last_ts = {
         r["session_id"]: r["t"]
         for r in rows(
-            "SELECT session_id, MAX(ts) t FROM events" + per_session[0] + " GROUP BY session_id",
+            "SELECT session_id, last_ts t FROM session_stats" + per_session[0],
             per_session[1],
         )
     }
