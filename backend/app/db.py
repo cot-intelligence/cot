@@ -3447,6 +3447,9 @@ def session_window(days: int) -> dict[str, Any]:
     if days > 0:
         since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
     summaries, _ = list_sessions_page(1_000_000_000, since=since)
+    # One series point per UTC day, or per UTC hour for the 24-hour window
+    # ("2026-10-16" / "2026-10-16T14"); the dashboard fills the empty buckets.
+    bucket = 13 if days == 1 else 10
     series: dict[str, dict[str, Any]] = {}
     projects: dict[str, dict[str, Any]] = {}
     sources: set[str] = set()
@@ -3454,7 +3457,7 @@ def session_window(days: int) -> dict[str, Any]:
         cost = x.get("cost_usd") or 0
         tools = x.get("tool_count") or 0
         sources.add(x["source"])
-        day = series.setdefault((x.get("started_at") or "")[:10], {"sessions": 0, "cost": 0.0, "tools": 0})
+        day = series.setdefault((x.get("started_at") or "")[:bucket], {"sessions": 0, "cost": 0.0, "tools": 0})
         day["sessions"] += 1
         day["cost"] += cost
         day["tools"] += tools
