@@ -17,6 +17,7 @@ import {
   type TimelineItem,
 } from '../../lib/api';
 import { usePolling } from '../../lib/usePolling';
+import { BackToTop } from '../ui/BackToTop';
 import { sessionDetailKey, useHoverPrefetch } from '../../lib/sessionDetailQuery';
 import { agentLabel } from '../forest/AgentMark';
 import { categoryLabel, fmt, modelLabel, project, shortId } from '../forest/format';
@@ -158,6 +159,7 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
 
   return (
     <div className="scroll" id="vf-scroll">
+      <BackToTop />
       <div className="page">
         <div className="ph">
           <div><span className="label">Monitor</span><h1>Sessions</h1><p>Every traced agent session. Select a row to peek, open it for the full trace.</p></div>

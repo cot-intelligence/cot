@@ -631,3 +631,10 @@
 @media (hover: hover) and (pointer: fine) { .vf .rule-add:hover, .vf .rule-join:hover { color: var(--v-fg); } }
 .vf .rule-details { padding: 12px 20px 16px; border-top: 1px solid var(--v-line); }
 .vf .rule-example { display: flex; justify-content: space-between; gap: 12px; padding: 8px 12px; color: inherit; text-decoration: none; }
+
+/* Back to top (components/ui/BackToTop): flat surface, hairline ring. */
+.vf .to-top { position: fixed; right: 24px; bottom: 24px; z-index: 40; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 999px; border: 1px solid var(--v-line); background: var(--v-surface); color: var(--v-dim); opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 160ms ease, transform 160ms var(--v-ease-out), color 150ms ease, border-color 150ms ease; }
+.vf .to-top[data-shown='true'] { opacity: 1; transform: none; pointer-events: auto; }
+.vf .to-top:active { transform: scale(0.96); }
+@media (hover: hover) and (pointer: fine) { .vf .to-top:hover { color: var(--v-fg); border-color: var(--v-mute); } }
+@media (prefers-reduced-motion: reduce) { .vf .to-top { transition: opacity 120ms ease; transform: none; } }
