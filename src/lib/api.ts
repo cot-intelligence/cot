@@ -210,6 +210,9 @@ export interface Stats {
   avg_duration_seconds: number | null;
   by_source: Record<string, number>;
   by_status: Record<string, number>;
+  /** Sessions the sessions list shows (top-level, unarchived, with content). */
+  listed_sessions: number;
+  /** Projects among those sessions. */
   projects: number;
   /** Active, non-info findings as of the last insights pass. */
   open_findings: number;

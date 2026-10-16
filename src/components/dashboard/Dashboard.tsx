@@ -444,7 +444,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
         onMobileClose={() => setMobileOpen(false)}
         onToggleCollapsed={toggleNav}
         onSearch={() => setPaletteOpen(true)}
-        counts={{ sessions: stats?.sessions, findings: stats?.open_findings ?? 0, projects: stats?.projects, agents: stats ? Object.keys(stats.by_source).length : undefined }}
+        counts={{ sessions: stats?.listed_sessions ?? stats?.sessions, findings: stats?.open_findings ?? 0, projects: stats?.projects, agents: stats ? Object.keys(stats.by_source).length : undefined }}
       />
       <div className="main">
         <header className="top">

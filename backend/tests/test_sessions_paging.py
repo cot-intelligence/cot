@@ -92,3 +92,23 @@ def test_projects_lists_every_project_with_counts():
     _seed(5, cwd=lambda i: "/code/alpha" if i < 3 else "/code/beta/")
     body = _client().get("/v1/sessions/projects").json()
     assert body["projects"] == [{"project": "alpha", "sessions": 3}, {"project": "beta", "sessions": 2}]
+
+
+def test_nav_counts_match_the_sessions_list(fresh_db):
+    from app import db, store
+
+    with store.write() as conn:
+        for sid, parent, archived in (("top", None, 0), ("child", "top", 0), ("old", None, 1), ("bare", None, 0)):
+            conn.execute(
+                "INSERT INTO sessions (id, source, cwd, started_at, status, archived, parent_session_id, created_at)"
+                " VALUES (?, 'claude', ?, '2026-01-01T00:00:00Z', 'completed', ?, ?, '2026-01-01T00:00:00Z')",
+                (sid, f"/p/{sid}", archived, parent),
+            )
+            # "bare" has only lifecycle events: bookkeeping, not a listed session.
+            store.insert_event(conn, session_id=sid, source="claude", ts="2026-01-01T00:00:01Z",
+                               category="lifecycle" if sid == "bare" else "prompt")
+    stats = db.stats()
+    _, total = db.list_sessions_page(limit=50)
+    assert stats["sessions"] == 4
+    assert stats["listed_sessions"] == total == 1
+    assert stats["projects"] == 1

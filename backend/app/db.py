@@ -4512,10 +4512,18 @@ def stats() -> dict[str, Any]:
         durations = [r["duration"] for r in event_rows if r["duration"] is not None]
         avg_duration = round(sum(durations) / len(durations), 2) if durations else None
         # Navigation counts, so the dashboard shell needs neither /v1/metrics nor
-        # an insights pass. Findings come from the last reconcile, not a new one.
-        projects = conn.execute(
-            "SELECT COUNT(DISTINCT cwd) AS n FROM sessions WHERE cwd IS NOT NULL"
-        ).fetchone()["n"]
+        # an insights pass. Sessions and projects count what the sessions list
+        # (and the Overview) show: top-level, unarchived sessions with content,
+        # not subagents, import fragments or hook-only bookkeeping, which the
+        # ``sessions`` total above includes. Findings come from the last
+        # reconcile, not a new one.
+        listed = conn.execute(
+            "SELECT COUNT(*) AS n, COUNT(DISTINCT COALESCE(s.cwd, '')) AS projects"
+            " FROM sessions s"
+            " JOIN session_stats e ON e.session_id = s.id AND e.content_count > 0"
+            " WHERE s.archived = 0 AND s.parent_session_id IS NULL"
+            " AND (s.import_root_id IS NULL OR s.import_root_id = s.id)"
+        ).fetchone()
         open_findings = conn.execute(
             "SELECT COUNT(*) AS n FROM insight_findings"
             " WHERE status = 'active' AND severity != 'info'"
@@ -4528,7 +4536,8 @@ def stats() -> dict[str, Any]:
             "avg_duration_seconds": avg_duration,
             "by_source": by_source,
             "by_status": by_status,
-            "projects": projects,
+            "listed_sessions": listed["n"],
+            "projects": listed["projects"],
             "open_findings": open_findings,
         }
 
