@@ -385,6 +385,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)"
         )
+    # Why a finding was dismissed, in the person's words (optional).
+    _add_column_if_missing(
+        conn, "insight_findings", "dismiss_reason", "TEXT", _table_columns(conn, "insight_findings")
+    )
 
     if "ord" not in _table_columns(conn, "extension_uses"):
         # Keyed by event_id alone before ord existed. The table is derived from
@@ -4891,11 +4895,15 @@ def delete_user_rule(rule_id: str) -> bool:
         return conn.execute("DELETE FROM user_rules WHERE id = ?", (rule_id,)).rowcount > 0
 
 
-def set_insight_finding_status(fingerprint: str, status: str, dismissed_at: str | None) -> bool:
-    """Manual lifecycle control (dismiss/restore). False if the fingerprint is unknown."""
+def set_insight_finding_status(
+    fingerprint: str, status: str, dismissed_at: str | None, reason: str | None = None
+) -> bool:
+    """Manual lifecycle control (dismiss/restore). False if the fingerprint is unknown.
+    ``reason`` is kept with a dismissal and cleared when the finding is reopened."""
     with store.write() as conn:
         cur = conn.execute(
-            "UPDATE insight_findings SET status = ?, dismissed_at = ? WHERE fingerprint = ?",
-            (status, dismissed_at, fingerprint),
+            "UPDATE insight_findings SET status = ?, dismissed_at = ?, dismiss_reason = ?"
+            " WHERE fingerprint = ?",
+            (status, dismissed_at, reason, fingerprint),
         )
         return cur.rowcount > 0

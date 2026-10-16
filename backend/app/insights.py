@@ -1032,6 +1032,8 @@ def _stored_to_finding(r: Any) -> dict[str, Any]:
         "first_seen": r["first_seen"],
         "last_seen": r["last_seen"],
         "resolved_at": r["resolved_at"],
+        "dismissed_at": r["dismissed_at"],
+        "dismiss_reason": r["dismiss_reason"],
         "user_rule": r["rule_id"].startswith(user_rules.ID_PREFIX),
     }
 
@@ -1078,6 +1080,8 @@ def _reconcile(store: FindingsStore, findings: list[dict[str, Any]]) -> list[dic
             status = "active" if prev["status"] == "resolved" else prev["status"]
             store.refresh(f, status, now)
             f["status"], f["first_seen"], f["last_seen"] = status, prev["first_seen"], now
+            if status == "dismissed":
+                f["dismissed_at"], f["dismiss_reason"] = prev["dismissed_at"], prev["dismiss_reason"]
         f["resolved_at"] = None
         out.append(f)
     for fp, r in stored.items():
@@ -1240,13 +1244,17 @@ def forget_shared_insights() -> None:
         _shared_done.clear()
 
 
-def _patch_shared_status(fingerprint: str, status: str) -> None:
+def _patch_shared_status(
+    fingerprint: str, status: str, *, dismissed_at: str | None = None, reason: str | None = None
+) -> None:
     """Apply a dismiss/restore to every stored result, so the next read shows it
     without a new pass."""
     with _shared_lock:
         for key, (at, result) in list(_shared_done.items()):
             findings = [
-                {**f, "status": status} if f.get("fingerprint") == fingerprint else f
+                {**f, "status": status, "dismissed_at": dismissed_at, "dismiss_reason": reason}
+                if f.get("fingerprint") == fingerprint
+                else f
                 for f in result["insights"]
             ]
             patched = {**result, "insights": findings}
@@ -1259,12 +1267,14 @@ def session_exists(session_id: str) -> bool:
     return db.session_exists(session_id)
 
 
-def set_finding_status(fingerprint: str, status: str) -> bool:
-    """Manual lifecycle control: dismiss or restore. Returns False if unknown."""
+def set_finding_status(fingerprint: str, status: str, reason: str | None = None) -> bool:
+    """Manual lifecycle control: dismiss (optionally saying why) or restore.
+    Returns False if unknown."""
     assert status in ("dismissed", "active")
-    changed = db.set_insight_finding_status(
-        fingerprint, status, db.now() if status == "dismissed" else None
-    )
+    dismissed = status == "dismissed"
+    reason = (reason or "").strip() or None if dismissed else None
+    dismissed_at = db.now() if dismissed else None
+    changed = db.set_insight_finding_status(fingerprint, status, dismissed_at, reason)
     if changed:
-        _patch_shared_status(fingerprint, status)
+        _patch_shared_status(fingerprint, status, dismissed_at=dismissed_at, reason=reason)
     return changed

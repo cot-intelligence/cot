@@ -707,6 +707,9 @@ export interface ActionableInsight {
   first_seen: string | null;
   last_seen: string | null;
   resolved_at: string | null;
+  /** Set while dismissed. */
+  dismissed_at?: string | null;
+  dismiss_reason?: string | null;
 }
 
 export interface InsightsResponse {
@@ -737,9 +740,14 @@ export async function getSessionInsights(
   );
 }
 
-export async function dismissInsight(fingerprint: string): Promise<void> {
+/** Dismiss a finding, optionally saying why (kept with it, cleared on reopen). */
+export async function dismissInsight(fingerprint: string, reason?: string): Promise<void> {
   await json<{ ok: boolean }>(
-    await fetch(`/v1/insights/${encodeURIComponent(fingerprint)}/dismiss`, { method: 'POST' }),
+    await fetch(`/v1/insights/${encodeURIComponent(fingerprint)}/dismiss`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: reason?.trim() || null }),
+    }),
   );
 }
 

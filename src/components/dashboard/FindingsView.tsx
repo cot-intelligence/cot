@@ -99,12 +99,12 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
   const clear = () => { setQ(''); setSev(''); setRule(''); setProj(''); setAgent(''); setSel(null); };
   const cur: ActionableInsight | undefined = rows.find((f) => f.fingerprint === sel) ?? rows[0];
 
-  const act = async (f: ActionableInsight, action: 'dismiss' | 'restore') => {
+  const act = async (f: ActionableInsight, action: 'dismiss' | 'restore', reason?: string) => {
     const i = rows.findIndex((r) => r.fingerprint === f.fingerprint);
     const next = rows[i + 1] ?? rows[i - 1];
     setBusy(true);
     try {
-      await (action === 'dismiss' ? dismissInsight(f.fingerprint) : restoreInsight(f.fingerprint));
+      await (action === 'dismiss' ? dismissInsight(f.fingerprint, reason) : restoreInsight(f.fingerprint));
       setSel(next?.fingerprint ?? null);
     } finally {
       setBusy(false);
@@ -251,8 +251,14 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
                       })}
                     </ul>
                   </div>
-                  <div style={{ display: 'flex', gap: 8, borderTop: '1px solid var(--v-line)', paddingTop: 14, alignItems: 'center' }}>
-                    {cur.status === 'active' && <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={busy} onClick={() => act(cur, 'dismiss')}>Dismiss</button>}
+                  {cur.status === 'dismissed' && (
+                    <p className="dim" style={{ fontSize: 13, margin: 0 }}>
+                      Dismissed{cur.dismissed_at ? ` ${fmt.day(cur.dismissed_at)}` : ''}
+                      {cur.dismiss_reason ? <>: <span style={{ color: 'var(--v-fg)' }}>{cur.dismiss_reason}</span></> : '.'}
+                    </p>
+                  )}
+                  <div style={{ display: 'flex', gap: 8, borderTop: '1px solid var(--v-line)', paddingTop: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+                    {cur.status === 'active' && <DismissControl key={cur.fingerprint} busy={busy} onDismiss={(reason) => act(cur, 'dismiss', reason)} />}
                     {cur.status === 'dismissed' && <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={busy} onClick={() => act(cur, 'restore')}>Reopen</button>}
                     {cur.status === 'resolved' && cur.resolved_at && <span className="vchip c-ok"><span className="dot" />fixed {fmt.day(cur.resolved_at)}</span>}
                     <span className="mono faint" style={{ marginLeft: 'auto', fontSize: 11 }}>{cur.first_seen ? `first seen ${fmt.day(cur.first_seen)}` : ''}</span>
@@ -266,5 +272,43 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
         )}
       </div>
     </div>
+  );
+}
+
+const QUICK_REASONS = ['Expected', 'False positive', "Won't fix"];
+
+/** Dismiss, with an optional reason: a quick pick or a few words of its own. */
+function DismissControl({ busy, onDismiss }: { busy: boolean; onDismiss: (reason?: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  if (!open) {
+    return <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={busy} onClick={() => setOpen(true)}>Dismiss</button>;
+  }
+  const submit = () => onDismiss(reason.trim() || undefined);
+  return (
+    <form
+      onSubmit={(e) => { e.preventDefault(); submit(); }}
+      style={{ display: 'grid', gap: 8, width: '100%' }}>
+      <label className="vfield" style={{ width: '100%' }}>
+        <input
+          autoFocus
+          value={reason}
+          maxLength={500}
+          onChange={(e) => setReason(e.target.value)}
+          onKeyDown={(e) => e.key === 'Escape' && (setOpen(false), setReason(''))}
+          placeholder="Why dismiss it? (optional)"
+          aria-label="Reason for dismissing"
+        />
+      </label>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+        {QUICK_REASONS.map((r) => (
+          <button key={r} type="button" className="vchip c-dim" style={{ cursor: 'pointer', border: 0 }} aria-pressed={reason === r} onClick={() => setReason(r)}>{r}</button>
+        ))}
+        <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+          <button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={() => { setOpen(false); setReason(''); }}>Cancel</button>
+          <button type="submit" className="vbtn vbtn-quiet vbtn-sm" disabled={busy}>Dismiss</button>
+        </span>
+      </div>
+    </form>
   );
 }

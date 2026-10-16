@@ -1715,10 +1715,18 @@ def get_insights(
     return result
 
 
+class DismissBody(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
 @app.post("/v1/insights/{fingerprint}/dismiss")
-def dismiss_insight(fingerprint: str) -> dict[str, Any]:
-    if not insights.set_finding_status(fingerprint, "dismissed"):
+def dismiss_insight(fingerprint: str, body: DismissBody | None = None) -> dict[str, Any]:
+    reason = body.reason if body else None
+    if not insights.set_finding_status(fingerprint, "dismissed", reason):
         raise HTTPException(status_code=404, detail="Finding not found")
+    db.record_audit_event(
+        "finding.dismissed", target=fingerprint, detail={"reason": (reason or "").strip() or None}
+    )
     return {"ok": True}
 
 
