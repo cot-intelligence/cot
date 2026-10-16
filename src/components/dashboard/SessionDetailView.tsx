@@ -263,7 +263,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
                   )}
                 </div>
               </div>
-              <div style={{ display: 'grid', gap: 4, alignContent: 'start', position: 'sticky', top: 0 }}>
+              <div className="trace-filter scroll-thin">
                 <span className="label" style={{ padding: '0 8px 6px' }}>Filter</span>
                 {[null, ...Object.keys(counts).sort((a, b) => counts[b] - counts[a])].map((k) => (
                   <button

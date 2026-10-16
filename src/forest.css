@@ -164,7 +164,13 @@
 .vf .grid-2 { display: grid; grid-template-columns: 1.6fr 1fr; gap: 16px; margin-top: 16px; }
 .vf .grid-2e { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
 .vf .grid-trace { grid-template-columns: minmax(0, 1fr) 260px; }
-@media (max-width: 1000px) { .vf .grid-2, .vf .grid-2e { grid-template-columns: 1fr; } }
+/* The trace's filter column stays in view while the timeline scrolls. As a grid
+   item it would stretch to the row's full height and have nowhere to stick, so
+   it aligns to the top; a list taller than the visible area (56px app bar plus
+   the 16px offset above and below) scrolls on its own. Stacked under the
+   timeline on narrow screens, it is a plain block again. */
+.vf .trace-filter { display: grid; gap: 4px; align-content: start; align-self: start; position: sticky; top: 16px; max-height: calc(100dvh - 56px - 32px); overflow-y: auto; overscroll-behavior: contain; }
+@media (max-width: 1000px) { .vf .grid-2, .vf .grid-2e { grid-template-columns: 1fr; } .vf .trace-filter { position: static; max-height: none; overflow: visible; } }
 
 .vf table.t { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
 .vf table.t th { text-align: left; font-family: 'Geist Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--v-faint); padding: 10px 12px; border-bottom: 1px solid var(--v-line); white-space: nowrap; position: sticky; top: 0; background: var(--v-surface); z-index: 1; }
