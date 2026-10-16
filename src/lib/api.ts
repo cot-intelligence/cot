@@ -459,6 +459,30 @@ export interface OverviewWindow {
   projects: { cwd: string | null; sessions: number; cost: number; agents: Record<string, number> }[];
 }
 
+/** One project's page: its sessions in a window (0 = all time) and what they did. */
+export interface ProjectOverview {
+  name: string;
+  days: number;
+  paths: string[];
+  sessions: number;
+  active: number;
+  cost: number;
+  tools: number;
+  events: number;
+  first_seen: string | null;
+  last_active: string | null;
+  series: { day: string; sessions: number; cost: number; tools: number }[];
+  agents: { source: string; sessions: number; cost: number }[];
+  models: { model: string; cost: number | null; tokens: number }[];
+  categories: Record<string, number>;
+  session_ids: string[];
+  recent: SessionSummary[];
+}
+
+export async function getProject(name: string, days: number): Promise<ProjectOverview> {
+  return json<ProjectOverview>(await fetch(`/v1/projects/${encodeURIComponent(name)}?days=${days}`));
+}
+
 export async function getOverviewWindow(days: number): Promise<OverviewWindow> {
   return json<OverviewWindow>(await fetch(`/v1/overview/window?days=${days}`));
 }

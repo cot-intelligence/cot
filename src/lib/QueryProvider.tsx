@@ -22,6 +22,7 @@ const HEAVY_KEYS = new Set([
   'extensions',
   'extensionDetail',
   'sessionProjects',
+  'project',
 ]);
 
 // Keys scoped to one session, and where its id sits in the key. They refetch

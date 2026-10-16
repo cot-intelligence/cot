@@ -3494,6 +3494,73 @@ def session_window(days: int) -> dict[str, Any]:
     }
 
 
+def project_overview(name: str, days: int) -> dict[str, Any]:
+    """One project's page: the listed sessions whose working directory ends in
+    ``name`` (as the dashboard names projects) that started in the last ``days``
+    days (0 = all time), with their spend over time, by agent, by model and by
+    activity kind, and the most recent of them."""
+    since = None
+    if days > 0:
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    summaries, _ = list_sessions_page(1_000_000_000, project=name, since=since)
+    bucket = 13 if days == 1 else 10  # hourly for the 24-hour window
+    series: dict[str, dict[str, Any]] = {}
+    agents: dict[str, dict[str, Any]] = {}
+    categories: dict[str, int] = {}
+    for x in summaries:
+        cost, tools = x.get("cost_usd") or 0, x.get("tool_count") or 0
+        point = series.setdefault((x.get("started_at") or "")[:bucket], {"sessions": 0, "cost": 0.0, "tools": 0})
+        point["sessions"] += 1
+        point["cost"] += cost
+        point["tools"] += tools
+        agent = agents.setdefault(x["source"], {"source": x["source"], "sessions": 0, "cost": 0.0})
+        agent["sessions"] += 1
+        agent["cost"] += cost
+        for cat, n in (x.get("category_counts") or {}).items():
+            categories[cat] = categories.get(cat, 0) + n
+    session_ids = [x["id"] for x in summaries]
+    # Spend by model needs each model's tokens, which the summaries don't split.
+    model_tokens: dict[str, list[int]] = {}
+    with store.read() as conn:
+        for i in range(0, len(session_ids), 500):
+            batch = session_ids[i : i + 500]
+            for r in conn.execute(
+                "SELECT model, COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o,"
+                " COALESCE(SUM(cache_read_tokens),0) cr, COALESCE(SUM(cache_write_tokens),0) cw"
+                f" FROM events WHERE session_id IN ({','.join('?' * len(batch))})"
+                " AND model IS NOT NULL AND model != '' GROUP BY model",
+                batch,
+            ):
+                key = normalize_model(r["model"]) or r["model"]
+                acc = model_tokens.setdefault(key, [0, 0, 0, 0])
+                for j, col in enumerate(("i", "o", "cr", "cw")):
+                    acc[j] += r[col] or 0
+    models = []
+    for model, (i, o, cr, cw) in model_tokens.items():
+        models.append({"model": model, "cost": cost_for(model, i, o, cr, cw), "tokens": i + o + cr + cw})
+    models.sort(key=lambda m: (-(m["cost"] or 0), -m["tokens"]))
+    starts = [x["started_at"] for x in summaries if x.get("started_at")]
+    lasts = [x["last_activity"] for x in summaries if x.get("last_activity")]
+    return {
+        "name": name,
+        "days": days,
+        "paths": sorted({x["cwd"] for x in summaries if x.get("cwd")}),
+        "sessions": len(summaries),
+        "active": sum(1 for x in summaries if x.get("status") == "active"),
+        "cost": sum(x.get("cost_usd") or 0 for x in summaries),
+        "tools": sum(x.get("tool_count") or 0 for x in summaries),
+        "events": sum(x.get("event_count") or 0 for x in summaries),
+        "first_seen": min(starts) if starts else None,
+        "last_active": max(lasts) if lasts else None,
+        "series": [{"day": k, **v} for k, v in sorted(series.items()) if k],
+        "agents": sorted(agents.values(), key=lambda a: (-a["cost"], -a["sessions"])),
+        "models": models,
+        "categories": dict(sorted(categories.items(), key=lambda kv: -kv[1])),
+        "session_ids": session_ids,
+        "recent": summaries[:12],
+    }
+
+
 def list_session_projects(archived: bool = False) -> list[dict[str, Any]]:
     """Every project name in the sessions list (last cwd segment) with its session count."""
     with store.read() as conn:

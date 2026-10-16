@@ -179,7 +179,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
           <a href={back.href} className="vbtn vbtn-ghost vbtn-sm" style={{ marginLeft: -10, marginBottom: 8 }}><Icon name="back" size={14} />{back.label}</a>
           <div className="ph" style={{ alignItems: 'flex-start' }}>
             <div style={{ minWidth: 0, maxWidth: 820 }}>
-              <span className="mono faint" style={{ fontSize: 12 }}>{project(s.cwd)} · {s.id}</span>
+              <span className="mono faint" style={{ fontSize: 12 }}>{s.cwd ? <a href={`#/project/${encodeURIComponent(project(s.cwd))}`} className="proj-link">{project(s.cwd)}</a> : project(s.cwd)} · {s.id}</span>
               <h1 style={{ fontSize: 24, lineHeight: '30px', overflowWrap: 'anywhere' }}>{s.title || 'Untitled session'}</h1>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10, alignItems: 'center' }}>
                 {s.status === 'active' ? <span className="vchip c-ok"><span className="dot" />live</span> : <span className="vchip c-dim">completed</span>}
