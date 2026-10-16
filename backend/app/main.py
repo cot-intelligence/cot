@@ -270,6 +270,12 @@ def _build_search_index() -> None:
         db.ensure_metrics_indexes()
     except sqlite3.Error:
         pass  # metrics still work without them, only slower; retried next start
+    # Compute the default findings window now, so the dashboard's first request
+    # for it is served from memory instead of waiting on a multi-second pass.
+    try:
+        insights.warm_shared_insights(30)
+    except Exception:  # noqa: BLE001 - the first request computes it instead
+        pass
 
 
 # A findings pass is seconds of pure-Python work, and every SQLite call drops
@@ -1597,7 +1603,8 @@ def get_insights(
     severity: str | None = Query(None),
     status: str = Query("active"),
 ) -> dict[str, Any]:
-    """Actionable findings across sessions; runs lifecycle reconcile on read."""
+    """Actionable findings across sessions. Served from the last lifecycle pass;
+    a stale one is refreshed in the background (see compute_insights_shared)."""
     if pillar is not None and pillar not in insights.PILLARS:
         raise HTTPException(status_code=400, detail=f"pillar must be one of {insights.PILLARS}")
     if severity is not None and severity not in insights.SEVERITIES:
