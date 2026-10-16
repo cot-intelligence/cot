@@ -1,15 +1,16 @@
 import { motion, useReducedMotion } from 'framer-motion';
-import { useRef } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { getHealth, type Health } from '../../lib/api';
 import { usePolling } from '../../lib/usePolling';
 import { Icon } from '../forest/icons';
 import { Wordmark } from '../forest/ui';
 import { WorkspaceAvatar } from '../forest/avatars';
 import { usePrefs } from '../../lib/prefs';
+import { TeamsModal } from './TeamsModal';
 
 export type ActivityTab = 'shell' | 'web' | 'mcp' | 'skill' | 'plugin';
 export type NavKey =
-  | 'sessions' | 'overview' | 'replay' | 'findings' | 'governance' | 'settings'
+  | 'sessions' | 'overview' | 'replay' | 'findings' | 'rules' | 'governance' | 'settings'
   | `activity-${ActivityTab}`;
 
 // Markup and classes follow the demo's sidebar (demo-variants/src/variants/forest/App.tsx) one to one;
@@ -37,6 +38,7 @@ const NAV: { group: string; items: { key: NavKey; label: string; href: string; i
     group: 'Govern',
     items: [
       { key: 'findings', label: 'Findings', href: '#/findings', icon: 'findings' },
+      { key: 'rules', label: 'Rules', href: '#/rules', icon: 'filter' },
       { key: 'governance', label: 'Governance', href: '#/governance', icon: 'governance' },
     ],
   },
@@ -63,6 +65,8 @@ export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, on
   const { data: health, error } = usePolling<Health>(['health'], () => getHealth(), 15000);
   const warm = useWarmTips();
   const pill = useReducedMotion() ? PILL_INSTANT : PILL;
+  const [teamsOpen, setTeamsOpen] = useState(false);
+  const closeTeams = useCallback(() => setTeamsOpen(false), []);
   const ws = 'Local workspace';
   const { avatar } = usePrefs();
   const foot = error ? 'Collector offline' : `Collector on :31337${health ? ` · v${health.version}` : ''}`;
@@ -124,6 +128,9 @@ export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, on
         </nav>
         {rail ? (
           <div className="rail-foot">
+            <button type="button" className="nav-i" aria-haspopup="dialog" aria-label="For teams" data-tip="For teams" onClick={() => setTeamsOpen(true)}>
+              <Icon name="users" />
+            </button>
             <a href="#/settings" className="nav-i" aria-current={active === 'settings' ? 'page' : undefined} aria-label="Settings" data-tip="Settings">
               {active === 'settings' && <motion.span layoutId="vf-pill" className="pill" transition={pill} />}
               <Icon name="sliders" />
@@ -138,6 +145,10 @@ export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, on
         ) : (
           <>
             <div className="nav-g" style={{ marginTop: 'auto', paddingBottom: 8 }}>
+              <button type="button" className="nav-i" aria-haspopup="dialog" onClick={() => { onMobileClose(); setTeamsOpen(true); }}>
+                <Icon name="users" />
+                <span>For teams</span>
+              </button>
               <a href="#/settings" className="nav-i" aria-current={active === 'settings' ? 'page' : undefined} onClick={onMobileClose}>
                 {active === 'settings' && <motion.span layoutId="vf-pill" className="pill" transition={pill} />}
                 <Icon name="sliders" />
@@ -170,6 +181,7 @@ export function AppSidebar({ active, rail, narrow, mobileOpen, onMobileClose, on
         )}
       </aside>
       {mobileOpen && <div className="scrim" style={{ zIndex: 55 }} onClick={onMobileClose} />}
+      <TeamsModal open={teamsOpen} onClose={closeTeams} />
     </>
   );
 }

@@ -132,7 +132,7 @@ export function ActivityLog({
           <div className="empty">{filtered ? `No ${noun} match these filters.` : `No ${noun} in this time range. Try a longer range.`}</div>
         ) : (
           <table className="t">
-            <thead><tr><th>Time</th><th>{COLUMN[category]}</th><th>Project</th><th>Agent</th><th className="num">Took</th><th>Result</th></tr></thead>
+            <thead><tr><th>Time</th><th>{COLUMN[category]}</th><th>Project</th><th>Agent</th><th className="num">Took</th><th>Result</th><th><span className="sr-only">Actions</span></th></tr></thead>
             <tbody>
               {items.map((i) => (
                 <tr
@@ -162,6 +162,14 @@ export function ActivityLog({
                       : i.no_match ? <span className="vchip c-dim" title="Exit 1: no match">no match</span>
                       : <span className="vchip c-ok">ok</span>}
                     {i.elevated && <span className="vchip c-warn" style={{ marginLeft: 4 }}>sudo</span>}
+                  </td>
+                  <td style={{ width: 1 }}>
+                    {category !== 'skill' && (
+                      <a className="iconbtn" href={`#/rules?from=${i.event_id}`} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}
+                        aria-label="Make a rule from this" title="Make a rule from this">
+                        <FIcon name="filter" size={14} />
+                      </a>
+                    )}
                   </td>
                 </tr>
               ))}

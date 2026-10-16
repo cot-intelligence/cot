@@ -40,7 +40,10 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, activity, ai_insights, context_cost, cron, db, extension_usage, insights, otlp, passive, store, timeutil
+from . import (
+    __version__, activity, ai_insights, context_cost, cron, db, extension_usage, insights, otlp,
+    passive, rule_drafts, store, timeutil, user_rules,
+)
 
 app = FastAPI(title="cot collector", version=__version__)
 
@@ -606,6 +609,8 @@ def get_settings() -> dict[str, Any]:
         "ui_sidebar_open": db.get_setting("ui_sidebar_open", "1") != "0",
         "ui_onboarded": db.get_setting("ui_onboarded") == "1",
         "ui_onboarding_agents": _stored_onboarding_agents(),
+        # macOS notifications from the Mac app for new inbox items.
+        "notify_desktop": db.get_setting("notify_desktop", "1") != "0",
     }
 
 
@@ -650,7 +655,7 @@ async def update_settings(request: Request) -> dict[str, Any]:
         # choice takes effect without waiting for the daily cycle.
         if enabled and not _telemetry_env_disabled():
             threading.Thread(target=_send_telemetry, args=(True,), daemon=True).start()
-    for key in ("ui_nav_collapsed", "ui_sidebar_open", "ui_onboarded"):
+    for key in ("ui_nav_collapsed", "ui_sidebar_open", "ui_onboarded", "notify_desktop"):
         if key in body:
             db.set_setting(key, "1" if bool(body[key]) else "0")
     if "ui_onboarding_agents" in body:
@@ -1157,6 +1162,32 @@ async def stream(request: Request) -> StreamingResponse:
 @app.get("/v1/stats")
 def get_stats() -> dict[str, Any]:
     return db.stats()
+
+
+@app.get("/v1/projects/{name}")
+def get_project(name: str, days: int = 30) -> dict[str, Any]:
+    """One project's page (see db.project_overview); 0 days = all time."""
+    days = max(0, days)
+    return _cached_aggregate("project", (name, days), lambda: db.project_overview(name, days))
+
+
+@app.get("/v1/notifications")
+def get_notifications(limit: int = 30, after: int | None = None) -> dict[str, Any]:
+    """The inbox. ``after`` returns only newer items, oldest first (the Mac app
+    polls with it to post macOS notifications); ``notify_desktop`` says whether
+    it should."""
+    out = db.list_notifications(limit, after)
+    out["notify_desktop"] = db.get_setting("notify_desktop", "1") != "0"
+    return out
+
+
+class ReadBody(BaseModel):
+    ids: list[int] | None = None
+
+
+@app.post("/v1/notifications/read")
+def read_notifications(body: ReadBody | None = None) -> dict[str, Any]:
+    return {"unread": db.mark_notifications_read(body.ids if body else None)}
 
 
 @app.get("/v1/overview/window")
@@ -1712,10 +1743,18 @@ def get_insights(
     return result
 
 
+class DismissBody(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
 @app.post("/v1/insights/{fingerprint}/dismiss")
-def dismiss_insight(fingerprint: str) -> dict[str, Any]:
-    if not insights.set_finding_status(fingerprint, "dismissed"):
+def dismiss_insight(fingerprint: str, body: DismissBody | None = None) -> dict[str, Any]:
+    reason = body.reason if body else None
+    if not insights.set_finding_status(fingerprint, "dismissed", reason):
         raise HTTPException(status_code=404, detail="Finding not found")
+    db.record_audit_event(
+        "finding.dismissed", target=fingerprint, detail={"reason": (reason or "").strip() or None}
+    )
     return {"ok": True}
 
 
@@ -1723,6 +1762,105 @@ def dismiss_insight(fingerprint: str) -> dict[str, Any]:
 def restore_insight(fingerprint: str) -> dict[str, Any]:
     if not insights.set_finding_status(fingerprint, "active"):
         raise HTTPException(status_code=404, detail="Finding not found")
+    return {"ok": True}
+
+
+# --- user rules ------------------------------------------------------------------
+
+
+class RuleBody(BaseModel):
+    spec: dict[str, Any] | None = None
+    enabled: bool | None = None
+
+
+class RulePreviewBody(BaseModel):
+    spec: dict[str, Any]
+    days: int = 30
+
+
+def _spec_error(exc: user_rules.SpecError) -> HTTPException:
+    return HTTPException(status_code=422, detail={"path": exc.path, "message": exc.message})
+
+
+@app.get("/v1/rules/schema")
+def get_rules_schema() -> dict[str, Any]:
+    """Fields, operators and choices the rule builder renders from."""
+    return user_rules.schema()
+
+
+@app.get("/v1/rules")
+def get_rules() -> dict[str, Any]:
+    return {"rules": user_rules.list_rules()}
+
+
+@app.post("/v1/rules")
+def create_rule(body: RuleBody) -> dict[str, Any]:
+    if body.spec is None:
+        raise HTTPException(status_code=422, detail={"path": "", "message": "spec is required"})
+    try:
+        rule = user_rules.create_rule(body.spec, True if body.enabled is None else body.enabled)
+    except user_rules.SpecError as exc:
+        raise _spec_error(exc)
+    db.record_audit_event("rules.created", target=rule["id"], detail={"name": rule["spec"]["name"]})
+    return rule
+
+
+@app.post("/v1/rules/preview")
+def preview_rule(body: RulePreviewBody) -> dict[str, Any]:
+    """Dry-run an unsaved rule over recent history; nothing is stored."""
+    try:
+        return user_rules.preview(body.spec, max(1, min(body.days, 365)))
+    except user_rules.SpecError as exc:
+        raise _spec_error(exc)
+
+
+class RuleDescribeBody(BaseModel):
+    text: str
+
+
+@app.get("/v1/rules/draft/event/{event_id}")
+def draft_rule_from_event(event_id: int) -> dict[str, Any]:
+    """A starting rule built from one event ("Make a rule from this")."""
+    try:
+        return rule_drafts.from_event(event_id)
+    except rule_drafts.DraftError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.post("/v1/rules/draft/describe")
+def draft_rule_from_text(body: RuleDescribeBody) -> dict[str, Any]:
+    """Plain English to a rule via the user's AI provider. Explicit action; costs money."""
+    try:
+        draft = rule_drafts.from_text(body.text)
+    except ai_insights.AiDisabledError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ai_insights.AiNotConfiguredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ai_insights.AiProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except rule_drafts.DraftError as exc:
+        raise HTTPException(status_code=422, detail={"path": "", "message": str(exc)})
+    db.record_audit_event("rules.drafted.ai", target="ai")
+    return draft
+
+
+@app.put("/v1/rules/{rule_id}")
+def update_rule(rule_id: str, body: RuleBody) -> dict[str, Any]:
+    try:
+        rule = user_rules.update_rule(rule_id, body.spec, body.enabled)
+    except user_rules.SpecError as exc:
+        raise _spec_error(exc)
+    if rule is None:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    db.record_audit_event("rules.updated", target=rule_id, detail={"enabled": rule["enabled"]})
+    return rule
+
+
+@app.delete("/v1/rules/{rule_id}")
+def delete_rule(rule_id: str) -> dict[str, Any]:
+    if not user_rules.delete_rule(rule_id):
+        raise HTTPException(status_code=404, detail="Rule not found")
+    db.record_audit_event("rules.deleted", target=rule_id)
     return {"ok": True}
 
 

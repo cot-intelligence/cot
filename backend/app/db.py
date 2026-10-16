@@ -209,6 +209,29 @@ CREATE TABLE IF NOT EXISTS ai_analyses (
 
 CREATE INDEX IF NOT EXISTS idx_ai_analyses_created ON ai_analyses(created_at);
 
+-- Things worth telling the person about (a new finding, a rule match), shown in
+-- the dashboard's inbox and, in the Mac app, as macOS notifications.
+CREATE TABLE IF NOT EXISTS notifications (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,
+    severity    TEXT,
+    title       TEXT NOT NULL,
+    body        TEXT,
+    href        TEXT,
+    dedup_key   TEXT UNIQUE,
+    created_at  TEXT NOT NULL,
+    read_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(read_at, id);
+
+CREATE TABLE IF NOT EXISTS user_rules (
+    id          TEXT PRIMARY KEY,
+    spec        TEXT NOT NULL,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
 -- What the person thought of a session (event_id 0) or of one event in it:
 -- a thumbs rating, short labels and a note. Ground truth for insights and rules.
 CREATE TABLE IF NOT EXISTS annotations (
@@ -377,6 +400,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id)"
         )
+    # Why a finding was dismissed, in the person's words (optional).
+    _add_column_if_missing(
+        conn, "insight_findings", "dismiss_reason", "TEXT", _table_columns(conn, "insight_findings")
+    )
 
     if "ord" not in _table_columns(conn, "extension_uses"):
         # Keyed by event_id alone before ord existed. The table is derived from
@@ -3494,6 +3521,73 @@ def session_window(days: int) -> dict[str, Any]:
     }
 
 
+def project_overview(name: str, days: int) -> dict[str, Any]:
+    """One project's page: the listed sessions whose working directory ends in
+    ``name`` (as the dashboard names projects) that started in the last ``days``
+    days (0 = all time), with their spend over time, by agent, by model and by
+    activity kind, and the most recent of them."""
+    since = None
+    if days > 0:
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    summaries, _ = list_sessions_page(1_000_000_000, project=name, since=since)
+    bucket = 13 if days == 1 else 10  # hourly for the 24-hour window
+    series: dict[str, dict[str, Any]] = {}
+    agents: dict[str, dict[str, Any]] = {}
+    categories: dict[str, int] = {}
+    for x in summaries:
+        cost, tools = x.get("cost_usd") or 0, x.get("tool_count") or 0
+        point = series.setdefault((x.get("started_at") or "")[:bucket], {"sessions": 0, "cost": 0.0, "tools": 0})
+        point["sessions"] += 1
+        point["cost"] += cost
+        point["tools"] += tools
+        agent = agents.setdefault(x["source"], {"source": x["source"], "sessions": 0, "cost": 0.0})
+        agent["sessions"] += 1
+        agent["cost"] += cost
+        for cat, n in (x.get("category_counts") or {}).items():
+            categories[cat] = categories.get(cat, 0) + n
+    session_ids = [x["id"] for x in summaries]
+    # Spend by model needs each model's tokens, which the summaries don't split.
+    model_tokens: dict[str, list[int]] = {}
+    with store.read() as conn:
+        for i in range(0, len(session_ids), 500):
+            batch = session_ids[i : i + 500]
+            for r in conn.execute(
+                "SELECT model, COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o,"
+                " COALESCE(SUM(cache_read_tokens),0) cr, COALESCE(SUM(cache_write_tokens),0) cw"
+                f" FROM events WHERE session_id IN ({','.join('?' * len(batch))})"
+                " AND model IS NOT NULL AND model != '' GROUP BY model",
+                batch,
+            ):
+                key = normalize_model(r["model"]) or r["model"]
+                acc = model_tokens.setdefault(key, [0, 0, 0, 0])
+                for j, col in enumerate(("i", "o", "cr", "cw")):
+                    acc[j] += r[col] or 0
+    models = []
+    for model, (i, o, cr, cw) in model_tokens.items():
+        models.append({"model": model, "cost": cost_for(model, i, o, cr, cw), "tokens": i + o + cr + cw})
+    models.sort(key=lambda m: (-(m["cost"] or 0), -m["tokens"]))
+    starts = [x["started_at"] for x in summaries if x.get("started_at")]
+    lasts = [x["last_activity"] for x in summaries if x.get("last_activity")]
+    return {
+        "name": name,
+        "days": days,
+        "paths": sorted({x["cwd"] for x in summaries if x.get("cwd")}),
+        "sessions": len(summaries),
+        "active": sum(1 for x in summaries if x.get("status") == "active"),
+        "cost": sum(x.get("cost_usd") or 0 for x in summaries),
+        "tools": sum(x.get("tool_count") or 0 for x in summaries),
+        "events": sum(x.get("event_count") or 0 for x in summaries),
+        "first_seen": min(starts) if starts else None,
+        "last_active": max(lasts) if lasts else None,
+        "series": [{"day": k, **v} for k, v in sorted(series.items()) if k],
+        "agents": sorted(agents.values(), key=lambda a: (-a["cost"], -a["sessions"])),
+        "models": models,
+        "categories": dict(sorted(categories.items(), key=lambda kv: -kv[1])),
+        "session_ids": session_ids,
+        "recent": summaries[:12],
+    }
+
+
 def list_session_projects(archived: bool = False) -> list[dict[str, Any]]:
     """Every project name in the sessions list (last cwd segment) with its session count."""
     with store.read() as conn:
@@ -4581,12 +4675,13 @@ QUESTION_TOOLS = session_read.QUESTION_TOOLS
 # every other row made the findings read several times longer, and in
 # rollback-journal mode every other request queues behind a long read once a
 # write is pending. The CASE leaves the other rows' overflow pages unread.
+_INSIGHT_DETAIL_COLUMN = "CASE WHEN e.category IN ('prompt', 'shell') THEN e.detail END AS detail"
 _INSIGHT_EVENT_COLUMNS = (
     "e.id, e.session_id, e.ts, e.category, e.tool, e.target, e.status, e.hook,"
-    " e.title, CASE WHEN e.category IN ('prompt', 'shell') THEN e.detail END AS detail,"
+    " e.title, " + _INSIGHT_DETAIL_COLUMN + ","
     " e.model, e.duration_ms,"
     " e.input_tokens, e.output_tokens, e.cache_read_tokens, e.cache_write_tokens,"
-    " s.cwd"
+    " s.cwd, e.source"
 )
 
 # Serves the per-session tool-call counts (``model_mismatch``) from a small
@@ -4637,6 +4732,62 @@ def ensure_insight_indexes() -> None:
     with store.write() as conn:
         conn.execute(_TOOL_CALLS_INDEX_SQL)
 
+
+def get_rule_event(event_id: int) -> dict[str, Any] | None:
+    """One event joined to its session, in the insight row shape (rule drafts)."""
+    with store.read() as conn:
+        row = conn.execute(
+            "SELECT " + _INSIGHT_EVENT_COLUMNS
+            + " FROM events e JOIN sessions s ON s.id = e.session_id WHERE e.id = ?",
+            (event_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def _read_working_set(cutoff: str | None, session_id: str | None, columns: str) -> list[dict[str, Any]]:
+    """Non-archived events (optionally windowed / one session), ordered by
+    (session, ts, id), read a batch of sessions per query: one query for a month
+    of events held the read lock for seconds on a cold cache, and in
+    rollback-journal mode every other request queues behind it once a write is
+    pending. Rows become dicts after each connection closes."""
+
+    def rows(sql: str, args: Any = ()) -> list[Any]:
+        with store.read() as conn:
+            return conn.execute(sql, args).fetchall()
+
+    if session_id:
+        session_ids = [session_id]
+    else:
+        session_ids = [r["id"] for r in rows("SELECT id FROM sessions WHERE archived = 0 ORDER BY id")]
+    window = " AND e.ts >= ?" if cutoff else ""
+    events: list[dict[str, Any]] = []
+    for i in range(0, len(session_ids), _INSIGHT_SESSION_BATCH):
+        batch = session_ids[i:i + _INSIGHT_SESSION_BATCH]
+        events.extend(
+            dict(r)
+            for r in rows(
+                "SELECT " + columns
+                + " FROM events e JOIN sessions s ON s.id = e.session_id"
+                " WHERE s.archived = 0 AND e.session_id IN (" + ",".join("?" * len(batch)) + ")"
+                + window
+                + " ORDER BY e.session_id, e.ts, e.id",
+                [*batch, *([cutoff] if cutoff else [])],
+            )
+        )
+    return events
+
+
+def read_rule_events(*, cutoff: str | None, with_detail: bool) -> list[dict[str, Any]]:
+    """The insight working set alone, for dry-running one user rule.
+
+    Skips the cross-session views and, unless the rule reads it, the ``detail``
+    column — most of the events table's bytes — so a preview stays interactive.
+    """
+    cols = (
+        _INSIGHT_EVENT_COLUMNS if with_detail
+        else _INSIGHT_EVENT_COLUMNS.replace(_INSIGHT_DETAIL_COLUMN, "NULL AS detail")
+    )
+    return _read_working_set(cutoff, None, cols)
 
 # Indexes for hot queries that otherwise read rows past their payload/detail
 # blobs. Built off the startup path like the findings index (a first build is a
@@ -4695,28 +4846,7 @@ def read_insight_inputs(
         with store.read() as conn:
             return conn.execute(sql, args).fetchall()
 
-    # The working set is read a batch of sessions at a time (in session order,
-    # so the result keeps its (session, ts, id) ordering): one query for a
-    # month of events held the read lock for seconds on a cold cache.
-    if session_id:
-        session_ids = [session_id]
-    else:
-        session_ids = [r["id"] for r in rows("SELECT id FROM sessions WHERE archived = 0 ORDER BY id")]
-    window = " AND e.ts >= ?" if cutoff else ""
-    events: list[dict[str, Any]] = []
-    for i in range(0, len(session_ids), _INSIGHT_SESSION_BATCH):
-        batch = session_ids[i:i + _INSIGHT_SESSION_BATCH]
-        events.extend(
-            dict(r)
-            for r in rows(
-                "SELECT " + _INSIGHT_EVENT_COLUMNS
-                + " FROM events e JOIN sessions s ON s.id = e.session_id"
-                " WHERE s.archived = 0 AND e.session_id IN (" + ",".join("?" * len(batch)) + ")"
-                + window
-                + " ORDER BY e.session_id, e.ts, e.id",
-                [*batch, *([cutoff] if cutoff else [])],
-            )
-        )
+    events = _read_working_set(cutoff, session_id, _INSIGHT_EVENT_COLUMNS)
     session_last_ts = {
         r["session_id"]: r["t"]
         for r in rows(
@@ -4775,6 +4905,19 @@ class InsightFindingsRepo:
             for r in self._conn.execute("SELECT * FROM insight_findings").fetchall()
         }
 
+    def notify_new_finding(self, finding: Any, now: str) -> None:
+        """Queue a notification for a newly detected finding (same transaction)."""
+        _insert_notification(
+            self._conn,
+            kind="finding",
+            severity=finding.get("severity"),
+            title=finding.get("title") or "New finding",
+            body=finding.get("recommendation") or finding.get("detail"),
+            href=f"#/findings?pillar={finding.get('pillar')}" if finding.get("pillar") else "#/findings",
+            dedup_key=f"finding:{finding['fingerprint']}",
+            now=now,
+        )
+
     def insert(self, finding: Any, now: str) -> None:
         self._conn.execute(
             "INSERT INTO insight_findings (fingerprint, rule_id, pillar, tier, severity,"
@@ -4822,6 +4965,56 @@ class InsightFindingsRepo:
         self._conn.commit()
 
 
+def _insert_notification(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    title: str,
+    now: str,
+    severity: str | None = None,
+    body: str | None = None,
+    href: str | None = None,
+    dedup_key: str | None = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO notifications (kind, severity, title, body, href, dedup_key, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(dedup_key) DO NOTHING",
+        (kind, severity, title[:300], (body or "")[:1000] or None, href, dedup_key, now),
+    )
+
+
+def list_notifications(limit: int = 30, after: int | None = None) -> dict[str, Any]:
+    """Newest notifications (or only those after ``after``, oldest first, for
+    the Mac app's poller), with the unread count."""
+    limit = max(1, min(limit, 200))
+    with store.read() as conn:
+        if after is not None:
+            rows = conn.execute(
+                "SELECT * FROM notifications WHERE id > ? ORDER BY id ASC LIMIT ?", (after, limit)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM notifications ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        unread = conn.execute("SELECT COUNT(*) FROM notifications WHERE read_at IS NULL").fetchone()[0]
+        latest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM notifications").fetchone()[0]
+    return {"items": [dict(r) for r in rows], "unread": unread, "latest_id": latest}
+
+
+def mark_notifications_read(ids: list[int] | None = None) -> int:
+    """Mark the given notifications (or all) read; returns the unread count left."""
+    now = timeutil.now()
+    with store.write() as conn:
+        if ids:
+            conn.execute(
+                f"UPDATE notifications SET read_at = ? WHERE read_at IS NULL AND id IN ({','.join('?' * len(ids))})",
+                (now, *ids),
+            )
+        else:
+            conn.execute("UPDATE notifications SET read_at = ? WHERE read_at IS NULL", (now,))
+        return conn.execute("SELECT COUNT(*) FROM notifications WHERE read_at IS NULL").fetchone()[0]
+
+
 @contextmanager
 def insight_findings_repo() -> Iterator[InsightFindingsRepo]:
     """A findings repository over a single connection/transaction."""
@@ -4829,11 +5022,45 @@ def insight_findings_repo() -> Iterator[InsightFindingsRepo]:
         yield InsightFindingsRepo(conn)
 
 
-def set_insight_finding_status(fingerprint: str, status: str, dismissed_at: str | None) -> bool:
-    """Manual lifecycle control (dismiss/restore). False if the fingerprint is unknown."""
+def delete_insight_findings_for_rule(rule_id: str) -> None:
+    """Drop every stored finding of one rule (a deleted or disabled user rule)."""
+    with store.write() as conn:
+        conn.execute("DELETE FROM insight_findings WHERE rule_id = ?", (rule_id,))
+
+
+# --- user rules ---------------------------------------------------------------
+
+
+def list_user_rules() -> list[sqlite3.Row]:
+    with store.read() as conn:
+        return conn.execute("SELECT * FROM user_rules ORDER BY created_at").fetchall()
+
+
+def upsert_user_rule(rule_id: str, spec_json: str, enabled: bool) -> None:
+    ts = timeutil.now()
+    with store.write() as conn:
+        conn.execute(
+            "INSERT INTO user_rules (id, spec, enabled, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET"
+            " spec = excluded.spec, enabled = excluded.enabled, updated_at = excluded.updated_at",
+            (rule_id, spec_json, 1 if enabled else 0, ts, ts),
+        )
+
+
+def delete_user_rule(rule_id: str) -> bool:
+    with store.write() as conn:
+        return conn.execute("DELETE FROM user_rules WHERE id = ?", (rule_id,)).rowcount > 0
+
+
+def set_insight_finding_status(
+    fingerprint: str, status: str, dismissed_at: str | None, reason: str | None = None
+) -> bool:
+    """Manual lifecycle control (dismiss/restore). False if the fingerprint is unknown.
+    ``reason`` is kept with a dismissal and cleared when the finding is reopened."""
     with store.write() as conn:
         cur = conn.execute(
-            "UPDATE insight_findings SET status = ?, dismissed_at = ? WHERE fingerprint = ?",
-            (status, dismissed_at, fingerprint),
+            "UPDATE insight_findings SET status = ?, dismissed_at = ?, dismiss_reason = ?"
+            " WHERE fingerprint = ?",
+            (status, dismissed_at, reason, fingerprint),
         )
         return cur.rowcount > 0

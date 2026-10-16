@@ -4,16 +4,20 @@ import { useQueryClient } from '@tanstack/react-query';
 import {
   dismissInsight,
   getInsights,
+  getRules,
   getSessions,
   restoreInsight,
   type ActionableInsight,
   type InsightPillar,
+  type InsightSeverity,
   type InsightsResponse,
   type InsightStatus,
   type SessionSummary,
+  type UserRule,
 } from '../../lib/api';
 import { usePolling } from '../../lib/usePolling';
 import { agentLabel } from '../forest/AgentMark';
+import { Dropdown } from '../forest/Dropdown';
 import { fmt, project, shortId } from '../forest/format';
 import { Icon } from '../forest/icons';
 import { listItem, listParent } from '../forest/motion';
@@ -29,6 +33,7 @@ const WINDOWS = [
   { k: 90, l: '90d' },
   { k: 0, l: 'all' },
 ];
+const SEVERITIES: InsightSeverity[] = ['critical', 'warn', 'info'];
 
 interface FindingsViewProps {
   onSelect: (id: string, eventId?: number) => void;
@@ -44,6 +49,11 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
   const [sel, setSel] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const queryClient = useQueryClient();
+  const [q, setQ] = useState('');
+  const [sev, setSev] = useState('');
+  const [rule, setRule] = useState('');
+  const [proj, setProj] = useState('');
+  const [agent, setAgent] = useState('');
   const { data: ins, error } = usePolling<InsightsResponse>(
     ['insights', days, refreshKey || undefined].filter((x) => x !== undefined),
     () => getInsights(days, 'all'),
@@ -51,6 +61,8 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
   );
   // Same key as the Overview's sample, for the evidence lines (project · agent).
   const { data: recent } = usePolling<SessionSummary[]>(['sessions', 'overview', 500], () => getSessions({ limit: 500 }), 30000);
+  const { data: myRules } = usePolling<UserRule[]>(['rules'], () => getRules(), 60000);
+  const userRules = (myRules ?? []).filter((r) => r.enabled).length;
   const byId = useMemo(() => new Map((recent ?? []).map((s) => [s.id, s])), [recent]);
 
   useEffect(() => {
@@ -58,16 +70,41 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
   }, [initialPillar]);
 
   const all = ins?.insights ?? [];
-  const count = (s: InsightStatus) => all.filter((f) => f.status === s).length;
-  const rows = all.filter((f) => f.status === status && (!pillar || f.pillar === pillar));
+  // Project and agent come from the evidence sessions; a finding matches if any of them does.
+  const sessionsOf = (f: ActionableInsight) => f.evidence.map((e) => byId.get(e.session_id)).filter((s): s is SessionSummary => !!s);
+  const needle = q.trim().toLowerCase();
+  const filtered = all.filter((f) => {
+    if (sev && f.severity !== sev) return false;
+    if (rule && f.group_title !== rule) return false;
+    if (needle && ![f.title, f.detail, f.id, f.group_title, ...f.evidence.map((e) => e.label)].some((t) => t?.toLowerCase().includes(needle))) return false;
+    if (proj || agent) {
+      const ss = sessionsOf(f);
+      if (proj && !ss.some((s) => project(s.cwd) === proj)) return false;
+      if (agent && !ss.some((s) => s.source === agent)) return false;
+    }
+    return true;
+  });
+  const count = (s: InsightStatus) => filtered.filter((f) => f.status === s).length;
+  const rows = filtered.filter((f) => f.status === status && (!pillar || f.pillar === pillar));
+  const tally = (key: (f: ActionableInsight) => string[]) => {
+    const m = new Map<string, number>();
+    for (const f of all) if (f.status === status) for (const k of new Set(key(f))) m.set(k, (m.get(k) ?? 0) + 1);
+    return [...m].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  };
+  const ruleOpts = tally((f) => [f.group_title]);
+  const projOpts = tally((f) => sessionsOf(f).map((s) => project(s.cwd)));
+  const agentOpts = tally((f) => sessionsOf(f).map((s) => s.source));
+  const anyFilter = !!(q || sev || rule || proj || agent);
+  const filter = <T,>(set: (v: T) => void) => (v: T) => { set(v); setSel(null); };
+  const clear = () => { setQ(''); setSev(''); setRule(''); setProj(''); setAgent(''); setSel(null); };
   const cur: ActionableInsight | undefined = rows.find((f) => f.fingerprint === sel) ?? rows[0];
 
-  const act = async (f: ActionableInsight, action: 'dismiss' | 'restore') => {
+  const act = async (f: ActionableInsight, action: 'dismiss' | 'restore', reason?: string) => {
     const i = rows.findIndex((r) => r.fingerprint === f.fingerprint);
     const next = rows[i + 1] ?? rows[i - 1];
     setBusy(true);
     try {
-      await (action === 'dismiss' ? dismissInsight(f.fingerprint) : restoreInsight(f.fingerprint));
+      await (action === 'dismiss' ? dismissInsight(f.fingerprint, reason) : restoreInsight(f.fingerprint));
       setSel(next?.fingerprint ?? null);
     } finally {
       setBusy(false);
@@ -100,7 +137,7 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
           <div>
             <span className="label">Govern</span>
             <h1>Findings</h1>
-            <p>{RULE_COUNT} rules across security, cost and usability, run on {days ? `the last ${days} days` : 'all history'}.</p>
+            <p>{RULE_COUNT} built-in rules{userRules ? ` and ${userRules} of yours` : ''} across security, cost and usability, run on {days ? `the last ${days} days` : 'all history'}. <a href="#/rules">Manage rules</a></p>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <Seg id="vf-fwin" value={days} onChange={(k) => { setDays(k); setSel(null); }} options={WINDOWS} />
@@ -123,9 +160,18 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
               style={pillar === p ? { borderColor: 'var(--v-hot)', color: 'var(--v-hot)' } : undefined}>
               {p && <Icon name={PILLAR_ICON[p]} size={14} />}
               {p ? p[0].toUpperCase() + p.slice(1) : 'All pillars'}
-              <span className="mono faint" style={{ fontSize: 11 }}>{ins ? all.filter((f) => (!p || f.pillar === p) && f.status === status).length : '…'}</span>
+              <span className="mono faint" style={{ fontSize: 11 }}>{ins ? filtered.filter((f) => (!p || f.pillar === p) && f.status === status).length : '…'}</span>
             </button>
           ))}
+        </div>
+        <div className="toolbar">
+          <label className="vfield"><Icon name="search" size={15} /><input value={q} onChange={(e) => filter(setQ)(e.target.value)} placeholder="Search title, detail or evidence" aria-label="Search findings" /></label>
+          <Dropdown label="Severity" value={sev} onChange={filter(setSev)} options={[{ value: '', label: 'Any severity' }, ...SEVERITIES.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1), meta: all.filter((f) => f.status === status && f.severity === s).length }))]} />
+          <Dropdown label="Rule" value={rule} onChange={filter(setRule)} options={[{ value: '', label: 'All rules' }, ...ruleOpts.map(([r, n]) => ({ value: r, label: r, meta: n }))]} />
+          <Dropdown label="Project" value={proj} onChange={filter(setProj)} options={[{ value: '', label: 'All projects' }, ...projOpts.map(([p, n]) => ({ value: p, label: p, meta: n }))]} />
+          <Dropdown label="Agent" value={agent} onChange={filter(setAgent)} options={[{ value: '', label: 'All agents' }, ...agentOpts.map(([a, n]) => ({ value: a, label: agentLabel(a), meta: n }))]} />
+          {anyFilter && <button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={clear}>Clear</button>}
+          <span className="mono faint" style={{ marginLeft: 'auto', fontSize: 12 }}>{ins ? `${fmt.n(rows.length)} finding${rows.length === 1 ? '' : 's'}` : '…'}</span>
         </div>
 
         {error && !ins ? (
@@ -144,7 +190,7 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
                   <p className="faint" style={{ fontSize: 12, padding: '4px 12px 8px', margin: 0 }}>Computing findings on your traces. Large databases take a little while.</p>
                 </div>
               )}
-              {ins && rows.length === 0 && <div className="empty">Nothing {status} here.</div>}
+              {ins && rows.length === 0 && <div className="empty">{anyFilter ? `No ${status} findings match these filters.` : `Nothing ${status} here.`}</div>}
               {ins && (
                 <motion.ul variants={listParent} initial={false} animate="show" style={{ listStyle: 'none', margin: 0, padding: 6 }}>
                   {rows.map((f) => {
@@ -157,7 +203,7 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
                           onClick={() => setSel(f.fingerprint)}
                           aria-current={on}
                           style={{ width: '100%', textAlign: 'left', border: 0, background: on ? 'var(--v-bg)' : 'none', borderRadius: 10, padding: '10px 12px', display: 'grid', gap: 4, boxShadow: on ? '0 0 0 1px var(--v-mute)' : undefined }}>
-                          <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Sev s={f.severity} /><span className="mono faint truncate" style={{ fontSize: 11 }}>{f.id}</span></span>
+                          <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Sev s={f.severity} /><span className="mono faint truncate" style={{ fontSize: 11 }}>{f.id.startsWith('user.') ? `your rule · ${f.group_title}` : f.id}</span></span>
                           <span className="truncate" style={{ fontWeight: 500, fontSize: 13 }}>{f.title}</span>
                         </button>
                       </motion.li>
@@ -205,8 +251,14 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
                       })}
                     </ul>
                   </div>
-                  <div style={{ display: 'flex', gap: 8, borderTop: '1px solid var(--v-line)', paddingTop: 14, alignItems: 'center' }}>
-                    {cur.status === 'active' && <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={busy} onClick={() => act(cur, 'dismiss')}>Dismiss</button>}
+                  {cur.status === 'dismissed' && (
+                    <p className="dim" style={{ fontSize: 13, margin: 0 }}>
+                      Dismissed{cur.dismissed_at ? ` ${fmt.day(cur.dismissed_at)}` : ''}
+                      {cur.dismiss_reason ? <>: <span style={{ color: 'var(--v-fg)' }}>{cur.dismiss_reason}</span></> : '.'}
+                    </p>
+                  )}
+                  <div style={{ display: 'flex', gap: 8, borderTop: '1px solid var(--v-line)', paddingTop: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+                    {cur.status === 'active' && <DismissControl key={cur.fingerprint} busy={busy} onDismiss={(reason) => act(cur, 'dismiss', reason)} />}
                     {cur.status === 'dismissed' && <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={busy} onClick={() => act(cur, 'restore')}>Reopen</button>}
                     {cur.status === 'resolved' && cur.resolved_at && <span className="vchip c-ok"><span className="dot" />fixed {fmt.day(cur.resolved_at)}</span>}
                     <span className="mono faint" style={{ marginLeft: 'auto', fontSize: 11 }}>{cur.first_seen ? `first seen ${fmt.day(cur.first_seen)}` : ''}</span>
@@ -220,5 +272,43 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
         )}
       </div>
     </div>
+  );
+}
+
+const QUICK_REASONS = ['Expected', 'False positive', "Won't fix"];
+
+/** Dismiss, with an optional reason: a quick pick or a few words of its own. */
+function DismissControl({ busy, onDismiss }: { busy: boolean; onDismiss: (reason?: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  if (!open) {
+    return <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={busy} onClick={() => setOpen(true)}>Dismiss</button>;
+  }
+  const submit = () => onDismiss(reason.trim() || undefined);
+  return (
+    <form
+      onSubmit={(e) => { e.preventDefault(); submit(); }}
+      style={{ display: 'grid', gap: 8, width: '100%' }}>
+      <label className="vfield" style={{ width: '100%' }}>
+        <input
+          autoFocus
+          value={reason}
+          maxLength={500}
+          onChange={(e) => setReason(e.target.value)}
+          onKeyDown={(e) => e.key === 'Escape' && (setOpen(false), setReason(''))}
+          placeholder="Why dismiss it? (optional)"
+          aria-label="Reason for dismissing"
+        />
+      </label>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+        {QUICK_REASONS.map((r) => (
+          <button key={r} type="button" className="vchip c-dim" style={{ cursor: 'pointer', border: 0 }} aria-pressed={reason === r} onClick={() => setReason(r)}>{r}</button>
+        ))}
+        <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+          <button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={() => { setOpen(false); setReason(''); }}>Cancel</button>
+          <button type="submit" className="vbtn vbtn-quiet vbtn-sm" disabled={busy}>Dismiss</button>
+        </span>
+      </div>
+    </form>
   );
 }

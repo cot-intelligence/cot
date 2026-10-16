@@ -608,3 +608,61 @@
 /* Workspace card lives at the bottom of the sidebar, under the collector status. */
 .vf .side > .ws { margin: 0 12px 12px; }
 .vf .side-foot { border-top: 1px solid var(--v-line); }
+
+/* Rules (RulesView) */
+.vf .rule-row { display: flex; gap: 16px; align-items: center; justify-content: space-between; padding: 12px 20px; border-top: 1px solid var(--v-line); }
+.vf .rule-row:first-child { border-top: 0; }
+.vf .rule-templates { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 10px; }
+.vf .rule-template { display: grid; gap: 6px; padding: 14px 16px; text-align: left; align-content: start; }
+.vf .rule-form { display: grid; gap: 22px; }
+.vf .rule-sec { display: grid; gap: 8px; }
+.vf .rule-line { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.vf .rule-sec.rule-line { gap: 20px; align-items: start; }
+.vf .input.textarea { height: auto; width: 100%; padding: 8px 10px; line-height: 18px; resize: vertical; }
+.vf .rule-err { margin: 0; font-size: 12px; color: var(--v-alert); }
+@media (max-width: 640px) { .vf .rule-row { flex-direction: column; align-items: stretch; } }
+.vf .rule-sentence { display: grid; gap: 12px; font-size: 15px; }
+.vf .rule-sline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.vf .rule-join { border: 1px solid var(--v-line); background: var(--v-panel); border-radius: 6px; padding: 2px 8px; font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--v-dim); cursor: pointer; }
+.vf .rule-adds { display: flex; gap: 6px 14px; flex-wrap: wrap; align-items: center; }
+.vf .rule-adds:empty { display: none; }
+.vf .rule-add { border: 0; background: none; padding: 4px 0; font-size: 13px; color: var(--v-dim); cursor: pointer; display: inline-flex; gap: 4px; align-items: center; }
+.vf .rule-add[aria-pressed="true"] { color: var(--v-hot); }
+@media (hover: hover) and (pointer: fine) { .vf .rule-add:hover, .vf .rule-join:hover { color: var(--v-fg); } }
+.vf .rule-details { padding: 12px 20px 16px; border-top: 1px solid var(--v-line); }
+.vf .rule-example { display: flex; justify-content: space-between; gap: 12px; padding: 8px 12px; color: inherit; text-decoration: none; }
+
+/* Back to top (components/ui/BackToTop): flat surface, hairline ring. */
+.vf .to-top { position: fixed; right: 24px; bottom: 24px; z-index: 40; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 999px; border: 1px solid var(--v-line); background: var(--v-surface); color: var(--v-dim); opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity 160ms ease, transform 160ms var(--v-ease-out), color 150ms ease, border-color 150ms ease; }
+.vf .to-top[data-shown='true'] { opacity: 1; transform: none; pointer-events: auto; }
+.vf .to-top:active { transform: scale(0.96); }
+@media (hover: hover) and (pointer: fine) { .vf .to-top:hover { color: var(--v-fg); border-color: var(--v-mute); } }
+@media (prefers-reduced-motion: reduce) { .vf .to-top { transition: opacity 120ms ease; transform: none; } }
+
+/* Project page (ProjectView): the wide column carries the time series and the
+   session list, the narrow one the breakdowns beside them. One column on narrow
+   screens. Sections rise in once on first paint, 40ms apart; never on refresh. */
+.vf .proj-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr); gap: 16px; margin-top: 16px; align-items: start; }
+@media (max-width: 1000px) { .vf .proj-grid { grid-template-columns: minmax(0, 1fr); } }
+.vf .proj-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 12px; border-radius: 10px; color: inherit; text-decoration: none; transition: background-color 120ms ease, transform 120ms var(--v-ease-out); }
+.vf .proj-row:active { transform: scale(0.99); }
+.vf .proj-rise { animation: proj-rise 220ms var(--v-ease-out) both; animation-delay: calc(var(--i, 0) * 40ms); }
+@keyframes proj-rise { from { opacity: 0; transform: translateY(6px); } }
+@media (prefers-reduced-motion: reduce) { .vf .proj-rise { animation: none; } }
+.vf .proj-link { color: inherit; text-decoration: none; border-bottom: 1px solid transparent; transition: color 120ms ease, border-color 120ms ease; }
+@media (hover: hover) and (pointer: fine) { .vf .proj-link:hover { color: var(--v-fg); border-bottom-color: var(--v-mute); } }
+/* Read notifications step back; unread ones keep full weight. */
+.vf .tray-i[data-read] .tray-t b { font-weight: 400; color: var(--v-dim); }
+.vf .tray-i[data-read] .tray-ic { opacity: 0.6; }
+
+/* For teams confirmation (TeamsModal): centered, above the scrim. */
+.vf .teams-wrap { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; padding: 16px; pointer-events: none; }
+.vf .scrim:has(+ .teams-wrap) { z-index: 69; }
+.vf .teams-modal { pointer-events: auto; width: min(420px, 100%); display: grid; gap: 10px; padding: 24px; background: var(--v-surface); border: 1px solid var(--v-line); border-radius: 16px; box-shadow: var(--v-pop); transform-origin: center; }
+.vf .teams-modal h2 { margin: 0; font-size: 20px; line-height: 26px; font-weight: 600; letter-spacing: -0.01em; }
+.vf .teams-modal p { margin: 0; font-size: 14px; line-height: 21px; }
+.vf .teams-ic { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; color: var(--v-hot); background: color-mix(in srgb, var(--v-hot) 12%, transparent); margin-bottom: 4px; }
+.vf .teams-url { display: flex; align-items: center; gap: 8px; min-width: 0; margin-top: 4px; padding: 9px 12px; border-radius: 10px; background: var(--v-panel); border: 1px solid var(--v-line); font-size: 12px; color: var(--v-fg); }
+.vf .teams-note { display: flex; gap: 8px; align-items: flex-start; font-size: 12px !important; line-height: 18px !important; color: var(--v-dim); }
+.vf .teams-note svg { flex: none; margin-top: 2px; }
+.vf .teams-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }

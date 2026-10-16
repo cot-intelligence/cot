@@ -33,6 +33,8 @@ const ReplayView = lazy(() => import('./ReplayView').then((m) => ({ default: m.R
 const SettingsView = lazy(() => import('./SettingsView').then((m) => ({ default: m.SettingsView })));
 const FindingsView = lazy(() => import('./FindingsView').then((m) => ({ default: m.FindingsView })));
 const GovernanceView = lazy(() => import('./GovernanceView').then((m) => ({ default: m.GovernanceView })));
+const RulesView = lazy(() => import('./RulesView').then((m) => ({ default: m.RulesView })));
+const ProjectView = lazy(() => import('./ProjectView').then((m) => ({ default: m.ProjectView })));
 const ExtensionDetailView = lazy(() =>
   import('./ExtensionsView').then((m) => ({ default: m.ExtensionDetailView })),
 );
@@ -70,6 +72,8 @@ type DashboardRoute =
   | { view: 'settings' }
   | { view: 'findings'; pillar?: InsightPillar }
   | { view: 'governance' }
+  | { view: 'rules'; fromEvent?: number }
+  | { view: 'project'; name: string }
   | { view: 'extension'; key: string };
 
 type MetricsHistoryTab = 'shell' | 'web' | 'mcp' | 'skill' | 'plugin';
@@ -85,6 +89,10 @@ function parseHash(): DashboardRoute {
   const hash = window.location.hash.replace(/^#\/?/, '');
   if (hash === 'settings') return { view: 'settings' };
   if (hash === 'governance') return { view: 'governance' };
+  const rulesMatch = hash.match(/^rules(?:\?from=(\d+))?$/);
+  if (rulesMatch) return { view: 'rules', fromEvent: rulesMatch[1] ? Number(rulesMatch[1]) : undefined };
+  const projectPage = hash.match(/^project\/(.+)$/);
+  if (projectPage) return { view: 'project', name: decodeURIComponent(projectPage[1]) };
   const extPage = hash.match(/^extensions\/(.+)$/);
   if (extPage) return { view: 'extension', key: decodeURIComponent(extPage[1]) };
   // The old Extensions list now lives in Activity (MCP / Skills → Installed, Plugins).
@@ -225,6 +233,8 @@ export function Dashboard({ onSetup }: DashboardProps) {
     else if (route.view === 'replay') setDocumentTitle('Session Replay');
     else if (route.view === 'findings') setDocumentTitle('Findings');
     else if (route.view === 'governance') setDocumentTitle('Governance');
+    else if (route.view === 'rules') setDocumentTitle('Rules');
+    else if (route.view === 'project') setDocumentTitle(route.name);
     else if (route.view === 'extension') setDocumentTitle(route.key.split(':').slice(1).join(':'));
   }, [route.view, route.view === 'metrics-history' ? route.tab : undefined]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -266,6 +276,11 @@ export function Dashboard({ onSetup }: DashboardProps) {
     window.location.hash = '#/governance';
   }, []);
 
+  const goRules = useCallback(() => {
+    setRoute({ view: 'rules' });
+    window.location.hash = '#/rules';
+  }, []);
+
   const goInstalled = useCallback((kind: 'mcp' | 'skill' | 'plugin') => {
     window.location.hash = installedHref(kind);
   }, []);
@@ -283,10 +298,12 @@ export function Dashboard({ onSetup }: DashboardProps) {
   const onReplay = route.view === 'replay' || replayId !== null;
   const onFindings = route.view === 'findings';
   const onGovernance = route.view === 'governance';
+  const onRules = route.view === 'rules';
+  const onProject = route.view === 'project';
   const extensionKey = route.view === 'extension' ? route.key : null;
   const extensionKind = extensionKey ? (extensionKey.split(':')[0] as 'mcp' | 'skill' | 'plugin') : null;
   const onExtensions = !!extensionKey;
-  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay && !onFindings && !onGovernance && !onExtensions;
+  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay && !onFindings && !onGovernance && !onRules && !onExtensions && !onProject;
 
   // Counts for the navigation: sessions traced, and findings that still need a look.
   // /v1/stats carries them all, so the shell never pays for metrics or an insights pass.
@@ -349,6 +366,14 @@ export function Dashboard({ onSetup }: DashboardProps) {
         run: () => goInstalled('mcp'),
       },
       {
+        id: 'nav-rules',
+        label: 'Go to Rules',
+        icon: 'list',
+        keywords: 'rules custom rule engine create detection policy alert block',
+        active: onRules,
+        run: goRules,
+      },
+      {
         id: 'nav-governance',
         label: 'Go to Governance',
         icon: 'plug',
@@ -374,9 +399,11 @@ export function Dashboard({ onSetup }: DashboardProps) {
       onSettings,
       onFindings,
       onGovernance,
+      onRules,
       onExtensions,
       goFindings,
       goGovernance,
+      goRules,
       goInstalled,
       route,
       goSessions,
@@ -404,9 +431,11 @@ export function Dashboard({ onSetup }: DashboardProps) {
       ? (`activity-${extensionKind}` as NavKey)
       : onGovernance
       ? 'governance'
+      : onRules
+      ? 'rules'
       : onSettings
     ? 'settings'
-    : onOverview
+    : onOverview || onProject
       ? 'overview'
       : onMetricsHistory
         ? (`activity-${route.view === 'metrics-history' ? route.tab ?? 'shell' : 'shell'}` as NavKey)
@@ -429,9 +458,11 @@ export function Dashboard({ onSetup }: DashboardProps) {
               { label: ACTIVITY_LABEL[extensionKind!], href: installedHref(extensionKind!) },
               { label: extensionKey.split(':').slice(1).join(':') },
             ]
+        : route.view === 'project'
+          ? [{ label: 'Overview', href: '#/overview' }, { label: route.name }]
         : onMetricsHistory
       ? [{ label: 'Activity', href: '#/metrics-history' }, { label: ACTIVITY_LABEL[route.view === 'metrics-history' ? route.tab ?? 'shell' : 'shell'] }]
-      : [{ label: onFindings ? 'Findings' : onGovernance ? 'Governance' : onSettings ? 'Settings' : onOverview ? 'Overview' : 'Sessions' }];
+      : [{ label: onFindings ? 'Findings' : onGovernance ? 'Governance' : onRules ? 'Rules' : onSettings ? 'Settings' : onOverview ? 'Overview' : 'Sessions' }];
   const trail = [{ label: 'Local workspace', href: '#/overview' }, ...crumbs];
 
   return (
@@ -493,6 +524,18 @@ export function Dashboard({ onSetup }: DashboardProps) {
             <main className="flex min-w-0 flex-1 flex-col">
               <Suspense fallback={<MetricsSkeleton />}>
                 <ExtensionDetailView extKey={extensionKey!} onSelect={selectSession} />
+              </Suspense>
+            </main>
+          ) : route.view === 'project' ? (
+            <main className="flex min-w-0 flex-1 flex-col">
+              <Suspense fallback={<MetricsSkeleton />}>
+                <ProjectView key={route.name} name={route.name} onSelect={selectSession} />
+              </Suspense>
+            </main>
+          ) : onRules ? (
+            <main className="flex min-w-0 flex-1 flex-col">
+              <Suspense fallback={<MetricsSkeleton />}>
+                <RulesView fromEvent={route.view === 'rules' ? route.fromEvent : undefined} />
               </Suspense>
             </main>
           ) : onGovernance ? (

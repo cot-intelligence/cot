@@ -114,6 +114,26 @@ pub fn health(port: u16) -> Option<String> {
     parse_health_response(&String::from_utf8_lossy(&response))
 }
 
+/// A JSON GET against the local collector, the same raw HTTP/1.0 way as
+/// `health` (no Accept-Encoding, so the reply is never gzipped).
+pub fn get_json(port: u16, path: &str) -> Option<serde_json::Value> {
+    let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into();
+    let timeout = Duration::from_millis(3000);
+    let mut stream = TcpStream::connect_timeout(&addr, timeout).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
+    let request = format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nAccept: application/json\r\n\r\n");
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut response = Vec::new();
+    stream.take(1024 * 1024).read_to_end(&mut response).ok()?;
+    let response = String::from_utf8_lossy(&response);
+    let (head, body) = response.split_once("\r\n\r\n")?;
+    if head.lines().next()?.split_whitespace().nth(1) != Some("200") {
+        return None;
+    }
+    serde_json::from_str(body.trim()).ok()
+}
+
 pub fn parse_health_response(response: &str) -> Option<String> {
     let (head, body) = response.split_once("\r\n\r\n")?;
     let status_line = head.lines().next()?;

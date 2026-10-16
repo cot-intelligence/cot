@@ -283,7 +283,7 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
                     const fx = projectFindings(p.cwd);
                     return (
                       <tr key={p.cwd ?? '-'}>
-                        <td><span className="mono" style={{ fontSize: 12 }} title={p.cwd ?? ''}>{fproject(p.cwd)}</span></td>
+                        <td><a href={`#/project/${encodeURIComponent(fproject(p.cwd))}`} className="mono proj-link" style={{ fontSize: 12 }} title={p.cwd ?? ''}>{fproject(p.cwd)}</a></td>
                         <td style={{ minWidth: 120 }}><FStackBar parts={sources.map((a) => ({ key: sourceLabel(a), value: p.agents[a] ?? 0, color: fAgentColor(a) }))} /></td>
                         <td className="num">{p.sessions}</td>
                         <td className="num">{fmt.usd(p.cost)}</td>

@@ -137,9 +137,6 @@ interface Palette {
   faint: string;
   hair: string;
   cardLine: string;
-  grid: string;
-  bracket: string;
-  crossInk: string;
   hot: string;
   cobalt: string;
 }
@@ -155,9 +152,6 @@ function palette(theme: CardTheme): Palette {
         faint: 'rgba(233,240,234,0.45)',
         hair: 'rgba(233,240,234,0.16)',
         cardLine: 'rgba(233,240,234,0.1)',
-        grid: 'rgba(233,240,234,0.035)',
-        bracket: 'rgba(233,240,234,0.3)',
-        crossInk: 'rgba(233,240,234,0.3)',
         hot: '#C8F169',
         cobalt: '#7FA2F5',
       }
@@ -170,9 +164,6 @@ function palette(theme: CardTheme): Palette {
         faint: 'rgba(12,26,20,0.5)',
         hair: 'rgba(12,26,20,0.16)',
         cardLine: 'rgba(12,26,20,0.1)',
-        grid: 'rgba(12,26,20,0.035)',
-        bracket: 'rgba(12,26,20,0.28)',
-        crossInk: 'rgba(12,26,20,0.25)',
         hot: '#0F5B3E',
         cobalt: '#2B5CE6',
       };
@@ -186,75 +177,10 @@ function ls(ctx: CanvasRenderingContext2D, px: number) {
   }
 }
 
-function fitMono(ctx: CanvasRenderingContext2D, t: string, start: number, maxW: number, min = 14) {
-  let px = start;
-  while (px > min) {
-    ctx.font = `800 ${px}px ${MONO}`;
-    if (ctx.measureText(t).width <= maxW) break;
-    px -= 1;
-  }
-  return px;
-}
 
-function accentWords(title: string) {
-  const raw = title.trim().split(/\s+/).filter(Boolean);
-  const words = raw.length ? raw : ['metrics'];
-  const lead = words.slice(0, -1).join(' ').toUpperCase();
-  const accent = words[words.length - 1].toLowerCase();
-  return { lead, accent };
-}
 
-function bracket(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  dx: number,
-  dy: number,
-  len: number,
-  w: number,
-  color: string,
-) {
-  ctx.strokeStyle = color;
-  ctx.lineWidth = w;
-  ctx.beginPath();
-  ctx.moveTo(x + dx * len, y);
-  ctx.lineTo(x, y);
-  ctx.lineTo(x, y + dy * len);
-  ctx.stroke();
-}
 
-function cross(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, w: number, color: string) {
-  ctx.strokeStyle = color;
-  ctx.lineWidth = w;
-  ctx.beginPath();
-  ctx.moveTo(x - r, y);
-  ctx.lineTo(x + r, y);
-  ctx.moveTo(x, y - r);
-  ctx.lineTo(x, y + r);
-  ctx.stroke();
-}
 
-function chartLabel(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  right: number,
-  label: string,
-  meta: string,
-  accent: string,
-  P: Palette,
-) {
-  ctx.font = `700 11px ${MONO}`;
-  ls(ctx, 2.5);
-  ctx.textAlign = 'left';
-  ctx.fillStyle = P.sub;
-  ctx.fillText(label, x, y);
-  ctx.textAlign = 'right';
-  ctx.fillStyle = accent;
-  ctx.fillText(meta, right, y);
-  ctx.textAlign = 'left';
-  ls(ctx, 0);
-}
 
 function axisTickIndices(n: number, maxTicks = 5): number[] {
   if (n <= 0) return [];
@@ -404,92 +330,122 @@ function barChart(
   }
 }
 
-/** Donut chart + legend for a categorical breakdown. */
-function donutChart(
+/** A distribution as one stacked bar and a legend: easier to read than a donut. */
+function stackedShare(
   ctx: CanvasRenderingContext2D,
   slot: { x: number; y: number; w: number; h: number },
   items: { name: string; value: number }[],
-  unit: string,
   P: Palette,
 ) {
-  const total = items.reduce((n, it) => n + it.value, 0) || 1;
-  const colors = [
-    HOT,
-    COBALT,
-    P.dark ? OLIVE_DARK : OLIVE_LIGHT,
-    P.dark ? 'rgba(244,240,234,0.5)' : 'rgba(17,17,17,0.5)',
-    P.dark ? 'rgba(244,240,234,0.28)' : 'rgba(17,17,17,0.28)',
-  ];
-  const top = items.slice(0, 5);
+  const colors = [HOT, COBALT, P.dark ? OLIVE_DARK : OLIVE_LIGHT, P.dark ? 'rgba(233,240,234,0.45)' : 'rgba(12,26,20,0.42)', P.dark ? 'rgba(233,240,234,0.22)' : 'rgba(12,26,20,0.2)'];
+  const top = items.slice(0, 4);
+  const rest = items.slice(4).reduce((n, it) => n + it.value, 0);
+  const parts = rest > 0 ? [...top, { name: 'Other', value: rest }] : top;
+  const total = parts.reduce((n, it) => n + it.value, 0) || 1;
 
-  const r = Math.min(slot.h / 2, 54);
-  const cx = slot.x + r + 2;
-  const cy = slot.y + slot.h / 2;
-  const th = r * 0.42;
-  const rr = r - th / 2;
-
-  let a = -Math.PI / 2;
-  top.forEach((it, i) => {
-    const sweep = (it.value / total) * Math.PI * 2;
-    ctx.beginPath();
-    ctx.arc(cx, cy, rr, a + 0.03, a + sweep - 0.03);
-    ctx.strokeStyle = colors[i % colors.length];
-    ctx.lineWidth = th;
-    ctx.lineCap = 'butt';
-    ctx.stroke();
-    a += sweep;
-  });
-
-  // Centre: count + unit.
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.font = `800 22px ${MONO}`;
-  ctx.fillStyle = P.fg;
-  ctx.fillText(String(items.length), cx, cy - 4);
-  ctx.font = `700 8px ${MONO}`;
-  ls(ctx, 2);
-  ctx.fillStyle = P.faint;
-  ctx.fillText(unit.toUpperCase(), cx, cy + 12);
-  ls(ctx, 0);
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'alphabetic';
-
-  // Legend.
-  const lx = cx + r + 22;
-  const lRight = slot.x + slot.w;
-  const rowH = Math.min(20, slot.h / top.length);
-  top.forEach((it, i) => {
-    const ly = slot.y + rowH * (i + 0.5) + 4;
+  // The bar: flat segments with a 2px gap, rounded ends.
+  const barH = 12;
+  let bx = slot.x;
+  ctx.save();
+  roundRect(ctx, slot.x, slot.y, slot.w, barH, barH / 2);
+  ctx.clip();
+  parts.forEach((it, i) => {
+    const w = (it.value / total) * slot.w;
     ctx.fillStyle = colors[i % colors.length];
-    ctx.fillRect(lx, ly - 9, 9, 9);
-    ctx.font = `700 11px ${MONO}`;
+    ctx.fillRect(bx, slot.y, Math.max(0, w - 2), barH);
+    bx += w;
+  });
+  ctx.restore();
+
+  // Legend: two columns of swatch, name, share.
+  const rowH = 26;
+  const colW = slot.w / 2;
+  parts.forEach((it, i) => {
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    const lx = slot.x + col * colW;
+    const ly = slot.y + barH + 30 + row * rowH;
+    if (ly > slot.y + slot.h) return;
+    ctx.fillStyle = colors[i % colors.length];
+    roundRect(ctx, lx, ly - 9, 9, 9, 2);
+    ctx.fill();
+    const pct = `${Math.round((it.value / total) * 100)}%`;
+    ctx.font = `500 13px ${MONO}`;
     ctx.textAlign = 'right';
     ctx.fillStyle = P.faint;
-    const pct = `${Math.round((it.value / total) * 100)}%`;
-    ctx.fillText(pct, lRight, ly);
+    const right = lx + colW - 18;
+    ctx.fillText(pct, right, ly);
     const pctW = ctx.measureText(pct).width;
     ctx.textAlign = 'left';
-    ctx.fillStyle = P.sub;
+    ctx.font = `500 14px ${SANS}`;
+    ctx.fillStyle = P.fg;
     let name = it.name;
-    const nameMax = lRight - (lx + 16) - pctW - 12;
+    const nameMax = right - pctW - 12 - (lx + 18);
     while (name.length > 1 && ctx.measureText(name).width > nameMax) name = name.slice(0, -1);
-    if (name !== it.name) name = name.slice(0, -1) + '…';
-    ctx.fillText(name, lx + 16, ly);
+    if (name !== it.name) name = `${name.slice(0, -1)}…`;
+    ctx.fillText(name, lx + 18, ly);
   });
 }
 
-/** Column/row split for the metrics bento, minimising empty cells. */
-function gridDims(n: number): [number, number] {
-  if (n <= 1) return [1, 1];
-  if (n === 2) return [2, 1];
-  if (n === 3) return [3, 1];
-  if (n === 4) return [2, 2];
-  return [3, 2];
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  ctx.beginPath();
+  if (typeof ctx.roundRect === 'function') {
+    ctx.roundRect(x, y, w, h, r);
+  } else {
+    ctx.rect(x, y, w, h);
+  }
+}
+
+/** Fit `text` to `maxW` by shrinking the font from `start` to at least `min`. */
+function fitFont(ctx: CanvasRenderingContext2D, text: string, weight: string, family: string, start: number, maxW: number, min: number): number {
+  let px = start;
+  ctx.font = `${weight} ${px}px ${family}`;
+  while (px > min && ctx.measureText(text).width > maxW) {
+    px -= 1;
+    ctx.font = `${weight} ${px}px ${family}`;
+  }
+  return px;
+}
+
+/** Break `text` into at most `maxLines` lines that fit `maxW` (the last one ellipsized). */
+function wrapLines(ctx: CanvasRenderingContext2D, text: string, maxW: number, maxLines: number): string[] {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let cur = '';
+  for (const w of words) {
+    const next = cur ? `${cur} ${w}` : w;
+    if (ctx.measureText(next).width <= maxW || !cur) cur = next;
+    else {
+      lines.push(cur);
+      cur = w;
+      if (lines.length === maxLines) break;
+    }
+  }
+  if (lines.length < maxLines && cur) lines.push(cur);
+  if (lines.length === maxLines && words.join(' ') !== lines.join(' ')) {
+    let last = lines[maxLines - 1];
+    while (last.length > 1 && ctx.measureText(`${last}…`).width > maxW) last = last.slice(0, -1);
+    lines[maxLines - 1] = `${last.trimEnd()}…`;
+  }
+  return lines;
+}
+
+function mono(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, color: string, px = 12, track = 2) {
+  ctx.font = `500 ${px}px ${MONO}`;
+  ls(ctx, track);
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+  ls(ctx, 0);
 }
 
 /**
  * Draw the share card onto `canvas` at high resolution. Resolves once web
  * fonts are ready so Geist / Geist Mono / Newsreader render in the export too.
+ *
+ * One hero number with the rest in a hairline-separated row on the left; on the
+ * right, one flat panel with the activity line and the breakdown. Flat fills and
+ * hairlines only (no textures, glows or gradients), so it reads at a glance in a
+ * feed and matches the dashboard.
  */
 export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions): Promise<void> {
   if (document.fonts?.ready) {
@@ -510,237 +466,135 @@ export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions
   const P = palette(opts.theme);
   HOT = P.hot;
   COBALT = P.cobalt;
-
-  // ── Flat background (no colour glows) ──
   ctx.fillStyle = P.bg;
   ctx.fillRect(0, 0, CARD_W, CARD_H);
-
-  // Faint grid texture.
-  ctx.strokeStyle = P.grid;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let gx = 0; gx <= CARD_W; gx += 48) {
-    ctx.moveTo(gx + 0.5, 0);
-    ctx.lineTo(gx + 0.5, CARD_H);
-  }
-  for (let gy = 0; gy <= CARD_H; gy += 48) {
-    ctx.moveTo(0, gy + 0.5);
-    ctx.lineTo(CARD_W, gy + 0.5);
-  }
-  ctx.stroke();
-
   ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';
 
-  // ── Frame + corner marks ──
-  const CM = 52;
-  const cR = CARD_W - CM;
-  const cB = CARD_H - CM;
-  bracket(ctx, CM, CM, 1, 1, 26, 2, P.bracket);
-  bracket(ctx, cR, CM, -1, 1, 26, 2, P.bracket);
-  bracket(ctx, CM, cB, 1, -1, 26, 2, P.bracket);
-  bracket(ctx, cR, cB, -1, -1, 26, 2, P.bracket);
-  cross(ctx, CARD_W / 2, CM, 6, 1.5, P.hot);
-  cross(ctx, CARD_W / 2, cB, 6, 1.5, P.cobalt);
-  ctx.strokeStyle = P.bracket;
-  ctx.lineWidth = 1;
-  for (let tx = CM + 60; tx < cR - 60; tx += 40) {
-    ctx.beginPath();
-    ctx.moveTo(tx, CM);
-    ctx.lineTo(tx, CM + 6);
-    ctx.stroke();
-  }
-
-  // ── Layout ──
-  const pad = 22;
-  const x0 = CM + pad;
-  const y0 = CM + pad;
-  const x1 = cR - pad;
-  const y1 = cB - pad;
-  const leftW = 432;
-  const gap = 34;
-  const rx0 = x0 + leftW + gap;
-  const rw = x1 - rx0;
-
-  // ── Masthead: cot. + tagline (left) · cot.run (right) ──
-  const { lead, accent } = accentWords(opts.title);
+  const M = 64; // outer margin
+  const x0 = M;
+  const x1 = CARD_W - M;
   const handle = opts.handle.trim();
 
-  ctx.font = `italic 700 40px 'Newsreader', serif`;
+  // ── Masthead: wordmark + line (left), handle · cot.run (right) ──
+  ctx.font = `italic 700 34px 'Newsreader', serif`;
   ctx.fillStyle = P.fg;
-  ctx.fillText('cot', x0, y0 + 38);
+  ctx.fillText('cot', x0, 92);
   const cw = ctx.measureText('cot').width;
   ctx.fillStyle = HOT;
-  ctx.fillText('.', x0 + cw + 2, y0 + 38);
-  ctx.font = `400 17px ${SANS}`;
+  ctx.fillText('.', x0 + cw + 1, 92);
+  ctx.font = `400 15px ${SANS}`;
   ctx.fillStyle = P.sub;
-  ctx.fillText('Every session, fully traced.', x0 + cw + 24, y0 + 36);
-
-  ctx.font = `700 12px ${MONO}`;
-  ls(ctx, 2.5);
+  ctx.fillText('Every session, fully traced.', x0 + cw + 22, 89);
   ctx.textAlign = 'right';
+  ctx.font = `500 13px ${MONO}`;
+  ls(ctx, 1.5);
   ctx.fillStyle = HOT;
-  ctx.fillText('COT.RUN', x1, y0 + 34);
-  ctx.textAlign = 'left';
-  ls(ctx, 0);
-
-  const headBand = y0 + 60;
-  ctx.fillStyle = P.cardLine;
-  ctx.fillRect(x0, headBand, x1 - x0, 1);
-
-  const rowTop = headBand + 28;
-  const rowBottom = y1;
-  const topH = 226;
-  const chartsTop = rowTop + topH + 26;
-
-  // ── Title card with a quiet background texture ──
-  const card = { x: x0, y: rowTop, w: leftW, h: topH };
-  ctx.fillStyle = P.surface;
-  ctx.fillRect(card.x, card.y, card.w, card.h);
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(card.x + 3, card.y + 3, card.w - 6, card.h - 6);
-  ctx.clip();
-  ctx.fillStyle = P.dark ? 'rgba(244,240,234,0.055)' : 'rgba(17,17,17,0.05)';
-  for (let dy = card.y + 16; dy < card.y + card.h - 6; dy += 19) {
-    for (let dx = card.x + 16; dx < card.x + card.w - 6; dx += 19) {
-      ctx.fillRect(dx, dy, 1.5, 1.5);
-    }
-  }
-  ctx.strokeStyle = P.dark ? 'rgba(200,241,105,0.12)' : 'rgba(15,91,62,0.1)';
-  ctx.lineWidth = 2;
-  for (let rr = 52; rr <= 300; rr += 42) {
-    ctx.beginPath();
-    ctx.arc(card.x + card.w - 6, card.y + card.h - 6, rr, Math.PI, 1.5 * Math.PI);
-    ctx.stroke();
-  }
-  ctx.restore();
-
-  ctx.strokeStyle = P.hair;
-  ctx.lineWidth = 1;
-  ctx.strokeRect(card.x + 0.5, card.y + 0.5, card.w - 1, card.h - 1);
-
-  const cp = 30;
-  const cx = card.x + cp;
-  const cInnerW = card.w - cp * 2;
-
-  ctx.fillStyle = HOT;
-  ctx.fillRect(cx, card.y + 27, 7, 7);
-  ctx.font = `700 11px ${MONO}`;
-  ls(ctx, 2);
-  ctx.fillStyle = P.faint;
-  ctx.fillText('TRACED WITH COT', cx + 15, card.y + 34);
-  ls(ctx, 0);
-
-  let hpx = 50;
-  ctx.font = `600 ${hpx}px ${SANS}`;
-  while (hpx > 26 && ctx.measureText(lead).width > cInnerW) {
-    hpx -= 1;
-    ctx.font = `600 ${hpx}px ${SANS}`;
-  }
-  const lineH = hpx * 0.98;
-  const regionTop = 46;
-  const regionBottom = card.h - 50;
-  const blockH = lineH + hpx * 0.74;
-  const capTop = regionTop + (regionBottom - regionTop - blockH) / 2;
-  const hb = card.y + capTop + hpx * 0.74;
-  ctx.fillStyle = P.fg;
-  ctx.fillText(lead, cx, hb);
-  ctx.font = `600 ${hpx}px ${SANS}`;
-  ctx.fillStyle = HOT;
-  ctx.fillText(accent, cx, hb + lineH);
-
-  ctx.fillStyle = P.cardLine;
-  ctx.fillRect(cx, card.y + card.h - 44, cInnerW, 1);
-  ctx.font = `700 12px ${MONO}`;
-  ls(ctx, 2);
-  ctx.fillStyle = P.faint;
-  ctx.fillText((handle || '@you').toUpperCase(), cx, card.y + card.h - 22);
-  ls(ctx, 0);
-
-  // ── Metrics bento (hairline-segregated, adaptive grid) ──
-  const metrics = { x: rx0, y: rowTop, w: rw, h: topH };
-  const stats = opts.stats.slice(0, MAX_STATS);
-  const [gCols, gRows] = gridDims(stats.length || 1);
-  const cellW = metrics.w / gCols;
-  const cellH = metrics.h / gRows;
-  ctx.strokeStyle = P.hair;
-  ctx.lineWidth = 1;
-  ctx.strokeRect(metrics.x + 0.5, metrics.y + 0.5, metrics.w - 1, metrics.h - 1);
-  ctx.beginPath();
-  for (let c = 1; c < gCols; c++) {
-    const gx = metrics.x + c * cellW;
-    ctx.moveTo(gx + 0.5, metrics.y);
-    ctx.lineTo(gx + 0.5, metrics.y + metrics.h);
-  }
-  for (let r = 1; r < gRows; r++) {
-    const gy = metrics.y + r * cellH;
-    ctx.moveTo(metrics.x, gy + 0.5);
-    ctx.lineTo(metrics.x + metrics.w, gy + 0.5);
-  }
-  ctx.stroke();
-  stats.forEach((s, i) => {
-    const r = Math.floor(i / gCols);
-    const c = i % gCols;
-    const gx = metrics.x + c * cellW;
-    const gy = metrics.y + r * cellH;
-    const px = gx + 20;
-    ctx.font = `700 11px ${MONO}`;
-    ls(ctx, 1.5);
+  ctx.fillText('COT.RUN', x1, 88);
+  const runW = ctx.measureText('COT.RUN').width;
+  if (handle) {
     ctx.fillStyle = P.faint;
-    ctx.fillText(s.label.toUpperCase(), px, gy + 32);
-    ls(ctx, 0);
-    const vpx = fitMono(ctx, s.value, Math.min(cellH * 0.4, 56), cellW - 40, 22);
-    ctx.font = `800 ${vpx}px ${MONO}`;
+    ctx.fillText(`${handle.toUpperCase()}  ·`, x1 - runW - 8, 88);
+  }
+  ls(ctx, 0);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = P.cardLine;
+  ctx.fillRect(x0, 116, x1 - x0, 1);
+
+  // ── Left: title, hero number, the rest ──
+  const leftW = 520;
+  const stats = opts.stats.slice(0, MAX_STATS);
+  const hero = stats[0];
+  const rest = stats.slice(1);
+
+  mono(ctx, 'TRACED WITH COT', x0, 168, P.faint, 12, 2.4);
+  const titlePx = fitFont(ctx, opts.title || 'My coding footprint', '600', SANS, 40, leftW * 1.6, 30);
+  ctx.font = `600 ${titlePx}px ${SANS}`;
+  ls(ctx, -0.6);
+  ctx.fillStyle = P.fg;
+  const titleLines = wrapLines(ctx, opts.title || 'My coding footprint', leftW, 2);
+  titleLines.forEach((line, i) => ctx.fillText(line, x0, 214 + i * titlePx * 1.12));
+  ls(ctx, 0);
+
+  if (hero) {
+    const heroY = 214 + titleLines.length * titlePx * 1.12 + 118;
+    const heroPx = fitFont(ctx, hero.value, '600', SANS, 132, leftW, 56);
+    ctx.font = `600 ${heroPx}px ${SANS}`;
+    ls(ctx, -heroPx * 0.04);
     ctx.fillStyle = P.fg;
-    ctx.fillText(s.value, px, gy + cellH - 24);
-  });
-
-  // ── Two charts at the bottom corners ──
-  const charts = { y: chartsTop, h: rowBottom - chartsTop };
-  const left = { x: x0, y: charts.y, w: leftW, h: charts.h };
-  const rightC = { x: rx0, y: charts.y, w: rw, h: charts.h };
-
-  ctx.strokeStyle = P.hair;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  const midX = x0 + leftW + gap / 2;
-  ctx.moveTo(midX + 0.5, charts.y + 4);
-  ctx.lineTo(midX + 0.5, charts.y + charts.h);
-  ctx.stroke();
-
-  const labelY = left.y + 12;
-  const plotTop = labelY + 22;
-  const plotH = left.y + left.h - plotTop;
-
-  // Bottom-left: hot line (sequential series).
-  const lineS = opts.lineSeries;
-  chartLabel(ctx, left.x, labelY, left.x + left.w, lineS.label.toUpperCase(), 'LINE', HOT, P);
-  lineChart(ctx, left.x, plotTop, left.w, plotH, lineS.data ?? [0], HOT, P, lineS.labels);
-
-  // Bottom-right: a distribution — bars or a donut.
-  const distS = opts.distSeries;
-  if (distS.kind === 'pie' && distS.items?.length) {
-    chartLabel(ctx, rightC.x, labelY, rightC.x + rightC.w, distS.label.toUpperCase(), 'PIE', COBALT, P);
-    donutChart(ctx, { x: rightC.x, y: plotTop, w: rightC.w, h: plotH }, distS.items, distS.unit ?? 'items', P);
-  } else {
-    chartLabel(ctx, rightC.x, labelY, rightC.x + rightC.w, distS.label.toUpperCase(), 'BARS', COBALT, P);
-    barChart(
-      ctx,
-      rightC.x,
-      plotTop,
-      rightC.w,
-      plotH,
-      distS.data ?? [],
-      COBALT,
-      P.dark ? 'rgba(127,162,245,0.45)' : 'rgba(43,92,230,0.45)',
-      P,
-      distS.labels,
-    );
+    ctx.fillText(hero.value, x0 - heroPx * 0.04, heroY);
+    ls(ctx, 0);
+    mono(ctx, hero.label.toUpperCase(), x0, heroY + 30, HOT, 13, 2.2);
   }
 
-  cross(ctx, x0, chartsTop - 13, 4, 1, P.hot);
-  cross(ctx, x1, chartsTop - 13, 4, 1, P.cobalt);
+  if (rest.length) {
+    const rowTop = 488;
+    const cellW = leftW / rest.length;
+    ctx.fillStyle = P.cardLine;
+    ctx.fillRect(x0, rowTop, leftW, 1);
+    rest.forEach((st, i) => {
+      const cx = x0 + i * cellW;
+      if (i > 0) {
+        ctx.fillStyle = P.cardLine;
+        ctx.fillRect(cx, rowTop + 18, 1, 58);
+      }
+      const pad = i === 0 ? 0 : 18;
+      mono(ctx, st.label.toUpperCase(), cx + pad, rowTop + 36, P.faint, 11, 1.6);
+      const vPx = fitFont(ctx, st.value, '600', MONO, 30, cellW - pad - 12, 16);
+      ctx.font = `600 ${vPx}px ${MONO}`;
+      ctx.fillStyle = P.fg;
+      ctx.fillText(st.value, cx + pad, rowTop + 74);
+    });
+  }
+
+  // ── Right: one panel, activity over its breakdown ──
+  const panel = { x: x0 + leftW + 48, y: 146, w: 0, h: CARD_H - M - 146 };
+  panel.w = x1 - panel.x;
+  ctx.fillStyle = P.surface;
+  roundRect(ctx, panel.x, panel.y, panel.w, panel.h, 20);
+  ctx.fill();
+  ctx.strokeStyle = P.cardLine;
+  ctx.lineWidth = 1;
+  roundRect(ctx, panel.x + 0.5, panel.y + 0.5, panel.w - 1, panel.h - 1, 20);
+  ctx.stroke();
+
+  const ip = 28;
+  const ix = panel.x + ip;
+  const iw = panel.w - ip * 2;
+
+  const lineS = opts.lineSeries;
+  const data = lineS.data ?? [0];
+  mono(ctx, `ACTIVITY · ${lineS.label.toUpperCase()}`, ix, panel.y + 40, P.sub, 11, 2);
+  ctx.textAlign = 'right';
+  mono(ctx, `PEAK ${compact(Math.max(...data, 0))}`, ix + iw, panel.y + 40, P.faint, 11, 1.6);
+  ctx.textAlign = 'left';
+  const plot = { x: ix, y: panel.y + 60, w: iw, h: 140 };
+  // A flat tint under the line (no gradient), then the line itself.
+  const maxV = Math.max(...data, 1);
+  const n = data.length;
+  const px = (i: number) => plot.x + (n <= 1 ? plot.w / 2 : (i / (n - 1)) * plot.w);
+  const py = (v: number) => plot.y + plot.h - 16 - Math.max(0.02, v / maxV) * (plot.h - 16);
+  ctx.beginPath();
+  ctx.moveTo(px(0), plot.y + plot.h - 16);
+  data.forEach((v, i) => ctx.lineTo(px(i), py(v)));
+  ctx.lineTo(px(n - 1), plot.y + plot.h - 16);
+  ctx.closePath();
+  ctx.fillStyle = P.dark ? 'rgba(200,241,105,0.10)' : 'rgba(15,91,62,0.08)';
+  ctx.fill();
+  lineChart(ctx, plot.x, plot.y, plot.w, plot.h, data, HOT, P, lineS.labels);
+
+  const divY = plot.y + plot.h + 22;
+  ctx.fillStyle = P.cardLine;
+  ctx.fillRect(ix, divY, iw, 1);
+
+  const distS = opts.distSeries;
+  mono(ctx, distS.label.toUpperCase(), ix, divY + 36, P.sub, 11, 2);
+  const slot = { x: ix, y: divY + 54, w: iw, h: panel.y + panel.h - (divY + 54) - 24 };
+  if (distS.kind === 'pie' && distS.items?.length) {
+    stackedShare(ctx, slot, distS.items, P);
+  } else {
+    barChart(ctx, slot.x, slot.y, slot.w, slot.h, distS.data ?? [], COBALT, P.dark ? 'rgba(127,162,245,0.45)' : 'rgba(43,92,230,0.42)', P, distS.labels);
+  }
 }
 
 /** Compose the share copy from the headline + selected stats + cot tagline. */

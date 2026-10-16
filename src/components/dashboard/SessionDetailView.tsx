@@ -5,6 +5,7 @@ import { getSessionDetail, getSessionExtensions, sessionExportUrl, setSessionBoo
 import { setDocumentTitle } from '../../lib/documentTitle';
 import { cachedSessionSummary, seededSessionDetail, sessionDetailKey } from '../../lib/sessionDetailQuery';
 import { useFullEventDetail } from '../../lib/useFullEventDetail';
+import { BackToTop } from '../ui/BackToTop';
 import { sessionHref, SessionStoreContext } from '../../lib/sessionStore';
 import { categoryLabel, fmt, modelLabel, project } from '../forest/format';
 import { CATEGORY_ICON, Icon } from '../forest/icons';
@@ -173,11 +174,12 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   return (
     <SessionStoreContext.Provider value={store}>
       <div className="scroll" id="vf-scroll">
+        <BackToTop />
         <div className="page">
           <a href={back.href} className="vbtn vbtn-ghost vbtn-sm" style={{ marginLeft: -10, marginBottom: 8 }}><Icon name="back" size={14} />{back.label}</a>
           <div className="ph" style={{ alignItems: 'flex-start' }}>
             <div style={{ minWidth: 0, maxWidth: 820 }}>
-              <span className="mono faint" style={{ fontSize: 12 }}>{project(s.cwd)} · {s.id}</span>
+              <span className="mono faint" style={{ fontSize: 12 }}>{s.cwd ? <a href={`#/project/${encodeURIComponent(project(s.cwd))}`} className="proj-link">{project(s.cwd)}</a> : project(s.cwd)} · {s.id}</span>
               <h1 style={{ fontSize: 24, lineHeight: '30px', overflowWrap: 'anywhere' }}>{s.title || 'Untitled session'}</h1>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10, alignItems: 'center' }}>
                 {s.status === 'active' ? <span className="vchip c-ok"><span className="dot" />live</span> : <span className="vchip c-dim">completed</span>}
@@ -253,7 +255,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
                 <div className="card-b">
                   <ol className="tl">
                     {list.slice(0, shown).map((e) => (
-                      <TraceRow key={e.id} e={e} live={s.status === 'active'} open={open === e.id} focusQuery={e.id === focusEventId ? focusQuery : undefined} onToggle={() => setOpen((o) => (o === e.id ? null : e.id))} sessionId={sessionId} onJump={revealEvent} annotatable={store === 'main'} annotation={ratedEvents.get(e.id)} />
+                      <TraceRow key={e.id} e={e} live={s.status === 'active'} open={open === e.id} focusQuery={e.id === focusEventId ? focusQuery : undefined} onToggle={() => setOpen((o) => (o === e.id ? null : e.id))} sessionId={sessionId} onJump={revealEvent} annotatable={store === 'main'} annotation={ratedEvents.get(e.id)} ruleable={store === 'main'} />
                     ))}
                   </ol>
                   {list.length === 0 && <div className="empty">No events{cat ? ' of this kind' : ''}.</div>}
@@ -308,7 +310,10 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   );
 }
 
-type TraceRowProps = { e: TimelineItem; open: boolean; live: boolean; focusQuery?: string; onToggle: () => void; sessionId: string; onJump: (id: number) => void; annotatable: boolean; annotation?: Annotation };
+// Events a rule can be drafted from (rule_drafts.from_event): commands, files, web, tools.
+const RULEABLE = new Set(['shell', 'file_read', 'context_read', 'file_edit', 'web', 'mcp']);
+
+type TraceRowProps = { e: TimelineItem; open: boolean; live: boolean; focusQuery?: string; onToggle: () => void; sessionId: string; onJump: (id: number) => void; annotatable: boolean; annotation?: Annotation; ruleable: boolean };
 
 // Opening one row (or a poll landing) used to re-render every row on the page,
 // markdown and all. A row only changes with its own props; its callbacks are
@@ -316,10 +321,11 @@ type TraceRowProps = { e: TimelineItem; open: boolean; live: boolean; focusQuery
 const TraceRow = memo(TraceRowView, (a, b) =>
   a.e === b.e && a.open === b.open && a.live === b.live && a.focusQuery === b.focusQuery &&
   a.sessionId === b.sessionId && a.annotatable === b.annotatable && a.annotation === b.annotation &&
+  a.ruleable === b.ruleable &&
   a.onJump === b.onJump,
 );
 
-function TraceRowView({ e, open, live, focusQuery, onToggle, sessionId, onJump, annotatable, annotation }: TraceRowProps) {
+function TraceRowView({ e, open, live, focusQuery, onToggle, sessionId, onJump, annotatable, annotation, ruleable }: TraceRowProps) {
   const failed = e.status === 'error' || e.status === 'failed';
   const text = TEXT_KINDS.has(e.category) ? e.detail?.trim() : '';
   return (
@@ -337,6 +343,12 @@ function TraceRowView({ e, open, live, focusQuery, onToggle, sessionId, onJump, 
             <EventDetailPanel item={e} sessionId={sessionId} onJump={onJump} compact />
             {annotatable && <div style={{ marginTop: 10 }}><Feedback sessionId={sessionId} eventId={e.id} compact /></div>}
             {focusQuery && <p className="mono faint" style={{ fontSize: 11, margin: '8px 0 0' }}>Matched “{focusQuery}”</p>}
+            {ruleable && RULEABLE.has(e.category) && (e.target || e.tool) && (
+              // A merged span's end half carries the result, so draft from it when there is one.
+              <a className="vbtn vbtn-ghost vbtn-sm" style={{ marginTop: 8, marginLeft: -10 }} href={`#/rules?from=${e.end_id ?? e.id}`}>
+                <Icon name="filter" size={13} />Make a rule from this
+              </a>
+            )}
           </div>
         )}
       </div>

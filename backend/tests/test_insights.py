@@ -642,3 +642,31 @@ def test_refresh_skips_unchanged_findings_until_last_seen_is_due():
         conn.execute("UPDATE insight_findings SET last_seen = ? WHERE fingerprint = 'fp-refresh'",
                      (_ts(minutes_ago=30),))
     assert refresh({**finding, "severity": "critical"}, _ts()) == 1  # last_seen due
+
+
+def test_dismiss_reason_is_kept_and_cleared_on_reopen():
+    from fastapi.testclient import TestClient
+
+    from app import main
+
+    finding = {
+        "fingerprint": "fp-reason", "id": "rule", "pillar": "cost", "tier": 2,
+        "severity": "warn", "title": "t", "detail": "d", "recommendation": "r", "evidence": [],
+    }
+    with db.insight_findings_repo() as repo:
+        repo.insert(finding, _ts())
+    client = TestClient(main.app, base_url="http://127.0.0.1")
+
+    def stored() -> dict:
+        res = insights.compute_insights(days=1)
+        return next(f for f in res["insights"] if f["fingerprint"] == "fp-reason")
+
+    assert client.post("/v1/insights/fp-reason/dismiss", json={"reason": "  expected in CI  "}).status_code == 200
+    f = stored()
+    assert f["status"] == "dismissed" and f["dismiss_reason"] == "expected in CI" and f["dismissed_at"]
+    assert client.post("/v1/insights/fp-reason/restore").status_code == 200
+    f = stored()
+    assert f["status"] == "active" and f["dismiss_reason"] is None
+    # No body still works (older dashboards).
+    assert client.post("/v1/insights/fp-reason/dismiss").status_code == 200
+    assert stored()["dismiss_reason"] is None

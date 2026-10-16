@@ -18,6 +18,10 @@ never "Breached". False positives are expected and cheap to dismiss.
 3. Put its thresholds in ``CONSTANTS[rule_id]``.
 4. Add a fires / doesn't-fire test pair in ``backend/tests/test_insights.py``.
 
+Rules end users write in the dashboard are not Python: they are declarative
+specs in ``user_rules.py``, compiled at runtime and run after the built-ins
+here, feeding the same lifecycle.
+
 The finding's ``subject`` must be the stable entity the finding is about
 (command string, path, cwd, session id) — it drives the lifecycle
 fingerprint, so re-detections refresh the same finding instead of creating
@@ -60,7 +64,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import db
+from . import db, user_rules
 from .store import use as use_store
 from .insight_lifecycle import FindingsStore
 from .insight_snapshot import Event, Snapshot, build_snapshot
@@ -1013,7 +1017,9 @@ def _stored_to_finding(r: Any) -> dict[str, Any]:
     return {
         "id": r["rule_id"],
         "fingerprint": r["fingerprint"],
-        "group_title": GROUP_TITLES.get(r["rule_id"], r["pillar"]),
+        "group_title": (
+            GROUP_TITLES.get(r["rule_id"]) or user_rules.group_title(r["rule_id"]) or r["pillar"]
+        ),
         "pillar": r["pillar"],
         "tier": r["tier"],
         "severity": r["severity"],
@@ -1026,6 +1032,9 @@ def _stored_to_finding(r: Any) -> dict[str, Any]:
         "first_seen": r["first_seen"],
         "last_seen": r["last_seen"],
         "resolved_at": r["resolved_at"],
+        "dismissed_at": r["dismissed_at"] if "dismissed_at" in r.keys() else None,
+        "dismiss_reason": r["dismiss_reason"] if "dismiss_reason" in r.keys() else None,
+        "user_rule": r["rule_id"].startswith(user_rules.ID_PREFIX),
     }
 
 
@@ -1065,12 +1074,23 @@ def _reconcile(store: FindingsStore, findings: list[dict[str, Any]]) -> list[dic
         prev = stored.get(fp)
         if prev is None:
             store.insert(f, now)
+            # Notify about new critical/warn findings and every user-rule match,
+            # but not on the very first pass (an empty store), which would flood
+            # the inbox with history.
+            notify = getattr(store, "notify_new_finding", None)
+            if notify and stored and (f.get("severity") in ("critical", "warn") or f.get("user_rule")):
+                notify(f, now)
             f["status"], f["first_seen"], f["last_seen"] = "active", now, now
         else:
             # Re-detection: refresh the snapshot; reopen resolved, keep dismissed hidden.
             status = "active" if prev["status"] == "resolved" else prev["status"]
             store.refresh(f, status, now)
             f["status"], f["first_seen"], f["last_seen"] = status, prev["first_seen"], now
+            if status == "dismissed":
+                # Rows (sqlite3.Row or a store's dicts) may predate these fields.
+                keys = prev.keys()
+                f["dismissed_at"] = prev["dismissed_at"] if "dismissed_at" in keys else None
+                f["dismiss_reason"] = prev["dismiss_reason"] if "dismiss_reason" in keys else None
         f["resolved_at"] = None
         out.append(f)
     for fp, r in stored.items():
@@ -1096,7 +1116,8 @@ def compute_insights(
     lifecycle; per-session mode is ephemeral. ``progress(done, total)`` is
     called after the snapshot, each rule and the reconcile.
     """
-    total = len(RULES) + 2
+    custom = user_rules.active_rules()
+    total = len(RULES) + len(custom) + 2
     step = 0
 
     def advance() -> None:
@@ -1114,6 +1135,9 @@ def compute_insights(
     for meta in RULES.values():
         if not (session_id and meta.aggregate_only):
             findings.extend(meta.fn(snap))
+        advance()
+    for custom_rule in custom:
+        findings.extend(custom_rule.run(snap))
         advance()
     if session_id is None:
         with db.insight_findings_repo() as store:
@@ -1229,13 +1253,17 @@ def forget_shared_insights() -> None:
         _shared_done.clear()
 
 
-def _patch_shared_status(fingerprint: str, status: str) -> None:
+def _patch_shared_status(
+    fingerprint: str, status: str, *, dismissed_at: str | None = None, reason: str | None = None
+) -> None:
     """Apply a dismiss/restore to every stored result, so the next read shows it
     without a new pass."""
     with _shared_lock:
         for key, (at, result) in list(_shared_done.items()):
             findings = [
-                {**f, "status": status} if f.get("fingerprint") == fingerprint else f
+                {**f, "status": status, "dismissed_at": dismissed_at, "dismiss_reason": reason}
+                if f.get("fingerprint") == fingerprint
+                else f
                 for f in result["insights"]
             ]
             patched = {**result, "insights": findings}
@@ -1248,12 +1276,14 @@ def session_exists(session_id: str) -> bool:
     return db.session_exists(session_id)
 
 
-def set_finding_status(fingerprint: str, status: str) -> bool:
-    """Manual lifecycle control: dismiss or restore. Returns False if unknown."""
+def set_finding_status(fingerprint: str, status: str, reason: str | None = None) -> bool:
+    """Manual lifecycle control: dismiss (optionally saying why) or restore.
+    Returns False if unknown."""
     assert status in ("dismissed", "active")
-    changed = db.set_insight_finding_status(
-        fingerprint, status, db.now() if status == "dismissed" else None
-    )
+    dismissed = status == "dismissed"
+    reason = (reason or "").strip() or None if dismissed else None
+    dismissed_at = db.now() if dismissed else None
+    changed = db.set_insight_finding_status(fingerprint, status, dismissed_at, reason)
     if changed:
-        _patch_shared_status(fingerprint, status)
+        _patch_shared_status(fingerprint, status, dismissed_at=dismissed_at, reason=reason)
     return changed

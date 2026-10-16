@@ -139,6 +139,18 @@ export function SettingsView({ sidebarOpen, onSidebarOpenChange, navCollapsed, o
               <Row label="Overview range" hint="Used until you pick another range on the page.">
                 <Seg id="set-range" value={prefs.range} onChange={pref('range')} options={[{ k: 1, l: '1d' }, { k: 7, l: '7d' }, { k: 30, l: '30d' }, { k: 90, l: '90d' }]} />
               </Row>
+              <Row label="macOS notifications" hint="In the Mac app, new findings and rule matches also arrive as macOS notifications. They always appear in the bell's inbox.">
+                <Switch
+                  on={settings?.notify_desktop ?? true}
+                  disabled={!settings}
+                  label="macOS notifications"
+                  onChange={(on) => {
+                    if (!settings) return;
+                    setSettings({ ...settings, notify_desktop: on });
+                    updateSettings({ notify_desktop: on }).then(setSettings).catch(() => setSettings({ ...settings, notify_desktop: !on }));
+                  }}
+                />
+              </Row>
             </Section>
 
             <AiSection settings={settings} onSettings={setSettings} />

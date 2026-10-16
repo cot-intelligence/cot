@@ -205,7 +205,7 @@ export function ShareCardModal({ metrics, onClose }: ShareCardModalProps) {
                 placeholder="My coding footprint"
                 className="w-full border rounded-control border-line/[0.16] bg-surface px-2.5 py-2 font-mono text-xs text-fg placeholder:text-fg/40 focus:border-hot focus:outline-none"
               />
-              <p className="font-mono text-label text-fg/40">Last word becomes the accent.</p>
+              <p className="font-mono text-label text-fg/40">Up to two lines. The first metric you pick is the big number.</p>
             </div>
 
             <div className="space-y-1.5">

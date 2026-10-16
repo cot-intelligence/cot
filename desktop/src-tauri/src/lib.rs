@@ -4,6 +4,7 @@
 #[cfg(target_os = "macos")]
 mod chrome;
 mod collector;
+mod notify;
 mod updates;
 mod sandbox;
 mod zoom;
@@ -506,6 +507,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .manage(AppState {
             home: CotHome::from_env(),
             collector: Mutex::new(None),
@@ -534,6 +536,7 @@ pub fn run() {
             build_tray(&handle)?;
             watch_collector(handle.clone());
             restart_collector(&handle);
+            notify::watch(handle.clone());
             updates::schedule(handle);
             Ok(())
         })

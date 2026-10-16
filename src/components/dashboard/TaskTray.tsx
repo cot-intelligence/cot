@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useRef, useState } from 'react';
-import { getTasks, type TaskRecent, type TaskRunning } from '../../lib/api';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { getInbox, getTasks, markInboxRead, type Inbox, type InboxItem, type TaskRecent, type TaskRunning } from '../../lib/api';
 import { subscribeStream } from '../../lib/useServerRevision';
 import { agentLabel } from '../forest/AgentMark';
 import { fmt, project } from '../forest/format';
@@ -196,7 +197,28 @@ export function TaskTray() {
 
   const done = saved.done;
   const busy = running.length > 0;
-  const label = [busy ? `${running.length} in progress` : null, done.length ? `${done.length} done` : null].filter(Boolean).join(', ') || 'Nothing in progress';
+  // The notifications inbox (new findings, rule matches) lives in the same tray.
+  const queryClient = useQueryClient();
+  const { data: inbox } = useQuery<Inbox>({ queryKey: ['inbox'], queryFn: () => getInbox(8), refetchInterval: 30_000 });
+  const unread = inbox?.unread ?? 0;
+  const readInbox = async (ids?: number[]) => {
+    queryClient.setQueryData<Inbox>(['inbox'], (prev) =>
+      prev
+        ? {
+            ...prev,
+            unread: ids ? Math.max(0, prev.unread - prev.items.filter((n) => ids.includes(n.id) && !n.read_at).length) : 0,
+            items: prev.items.map((n) => (!ids || ids.includes(n.id) ? { ...n, read_at: n.read_at ?? new Date().toISOString() } : n)),
+          }
+        : prev,
+    );
+    try {
+      await markInboxRead(ids);
+    } finally {
+      void queryClient.invalidateQueries({ queryKey: ['inbox'] });
+    }
+  };
+  const badge = unread + done.length;
+  const label = [unread ? `${unread} unread` : null, busy ? `${running.length} in progress` : null, done.length ? `${done.length} done` : null].filter(Boolean).join(', ') || 'Nothing in progress';
 
   return (
     <div className="tray" ref={root}>
@@ -210,8 +232,8 @@ export function TaskTray() {
         title="Activity"
         onClick={() => setOpen((o) => !o)}>
         <Icon name="bell" size={17} />
-        {done.length > 0 ? (
-          <span className="tray-count" aria-hidden="true">{done.length > 9 ? '9+' : done.length}</span>
+        {badge > 0 ? (
+          <span className="tray-count" aria-hidden="true">{badge > 9 ? '9+' : badge}</span>
         ) : busy ? (
           <span className="tray-live live" aria-hidden="true" />
         ) : null}
@@ -226,7 +248,40 @@ export function TaskTray() {
             animate={{ opacity: 1, transform: 'translateY(0px) scale(1)' }}
             exit={{ opacity: 0, transform: 'translateY(-2px) scale(0.98)', transition: { duration: 0.1 } }}
             transition={{ duration: 0.16, ease: EASE_OUT }}>
-            <section aria-labelledby="tray-run">
+            <section aria-labelledby="tray-inbox">
+              <div className="tray-h">
+                <span id="tray-inbox" className="label">Notifications{unread ? ` · ${unread} new` : ''}</span>
+                {unread > 0 && <button type="button" className="tray-clear" onClick={() => void readInbox()}>Mark all read</button>}
+              </div>
+              {inbox && inbox.items.length > 0 ? (
+                <ul className="tray-l">
+                  {inbox.items.map((n) => (
+                    <li key={n.id}>
+                      <a
+                        className="tray-i"
+                        data-read={n.read_at ? '' : undefined}
+                        href={n.href ?? '#/findings'}
+                        onClick={() => {
+                          void readInbox([n.id]);
+                          setOpen(false);
+                        }}>
+                        <span className="tray-ic" data-tone={inboxTone(n)} aria-hidden="true">
+                          <Icon name={n.kind === 'finding' ? 'findings' : 'bell'} size={13} />
+                        </span>
+                        <span className="tray-t">
+                          <b className="truncate">{n.title}</b>
+                          {n.body && <span className="tray-d truncate">{n.body}</span>}
+                        </span>
+                        <span className="tray-ago mono">{fmt.ago(n.created_at, now)}</span>
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="tray-empty">New findings and rule matches show up here.</p>
+              )}
+            </section>
+            <section aria-labelledby="tray-run" className="tray-sec">
               <div className="tray-h">
                 <span id="tray-run" className="label">In progress{busy ? ` · ${running.length}` : ''}</span>
               </div>
@@ -298,4 +353,10 @@ export function TaskTray() {
       </AnimatePresence>
     </div>
   );
+}
+
+function inboxTone(n: InboxItem): 'error' | 'warn' | undefined {
+  if (n.severity === 'critical') return 'error';
+  if (n.severity === 'warn') return 'warn';
+  return undefined;
 }
