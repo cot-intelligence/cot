@@ -75,7 +75,7 @@ def test_manual_plugin_inferred_without_its_own_manifest_entry(fresh_db, monkeyp
 
 def test_desktop_spec_serves_the_plugin(tmp_path, monkeypatch):
     repo = Path(__file__).resolve().parents[2]
-    tree = ast.parse((repo / "macos/packaging/cot-collector.spec").read_text())
+    tree = ast.parse((repo / "desktop/packaging/cot-collector.spec").read_text())
     analysis = next(n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "Analysis")
     datas = next(k.value for k in analysis.keywords if k.arg == "datas")
     for entry in datas.elts:

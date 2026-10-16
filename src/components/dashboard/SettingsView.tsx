@@ -137,7 +137,7 @@ export function SettingsView({ sidebarOpen, onSidebarOpenChange, navCollapsed, o
                 <Seg id="set-start" value={prefs.start} onChange={pref('start')} options={[{ k: 'overview', l: 'Overview' }, { k: 'sessions', l: 'Sessions' }, { k: 'findings', l: 'Findings' }]} />
               </Row>
               <Row label="Overview range" hint="Used until you pick another range on the page.">
-                <Seg id="set-range" value={prefs.range} onChange={pref('range')} options={[{ k: 7, l: '7d' }, { k: 30, l: '30d' }, { k: 90, l: '90d' }]} />
+                <Seg id="set-range" value={prefs.range} onChange={pref('range')} options={[{ k: 1, l: '1d' }, { k: 7, l: '7d' }, { k: 30, l: '30d' }, { k: 90, l: '90d' }]} />
               </Row>
             </Section>
 
@@ -461,7 +461,7 @@ function DataSection({ onExport }: { onExport: () => void }) {
         <Switch on={!!r?.policy.enabled} disabled={!r} label="Retention" onChange={(v) => void set({ enabled: v })} />
       </Row>
       <Row label="Window" hint={r ? `A ${r.policy.days}-day window would remove ${fmt.n(r.preview_sessions)} sessions and ${fmt.n(r.preview_events)} events.` : undefined}>
-        <Seg id="set-ret" value={r?.policy.days ?? 30} onChange={(d) => void set({ days: d })} options={WINDOWS} />
+        <Seg id="set-ret" value={r?.policy.days ?? 30} onChange={(d) => void set({ days: d })} options={WINDOWS} disabled={!r?.policy.enabled} disabledHint="Turn on retention to choose a window" />
       </Row>
       <Row
         label="Clean up"

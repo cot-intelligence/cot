@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion';
 import { useEffect, useMemo, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   dismissInsight,
   getInsights,
@@ -44,6 +45,7 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
   const [refreshKey, setRefreshKey] = useState(0);
   const [sel, setSel] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const queryClient = useQueryClient();
   const { data: ins, error } = usePolling<InsightsResponse>(
     ['insights', days, refreshKey || undefined].filter((x) => x !== undefined),
     () => getInsights(days, 'all'),
@@ -74,6 +76,8 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
     } finally {
       setBusy(false);
       setRefreshKey((k) => k + 1);
+      // The nav badge counts open findings from /v1/stats.
+      void queryClient.invalidateQueries({ queryKey: ['stats'] });
     }
   };
 

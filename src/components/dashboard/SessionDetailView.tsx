@@ -1,8 +1,10 @@
 import { motion } from 'framer-motion';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getSessionDetail, getSessionExtensions, sessionExportUrl, setSessionBookmarked, type ComponentEntry, type SessionDetail, type Store, type TimelineItem } from '../../lib/api';
+import { getSessionDetail, getSessionExtensions, sessionExportUrl, setSessionBookmarked, type Annotation, type ComponentEntry, type SessionDetail, type Store, type TimelineItem } from '../../lib/api';
 import { setDocumentTitle } from '../../lib/documentTitle';
+import { cachedSessionSummary, seededSessionDetail, sessionDetailKey } from '../../lib/sessionDetailQuery';
+import { useFullEventDetail } from '../../lib/useFullEventDetail';
 import { sessionHref, SessionStoreContext } from '../../lib/sessionStore';
 import { categoryLabel, fmt, modelLabel, project } from '../forest/format';
 import { CATEGORY_ICON, Icon } from '../forest/icons';
@@ -11,7 +13,11 @@ import { extensionPageHref, SCOPE_LABEL } from './ExtensionsView';
 import { ActivityMap } from './session/ActivityMap';
 import { AttachmentTags } from './session/AttachmentTags';
 import { EventDetailPanel } from './session/EventDetailPanel';
-import { InsightsTab } from './session/tabs/InsightsTab';
+import { Feedback, RatingMark, useAnnotations } from './session/Feedback';
+
+// The findings tab draws charts (recharts); load it when the tab is opened, not
+// with every session.
+const InsightsTab = lazy(() => import('./session/tabs/InsightsTab').then((m) => ({ default: m.InsightsTab })));
 
 interface SessionDetailViewProps {
   sessionId: string;
@@ -37,13 +43,18 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   const [open, setOpen] = useState<number | null>(focusEventId ?? null);
   const [shown, setShown] = useState(PAGE);
   const queryClient = useQueryClient();
-  const key = store === 'main' ? ['sessionDetail', sessionId] : ['sessionDetail', store, sessionId];
+  const key = sessionDetailKey(sessionId, store);
   // Only a live session changes, so only a live one refetches: a finished trace can be large,
   // and re-reading it every 15s holds up whatever the collector is asked next.
-  const { data: detail } = useQuery({
+  // Until it arrives, the row from the sessions list (if cached) paints the header and figures.
+  const { data: detail, isPlaceholderData: seeded } = useQuery({
     queryKey: key,
     queryFn: () => getSessionDetail(sessionId, store),
     refetchInterval: (q) => (store === 'main' && q.state.data?.summary.status === 'active' ? 15000 : false),
+    placeholderData: () => {
+      const row = store === 'main' ? cachedSessionSummary(queryClient, sessionId) : undefined;
+      return row ? seededSessionDetail(row) : undefined;
+    },
   });
 
   // Which plugins, skills and MCP servers this session (and its subagents) used.
@@ -53,6 +64,10 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
     enabled: store === 'main',
     refetchInterval: store === 'main' && detail?.summary.status === 'active' ? 30000 : false,
   });
+
+  // Thumbs, labels and notes; only traced sessions take them.
+  const { data: annotations } = useAnnotations(sessionId, store === 'main');
+  const ratedEvents = useMemo(() => new Map((annotations?.events ?? []).map((a) => [a.event_id, a])), [annotations]);
 
   useEffect(() => {
     setTab('timeline');
@@ -148,8 +163,8 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
     }
   };
   const tabs: { k: Tab; l: string }[] = [
-    { k: 'timeline', l: `Timeline · ${events.length}` },
-    { k: 'files', l: `Files · ${fileCount}` },
+    { k: 'timeline', l: `Timeline · ${seeded ? s.event_count : events.length}` },
+    { k: 'files', l: seeded ? 'Files' : `Files · ${fileCount}` },
     { k: 'findings', l: 'Findings' },
     { k: 'map', l: 'Map' },
   ];
@@ -194,6 +209,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
                   ))}
                 </div>
               )}
+              {store === 'main' && <div style={{ marginTop: 12 }}><Feedback sessionId={sessionId} /></div>}
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
               <a className="vbtn vbtn-quiet vbtn-sm" href={sessionExportUrl(s.id, store)} download><Icon name="download" size={14} />Export</a>
@@ -221,13 +237,23 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
             ))}
           </div>
 
-          {tab === 'timeline' && (
+          {seeded && (
+            <div className="card" aria-busy="true">
+              <div className="card-b" style={{ display: 'grid', gap: 14 }}>
+                {[72, 54, 86, 61, 78, 47].map((w, i) => (
+                  <span key={i} className="sk" style={{ display: 'block', height: 18, width: `${w}%` }} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {!seeded && tab === 'timeline' && (
             <div className="grid-2 grid-trace" style={{ marginTop: 0 }}>
               <div className="card">
                 <div className="card-b">
                   <ol className="tl">
                     {list.slice(0, shown).map((e) => (
-                      <TraceRow key={e.id} e={e} live={s.status === 'active'} open={open === e.id} focusQuery={e.id === focusEventId ? focusQuery : undefined} onToggle={() => setOpen((o) => (o === e.id ? null : e.id))} sessionId={sessionId} onJump={revealEvent} ruleable={store === 'main'} />
+                      <TraceRow key={e.id} e={e} live={s.status === 'active'} open={open === e.id} focusQuery={e.id === focusEventId ? focusQuery : undefined} onToggle={() => setOpen((o) => (o === e.id ? null : e.id))} sessionId={sessionId} onJump={revealEvent} annotatable={store === 'main'} annotation={ratedEvents.get(e.id)} ruleable={store === 'main'} />
                     ))}
                   </ol>
                   {list.length === 0 && <div className="empty">No events{cat ? ' of this kind' : ''}.</div>}
@@ -238,7 +264,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
                   )}
                 </div>
               </div>
-              <div style={{ display: 'grid', gap: 4, alignContent: 'start', position: 'sticky', top: 0 }}>
+              <div className="trace-filter scroll-thin">
                 <span className="label" style={{ padding: '0 8px 6px' }}>Filter</span>
                 {[null, ...Object.keys(counts).sort((a, b) => counts[b] - counts[a])].map((k) => (
                   <button
@@ -256,7 +282,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
             </div>
           )}
 
-          {tab === 'files' && (
+          {!seeded && tab === 'files' && (
             <div className="grid-2e" style={{ marginTop: 0 }}>
               <FileCard title="Edited" icon="edit" color="var(--v-olive)" items={c.files_edited} strip={strip} />
               <FileCard title="Read" icon="file" color="var(--v-cobalt)" items={c.files_read} strip={strip} />
@@ -267,11 +293,11 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
             </div>
           )}
 
-          {tab === 'findings' && (
-            <div className="card"><div className="card-b"><InsightsTab detail={detail} /></div></div>
+          {!seeded && tab === 'findings' && (
+            <div className="card"><div className="card-b"><Suspense fallback={null}><InsightsTab detail={detail} /></Suspense></div></div>
           )}
 
-          {tab === 'map' && (
+          {!seeded && tab === 'map' && (
             <div className="card"><div className="card-b" style={{ overflowX: 'auto' }}>
               <ActivityMap items={events} sessionId={sessionId} activeKey={null} onJump={(it) => revealEvent(it.id)} />
             </div></div>
@@ -285,7 +311,19 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
 // Events a rule can be drafted from (rule_drafts.from_event): commands, files, web, tools.
 const RULEABLE = new Set(['shell', 'file_read', 'context_read', 'file_edit', 'web', 'mcp']);
 
-function TraceRow({ e, open, live, focusQuery, onToggle, sessionId, onJump, ruleable }: { e: TimelineItem; open: boolean; live: boolean; focusQuery?: string; onToggle: () => void; sessionId: string; onJump: (id: number) => void; ruleable: boolean }) {
+type TraceRowProps = { e: TimelineItem; open: boolean; live: boolean; focusQuery?: string; onToggle: () => void; sessionId: string; onJump: (id: number) => void; annotatable: boolean; annotation?: Annotation; ruleable: boolean };
+
+// Opening one row (or a poll landing) used to re-render every row on the page,
+// markdown and all. A row only changes with its own props; its callbacks are
+// recreated each render but always act on the same row, so they're not compared.
+const TraceRow = memo(TraceRowView, (a, b) =>
+  a.e === b.e && a.open === b.open && a.live === b.live && a.focusQuery === b.focusQuery &&
+  a.sessionId === b.sessionId && a.annotatable === b.annotatable && a.annotation === b.annotation &&
+  a.ruleable === b.ruleable &&
+  a.onJump === b.onJump,
+);
+
+function TraceRowView({ e, open, live, focusQuery, onToggle, sessionId, onJump, annotatable, annotation, ruleable }: TraceRowProps) {
   const failed = e.status === 'error' || e.status === 'failed';
   const text = TEXT_KINDS.has(e.category) ? e.detail?.trim() : '';
   return (
@@ -293,14 +331,15 @@ function TraceRow({ e, open, live, focusQuery, onToggle, sessionId, onJump, rule
       <span className="tl-ic"><Icon name={CATEGORY_ICON[e.category] ?? 'file'} size={15} /></span>
       <div style={{ minWidth: 0 }}>
         <button type="button" onClick={onToggle} aria-expanded={open} style={{ all: 'unset', cursor: 'pointer', display: 'block', width: '100%' }}>
-          <div className="tl-t">{e.tool ?? categoryLabel(e.category)}{failed ? <span className="vchip c-critical" style={{ marginLeft: 8 }}>failed</span> : null}{live && e.ongoing === true ? <span className="vchip c-ok" style={{ marginLeft: 8 }}><span className="dot" />running</span> : null}</div>
+          <div className="tl-t">{e.tool ?? categoryLabel(e.category)}{failed ? <span className="vchip c-critical" style={{ marginLeft: 8 }}>failed</span> : null}{live && e.ongoing === true ? <span className="vchip c-ok" style={{ marginLeft: 8 }}><span className="dot" />running</span> : null}<RatingMark annotation={annotation} /></div>
           {e.target && <div className="tl-x" title={e.target}>{e.target}</div>}
         </button>
-        {text && <TraceText kind={e.category} text={text} />}
+        {text && <TraceText kind={e.category} text={text} item={e} sessionId={sessionId} />}
         {e.attachments && e.attachments.length > 0 && <div style={{ marginTop: 6 }}><AttachmentTags attachments={e.attachments} /></div>}
         {open && (
           <div className="tl-detail">
             <EventDetailPanel item={e} sessionId={sessionId} onJump={onJump} compact />
+            {annotatable && <div style={{ marginTop: 10 }}><Feedback sessionId={sessionId} eventId={e.id} compact /></div>}
             {focusQuery && <p className="mono faint" style={{ fontSize: 11, margin: '8px 0 0' }}>Matched “{focusQuery}”</p>}
             {ruleable && RULEABLE.has(e.category) && (e.target || e.tool) && (
               // A merged span's end half carries the result, so draft from it when there is one.
@@ -317,12 +356,18 @@ function TraceRow({ e, open, live, focusQuery, onToggle, sessionId, onJump, rule
 }
 
 /** Prompt, reply and thinking text in the trace. Thinking starts folded; long text clamps with a toggle. */
-function TraceText({ kind, text }: { kind: string; text: string }) {
-  const long = text.length > 320 || text.split('\n').length > 5;
+function TraceText({ kind, text, item, sessionId }: { kind: string; text: string; item: TimelineItem; sessionId: string }) {
+  // The session payload carries long bodies as a preview (detail_truncated);
+  // expanding fetches the rest, so a long prompt reads in full, not cut at the preview.
+  const truncated = item.detail_truncated === true;
+  const long = truncated || text.length > 320 || text.split('\n').length > 5;
   const [open, setOpen] = useState(false);
+  const { resolved, loading } = useFullEventDetail(open && truncated ? item : null, sessionId);
+  const full = open && truncated && typeof resolved?.detail === 'string' ? resolved.detail.trim() : text;
   return (
     <div className="tx" data-kind={kind} data-open={open || !long}>
-      <p className="tx-b">{text}</p>
+      <p className="tx-b">{full}</p>
+      {open && loading && <p className="mono faint" style={{ fontSize: 11, margin: '6px 0 0' }}>Loading the rest…</p>}
       {long && (
         <button type="button" className="tx-more" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
           {open ? 'Show less' : kind === 'thought' ? 'Show thinking' : 'Show more'}

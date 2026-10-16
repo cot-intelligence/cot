@@ -7,12 +7,9 @@ The React UI and the backend are unchanged. The app bundles:
 
 - `Contents/Resources/cot-collector/`, the collector frozen by PyInstaller
   (onedir, so launches don't unpack anything), built from
-  `macos/packaging/cot-collector.spec`, which it shares with the Swift app
+  `desktop/packaging/cot-collector.spec`
 - `Contents/Resources/static/`, the vite build, passed to the collector as
   `COT_STATIC_DIR`
-
-The Swift app in `macos/` uses the same bundle id (`run.cot.app`) and `~/.cot`.
-Run one or the other, not both.
 
 ## Build
 
@@ -49,8 +46,8 @@ it and keeps collecting; Quit stops the collector (SIGTERM, then SIGKILL after
 gone (`COT_PARENT_PID`) and exits.
 
 The window only navigates to `127.0.0.1`/`localhost`; other links open in the
-browser. The dashboard page gets one IPC permission, dragging the window by
-its header.
+browser. The dashboard page gets two IPC permissions: dragging the window by
+its header, and double-clicking the header to zoom it.
 
 ## Updates
 

@@ -1,7 +1,6 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { animate, motion, useMotionTemplate, useMotionValue } from 'framer-motion';
 import { Dashboard } from './components/dashboard/Dashboard';
-import { Onboarding } from './components/onboarding/Onboarding';
 import { UpdateBanner } from './components/ui/UpdateBanner';
 import { getSettings, updateSettings } from './lib/api';
 import { setDocumentTitle } from './lib/documentTitle';
@@ -9,6 +8,11 @@ import { identifyInstall } from './lib/analytics';
 import type { AgentId } from './lib/agents';
 import { readOnboarded, readSavedAgents, writeOnboarded } from './lib/settings';
 import { getPrefs } from './lib/prefs';
+
+// First-run setup only: returning users never download it.
+const Onboarding = lazy(() =>
+  import('./components/onboarding/Onboarding').then((m) => ({ default: m.Onboarding })),
+);
 
 type Origin = { x: number; y: number };
 
@@ -74,7 +78,9 @@ export function App() {
   return (
     <>
       {view === 'checking' ? null : view === 'onboarding' ? (
-        <Onboarding onComplete={handleComplete} />
+        <Suspense fallback={null}>
+          <Onboarding onComplete={handleComplete} />
+        </Suspense>
       ) : (
         <>
           <Dashboard onSetup={openSetup} />
@@ -121,11 +127,13 @@ function FluidReveal({
         animate(radius, to, { duration, ease, delay, onComplete: () => resolve() });
       });
 
+    // About half a second in all: long enough to read as a transition, short
+    // enough not to feel like waiting.
     (async () => {
-      await play(maxDist, 0.5);
+      await play(maxDist, 0.25);
       if (cancelled) return;
       onCovered();
-      await play(0, 0.6, 0.08);
+      await play(0, 0.25);
       if (cancelled) return;
       onDone();
     })();

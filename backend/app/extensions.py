@@ -747,7 +747,9 @@ def _cursor_tool_index() -> dict[str, dict[str, Any]]:
         for sdir in server_dirs:
             meta = _dict(_read_json(sdir / "SERVER_METADATA.json"))
             name = _str(meta.get("serverName")) or sdir.name
-            entry = servers.setdefault(name, {"tools": {}, "projects": 0})
+            # sizes: each tool definition's bytes on disk, a proxy for what its
+            # schema costs in the prompt (context_cost estimates from it).
+            entry = servers.setdefault(name, {"tools": {}, "sizes": {}, "projects": 0})
             entry["projects"] += 1
             try:
                 tool_files = list((sdir / "tools").glob("*.json"))
@@ -758,6 +760,10 @@ def _cursor_tool_index() -> dict[str, dict[str, Any]]:
                     continue
                 data = _dict(_read_json(tf))
                 entry["tools"][tf.stem] = _str(data.get("description"))
+                try:
+                    entry["sizes"][tf.stem] = tf.stat().st_size
+                except OSError:
+                    pass
     return servers
 
 

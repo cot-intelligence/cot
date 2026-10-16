@@ -16,6 +16,13 @@ export function sourceLabel(source: string): string {
       return 'API';
     case 'custom':
       return 'Custom app';
+    // Agents that arrive over OpenTelemetry, named from their service.name.
+    case 'gemini-cli':
+      return 'Gemini CLI';
+    case 'github-copilot':
+      return 'GitHub Copilot';
+    case 'otel':
+      return 'OpenTelemetry';
     default:
       return source
         .replace(/[_-]+/g, ' ')

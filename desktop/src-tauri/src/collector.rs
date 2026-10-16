@@ -1,7 +1,6 @@
 //! Where the collector lives and how its process is started and stopped.
 //!
-//! Ported from macos/Sources/CollectorController.swift and
-//! CollectorEndpoint.swift. The rules are the same with one change: if another
+//! Ported from the original Swift app, with one change: if another
 //! collector already answers on the port, the app refuses to start rather than
 //! attaching to it, so there is never a second writer on ~/.cot/cot.db.
 

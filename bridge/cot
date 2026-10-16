@@ -4,16 +4,15 @@
 from __future__ import annotations
 
 import base64
+# subprocess, shutil and mimetypes are imported where used: every hook event
+# starts this script, and they are ~15 ms of import time it never needs.
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
-import mimetypes
 import os
 import re
-import shutil
 import socket
 import struct
-import subprocess
 import sys
 import threading
 import time
@@ -190,6 +189,24 @@ def _probe_health() -> bool:
         return False
 
 
+# Spooled events per request when the collector takes batches.
+_SPOOL_POST_BATCH = 100
+
+
+def _collector_accepts_batches(endpoint: str | None = None) -> bool:
+    """Whether the collector advertises batched ingest. An older one rejects an
+    array as malformed, and a rejected send counts as delivered, so batches
+    only go to a collector that says it takes them."""
+    try:
+        with urllib.request.urlopen(
+            f"{(endpoint or COT_ENDPOINT).rstrip('/')}/health", timeout=_PROBE_TIMEOUT_S
+        ) as resp:
+            body = json.loads(resp.read() or b"{}")
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return False
+    return isinstance(body, dict) and "ingest_batch" in (body.get("features") or [])
+
+
 def _collector_reachable() -> bool:
     """False while a recent unreachable send says the collector is down, so a
     hung collector costs one timeout rather than one per send. After the
@@ -212,7 +229,7 @@ def _collector_reachable() -> bool:
     return False
 
 
-def _send_once(url: str, payload: dict, timeout: float) -> bool:
+def _send_once(url: str, payload: dict | list[dict], timeout: float) -> bool:
     """POST one payload. Returns True on success, False if the collector could
     not be reached (the only condition that should trigger spooling)."""
     data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
@@ -316,20 +333,34 @@ def _spool_flush(timeout: float = 3.0, *, endpoint: str | None = None) -> bool:
                 pass
             return True
         reachable = True
+        limit = min(len(lines), _SPOOL_FLUSH_BATCH)
+        # Consecutive events for the same endpoint go as one request (one write
+        # transaction on the collector) when it takes batches; order is kept.
+        per_post = _SPOOL_POST_BATCH if limit > 1 and _collector_accepts_batches(endpoint) else 1
         i = 0
-        for i in range(min(len(lines), _SPOOL_FLUSH_BATCH)):
-            try:
-                rec = json.loads(lines[i])
-            except json.JSONDecodeError:
-                continue  # skip a corrupt line rather than wedge the queue
-            target = _spool_target(rec, endpoint)
-            if not target:
-                continue
-            if not _send_once(target, rec.get("payload", {}), timeout):
+        while i < limit:
+            group: list[dict] = []
+            target = ""
+            j = i
+            while j < limit and len(group) < per_post:
+                try:
+                    rec = json.loads(lines[j])
+                except json.JSONDecodeError:
+                    j += 1  # skip a corrupt line rather than wedge the queue
+                    continue
+                rec_target = _spool_target(rec, endpoint)
+                if not rec_target:
+                    j += 1
+                    continue
+                if target and rec_target != target:
+                    break
+                target = rec_target
+                group.append(rec.get("payload", {}))
+                j += 1
+            if group and not _send_once(target, group if per_post > 1 else group[0], timeout):
                 reachable = False
                 break
-        else:
-            i = min(len(lines), _SPOOL_FLUSH_BATCH)
+            i = j
         remaining = lines[i:]
         try:
             if remaining:
@@ -492,6 +523,8 @@ def _decode_data_url(value: str) -> tuple[str | None, bytes | None]:
 
 def _uploaded_documents_from_text(text: str) -> list[dict]:
     """Cursor records chat uploads as an uploaded_documents text preamble."""
+    import mimetypes
+
     match = re.search(r"<uploaded_documents>(.*?)</uploaded_documents>", text, re.S)
     if not match:
         return []
@@ -524,6 +557,8 @@ def _uploaded_documents_from_text(text: str) -> list[dict]:
 
 def _codex_files_from_text(text: str) -> list[dict]:
     """Codex records some uploads only as a leading Files-mentioned preamble."""
+    import mimetypes
+
     stripped = text.lstrip()
     if not stripped.startswith("# Files mentioned by the user:"):
         return []
@@ -557,6 +592,8 @@ def _codex_files_from_text(text: str) -> list[dict]:
 
 
 def _file_attachment_meta(attachment: dict) -> dict | None:
+    import mimetypes
+
     if attachment.get("type") != "file":
         return None
     filename = attachment.get("filename")
@@ -1608,6 +1645,8 @@ def _latest_backup(agent: str) -> dict | None:
 
 
 def _backup_config(agent: str, path: Path, action: str) -> dict | None:
+    import shutil
+
     if not path.exists():
         return None
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -1979,10 +2018,14 @@ def _container_name() -> str:
 
 
 def _docker_available() -> bool:
+    import shutil
+
     return shutil.which("docker") is not None
 
 
 def _docker_container_names(*filters: str) -> tuple[list[str], str | None]:
+    import subprocess
+
     result = subprocess.run(
         ["docker", "ps", "-a", *filters, "--format", "{{.Names}}"],
         capture_output=True,
@@ -2013,6 +2056,8 @@ def _collector_container_names(container: str) -> tuple[list[str], str | None]:
 
 
 def _docker_rm_collector(container: str) -> tuple[bool, str]:
+    import subprocess
+
     if not _docker_available():
         return False, "Docker is not installed or not on PATH."
     targets, err = _collector_container_names(container)
@@ -2028,6 +2073,8 @@ def _docker_rm_collector(container: str) -> tuple[bool, str]:
 
 
 def _docker_running_map(targets: list[str]) -> tuple[dict[str, bool], str | None]:
+    import subprocess
+
     if not targets:
         return {}, None
     result = subprocess.run(
@@ -2045,6 +2092,8 @@ def _docker_running_map(targets: list[str]) -> tuple[dict[str, bool], str | None
 
 
 def _docker_start_collectors(container: str) -> tuple[bool, str]:
+    import subprocess
+
     if not _docker_available():
         return False, "Docker is not installed or not on PATH."
     targets, err = _collector_container_names(container)
@@ -2066,6 +2115,8 @@ def _docker_start_collectors(container: str) -> tuple[bool, str]:
 
 
 def _docker_stop_collectors(container: str) -> tuple[bool, str]:
+    import subprocess
+
     if not _docker_available():
         return False, "Docker is not installed or not on PATH."
     targets, err = _collector_container_names(container)
@@ -2121,6 +2172,8 @@ def _wait_for_health(endpoint: str, attempts: int = 60) -> bool:
 
 
 def _docker_run_collector(container: str) -> tuple[bool, str]:
+    import subprocess
+
     global COT_ENDPOINT
     image = os.environ.get("COT_IMAGE") or "ghcr.io/cot-intelligence/cot:latest"
     port = int(os.environ.get("COT_PORT") or _endpoint_port(COT_ENDPOINT))
@@ -2250,6 +2303,8 @@ def _confirm_purge(assume_yes: bool) -> bool:
 
 
 def _cmd_purge(args: list[str]) -> int:
+    import shutil
+
     assume_yes = False
     if args:
         if len(args) == 1 and args[0] in ("-y", "--yes"):
@@ -4032,6 +4087,357 @@ def _cmd_watch(args: list[str]) -> int:
         return 0
 
 
+# --- MCP server ---------------------------------------------------------------
+#
+# `cot mcp` speaks the Model Context Protocol over stdio so an agent can ask
+# cot about past sessions: what ran, what it cost, what failed. Every tool is
+# read-only and goes through the collector's HTTP API on localhost; nothing
+# here writes to the DB or leaves the machine. stdout carries only JSON-RPC.
+
+_MCP_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
+# The tool interface's own version, bumped when a tool's inputs or output change.
+_MCP_SERVER_VERSION = "1"
+_MCP_TEXT_MAX = 400
+
+
+def _mcp_short(text: object, limit: int = _MCP_TEXT_MAX) -> str | None:
+    if text is None:
+        return None
+    s = " ".join(str(text).split())
+    return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def _mcp_get(path: str, params: dict | None = None) -> dict:
+    query = urllib.parse.urlencode({k: v for k, v in (params or {}).items() if v not in (None, "")})
+    req = urllib.request.Request(f"{COT_ENDPOINT}{path}{'?' + query if query else ''}", method="GET")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _mcp_since(days: object) -> str | None:
+    try:
+        d = int(days)
+    except (TypeError, ValueError):
+        return None
+    if d <= 0:
+        return None
+    return (datetime.now(timezone.utc) - timedelta(days=d)).isoformat()
+
+
+def _mcp_rating(value: object) -> int | None:
+    return {"up": 1, "good": 1, "down": -1, "bad": -1}.get(str(value or "").lower())
+
+
+def _mcp_session_row(s: dict) -> dict:
+    return {
+        "id": s.get("id"),
+        "title": _mcp_short(s.get("title"), 160),
+        "agent": s.get("source"),
+        "project": s.get("cwd"),
+        "started_at": s.get("started_at"),
+        "last_activity": s.get("last_activity"),
+        "duration_seconds": s.get("duration_seconds"),
+        "events": s.get("event_count"),
+        "tool_calls": s.get("tool_count"),
+        "tokens": (s.get("tokens") or {}).get("total"),
+        "cost_usd": s.get("cost_usd") if s.get("has_cost") else None,
+        "models": s.get("models"),
+        "rating": {1: "up", -1: "down"}.get(s.get("rating")),
+    }
+
+
+def _mcp_list_sessions(args: dict) -> dict:
+    limit = max(1, min(int(args.get("limit") or 20), 100))
+    since = _mcp_since(args.get("days", 7))
+    rating = _mcp_rating(args.get("rating"))
+    data = _mcp_get("/v1/sessions", {
+        "limit": 500 if (since or rating) else limit,
+        "source": args.get("agent"),
+        "q": args.get("query"),
+        "project": args.get("project"),
+    })
+    out = []
+    for s in data.get("sessions") or []:
+        if since and (s.get("last_activity") or s.get("started_at") or "") < since:
+            continue  # newest first, but a long session can outlive a newer one's start
+        if rating is not None and s.get("rating") != rating:
+            continue
+        out.append(_mcp_session_row(s))
+        if len(out) >= limit:
+            break
+    return {"sessions": out, "matched": len(out)}
+
+
+_MCP_TEXT_EVENTS = {"prompt", "response", "question", "plan"}
+
+
+def _mcp_get_session(args: dict) -> dict:
+    sid = str(args.get("session_id") or "").strip()
+    if not sid:
+        raise ValueError("session_id is required")
+    max_events = max(10, min(int(args.get("max_events") or 80), 400))
+    detail = _mcp_get(f"/v1/sessions/{urllib.parse.quote(sid, safe='')}")
+    events = detail.get("events") or detail.get("timeline") or []
+    rows = []
+    for e in events:
+        cat = e.get("category")
+        if cat in ("thought", "lifecycle", "meta"):
+            continue
+        failed = e.get("status") in ("error", "failed")
+        rows.append({
+            "event_id": e.get("id"),
+            "ts": e.get("ts"),
+            "kind": cat,
+            "tool": e.get("tool"),
+            "target": _mcp_short(e.get("target"), 200),
+            "text": _mcp_short(e.get("detail")) if cat in _MCP_TEXT_EVENTS else None,
+            "failed": failed or None,
+            "duration_ms": e.get("duration_ms"),
+        })
+    # Prompts and failures always make the cut; the rest fill what is left in order.
+    keep = {i for i, r in enumerate(rows) if r["kind"] == "prompt" or r["failed"]}
+    for i in range(len(rows)):
+        if len(keep) >= max_events:
+            break
+        keep.add(i)
+    shown = [{k: v for k, v in r.items() if v is not None} for i, r in enumerate(rows) if i in keep]
+    links = detail.get("links") or {}
+    annotations = None
+    try:
+        annotations = _mcp_get(f"/v1/sessions/{urllib.parse.quote(sid, safe='')}/annotations")
+    except urllib.error.HTTPError:
+        pass
+    return {
+        "summary": _mcp_session_row(detail.get("summary") or {}),
+        "subagents": [c.get("session_id") for c in links.get("children") or [] if c.get("type") == "subagent"],
+        "annotation": (annotations or {}).get("session"),
+        "events": shown,
+        "events_omitted": len(rows) - len(shown),
+    }
+
+
+def _mcp_session_cost(args: dict) -> dict:
+    sid = str(args.get("session_id") or "").strip()
+    if not sid:
+        raise ValueError("session_id is required")
+    return _mcp_get(f"/v1/sessions/{urllib.parse.quote(sid, safe='')}/cost")
+
+
+def _mcp_search(args: dict) -> dict:
+    q = str(args.get("query") or "").strip()
+    if len(q) < 2:
+        raise ValueError("query needs at least 2 characters")
+    data = _mcp_get("/v1/search", {
+        "q": q, "limit": max(1, min(int(args.get("limit") or 20), 100)), "session_id": args.get("session_id"),
+    })
+    return {"results": [
+        {k: (_mcp_short(v, 240) if k in ("snippet", "target") else v) for k, v in r.items()}
+        for r in data.get("results") or []
+    ]}
+
+
+def _mcp_context(args: dict) -> dict:
+    data = _mcp_get("/v1/context", {
+        "days": int(args.get("days") if args.get("days") is not None else 30),
+        "source": args.get("agent"), "project": args.get("project"),
+    })
+
+    def idle(rows: list) -> list:
+        return [
+            {"name": r["name"], "tokens_per_request": r["tokens_per_request"], "agents": r["agents"]}
+            for r in rows if r.get("idle") and r.get("tokens_per_request")
+        ][:15]
+
+    return {
+        "days": data.get("days"),
+        "note": "Request counts and floors are measured; the memory/skills/MCP split is estimated from files on disk (~4 bytes per token).",
+        "agents": data.get("agents"),
+        "idle_mcp_servers": idle(data.get("mcp") or []),
+        "idle_skills": idle(data.get("skills") or []),
+        "largest_memory_files": [
+            {"path": m["path"], "tokens": m["tokens_per_request"], "agents": m["agents"]}
+            for m in (data.get("memory") or [])[:8]
+        ],
+    }
+
+
+def _mcp_activity(args: dict) -> dict:
+    category = str(args.get("category") or "shell")
+    data = _mcp_get("/v1/activity", {
+        "category": category, "days": int(args.get("days") if args.get("days") is not None else 7),
+        "project": args.get("project"), "source": args.get("agent"),
+    })
+    return {
+        "category": category,
+        "summary": data.get("summary"),
+        "worth_a_look": [
+            {k: a.get(k) for k in ("severity", "title", "subject", "detail", "names", "ref") if a.get(k)}
+            for a in data.get("attention") or []
+        ],
+        "top": [
+            {"name": g.get("key"), "runs": g.get("runs"), "failed": g.get("failed")}
+            for g in (data.get("groups") or [])[:12]
+        ],
+        "failing": [
+            {"command": _mcp_short(f.get("command"), 200), "failed": f.get("failed"), "runs": f.get("runs")}
+            for f in data.get("failing") or []
+        ],
+    }
+
+
+def _mcp_annotations(args: dict) -> dict:
+    data = _mcp_get("/v1/annotations", {
+        "rating": _mcp_rating(args.get("rating")), "label": args.get("label"),
+        "days": int(args.get("days") or 0), "limit": max(1, min(int(args.get("limit") or 50), 200)),
+    })
+    return data
+
+
+_MCP_STR = {"type": "string"}
+_MCP_INT = {"type": "integer"}
+_MCP_TOOLS: dict[str, tuple[dict, object]] = {
+    "list_sessions": ({
+        "description": "List recent coding-agent sessions cot recorded (Claude Code, Cursor, Codex, OpenCode), newest first, with title, project, duration, tokens, cost and the person's rating.",
+        "inputSchema": {"type": "object", "properties": {
+            "days": {**_MCP_INT, "description": "Only sessions active in the last N days (default 7, 0 = any time)."},
+            "agent": {"type": "string", "enum": ["claude", "cursor", "codex", "opencode"]},
+            "project": {**_MCP_STR, "description": "Project name: the last segment of the working directory."},
+            "query": {**_MCP_STR, "description": "Text in the session id, path or first prompt."},
+            "rating": {"type": "string", "enum": ["up", "down"], "description": "Only sessions the person rated this way."},
+            "limit": {**_MCP_INT, "description": "Default 20, at most 100."},
+        }},
+    }, _mcp_list_sessions),
+    "get_session": ({
+        "description": "One session: its summary, the person's annotation, and a condensed timeline of prompts, tool calls, replies and failures.",
+        "inputSchema": {"type": "object", "required": ["session_id"], "properties": {
+            "session_id": _MCP_STR,
+            "max_events": {**_MCP_INT, "description": "Timeline rows to return (default 80). Prompts and failures are always kept."},
+        }},
+    }, _mcp_get_session),
+    "explain_session_cost": ({
+        "description": "Why a session cost what it did: tokens and dollars per model, the heaviest events, how much came from cache, and the fixed preamble (memory files, skill listing, MCP tool definitions) every request carried.",
+        "inputSchema": {"type": "object", "required": ["session_id"], "properties": {"session_id": _MCP_STR}},
+    }, _mcp_session_cost),
+    "search": ({
+        "description": "Full-text search across every recorded prompt, reply, command and tool call. Returns session and event ids with a snippet.",
+        "inputSchema": {"type": "object", "required": ["query"], "properties": {
+            "query": _MCP_STR, "session_id": {**_MCP_STR, "description": "Search within one session."},
+            "limit": {**_MCP_INT, "description": "Default 20, at most 100."},
+        }},
+    }, _mcp_search),
+    "context_overhead": ({
+        "description": "What the fixed part of every prompt is made of per agent (memory files, skill listing, MCP tool definitions), with MCP servers and skills that were loaded but never used.",
+        "inputSchema": {"type": "object", "properties": {
+            "days": {**_MCP_INT, "description": "Window in days (default 30, 0 = all time)."},
+            "agent": {"type": "string", "enum": ["claude", "cursor", "codex", "opencode"]},
+            "project": {**_MCP_STR, "description": "Exact working directory."},
+        }},
+    }, _mcp_context),
+    "activity": ({
+        "description": "What agents ran in a category over a window: shell commands, web requests, MCP calls or skill loads, with the top names, repeated failures and anomalies worth a look.",
+        "inputSchema": {"type": "object", "required": ["category"], "properties": {
+            "category": {"type": "string", "enum": ["shell", "web", "mcp", "skill"]},
+            "days": {**_MCP_INT, "description": "Window in days (default 7, 0 = all time)."},
+            "agent": {"type": "string", "enum": ["claude", "cursor", "codex", "opencode"]},
+            "project": {**_MCP_STR, "description": "Exact working directory."},
+        }},
+    }, _mcp_activity),
+    "annotations": ({
+        "description": "Sessions and events the person rated, labelled or wrote a note on, newest first: their own account of what went well or badly.",
+        "inputSchema": {"type": "object", "properties": {
+            "rating": {"type": "string", "enum": ["up", "down"]},
+            "label": {**_MCP_STR, "description": "e.g. looped, wrong approach, wasted tokens."},
+            "days": {**_MCP_INT, "description": "Only annotations from the last N days (0 = any time)."},
+            "limit": {**_MCP_INT, "description": "Default 50, at most 200."},
+        }},
+    }, _mcp_annotations),
+}
+
+
+def _mcp_result(req_id: object, result: dict) -> dict:
+    return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+
+def _mcp_error(req_id: object, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+
+
+def _mcp_call_tool(params: dict) -> dict:
+    name = params.get("name")
+    entry = _MCP_TOOLS.get(str(name))
+    if entry is None:
+        return {"content": [{"type": "text", "text": f"Unknown tool: {name}"}], "isError": True}
+    args = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+    try:
+        data = entry[1](args)
+    except urllib.error.HTTPError as exc:
+        msg = "not found" if exc.code == 404 else f"collector returned HTTP {exc.code}"
+        return {"content": [{"type": "text", "text": f"cot: {msg}"}], "isError": True}
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        text = f"cot: the collector at {COT_ENDPOINT} is not reachable ({exc}). Start it with `cot up` or open the cot app."
+        return {"content": [{"type": "text", "text": text}], "isError": True}
+    except ValueError as exc:
+        return {"content": [{"type": "text", "text": f"cot: {exc}"}], "isError": True}
+    return {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False, default=str)}]}
+
+
+def _mcp_handle(msg: object) -> dict | None:
+    """One JSON-RPC message in, its response out (None for notifications)."""
+    if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
+        return _mcp_error(None, -32600, "Invalid request")
+    method = msg.get("method")
+    req_id = msg.get("id")
+    params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+    if req_id is None:
+        return None  # notifications (initialized, cancelled) need no answer
+    if method == "initialize":
+        asked = params.get("protocolVersion")
+        return _mcp_result(req_id, {
+            "protocolVersion": asked if asked in _MCP_PROTOCOLS else _MCP_PROTOCOLS[0],
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": "cot", "title": "cot", "version": _MCP_SERVER_VERSION},
+            "instructions": "Read-only access to the coding-agent sessions cot recorded on this machine. Start with list_sessions or search, then get_session or explain_session_cost on an id.",
+        })
+    if method == "ping":
+        return _mcp_result(req_id, {})
+    if method == "tools/list":
+        tools = [
+            {"name": name, **spec, "annotations": {"readOnlyHint": True, "openWorldHint": False}}
+            for name, (spec, _fn) in _MCP_TOOLS.items()
+        ]
+        return _mcp_result(req_id, {"tools": tools})
+    if method == "tools/call":
+        return _mcp_result(req_id, _mcp_call_tool(params))
+    return _mcp_error(req_id, -32601, f"Method not found: {method}")
+
+
+def _cmd_mcp(args: list[str]) -> int:
+    """Serve MCP over stdio until stdin closes."""
+    if args and args[0] in ("-h", "--help"):
+        print("Usage: cot mcp    (an MCP server over stdio; register it with your agent)\n"
+              "  Claude Code:  claude mcp add cot -- ~/.cot/bin/cot mcp\n"
+              "  Codex:        codex mcp add cot -- ~/.cot/bin/cot mcp\n"
+              f'  Cursor:       add {{"cot": {{"command": "{BRIDGE_PATH}", "args": ["mcp"]}}}} to mcpServers in ~/.cursor/mcp.json')
+        return 0
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            out: object = _mcp_error(None, -32700, "Parse error")
+        else:
+            if isinstance(msg, list):
+                out = [r for r in (_mcp_handle(m) for m in msg) if r is not None] or None
+            else:
+                out = _mcp_handle(msg)
+        if out is not None:
+            sys.stdout.write(json.dumps(out, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+    return 0
+
+
 def main() -> int:
     if len(sys.argv) >= 2 and sys.argv[1] == "install":
         return _cmd_install(sys.argv[2:])
@@ -4055,6 +4461,8 @@ def main() -> int:
         return _cmd_recover_questions(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "watch":
         return _cmd_watch(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "mcp":
+        return _cmd_mcp(sys.argv[2:])
     if len(sys.argv) < 3 or sys.argv[1] != "hook":
         print(
             "Usage:\n"

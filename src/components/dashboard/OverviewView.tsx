@@ -42,12 +42,24 @@ interface OverviewViewProps {
 }
 
 const WINDOWS = [
+  { k: 1, l: '1d' },
   { k: 7, l: '7d' },
   { k: 30, l: '30d' },
   { k: 90, l: '90d' },
   { k: 0, l: 'all' },
 ];
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
+
+/** "14:00" for an hour bucket key ("2026-10-16T14", UTC) in the viewer's time. */
+function hourBucketLabel(key: string): string {
+  return new Date(`${key}:00:00Z`).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function windowText(days: number): string {
+  if (!days) return 'All time';
+  return days === 1 ? 'Last 24 hours' : `Last ${days} days`;
+}
 
 function shortPath(p: string | null): string {
   if (!p) return '(unknown)';
@@ -214,7 +226,7 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
           <div>
             <span className="label">Overview</span>
             <h1>Local workspace</h1>
-            <p>{days ? `Last ${days} days` : 'All time'} across {win.projects.length} projects and {sources.length} agents.</p>
+            <p>{windowText(days)} across {win.projects.length} projects and {sources.length} agents.</p>
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <FSeg id="vf-range" value={days} options={WINDOWS} onChange={setDays} />
@@ -235,9 +247,9 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
 
         <div className="grid-2">
           <section className="card" aria-labelledby="vf-spend">
-            <div className="card-h"><span className="card-t" id="vf-spend">Daily spend</span><span className="mono faint" style={{ fontSize: 12 }}>{fmt.usd(win.cost)} total</span></div>
+            <div className="card-h"><span className="card-t" id="vf-spend">{days === 1 ? 'Hourly spend' : 'Daily spend'}</span><span className="mono faint" style={{ fontSize: 12 }}>{fmt.usd(win.cost)} total</span></div>
             <div className="card-b">
-              <Columns key={days} data={win.series.map((x) => ({ key: x.day, value: x.cost }))} color="var(--v-hot)" muted="var(--v-mute)" label={fmt.day} format={fmt.usd} height={180} />
+              <Columns key={days} data={win.series.map((x) => ({ key: x.day, value: x.cost }))} color="var(--v-hot)" muted="var(--v-mute)" label={days === 1 ? hourBucketLabel : fmt.day} format={fmt.usd} height={180} />
             </div>
           </section>
           <section className="card" aria-labelledby="vf-review">
@@ -636,14 +648,17 @@ function RankBadge({ n }: { n: number }) {
   );
 }
 
-/** The window's totals with one series point per day, empty days included. */
+/** The window's totals with one series point per day (per hour for the 24-hour
+ * window), empty buckets included. */
 function windowed(w: OverviewWindow | null | undefined, days: number) {
   const now = Date.now();
   const oldest = w?.oldest ? new Date(w.oldest).getTime() : now;
-  const nDays = Math.min(days || Math.max(1, Math.ceil((now - oldest) / DAY_MS)), 120);
+  const hourly = days === 1;
+  const step = hourly ? HOUR_MS : DAY_MS;
+  const n = hourly ? 24 : Math.min(days || Math.max(1, Math.ceil((now - oldest) / DAY_MS)), 120);
   const byDay = new Map((w?.series ?? []).map((x) => [x.day, x]));
-  const series = Array.from({ length: nDays }, (_, i) => {
-    const day = new Date(now - (nDays - 1 - i) * DAY_MS).toISOString().slice(0, 10);
+  const series = Array.from({ length: n }, (_, i) => {
+    const day = new Date(now - (n - 1 - i) * step).toISOString().slice(0, hourly ? 13 : 10);
     const x = byDay.get(day);
     return { day, cost: x?.cost ?? 0, sessions: x?.sessions ?? 0, tools: x?.tools ?? 0, events: x?.tools ?? 0 };
   });

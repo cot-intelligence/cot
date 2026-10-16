@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
 import json
+import logging
 import os
 import sqlite3
 import threading
+import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -21,9 +24,47 @@ _EVENT_INSERT_SQL = (
     "INSERT INTO events (session_id, source, hook, tool, phase, ts, payload,"
     " category, title, detail, target, status, duration_ms, model,"
     " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
-    " attachments, dedup_key, origin, raw_ingest_id, created_at)"
-    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    " attachments, dedup_key, origin, raw_ingest_id, created_at, composer_mode)"
+    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
+
+# Every events column a display read needs: all but ``payload``, the raw hook
+# body (the largest column), which reads only used for ``composer_mode`` before
+# that had a column of its own.
+_EVENT_READ_COLUMNS = (
+    "id, session_id, source, hook, tool, phase, ts, category, title, detail, target,"
+    " status, duration_ms, model, input_tokens, output_tokens, cache_read_tokens,"
+    " cache_write_tokens, attachments, dedup_key, origin, raw_ingest_id, created_at,"
+    " composer_mode"
+)
+# Rows from before the column are filled in by a background backfill; until it
+# finishes, reads also fetch ``payload`` and event_row falls back to it.
+_composer_backfilled: dict[Path, bool] = {}
+
+
+def event_columns() -> str:
+    """The SELECT list for display reads of events (see event_row)."""
+    if _composer_backfilled.get(path()):
+        return _EVENT_READ_COLUMNS
+    return _EVENT_READ_COLUMNS + ", payload"
+
+
+def mark_composer_backfilled(done: bool = True) -> None:
+    _composer_backfilled[path()] = done
+
+
+def _composer_mode(payload: Any) -> str | None:
+    if isinstance(payload, Mapping):
+        mode = payload.get("composer_mode")
+    elif isinstance(payload, str) and '"composer_mode"' in payload:
+        try:
+            body = json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        mode = body.get("composer_mode") if isinstance(body, dict) else None
+    else:
+        return None
+    return mode if isinstance(mode, str) else None
 
 
 # The DB file this request (or thread) reads and writes. Unset means the main
@@ -101,6 +142,9 @@ def close_wal_keepalives() -> None:
         _wal_keepalive.clear()
 
 
+_MMAP_BYTES = 512 * 1024 * 1024
+
+
 def _connect() -> sqlite3.Connection:
     db_file = path()
     db_file.parent.mkdir(parents=True, exist_ok=True)
@@ -113,24 +157,68 @@ def _connect() -> sqlite3.Connection:
         conn.execute(f"PRAGMA journal_mode={want.upper()};")
     if want == "wal":
         _keep_wal_open(db_file)
+        # WAL on a local disk (the Mac app). NORMAL skips the fsync on each
+        # commit (only checkpoints sync); a power cut can lose the last commits
+        # but never corrupts the file, unlike NORMAL in rollback mode. mmap lets
+        # these short-lived connections share the OS page cache instead of each
+        # starting with an empty SQLite cache. Neither is safe on Docker's bind
+        # mount, so the rollback-journal default keeps both off.
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute(f"PRAGMA mmap_size={_MMAP_BYTES};")
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.execute("PRAGMA temp_store=MEMORY;")
     return conn
 
 
+# Reads and writes that hold their connection longer than this are logged with
+# the calling function, so a regression shows up in the collector log instead of
+# as a vaguely slower dashboard. 0 turns it off.
+_log = logging.getLogger("uvicorn.error")
+
+
+def _slow_ms() -> float:
+    try:
+        return float(os.environ.get("COT_SLOW_QUERY_MS", "100"))
+    except ValueError:
+        return 100.0
+
+
+def _log_if_slow(kind: str, started: float, waited_ms: float = 0.0) -> None:
+    threshold = _slow_ms()
+    held_ms = (time.perf_counter() - started) * 1000
+    if threshold <= 0 or held_ms < threshold:
+        return
+    # Frames: this function, the context manager's generator, contextlib's
+    # __exit__, then the caller's ``with`` statement.
+    frame = inspect.currentframe()
+    for _ in range(3):
+        frame = frame.f_back if frame else None
+    caller = (
+        f"{frame.f_globals.get('__name__', '?')}.{frame.f_code.co_name}:{frame.f_lineno}"
+        if frame
+        else "?"
+    )
+    wait = f" after waiting {waited_ms:.0f} ms for the write lock" if waited_ms >= 1 else ""
+    _log.warning("slow %s: %.0f ms in %s%s", kind, held_ms, caller, wait)
+
+
 @contextmanager
 def read() -> Iterator[sqlite3.Connection]:
+    started = time.perf_counter()
     conn = _connect()
     try:
         conn.execute("PRAGMA query_only=ON;")
         yield conn
     finally:
         conn.close()
+        _log_if_slow("read", started)
 
 
 @contextmanager
 def write() -> Iterator[sqlite3.Connection]:
+    asked = time.perf_counter()
     with _write_lock:
+        started = time.perf_counter()
         conn = _connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -143,6 +231,7 @@ def write() -> Iterator[sqlite3.Connection]:
                 conn.commit()
         finally:
             conn.close()
+            _log_if_slow("write", started, (started - asked) * 1000)
 
 
 def vacuum() -> None:
@@ -223,6 +312,7 @@ def insert_event(
             origin,
             raw_ingest_id,
             created_at or timeutil.now(),
+            _composer_mode(payload),
         ),
     )
     return int(cursor.lastrowid)
@@ -245,12 +335,10 @@ def event_row(row: sqlite3.Row) -> dict[str, Any]:
         "model": row["model"],
         "attachments": json.loads(row["attachments"]) if row["attachments"] else None,
     }
-    if row["payload"]:
-        try:
-            body = json.loads(row["payload"])
-        except (json.JSONDecodeError, TypeError):
-            body = {}
-        mode = body.get("composer_mode")
-        if isinstance(mode, str) and mode != "agent":
-            out["composer_mode"] = mode
+    keys = row.keys()
+    mode = row["composer_mode"] if "composer_mode" in keys else None
+    if mode is None and "payload" in keys:
+        mode = _composer_mode(row["payload"])
+    if isinstance(mode, str) and mode != "agent":
+        out["composer_mode"] = mode
     return out

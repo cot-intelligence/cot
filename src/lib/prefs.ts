@@ -6,7 +6,7 @@ export interface Prefs {
   density: 'comfortable' | 'compact';
   motion: 'system' | 'reduced';
   start: 'overview' | 'sessions' | 'findings';
-  range: 7 | 30 | 90;
+  range: 1 | 7 | 30 | 90;
   /** Workspace avatar: an id from components/forest/avatars, or 'initial' for the letter. */
   avatar: string;
 }

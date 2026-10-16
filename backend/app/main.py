@@ -19,6 +19,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ import urllib.error
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -39,8 +41,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import (
-    __version__, activity, ai_insights, cron, db, extension_usage, insights, passive, store,
-    rule_drafts, timeutil, user_rules,
+    __version__, activity, ai_insights, context_cost, cron, db, extension_usage, insights, otlp,
+    passive, rule_drafts, store, timeutil, user_rules,
 )
 
 app = FastAPI(title="cot collector", version=__version__)
@@ -205,6 +207,41 @@ if _explicit_origins:
 else:
     _cors_kwargs["allow_origin_regex"] = _LOCAL_ORIGIN_RE.pattern
 app.add_middleware(CORSMiddleware, **_cors_kwargs)
+# Compress every response a client accepts gzip for: a large session detail is
+# several MB of JSON, and the dashboard bundle over a MB. The SSE stream is left
+# alone (Starlette excludes text/event-stream), as is anything already encoded
+# (the extensions list, which caches its gzipped body).
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+
+
+class _ResponseTiming:
+    """Stamp each response with how long the collector took to produce it
+    (``Server-Timing: app;dur=…`` for DevTools, ``X-Response-Time`` for curl),
+    so a slow view can be traced to its endpoint without server logs. Measured
+    to the response headers, so a stream reports its setup time, not its life."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = time.perf_counter()
+
+        async def send_timed(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                ms = (time.perf_counter() - started) * 1000
+                headers = list(message.get("headers", []))
+                headers.append((b"server-timing", f"app;dur={ms:.1f}".encode()))
+                headers.append((b"x-response-time", f"{ms:.1f}ms".encode()))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_timed)
+
+
+app.add_middleware(_ResponseTiming)
 
 def _bridge_dir() -> Path:
     here = Path(__file__).resolve()
@@ -232,6 +269,24 @@ def _build_search_index() -> None:
         db.ensure_insight_indexes()
     except sqlite3.Error:
         pass  # findings still work without it, only slower; retried next start
+    try:
+        db.ensure_query_indexes()
+    except sqlite3.Error:
+        pass  # queries still work without them, only slower; retried next start
+    try:
+        db.backfill_composer_mode()
+    except sqlite3.Error:
+        pass  # reads keep falling back to the payload; resumes next start
+    try:
+        activity.warm()
+    except sqlite3.Error:
+        pass  # the first Activity visit parses it instead
+    # Compute the default findings window now, so the dashboard's first request
+    # for it is served from memory instead of waiting on a multi-second pass.
+    try:
+        insights.warm_shared_insights(30)
+    except Exception:  # noqa: BLE001 - the first request computes it instead
+        pass
 
 
 # A findings pass is seconds of pure-Python work, and every SQLite call drops
@@ -261,7 +316,15 @@ async def _startup() -> None:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "version": __version__, "db_path": str(store.path())}
+    return {
+        "status": "ok",
+        "version": __version__,
+        "db_path": str(store.path()),
+        # What this collector accepts beyond the original API, for a bridge that
+        # may be newer or older than it. ingest_batch: /v1/ingest/{source}
+        # takes a JSON array of hook bodies.
+        "features": ["ingest_batch"],
+    }
 
 
 def _hook_status_path() -> Path:
@@ -647,12 +710,43 @@ async def update_settings(request: Request) -> dict[str, Any]:
 # a 502 the tracker silently ignores. Disable entirely with COT_DISABLE_ANALYTICS=1.
 
 _UMAMI_UPSTREAM = os.environ.get("COT_UMAMI_HOST", "https://cloud.umami.is").rstrip("/")
-_UMAMI_SCRIPT_TTL = 6 * 60 * 60  # cache the tracker JS for 6h
-_umami_script_cache: dict[str, Any] = {"body": None, "fetched_at": 0.0}
+_UMAMI_SCRIPT_TTL = 6 * 60 * 60  # refresh the tracker JS every 6h
+# After a failed fetch (offline / air-gapped) don't try again for a while, so
+# page loads don't each pay the upstream timeout.
+_UMAMI_RETRY_AFTER = 10 * 60
+_umami_script_cache: dict[str, Any] = {"body": None, "fetched_at": 0.0, "failed_at": 0.0}
+_umami_refreshing = threading.Lock()
 
 
 def _analytics_env_disabled() -> bool:
     return os.environ.get("COT_DISABLE_ANALYTICS") in ("1", "true", "yes")
+
+
+def _umami_disk_cache() -> Path:
+    # Beside the DB, so a restarted collector serves it without going upstream.
+    return store.main_path().parent / "umami-script.js"
+
+
+def _fetch_umami_script() -> None:
+    cache = _umami_script_cache
+    if not _umami_refreshing.acquire(blocking=False):
+        return  # another request is already fetching it
+    try:
+        req = urllib.request.Request(
+            f"{_UMAMI_UPSTREAM}/script.js",
+            headers={"User-Agent": f"cot/{__version__}"},
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            body = resp.read()
+        cache["body"], cache["fetched_at"] = body, time.time()
+        try:
+            _umami_disk_cache().write_bytes(body)
+        except OSError:
+            pass
+    except Exception:
+        cache["failed_at"] = time.time()
+    finally:
+        _umami_refreshing.release()
 
 
 @app.get("/stats/script.js")
@@ -661,18 +755,22 @@ def umami_script() -> Response:
         return Response(status_code=404)
     now = time.time()
     cache = _umami_script_cache
-    if cache["body"] is None or now - cache["fetched_at"] > _UMAMI_SCRIPT_TTL:
+    if cache["body"] is None:
         try:
-            req = urllib.request.Request(
-                f"{_UMAMI_UPSTREAM}/script.js",
-                headers={"User-Agent": f"cot/{__version__}"},
-            )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                cache["body"] = resp.read()
-                cache["fetched_at"] = now
-        except Exception:
-            if cache["body"] is None:
-                return Response(status_code=502)
+            disk = _umami_disk_cache()
+            cache["body"], cache["fetched_at"] = disk.read_bytes(), disk.stat().st_mtime
+        except OSError:
+            pass
+    recently_failed = now - cache["failed_at"] < _UMAMI_RETRY_AFTER
+    if cache["body"] is None:
+        # Nothing to serve yet: fetch inline, once per retry window.
+        if not recently_failed:
+            _fetch_umami_script()
+        if cache["body"] is None:
+            return Response(status_code=502)
+    elif now - cache["fetched_at"] > _UMAMI_SCRIPT_TTL and not recently_failed:
+        # Serve what we have; refresh it for next time.
+        threading.Thread(target=_fetch_umami_script, name="umami-refresh", daemon=True).start()
     return Response(
         content=cache["body"],
         media_type="application/javascript",
@@ -824,15 +922,20 @@ async def _json_body(request: Request) -> dict[str, Any]:
     return body
 
 
-async def _ingest_body(request: Request) -> tuple[dict[str, Any] | None, str | None]:
+async def _ingest_body(
+    request: Request,
+) -> tuple[dict[str, Any] | list[dict[str, Any]] | None, str | None]:
     raw = await request.body()
     try:
         body = json.loads(raw.decode("utf-8") if raw else "{}")
     except Exception as exc:
         text = raw.decode("utf-8", errors="replace")
         return None, str(exc) or f"Malformed JSON: {text[:80]}"
+    # A JSON array is a batch of hook bodies (e.g. a replayed spool).
+    if isinstance(body, list) and body and all(isinstance(b, dict) for b in body):
+        return body, None
     if not isinstance(body, dict):
-        return None, "Hook payload must be a JSON object"
+        return None, "Hook payload must be a JSON object or a non-empty array of them"
     return body, None
 
 
@@ -841,26 +944,97 @@ async def ingest(source: str, request: Request) -> dict[str, Any]:
     if source not in AGENTS:
         raise HTTPException(status_code=404, detail=f"Unknown source: {source}")
     body, malformed_error = await _ingest_body(request)
+    # The writes below are synchronous SQLite calls (and may wait on the write
+    # lock), so they run on a worker thread rather than stalling the event loop
+    # that serves the live stream and every other async request.
     if body is None:
         raw_text = (await request.body()).decode("utf-8", errors="replace")
-        result = db.record_malformed_ingest(source, raw_text, origin="hook", error=malformed_error)
-        _bump_revision()
+        result = await asyncio.to_thread(
+            db.record_malformed_ingest, source, raw_text, origin="hook", error=malformed_error
+        )
+        _bump_revision(result.get("session_id"))
         return result
+
+    if isinstance(body, list):
+        results = await asyncio.to_thread(db.record_ingests, [(source, b) for b in body])
+        for r in results:
+            _bump_revision(r.get("session_id"))
+        return {"ok": True, "results": results}
 
     # Attachment metadata folds onto the matching prompt event, not a new row.
     if body.get("_attach_to_prompt"):
-        attached = db.attach_to_prompt(
+        attached = await asyncio.to_thread(
+            db.attach_to_prompt,
             str(body.get("session_id") or ""),
             body.get("text"),
             body.get("attachments") or [],
             body.get("timestamp"),
         )
-        _bump_revision()
+        _bump_revision(str(body.get("session_id") or ""))
         return {"ok": True, "attached": attached}
 
-    result = db.record_ingest(source, body)
-    _bump_revision()
+    result = await asyncio.to_thread(db.record_ingest, source, body)
+    _bump_revision(result.get("session_id"))
     return result
+
+
+def _otlp_reply(request: Request, status_code: int = 200, message: str | None = None) -> Response:
+    """An empty Export*ServiceResponse in the encoding the exporter sent."""
+    protobuf = "protobuf" in (request.headers.get("content-type") or "")
+    if status_code != 200:
+        return JSONResponse({"code": 3, "message": message or "bad request"}, status_code=status_code)
+    if protobuf:
+        return Response(b"", media_type="application/x-protobuf")
+    return JSONResponse({})
+
+
+def _ingest_otlp(records: list[dict[str, Any]]) -> int:
+    # Every span of one export request in one write transaction.
+    results = db.record_ingests(list(otlp.to_bodies(records)))
+    return sum(bool(r.get("event_id")) and not r.get("duplicate") for r in results)
+
+
+async def _otlp(request: Request, signal: str) -> Response:
+    raw = await request.body()
+    if len(raw) > otlp.MAX_BODY_BYTES:
+        return _otlp_reply(request, 413, "body too large")
+    try:
+        records = otlp.decode(
+            raw, request.headers.get("content-type"), request.headers.get("content-encoding"), signal
+        )
+    except ValueError as exc:
+        return _otlp_reply(request, 400, str(exc))
+    try:
+        stored = await asyncio.to_thread(_ingest_otlp, records)
+    except sqlite3.OperationalError:
+        # Busy DB: 503 is retryable under OTLP, and the retry dedups on span ids.
+        reply = _otlp_reply(request, 503, "collector busy, retry")
+        reply.headers["Retry-After"] = "2"
+        return reply
+    if stored:
+        _bump_revision()
+    return _otlp_reply(request)
+
+
+@app.post("/v1/traces")
+async def otlp_traces(request: Request) -> Response:
+    """OTLP/HTTP spans (JSON or protobuf). Point an agent's exporter at the
+    collector: ``OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:31337``."""
+    return await _otlp(request, "traces")
+
+
+@app.post("/v1/logs")
+async def otlp_logs(request: Request) -> Response:
+    """OTLP/HTTP log records: agents emit prompts, tool results and API usage as events."""
+    return await _otlp(request, "logs")
+
+
+@app.post("/v1/metrics")
+async def otlp_metrics(request: Request) -> Response:
+    """Accepted and dropped: per-request events carry the same numbers, and an
+    exporter that gets errors here retries and logs noise."""
+    await request.body()
+    return _otlp_reply(request)
 
 
 # In-process change counter. A single uvicorn worker serves this collector, so a
@@ -869,12 +1043,73 @@ async def ingest(source: str, request: Request) -> dict[str, Any]:
 # instead of polling on a fixed timer.
 _revision = 0
 _revision_lock = threading.Lock()
+# Which session each recent revision touched, so a `change` can name the
+# sessions that changed and the dashboard refetches only those (and the lists),
+# not every view's aggregates. ``None`` marks a change not tied to one session.
+_recent_changes: deque[tuple[int, str | None]] = deque(maxlen=4096)
 
 
-def _bump_revision() -> None:
+# Open /v1/stream connections, each woken the moment the revision moves instead
+# of polling it. Bumps come from worker threads as well as the event loop.
+_stream_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
+
+
+def _bump_revision(session_id: str | None = None) -> None:
     global _revision
     with _revision_lock:
         _revision += 1
+        _recent_changes.append((_revision, session_id or None))
+        waiters = list(_stream_waiters)
+    for loop, event in waiters:
+        try:
+            loop.call_soon_threadsafe(event.set)
+        except RuntimeError:
+            pass  # that loop has closed
+
+
+def _changed_sessions(after: int, upto: int) -> list[str] | None:
+    """Sessions changed in revisions (after, upto]; None when that can't be told
+    (a change without a session, or history older than the buffer)."""
+    with _revision_lock:
+        entries = [c for c in _recent_changes if after < c[0] <= upto]
+    if len(entries) != upto - after or any(sid is None for _, sid in entries):
+        return None
+    return sorted({sid for _, sid in entries if sid})
+
+
+# Whole-history aggregates (metrics, connections, overview totals) re-read the
+# events table on every call. Between ingests the answer can't change, and while
+# an agent is running (the revision then moves several times a second) a few
+# seconds of lag is invisible on an all-time chart, so callers share one result:
+# fresh for _AGG_FRESH_S after it was computed, and for _AGG_IDLE_S while no
+# ingest has landed. One computation per key runs at a time; concurrent callers
+# wait for it instead of starting their own.
+_AGG_FRESH_S = 10.0
+_AGG_IDLE_S = 60.0
+_agg_cache: dict[tuple[Any, ...], tuple[int, float, Any]] = {}
+_agg_locks: dict[tuple[Any, ...], threading.Lock] = {}
+_agg_guard = threading.Lock()
+
+
+def _cached_aggregate(name: str, args: tuple[Any, ...], compute: Any) -> Any:
+    key = (str(store.path()), name, args)
+    with _agg_guard:
+        lock = _agg_locks.setdefault(key, threading.Lock())
+    with lock:
+        rev = _revision
+        hit = _agg_cache.get(key)
+        if hit is not None:
+            hit_rev, at, value = hit
+            age = time.monotonic() - at
+            if age < _AGG_FRESH_S or (hit_rev == rev and age < _AGG_IDLE_S):
+                return value
+        value = compute()
+        _agg_cache[key] = (rev, time.monotonic(), value)
+        return value
+
+
+def _connections() -> list[dict[str, Any]]:
+    return _cached_aggregate("connections", (), db.connections)
 
 
 @app.get("/v1/stream")
@@ -884,23 +1119,36 @@ async def stream(request: Request) -> StreamingResponse:
     hold one connection instead of each polling the DB every few seconds."""
 
     async def gen() -> Any:
-        last = _revision
-        yield f"event: hello\ndata: {json.dumps({'revision': last})}\n\n"
-        idle = 0
-        while True:
-            if await request.is_disconnected():
-                break
-            current = _revision
-            if current != last:
-                last = current
-                idle = 0
-                yield f"event: change\ndata: {json.dumps({'revision': current})}\n\n"
-            else:
-                idle += 1
-                if idle >= 15:
-                    idle = 0
+        woken = asyncio.Event()
+        waiter = (asyncio.get_running_loop(), woken)
+        with _revision_lock:
+            _stream_waiters.add(waiter)
+        try:
+            last = _revision
+            yield f"event: hello\ndata: {json.dumps({'revision': last})}\n\n"
+            while True:
+                try:
+                    # Wake on the next change; every 15 s without one, send a
+                    # keepalive (and notice a client that went away).
+                    await asyncio.wait_for(woken.wait(), timeout=15)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        break
                     yield ": keepalive\n\n"
-            await asyncio.sleep(1)
+                    continue
+                woken.clear()
+                if await request.is_disconnected():
+                    break
+                current = _revision
+                if current != last:
+                    changed = {"revision": current, "sessions": _changed_sessions(last, current)}
+                    yield f"event: change\ndata: {json.dumps(changed)}\n\n"
+                    last = current
+                # A burst of ingests becomes one change per ~100 ms, not one each.
+                await asyncio.sleep(0.1)
+        finally:
+            with _revision_lock:
+                _stream_waiters.discard(waiter)
 
     return StreamingResponse(
         gen(),
@@ -917,7 +1165,8 @@ def get_stats() -> dict[str, Any]:
 @app.get("/v1/overview/window")
 def get_overview_window(days: int = 30) -> dict[str, Any]:
     """Overview totals over every session in the window (0 = all time)."""
-    return db.session_window(max(0, days))
+    days = max(0, days)
+    return _cached_aggregate("overview-window", (days,), lambda: db.session_window(days))
 
 
 @app.get("/v1/sessions/projects")
@@ -989,6 +1238,52 @@ def unbookmark_session(session_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Session not found")
     db.record_audit_event("session.unbookmarked", target=session_id)
     return {"ok": True, "bookmarked": False}
+
+
+class AnnotationBody(BaseModel):
+    event_id: int | None = None
+    rating: int | None = None
+    labels: list[str] | None = None
+    note: str | None = None
+
+
+@app.get("/v1/sessions/{session_id}/annotations")
+def get_session_annotations(session_id: str) -> dict[str, Any]:
+    found = db.get_annotations(session_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return found
+
+
+@app.put("/v1/sessions/{session_id}/annotations")
+def put_session_annotation(session_id: str, body: AnnotationBody) -> dict[str, Any]:
+    """Rate (1 / -1), label or note a session, or one event with ``event_id``.
+    Sending no rating, labels or note clears it."""
+    try:
+        saved = db.set_annotation(
+            session_id, body.event_id, rating=body.rating, labels=body.labels, note=body.note
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if saved is None:
+        raise HTTPException(status_code=404, detail="Session or event not found")
+    db.record_audit_event(
+        "session.annotated", target=f"{session_id}#{body.event_id}" if body.event_id else session_id
+    )
+    _bump_revision(session_id)
+    return saved
+
+
+@app.get("/v1/annotations")
+def get_annotations(
+    rating: int | None = Query(None, ge=-1, le=1),
+    label: str | None = None,
+    days: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=1000),
+) -> dict[str, Any]:
+    """Every annotation, newest first: ground truth for what went well or badly."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat() if days else None
+    return {"items": db.list_annotations(rating=rating, label=label, since=since, limit=limit)}
 
 
 @app.get("/v1/sessions/origins")
@@ -1109,7 +1404,7 @@ async def set_question_answer(request: Request) -> dict[str, Any]:
 
 @app.get("/v1/connections")
 def get_connections() -> dict[str, Any]:
-    return {"connections": db.connections()}
+    return {"connections": _connections()}
 
 
 # ---------------------------------------------------------------- passive mode
@@ -1261,7 +1556,7 @@ def get_tasks() -> dict[str, Any]:
 def get_hook_status() -> dict[str, Any]:
     manifest = _read_hook_manifest()
     manifest_agents = manifest.get("agents") if isinstance(manifest.get("agents"), dict) else {}
-    connections = {c["source"]: c for c in db.connections()}
+    connections = {c["source"]: c for c in _connections()}
 
     agents: list[dict[str, Any]] = []
     for source in AGENTS:
@@ -1333,7 +1628,7 @@ def get_hook_status() -> dict[str, Any]:
 
 @app.get("/v1/metrics")
 def get_metrics(tz: str | None = Query(None)) -> dict[str, Any]:
-    return db.metrics(tz)
+    return _cached_aggregate("metrics", (tz,), lambda: db.metrics(tz))
 
 
 @app.get("/v1/metrics/history")
@@ -1400,7 +1695,8 @@ def get_insights(
     severity: str | None = Query(None),
     status: str = Query("active"),
 ) -> dict[str, Any]:
-    """Actionable findings across sessions; runs lifecycle reconcile on read."""
+    """Actionable findings across sessions. Served from the last lifecycle pass;
+    a stale one is refreshed in the background (see compute_insights_shared)."""
     if pillar is not None and pillar not in insights.PILLARS:
         raise HTTPException(status_code=400, detail=f"pillar must be one of {insights.PILLARS}")
     if severity is not None and severity not in insights.SEVERITIES:
@@ -1609,6 +1905,29 @@ def get_extensions(request: Request, refresh: bool = False, days: int = Query(0,
     return _json_payload(request, extension_usage.overview(refresh=refresh, days=days))
 
 
+@app.get("/v1/context")
+def get_context(
+    request: Request,
+    days: int = Query(30, ge=0),
+    project: str | None = None,
+    source: str | None = None,
+) -> Response:
+    """What the fixed part of every prompt is made of: memory files, skill
+    listings and MCP tool definitions, per agent, with idle extensions flagged.
+    Request counts and floors are measured; the split is estimated from disk."""
+    return _json_payload(request, context_cost.cached_report(days, project, source))
+
+
+@app.get("/v1/sessions/{session_id}/cost")
+def get_session_cost(session_id: str) -> dict[str, Any]:
+    """Where one session's tokens went: per model, the heaviest events, cache
+    share, and the preamble (memory, skills, MCP) every request carried."""
+    found = context_cost.session_cost(session_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return found
+
+
 @app.get("/v1/extensions/detail")
 def get_extension_detail(request: Request, key: str, refresh: bool = False) -> Response:
     """One extension: where it is installed, how it is used, and its security scan.
@@ -1796,10 +2115,15 @@ def export_session(session_id: str) -> Response:
 
 
 @app.get("/v1/sessions/{session_id}")
-def get_session(session_id: str) -> dict[str, Any]:
+def get_session(session_id: str, compat: int = 0) -> dict[str, Any]:
     session = db.get_session_detail(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
+    # The deprecated parent-only `timeline` repeats every parent row already in
+    # `events` (the dashboard filters `events` by owner instead), roughly doubling
+    # the payload of a big session. Old callers can still ask for it.
+    if not compat:
+        session.pop("timeline", None)
     return session
 
 

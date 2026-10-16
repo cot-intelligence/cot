@@ -125,7 +125,7 @@ let HOT = '#0F5B3E';
 let COBALT = '#2B5CE6';
 const OLIVE_LIGHT = '#4E8C6F';
 const OLIVE_DARK = '#8FD3A6';
-const MONO = "'Geist Mono', ${MONO}";
+const MONO = "'Geist Mono', ui-monospace, monospace";
 const SANS = "'Geist', system-ui, sans-serif";
 
 interface Palette {
@@ -283,12 +283,14 @@ function drawAxisLabels(
   if (!positions.length) return;
   ctx.font = `700 8px ${MONO}`;
   ctx.fillStyle = P.faint;
-  ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  for (const { x, text } of positions) {
-    if (!text) continue;
+  positions.forEach(({ x, text }, i) => {
+    if (!text) return;
+    // Pin the end labels inside the plot so they don't spill past its edges.
+    const last = positions.length - 1;
+    ctx.textAlign = last > 0 && i === 0 ? 'left' : last > 0 && i === last ? 'right' : 'center';
     ctx.fillText(text, x, baselineY);
-  }
+  });
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
 }
@@ -339,12 +341,13 @@ function lineChart(
 
   if (labels?.length) {
     const ticks = axisTickIndices(n, n > 12 ? 5 : Math.min(n, 6));
-    const slotW = n <= 1 ? w : w / (n - 1);
+    // Each label may use the gap between neighbouring ticks, not one data slot.
+    const tickW = (w / Math.max(1, ticks.length - 1)) * 0.9;
     drawAxisLabels(
       ctx,
       ticks.map((i) => ({
         x: px(i),
-        text: fitLabel(ctx, labels[i] ?? '', slotW + 4),
+        text: fitLabel(ctx, labels[i] ?? '', tickW),
       })),
       y + plotH + 4,
       P,
@@ -378,23 +381,22 @@ function barChart(
   ctx.lineTo(x + w, y + plotH + 0.5);
   ctx.stroke();
 
-  const grad = ctx.createLinearGradient(0, y, 0, y + plotH);
-  grad.addColorStop(0, color);
-  grad.addColorStop(1, colorSoft);
   data.forEach((v, i) => {
     const bh = Math.max(2, (v / max) * plotH);
     const bx = x + i * (bw + gap);
-    ctx.fillStyle = grad;
+    // Flat fill; the tallest bar gets the full accent, the rest a softer tint.
+    ctx.fillStyle = v === max ? color : colorSoft;
     ctx.fillRect(bx, y + plotH - bh, bw, bh);
   });
 
   if (labels?.length) {
     const ticks = axisTickIndices(n, n > 8 ? 5 : n);
+    const tickW = (w / Math.max(1, ticks.length)) * 0.9;
     drawAxisLabels(
       ctx,
       ticks.map((i) => ({
         x: x + i * (bw + gap) + bw / 2,
-        text: fitLabel(ctx, labels[i] ?? '', bw + gap),
+        text: fitLabel(ctx, labels[i] ?? '', tickW),
       })),
       y + plotH + 4,
       P,
@@ -487,7 +489,7 @@ function gridDims(n: number): [number, number] {
 
 /**
  * Draw the share card onto `canvas` at high resolution. Resolves once web
- * fonts are ready so Geist / Newsreader render in the export too.
+ * fonts are ready so Geist / Geist Mono / Newsreader render in the export too.
  */
 export async function drawShareCard(canvas: HTMLCanvasElement, opts: CardOptions): Promise<void> {
   if (document.fonts?.ready) {

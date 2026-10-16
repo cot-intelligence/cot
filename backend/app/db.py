@@ -100,7 +100,6 @@ CREATE TABLE IF NOT EXISTS events (
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_session_category ON events(session_id, category);
 CREATE INDEX IF NOT EXISTS idx_events_session_model ON events(session_id, model);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
@@ -217,6 +216,20 @@ CREATE TABLE IF NOT EXISTS user_rules (
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
+
+-- What the person thought of a session (event_id 0) or of one event in it:
+-- a thumbs rating, short labels and a note. Ground truth for insights and rules.
+CREATE TABLE IF NOT EXISTS annotations (
+    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    event_id    INTEGER NOT NULL DEFAULT 0,
+    rating      INTEGER,
+    labels      TEXT,
+    note        TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (session_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_annotations_updated ON annotations(updated_at);
 """
 
 
@@ -336,6 +349,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("dedup_key", "TEXT"),
         ("origin", "TEXT"),
         ("raw_ingest_id", "INTEGER"),
+        ("composer_mode", "TEXT"),
     ):
         _add_column_if_missing(conn, "events", name, col_def, event_cols)
     conn.execute(
@@ -1222,6 +1236,145 @@ def ensure_search_index() -> None:
         _ensure_search_index(conn)
 
 
+# --- session_stats: per-session rollup of the events table -------------------
+# The sessions list, stats, metrics and summaries all need each session's event
+# and tool counts, first/last timestamp and token sums. Deriving them with a
+# GROUP BY over every event made each of those a scan of the whole table. This
+# table holds them per session, kept exact by triggers on ``events`` so every
+# write path (hooks, imports, recategorizing migrations, dedup, retention
+# cascades) maintains it without knowing about it. Deletes decrement, and only
+# re-seek first/last ts (through idx_events_session_agg) when the deleted row
+# held one of them. Bump the version to rebuild after changing the definitions.
+_SESSION_STATS_VERSION = "1"
+
+_SESSION_STATS_COLUMNS = (
+    "session_id, event_count, content_count, tool_count, first_ts, last_ts,"
+    " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, first_prompt_id"
+)
+
+_SESSION_STATS_TABLE = """
+CREATE TABLE session_stats (
+    session_id         TEXT PRIMARY KEY,
+    event_count        INTEGER NOT NULL DEFAULT 0,
+    -- Events with a category other than 'lifecycle': a session with none is
+    -- only hook bookkeeping and stays out of the list.
+    content_count      INTEGER NOT NULL DEFAULT 0,
+    tool_count         INTEGER NOT NULL DEFAULT 0,
+    first_ts           TEXT,
+    last_ts            TEXT,
+    input_tokens       INTEGER NOT NULL DEFAULT 0,
+    output_tokens      INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    -- The first prompt (its detail is the session title).
+    first_prompt_id    INTEGER
+)
+"""
+
+
+def _session_stats_add(row: str) -> str:
+    """Fold one events row (``NEW``) into its session's stats."""
+    return f"""
+    INSERT INTO session_stats ({_SESSION_STATS_COLUMNS})
+    VALUES ({row}.session_id, 1,
+        {row}.category IS NOT NULL AND {row}.category != 'lifecycle',
+        {row}.tool IS NOT NULL, {row}.ts, {row}.ts,
+        COALESCE({row}.input_tokens, 0), COALESCE({row}.output_tokens, 0),
+        COALESCE({row}.cache_read_tokens, 0), COALESCE({row}.cache_write_tokens, 0),
+        CASE WHEN {row}.category = 'prompt' THEN {row}.id END)
+    ON CONFLICT(session_id) DO UPDATE SET
+        event_count = event_count + 1,
+        content_count = content_count + excluded.content_count,
+        tool_count = tool_count + excluded.tool_count,
+        first_ts = CASE WHEN first_ts IS NULL OR excluded.first_ts < first_ts
+            THEN COALESCE(excluded.first_ts, first_ts) ELSE first_ts END,
+        last_ts = CASE WHEN last_ts IS NULL OR excluded.last_ts > last_ts
+            THEN COALESCE(excluded.last_ts, last_ts) ELSE last_ts END,
+        input_tokens = input_tokens + excluded.input_tokens,
+        output_tokens = output_tokens + excluded.output_tokens,
+        cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+        cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
+        first_prompt_id = CASE WHEN excluded.first_prompt_id IS NOT NULL
+            AND (first_prompt_id IS NULL OR excluded.first_prompt_id < first_prompt_id)
+            THEN excluded.first_prompt_id ELSE first_prompt_id END;
+"""
+
+
+def _session_stats_remove(row: str) -> str:
+    """Take one events row (``OLD``) out of its session's stats."""
+    return f"""
+    UPDATE session_stats SET
+        event_count = event_count - 1,
+        content_count = content_count - ({row}.category IS NOT NULL AND {row}.category != 'lifecycle'),
+        tool_count = tool_count - ({row}.tool IS NOT NULL),
+        input_tokens = input_tokens - COALESCE({row}.input_tokens, 0),
+        output_tokens = output_tokens - COALESCE({row}.output_tokens, 0),
+        cache_read_tokens = cache_read_tokens - COALESCE({row}.cache_read_tokens, 0),
+        cache_write_tokens = cache_write_tokens - COALESCE({row}.cache_write_tokens, 0)
+    WHERE session_id = {row}.session_id;
+    UPDATE session_stats SET
+        first_ts = (SELECT MIN(ts) FROM events WHERE session_id = {row}.session_id),
+        last_ts = (SELECT MAX(ts) FROM events WHERE session_id = {row}.session_id)
+    WHERE session_id = {row}.session_id AND ({row}.ts = first_ts OR {row}.ts = last_ts);
+    UPDATE session_stats SET first_prompt_id = (
+        SELECT MIN(id) FROM events WHERE session_id = {row}.session_id AND category = 'prompt')
+    WHERE session_id = {row}.session_id AND first_prompt_id = {row}.id;
+    DELETE FROM session_stats WHERE session_id = {row}.session_id AND event_count <= 0;
+"""
+
+
+_SESSION_STATS_TRIGGERS = (
+    "CREATE TRIGGER session_stats_insert AFTER INSERT ON events BEGIN"
+    + _session_stats_add("NEW") + "END",
+    "CREATE TRIGGER session_stats_delete AFTER DELETE ON events BEGIN"
+    + _session_stats_remove("OLD") + "END",
+    "CREATE TRIGGER session_stats_update AFTER UPDATE OF"
+    " session_id, ts, category, tool,"
+    " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens"
+    " ON events BEGIN" + _session_stats_remove("OLD") + _session_stats_add("NEW") + "END",
+)
+
+# One pass over idx_events_session_agg (session_id, ts, tool, category, tokens;
+# the rowid comes free), not the events table.
+_SESSION_STATS_BACKFILL = f"""
+INSERT INTO session_stats ({_SESSION_STATS_COLUMNS})
+SELECT session_id, COUNT(*),
+    SUM(category IS NOT NULL AND category != 'lifecycle'),
+    SUM(tool IS NOT NULL), MIN(ts), MAX(ts),
+    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+    COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0),
+    MIN(CASE WHEN category = 'prompt' THEN id END)
+FROM events INDEXED BY idx_events_session_agg
+GROUP BY session_id
+"""
+
+
+def _ensure_session_stats(conn: sqlite3.Connection) -> None:
+    """Create, or rebuild after a definition change, the session_stats rollup.
+    Runs inside init_db's write transaction, so no event lands between the
+    backfill and the triggers that take over from it."""
+    stored = conn.execute(
+        "SELECT value FROM settings WHERE key = 'session_stats_version'"
+    ).fetchone()
+    has_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_stats'"
+    ).fetchone()
+    if has_table and stored and stored["value"] == _SESSION_STATS_VERSION:
+        return
+    for name in ("session_stats_insert", "session_stats_delete", "session_stats_update"):
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+    conn.execute("DROP TABLE IF EXISTS session_stats")
+    conn.execute(_SESSION_STATS_TABLE)
+    conn.execute(_SESSION_STATS_BACKFILL)
+    for trigger in _SESSION_STATS_TRIGGERS:
+        conn.execute(trigger)
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES ('session_stats_version', ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (_SESSION_STATS_VERSION,),
+    )
+
+
 def init_db(build_search_index: bool = True) -> None:
     """``build_search_index=False`` leaves a first-time index build to
     :func:`ensure_search_index`; the server runs that after it starts, because
@@ -1231,6 +1384,7 @@ def init_db(build_search_index: bool = True) -> None:
             if statement.strip():
                 conn.execute(statement)
         _migrate(conn)
+        _ensure_session_stats(conn)
         if build_search_index:
             _ensure_search_index(conn)
         conn.execute(
@@ -1242,6 +1396,9 @@ def init_db(build_search_index: bool = True) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)"
         )
+        # A prefix of idx_events_session_agg, which serves every lookup it did
+        # (the cascade delete's included); one fewer B-tree to update per insert.
+        conn.execute("DROP INDEX IF EXISTS idx_events_session")
         stored = conn.execute(
             "SELECT value FROM settings WHERE key = 'migrations_version'"
         ).fetchone()
@@ -1910,11 +2067,24 @@ def mark_raw_ingest(
     projection_error: str | None = None,
 ) -> None:
     with store.write() as conn:
-        conn.execute(
-            "UPDATE raw_ingest_events SET status = ?, event_id = ?, projection_error = ?"
-            " WHERE id = ?",
-            (status, event_id, projection_error, raw_ingest_id),
+        _mark_raw_ingest(
+            conn, raw_ingest_id, status, event_id=event_id, projection_error=projection_error
         )
+
+
+def _mark_raw_ingest(
+    conn: sqlite3.Connection,
+    raw_ingest_id: int,
+    status: str,
+    *,
+    event_id: int | None = None,
+    projection_error: str | None = None,
+) -> None:
+    conn.execute(
+        "UPDATE raw_ingest_events SET status = ?, event_id = ?, projection_error = ?"
+        " WHERE id = ?",
+        (status, event_id, projection_error, raw_ingest_id),
+    )
 
 
 def raw_ingest_events(limit: int = 100) -> list[dict[str, Any]]:
@@ -1951,11 +2121,34 @@ def record_malformed_ingest(
 
 
 def record_ingest(source: str, raw: dict[str, Any]) -> dict[str, Any]:
-    raw_id = append_raw_ingest(source, raw, origin="import" if raw.get("_import") else "hook")
+    return record_ingests([(source, raw)])[0]
+
+
+def record_ingests(items: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Store and project hook bodies, all in one write transaction.
+
+    Each body is appended to the raw ingest ledger, projected into an Event and
+    its ledger row marked, as one unit per body (a savepoint), so a body whose
+    projection fails still keeps its raw row, marked failed. One commit for the
+    lot instead of three per body: a batch (OTLP spans, a replayed spool) holds
+    the write lock once."""
+    results: list[dict[str, Any]] = []
+    with store.write() as conn:
+        for source, raw in items:
+            results.append(_record_ingest(conn, source, raw))
+    return results
+
+
+def _record_ingest(conn: sqlite3.Connection, source: str, raw: dict[str, Any]) -> dict[str, Any]:
+    raw_id = _append_raw_ingest(
+        conn, source, raw, origin="import" if raw.get("_import") else "hook"
+    )
+    conn.execute("SAVEPOINT project_event")
     try:
         norm = normalize(source, raw)
         if should_ignore_event(norm, raw):
-            mark_raw_ingest(raw_id, "ignored")
+            conn.execute("RELEASE project_event")
+            _mark_raw_ingest(conn, raw_id, "ignored")
             return {
                 "ok": True,
                 "ignored": True,
@@ -1966,11 +2159,14 @@ def record_ingest(source: str, raw: dict[str, Any]) -> dict[str, Any]:
                 "hook": norm["hook"],
                 "category": norm.get("category"),
             }
-        session_id, event_id, inserted = record_event(
-            norm, raw, raw_ingest_id=raw_id, return_status=True
+        session_id, event_id, inserted = _record_event(
+            conn, norm, raw, raw_ingest_id=raw_id, return_status=True
         )
+        conn.execute("RELEASE project_event")
     except Exception as exc:
-        mark_raw_ingest(raw_id, "failed", projection_error=str(exc))
+        conn.execute("ROLLBACK TO project_event")
+        conn.execute("RELEASE project_event")
+        _mark_raw_ingest(conn, raw_id, "failed", projection_error=str(exc))
         return {
             "ok": True,
             "raw_ingest_id": raw_id,
@@ -1982,7 +2178,7 @@ def record_ingest(source: str, raw: dict[str, Any]) -> dict[str, Any]:
         }
 
     raw_status = "projected" if inserted else "duplicate"
-    mark_raw_ingest(raw_id, raw_status, event_id=event_id)
+    _mark_raw_ingest(conn, raw_id, raw_status, event_id=event_id)
     return {
         "ok": True,
         "raw_ingest_id": raw_id,
@@ -2003,124 +2199,137 @@ def record_event(
     raw_ingest_id: int | None = None,
     return_status: bool = False,
 ) -> tuple[str, int] | tuple[str, int, bool]:
+    with store.write() as conn:
+        return _record_event(
+            conn, norm, raw, raw_ingest_id=raw_ingest_id, return_status=return_status
+        )
+
+
+def _record_event(
+    conn: sqlite3.Connection,
+    norm: dict[str, Any],
+    raw: dict[str, Any],
+    *,
+    raw_ingest_id: int | None = None,
+    return_status: bool = False,
+) -> tuple[str, int] | tuple[str, int, bool]:
     sid = norm["session_id"]
     ts = norm["ts"]
     origin = "import" if raw.get("_import") else "hook"
     explicit_dk = raw.get("_dedup_key")
     dk = str(explicit_dk) if explicit_dk else _dedup_key(raw)
 
-    with store.write() as conn:
-        if explicit_dk:
-            # Import path: dedup on (session_id, dedup_key) with no time window.
-            dup = conn.execute(
-                "SELECT id FROM events WHERE session_id = ? AND dedup_key = ? LIMIT 1",
-                (sid, dk),
-            ).fetchone()
-        else:
-            # Live hook path: 5s payload-hash window (Cursor double-posts).
-            cutoff = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
-            dup = conn.execute(
-                "SELECT id FROM events WHERE session_id = ? AND dedup_key = ? AND created_at >= ?"
-                " ORDER BY id DESC LIMIT 1",
-                (sid, dk, cutoff),
-            ).fetchone()
-        if dup is not None:
-            event_id = int(dup["id"])
-            if raw_ingest_id is not None:
-                conn.execute(
-                    "UPDATE raw_ingest_events SET status = 'duplicate', event_id = ?"
-                    " WHERE id = ?",
-                    (event_id, raw_ingest_id),
-                )
-            return (sid, event_id, False) if return_status else (sid, event_id)
-
-        boundary = lifecycle_boundary(norm["source"], norm["hook"])
-        row = conn.execute("SELECT id FROM sessions WHERE id = ?", (sid,)).fetchone()
-        if row is None or boundary == "session_start":
-            if row is None:
-                conn.execute(
-                    "INSERT INTO sessions (id, source, cwd, started_at, status, created_at)"
-                    " VALUES (?, ?, ?, ?, 'active', ?)",
-                    (sid, norm["source"], norm["cwd"], ts, timeutil.now()),
-                )
-            elif boundary == "session_start":
-                conn.execute(
-                    "UPDATE sessions SET status = 'active', ended_at = NULL,"
-                    " cwd = COALESCE(?, cwd)"
-                    " WHERE id = ?",
-                    (norm["cwd"], sid),
-                )
-        elif norm["cwd"]:
+    if explicit_dk:
+        # Import path: dedup on (session_id, dedup_key) with no time window.
+        dup = conn.execute(
+            "SELECT id FROM events WHERE session_id = ? AND dedup_key = ? LIMIT 1",
+            (sid, dk),
+        ).fetchone()
+    else:
+        # Live hook path: 5s payload-hash window (Cursor double-posts).
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+        dup = conn.execute(
+            "SELECT id FROM events WHERE session_id = ? AND dedup_key = ? AND created_at >= ?"
+            " ORDER BY id DESC LIMIT 1",
+            (sid, dk, cutoff),
+        ).fetchone()
+    if dup is not None:
+        event_id = int(dup["id"])
+        if raw_ingest_id is not None:
             conn.execute(
-                "UPDATE sessions SET cwd = COALESCE(cwd, ?) WHERE id = ?",
+                "UPDATE raw_ingest_events SET status = 'duplicate', event_id = ?"
+                " WHERE id = ?",
+                (event_id, raw_ingest_id),
+            )
+        return (sid, event_id, False) if return_status else (sid, event_id)
+
+    boundary = lifecycle_boundary(norm["source"], norm["hook"])
+    row = conn.execute("SELECT id FROM sessions WHERE id = ?", (sid,)).fetchone()
+    if row is None or boundary == "session_start":
+        if row is None:
+            conn.execute(
+                "INSERT INTO sessions (id, source, cwd, started_at, status, created_at)"
+                " VALUES (?, ?, ?, ?, 'active', ?)",
+                (sid, norm["source"], norm["cwd"], ts, timeutil.now()),
+            )
+        elif boundary == "session_start":
+            conn.execute(
+                "UPDATE sessions SET status = 'active', ended_at = NULL,"
+                " cwd = COALESCE(?, cwd)"
+                " WHERE id = ?",
                 (norm["cwd"], sid),
             )
-
-        if norm["source"] == "opencode" and raw.get("parent_session_id"):
-            parent = str(raw["parent_session_id"])
-            if parent != sid:
-                conn.execute(
-                    "UPDATE sessions SET parent_session_id = ?,"
-                    " subagent_label = COALESCE(subagent_label, ?) WHERE id = ?",
-                    (parent, raw.get("session_title"), sid),
-                )
-
-        # Imported events carry historical timestamps; ensure the session's
-        # started_at reflects the earliest event we've seen.
-        if origin == "import":
-            conn.execute(
-                "UPDATE sessions SET started_at = ? WHERE id = ?"
-                " AND (started_at IS NULL OR ? < started_at)",
-                (ts, sid, ts),
-            )
-
-        if boundary == "session_end":
-            conn.execute(
-                "UPDATE sessions SET status = 'completed', ended_at = ? WHERE id = ?",
-                (ts, sid),
-            )
-
-        event_id = _insert_normalized_event(
-            conn,
-            norm,
-            raw,
-            dk,
-            ts=ts,
-            origin=origin,
-            raw_ingest_id=raw_ingest_id,
+    elif norm["cwd"]:
+        conn.execute(
+            "UPDATE sessions SET cwd = COALESCE(cwd, ?) WHERE id = ?",
+            (norm["cwd"], sid),
         )
 
-        if (
-            norm["source"] == "cursor"
-            and norm["hook"] == "preToolUse"
-            and norm.get("tool") in ("Task", "Subagent")
-            and norm.get("target")
-        ):
+    if norm["source"] == "opencode" and raw.get("parent_session_id"):
+        parent = str(raw["parent_session_id"])
+        if parent != sid:
             conn.execute(
-                "UPDATE events SET phase = 'superseded'"
-                " WHERE session_id = ? AND source = 'cursor'"
-                " AND hook = 'subagentStart' AND target = ? AND phase = 'start'",
-                (sid, norm["target"]),
+                "UPDATE sessions SET parent_session_id = ?,"
+                " subagent_label = COALESCE(subagent_label, ?) WHERE id = ?",
+                (parent, raw.get("session_title"), sid),
             )
 
-        # Hook data wins: if a live event arrives for a session that the importer
-        # had also ingested (timing race), drop the imported approximation and
-        # reset the session's start to the real events. No-op after the first.
-        if origin == "hook":
-            purged = conn.execute(
-                "DELETE FROM events WHERE session_id = ? AND origin = 'import'", (sid,)
-            ).rowcount
-            if purged:
-                bounds = conn.execute(
-                    "SELECT MIN(ts) mn FROM events WHERE session_id = ?", (sid,)
-                ).fetchone()
-                if bounds and bounds["mn"]:
-                    conn.execute(
-                        "UPDATE sessions SET started_at = ? WHERE id = ?",
-                        (bounds["mn"], sid),
-                    )
+    # Imported events carry historical timestamps; ensure the session's
+    # started_at reflects the earliest event we've seen.
+    if origin == "import":
+        conn.execute(
+            "UPDATE sessions SET started_at = ? WHERE id = ?"
+            " AND (started_at IS NULL OR ? < started_at)",
+            (ts, sid, ts),
+        )
 
-        return (sid, event_id, True) if return_status else (sid, event_id)
+    if boundary == "session_end":
+        conn.execute(
+            "UPDATE sessions SET status = 'completed', ended_at = ? WHERE id = ?",
+            (ts, sid),
+        )
+
+    event_id = _insert_normalized_event(
+        conn,
+        norm,
+        raw,
+        dk,
+        ts=ts,
+        origin=origin,
+        raw_ingest_id=raw_ingest_id,
+    )
+
+    if (
+        norm["source"] == "cursor"
+        and norm["hook"] == "preToolUse"
+        and norm.get("tool") in ("Task", "Subagent")
+        and norm.get("target")
+    ):
+        conn.execute(
+            "UPDATE events SET phase = 'superseded'"
+            " WHERE session_id = ? AND source = 'cursor'"
+            " AND hook = 'subagentStart' AND target = ? AND phase = 'start'",
+            (sid, norm["target"]),
+        )
+
+    # Hook data wins: if a live event arrives for a session that the importer
+    # had also ingested (timing race), drop the imported approximation and
+    # reset the session's start to the real events. No-op after the first.
+    if origin == "hook":
+        purged = conn.execute(
+            "DELETE FROM events WHERE session_id = ? AND origin = 'import'", (sid,)
+        ).rowcount
+        if purged:
+            bounds = conn.execute(
+                "SELECT MIN(ts) mn FROM events WHERE session_id = ?", (sid,)
+            ).fetchone()
+            if bounds and bounds["mn"]:
+                conn.execute(
+                    "UPDATE sessions SET started_at = ? WHERE id = ?",
+                    (bounds["mn"], sid),
+                )
+
+    return (sid, event_id, True) if return_status else (sid, event_id)
 
 
 def _summary_title(detail: Any) -> str | None:
@@ -2236,12 +2445,15 @@ def session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[d
 
     children: list[dict[str, Any]] = []
     seen: set[str] = set()
+    # A review prompt names the session it reviews, so only prompts that contain
+    # this id (LIKE is ASCII case-insensitive, like the lowercased match below)
+    # need the regex.
     rows = conn.execute(
         "SELECT session_id, detail, MIN(ts) AS first_ts FROM events"
-        " WHERE category='prompt' AND detail LIKE ?"
+        " WHERE category='prompt' AND detail LIKE ? AND detail LIKE ? ESCAPE '\\'"
         " GROUP BY session_id, detail"
         " ORDER BY first_ts ASC",
-        (f"{APPROVAL_REVIEW_PREFIX}%",),
+        (f"{APPROVAL_REVIEW_PREFIX}%", f"%{_like_escape(session_id)}%"),
     ).fetchall()
     for row in rows:
         review_session_id = row["session_id"]
@@ -2273,38 +2485,30 @@ def session_links(conn: sqlite3.Connection, session_id: str) -> dict[str, list[d
 
 
 def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
-    agg = conn.execute(
-        "SELECT COUNT(*) AS events,"
-        " SUM(CASE WHEN tool IS NOT NULL THEN 1 ELSE 0 END) AS tools,"
-        " MIN(ts) AS first_ts, MAX(ts) AS last_ts"
-        " FROM events WHERE session_id = ?",
+    stats = conn.execute(
+        "SELECT event_count, tool_count, first_ts, last_ts, input_tokens AS i,"
+        " output_tokens AS o, cache_read_tokens AS cr, cache_write_tokens AS cw"
+        " FROM session_stats WHERE session_id = ?",
         (row["id"],),
     ).fetchone()
+    agg = {
+        "events": stats["event_count"] if stats else 0,
+        "tools": stats["tool_count"] if stats else 0,
+        "first_ts": stats["first_ts"] if stats else None,
+        "last_ts": stats["last_ts"] if stats else None,
+    }
     last_ts = agg["last_ts"]
-    models = [
-        r["model"]
-        for r in conn.execute(
-            "SELECT DISTINCT model FROM events"
-            " WHERE session_id = ? AND model IS NOT NULL AND model != ''"
-            " ORDER BY model",
-            (row["id"],),
-        ).fetchall()
-    ]
-    tok = conn.execute(
-        "SELECT COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o,"
-        " COALESCE(SUM(cache_read_tokens),0) cr, COALESCE(SUM(cache_write_tokens),0) cw"
-        " FROM events WHERE session_id = ?",
-        (row["id"],),
-    ).fetchone()
-    # Per-model token sums for cost calculation.
+    tok = stats or {"i": 0, "o": 0, "cr": 0, "cw": 0}
+    # Per-model token sums for cost calculation (and the model list).
     model_rows = conn.execute(
         "SELECT model,"
         " COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o,"
         " COALESCE(SUM(cache_read_tokens),0) cr, COALESCE(SUM(cache_write_tokens),0) cw"
         " FROM events WHERE session_id = ? AND model IS NOT NULL AND model != ''"
-        " GROUP BY model",
+        " GROUP BY model ORDER BY model",
         (row["id"],),
     ).fetchall()
+    models = [mr["model"] for mr in model_rows]
     cost_usd = 0.0
     has_cost = False
     for mr in model_rows:
@@ -2331,7 +2535,23 @@ def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any
         "tokens": _tokens_dict(tok),
         "cost_usd": round(cost_usd, 6),
         "has_cost": has_cost,
+        "rating": _session_ratings(conn, [row["id"]]).get(row["id"]),
         **_import_fields(row),
+    }
+
+
+def _session_ratings(conn: sqlite3.Connection, session_ids: list[str]) -> dict[str, int]:
+    """Session-level thumbs (``annotations`` with event_id 0), by session."""
+    if not session_ids:
+        return {}
+    placeholders = ",".join("?" for _ in session_ids)
+    return {
+        r["session_id"]: r["rating"]
+        for r in conn.execute(
+            f"SELECT session_id, rating FROM annotations"
+            f" WHERE event_id = 0 AND rating IS NOT NULL AND session_id IN ({placeholders})",
+            session_ids,
+        )
     }
 
 
@@ -2377,6 +2597,7 @@ def _batched_session_summaries(
         session_ids,
     ).fetchall():
         model_rows_by_session.setdefault(r["session_id"], []).append(r)
+    ratings = _session_ratings(conn, session_ids)
 
     summaries: list[dict[str, Any]] = []
     for row in rows:
@@ -2409,6 +2630,7 @@ def _batched_session_summaries(
                 "tokens": _tokens_from_parts(row["i"], row["o"], row["cr"], row["cw"]),
                 "cost_usd": round(cost_usd, 6),
                 "has_cost": has_cost,
+                "rating": ratings.get(row["id"]),
                 **_import_fields(row),
             }
         )
@@ -2422,6 +2644,11 @@ def _resolve_tz(tz: str | None) -> ZoneInfo | None:
         return ZoneInfo(tz.strip())
     except ZoneInfoNotFoundError:
         return None
+
+
+# Timestamps already in canonical UTC text form (``...Z`` or ``...+00:00``), whose
+# first 16 characters are the UTC date, hour and minute.
+_UTC_TS_SQL = "ts GLOB '????-??-??T??:??*' AND (ts GLOB '*Z' OR ts GLOB '*+00:00')"
 
 
 def _metrics_time_buckets(
@@ -2448,15 +2675,31 @@ def _metrics_time_buckets(
 
     day_counts: dict[str, int] = {}
     hour_counts: dict[int, int] = {}
-    for r in conn.execute("SELECT ts FROM events WHERE ts IS NOT NULL"):
-        dt = timeutil.parse_ts(r["ts"])
-        if dt is None:
-            continue
+
+    def add(dt: datetime, n: int) -> None:
         local = dt.astimezone(tz)
         day = local.strftime("%Y-%m-%d")
-        day_counts[day] = day_counts.get(day, 0) + 1
-        hour = local.hour
-        hour_counts[hour] = hour_counts.get(hour, 0) + 1
+        day_counts[day] = day_counts.get(day, 0) + n
+        hour_counts[local.hour] = hour_counts.get(local.hour, 0) + n
+
+    # UTC timestamps are counted per quarter hour in SQL (from the ts index),
+    # then shifted: every UTC offset is a multiple of 15 minutes, so a bucket
+    # never straddles a local day or hour. Parsing each row in Python instead
+    # took seconds per call on a large DB.
+    for r in conn.execute(
+        "SELECT substr(ts,1,13) h, CAST(substr(ts,15,2) AS INTEGER) / 15 q, COUNT(*) n"
+        f" FROM events WHERE {_UTC_TS_SQL} GROUP BY h, q"
+    ):
+        try:
+            hour_start = datetime.strptime(r["h"], "%Y-%m-%dT%H").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        add(hour_start + timedelta(minutes=15 * r["q"]), r["n"])
+    # Anything else (offset or epoch timestamps) is rare; parse it row by row.
+    for r in conn.execute(f"SELECT ts FROM events WHERE ts IS NOT NULL AND NOT ({_UTC_TS_SQL})"):
+        dt = timeutil.parse_ts(r["ts"])
+        if dt is not None:
+            add(dt, 1)
     by_day = [{"day": d, "events": n} for d, n in sorted(day_counts.items())]
     by_hour = [{"hour": h, "events": n} for h, n in sorted(hour_counts.items())]
     return by_day, by_hour
@@ -2490,24 +2733,22 @@ def metrics(
         rows = lambda sql, *p: conn.execute(sql, p).fetchall()  # noqa: E731
 
         sessions = one("SELECT COUNT(*) n FROM sessions")["n"]
-        events = one("SELECT COUNT(*) n FROM events")["n"]
-        tool_calls = one("SELECT COUNT(*) n FROM events WHERE tool IS NOT NULL")["n"]
+        events, tool_calls = one(
+            "SELECT COALESCE(SUM(event_count), 0) e, COALESCE(SUM(tool_count), 0) t FROM session_stats"
+        )
         projects = one("SELECT COUNT(DISTINCT cwd) n FROM sessions WHERE cwd IS NOT NULL")["n"]
 
-        last_rows = rows("SELECT session_id, MAX(ts) lt FROM events GROUP BY session_id")
+        last_rows = rows("SELECT session_id, last_ts lt FROM session_stats")
         active = sum(1 for r in last_rows if timeutil.live_status(r["lt"]) == "active")
 
-        durs = rows(
-            "SELECT (julianday(MAX(ts))-julianday(MIN(ts)))*86400 d"
-            " FROM events GROUP BY session_id"
-        )
+        durs = rows("SELECT (julianday(last_ts)-julianday(first_ts))*86400 d FROM session_stats")
         dvals = [r["d"] for r in durs if r["d"] is not None]
         avg_duration = round(sum(dvals) / len(dvals), 2) if dvals else None
 
         tok = one(
             "SELECT COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o,"
             " COALESCE(SUM(cache_read_tokens),0) cr, COALESCE(SUM(cache_write_tokens),0) cw"
-            " FROM events"
+            " FROM session_stats"
         )
         tokens = _tokens_dict(tok)
 
@@ -2589,8 +2830,9 @@ def metrics(
                 "last_activity": timeutil.format_ts(r["lt"]),
             }
             for r in rows(
-                "SELECT s.cwd, COUNT(DISTINCT s.id) s, COUNT(ev.id) e, MAX(ev.ts) lt"
-                " FROM sessions s LEFT JOIN events ev ON ev.session_id = s.id"
+                "SELECT s.cwd, COUNT(DISTINCT s.id) s, COALESCE(SUM(st.event_count), 0) e,"
+                " MAX(st.last_ts) lt"
+                " FROM sessions s LEFT JOIN session_stats st ON st.session_id = s.id"
                 " WHERE s.cwd IS NOT NULL GROUP BY s.cwd ORDER BY e DESC LIMIT 10"
             )
         ]
@@ -2603,9 +2845,9 @@ def metrics(
         busiest_sessions = [
             {"session_id": r["session_id"], "events": r["n"], "cwd": r["cwd"]}
             for r in rows(
-                "SELECT e.session_id, COUNT(*) n, s.cwd"
-                " FROM events e LEFT JOIN sessions s ON s.id = e.session_id"
-                " GROUP BY e.session_id ORDER BY n DESC LIMIT 8"
+                "SELECT st.session_id, st.event_count n, s.cwd"
+                " FROM session_stats st LEFT JOIN sessions s ON s.id = st.session_id"
+                " ORDER BY n DESC LIMIT 8"
             )
         ]
 
@@ -2743,6 +2985,7 @@ def activity_rows(
     since: str | None,
     project: str | None = None,
     source: str | None = None,
+    after_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """Every finished shell command or web request in a window, newest first.
 
@@ -2767,6 +3010,10 @@ def activity_rows(
     if source:
         clauses.append("e.source = ?")
         params.append(source)
+    if after_id is not None:
+        # Only rows newer than a cached read (activity's incremental refresh).
+        clauses.append("e.id > ?")
+        params.append(after_id)
     with store.read() as conn:
         rows = conn.execute(
             "SELECT e.id, e.session_id, e.target, e.title, e.ts, e.source, e.duration_ms, e.status, s.cwd,"
@@ -2839,6 +3086,141 @@ def set_bookmarked(session_id: str, bookmarked: bool) -> bool:
             (1 if bookmarked else 0, session_id),
         )
         return cur.rowcount > 0
+
+
+ANNOTATION_LABELS_MAX = 8
+ANNOTATION_LABEL_MAX = 40
+ANNOTATION_NOTE_MAX = 4000
+
+
+def _annotation_dict(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        labels = json.loads(row["labels"] or "[]")
+    except json.JSONDecodeError:
+        labels = []
+    return {
+        "session_id": row["session_id"],
+        "event_id": row["event_id"] or None,
+        "rating": row["rating"],
+        "labels": labels if isinstance(labels, list) else [],
+        "note": row["note"],
+        "created_at": timeutil.format_ts(row["created_at"]),
+        "updated_at": timeutil.format_ts(row["updated_at"]),
+    }
+
+
+def _clean_labels(labels: list[Any] | None) -> list[str]:
+    out: list[str] = []
+    for label in labels or []:
+        text = " ".join(str(label or "").split())[:ANNOTATION_LABEL_MAX].lower()
+        if text and text not in out:
+            out.append(text)
+    return out[:ANNOTATION_LABELS_MAX]
+
+
+def get_annotations(session_id: str) -> dict[str, Any] | None:
+    """The session's own annotation and each annotated event's, or None when
+    the session does not exist."""
+    with store.read() as conn:
+        if conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone() is None:
+            return None
+        rows = conn.execute(
+            "SELECT * FROM annotations WHERE session_id = ? ORDER BY event_id", (session_id,)
+        ).fetchall()
+    found = [_annotation_dict(r) for r in rows]
+    return {
+        "session": next((a for a in found if a["event_id"] is None), None),
+        "events": [a for a in found if a["event_id"] is not None],
+    }
+
+
+def set_annotation(
+    session_id: str,
+    event_id: int | None,
+    *,
+    rating: int | None,
+    labels: list[Any] | None,
+    note: str | None,
+) -> dict[str, Any] | None:
+    """Replace the annotation on a session (``event_id`` None) or one of its
+    events. An empty annotation (no rating, labels or note) is removed, and
+    comes back empty. Returns None when the session or event does not exist."""
+    if rating not in (None, 1, -1):
+        raise ValueError("rating must be 1, -1 or null")
+    clean = _clean_labels(labels)
+    text = (note or "").strip()[:ANNOTATION_NOTE_MAX] or None
+    eid = int(event_id or 0)
+    now = timeutil.now()
+    with store.write() as conn:
+        if conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone() is None:
+            return None
+        if eid and conn.execute(
+            "SELECT 1 FROM events WHERE id = ? AND session_id = ?", (eid, session_id)
+        ).fetchone() is None:
+            return None
+        if rating is None and not clean and not text:
+            conn.execute("DELETE FROM annotations WHERE session_id = ? AND event_id = ?", (session_id, eid))
+            return {
+                "session_id": session_id, "event_id": eid or None, "rating": None, "labels": [],
+                "note": None, "created_at": None, "updated_at": None,
+            }
+        conn.execute(
+            "INSERT INTO annotations (session_id, event_id, rating, labels, note, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(session_id, event_id) DO UPDATE SET"
+            " rating = excluded.rating, labels = excluded.labels, note = excluded.note,"
+            " updated_at = excluded.updated_at",
+            (session_id, eid, rating, json.dumps(clean) if clean else None, text, now, now),
+        )
+        row = conn.execute(
+            "SELECT * FROM annotations WHERE session_id = ? AND event_id = ?", (session_id, eid)
+        ).fetchone()
+    return _annotation_dict(row)
+
+
+def list_annotations(
+    rating: int | None = None,
+    label: str | None = None,
+    since: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Annotations across sessions, newest first, with enough of the session
+    and event to read them without opening each one."""
+    clauses = ["1 = 1"]
+    params: list[Any] = []
+    if rating is not None:
+        clauses.append("a.rating = ?")
+        params.append(rating)
+    if label:
+        clauses.append("EXISTS (SELECT 1 FROM json_each(a.labels) j WHERE j.value = ?)")
+        params.append(label.strip().lower())
+    if since:
+        clauses.append("a.updated_at >= ?")
+        params.append(since)
+    params.append(limit)
+    with store.read() as conn:
+        rows = conn.execute(
+            "SELECT a.*, s.source, s.cwd, e.category AS event_category, e.title AS event_title,"
+            " e.target AS event_target,"
+            " (SELECT fp.detail FROM session_stats ss JOIN events fp ON fp.id = ss.first_prompt_id"
+            "  WHERE ss.session_id = a.session_id) AS prompt_detail"
+            " FROM annotations a JOIN sessions s ON s.id = a.session_id"
+            " LEFT JOIN events e ON e.id = NULLIF(a.event_id, 0)"
+            f" WHERE {' AND '.join(clauses)} ORDER BY a.updated_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+    out = []
+    for r in rows:
+        item = _annotation_dict(r)
+        item.update({
+            "source": r["source"],
+            "cwd": r["cwd"],
+            "session_title": _summary_title(r["prompt_detail"]),
+            "event": {"category": r["event_category"], "title": r["event_title"], "target": r["event_target"]}
+            if item["event_id"] else None,
+        })
+        out.append(item)
+    return out
 
 
 def set_subagent_links(links: list[dict[str, Any]]) -> int:
@@ -2926,25 +3308,11 @@ def export_sessions(
             f" s.status, s.archived, s.bookmarked, s.created_at,"
             f" s.imported_from, s.imported_at, s.import_note,"
             f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
-            f" e.i, e.o, e.cr, e.cw,"
-            f" (SELECT fp.detail FROM events fp"
-            f"  WHERE fp.session_id = s.id AND fp.category = 'prompt'"
-            f"  ORDER BY fp.id ASC LIMIT 1) AS prompt_detail"
+            f" e.input_tokens AS i, e.output_tokens AS o,"
+            f" e.cache_read_tokens AS cr, e.cache_write_tokens AS cw,"
+            f" (SELECT fp.detail FROM events fp WHERE fp.id = e.first_prompt_id) AS prompt_detail"
             f" FROM sessions s"
-            f" JOIN ("
-            f"   SELECT session_id,"
-            f"     COUNT(*) AS event_count,"
-            f"     SUM(CASE WHEN tool IS NOT NULL THEN 1 ELSE 0 END) AS tool_count,"
-            f"     MIN(ts) AS first_ts,"
-            f"     MAX(ts) AS last_ts,"
-            f"     COALESCE(SUM(input_tokens),0) AS i,"
-            f"     COALESCE(SUM(output_tokens),0) AS o,"
-            f"     COALESCE(SUM(cache_read_tokens),0) AS cr,"
-            f"     COALESCE(SUM(cache_write_tokens),0) AS cw"
-            f"   FROM events"
-            f"   GROUP BY session_id"
-            f"   HAVING SUM(CASE WHEN category IS NOT NULL AND category != 'lifecycle' THEN 1 ELSE 0 END) > 0"
-            f" ) e ON e.session_id = s.id"
+            f" JOIN session_stats e ON e.session_id = s.id AND e.content_count > 0"
             f" {where}"
             f" ORDER BY COALESCE(s.ended_at, e.last_ts, s.started_at) DESC"
             f" LIMIT ?",
@@ -3092,6 +3460,9 @@ def session_window(days: int) -> dict[str, Any]:
     if days > 0:
         since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
     summaries, _ = list_sessions_page(1_000_000_000, since=since)
+    # One series point per UTC day, or per UTC hour for the 24-hour window
+    # ("2026-10-16" / "2026-10-16T14"); the dashboard fills the empty buckets.
+    bucket = 13 if days == 1 else 10
     series: dict[str, dict[str, Any]] = {}
     projects: dict[str, dict[str, Any]] = {}
     sources: set[str] = set()
@@ -3099,7 +3470,7 @@ def session_window(days: int) -> dict[str, Any]:
         cost = x.get("cost_usd") or 0
         tools = x.get("tool_count") or 0
         sources.add(x["source"])
-        day = series.setdefault((x.get("started_at") or "")[:10], {"sessions": 0, "cost": 0.0, "tools": 0})
+        day = series.setdefault((x.get("started_at") or "")[:bucket], {"sessions": 0, "cost": 0.0, "tools": 0})
         day["sessions"] += 1
         day["cost"] += cost
         day["tools"] += tools
@@ -3177,8 +3548,7 @@ def list_sessions_page(
         # The title is the first prompt, so search it along with the id and path.
         clauses.append(
             "(s.id LIKE ? OR s.cwd LIKE ? OR (SELECT fp.detail FROM events fp"
-            " WHERE fp.session_id = s.id AND fp.category = 'prompt'"
-            " ORDER BY fp.id ASC LIMIT 1) LIKE ?)"
+            " WHERE fp.id = e.first_prompt_id) LIKE ?)"
         )
         params.extend([f"%{q}%"] * 3)
     if project:
@@ -3196,22 +3566,11 @@ def list_sessions_page(
     sort = sort if sort in SESSION_SORTS else "recent"
     direction = "DESC" if desc else "ASC"
     recency = "COALESCE(s.ended_at, e.last_ts, s.started_at)"
+    # Per-session counts come from the session_stats rollup; a session with only
+    # lifecycle events is hook bookkeeping and doesn't list.
     joined = (
         " FROM sessions s"
-        " JOIN ("
-        "   SELECT session_id,"
-        "     COUNT(*) AS event_count,"
-        "     SUM(CASE WHEN tool IS NOT NULL THEN 1 ELSE 0 END) AS tool_count,"
-        "     MIN(ts) AS first_ts,"
-        "     MAX(ts) AS last_ts,"
-        "     COALESCE(SUM(input_tokens),0) AS i,"
-        "     COALESCE(SUM(output_tokens),0) AS o,"
-        "     COALESCE(SUM(cache_read_tokens),0) AS cr,"
-        "     COALESCE(SUM(cache_write_tokens),0) AS cw"
-        "   FROM events"
-        "   GROUP BY session_id"
-        "   HAVING SUM(CASE WHEN category IS NOT NULL AND category != 'lifecycle' THEN 1 ELSE 0 END) > 0"
-        " ) e ON e.session_id = s.id"
+        " JOIN session_stats e ON e.session_id = s.id AND e.content_count > 0"
         f" {where}"
     )
     select = (
@@ -3219,10 +3578,9 @@ def list_sessions_page(
         " s.status, s.archived, s.bookmarked, s.created_at,"
         " s.imported_from, s.imported_at, s.import_note,"
         " e.event_count, e.tool_count, e.first_ts, e.last_ts,"
-        " e.i, e.o, e.cr, e.cw,"
-        " (SELECT fp.detail FROM events fp"
-        "  WHERE fp.session_id = s.id AND fp.category = 'prompt'"
-        "  ORDER BY fp.id ASC LIMIT 1) AS prompt_detail"
+        " e.input_tokens AS i, e.output_tokens AS o,"
+        " e.cache_read_tokens AS cr, e.cache_write_tokens AS cw,"
+        " (SELECT fp.detail FROM events fp WHERE fp.id = e.first_prompt_id) AS prompt_detail"
     )
     in_sql = sort in ("recent", "events") and not status
     order = f"e.event_count {direction}, {recency} DESC" if sort == "events" else f"{recency} {direction}"
@@ -4159,11 +4517,9 @@ def stats() -> dict[str, Any]:
         # Effective status is recency-derived, so count live sessions from each
         # session's most recent event rather than the stored flag.
         event_rows = conn.execute(
-            "SELECT session_id, MAX(ts) AS last_ts,"
-            " COUNT(*) AS events,"
-            " SUM(CASE WHEN tool IS NOT NULL THEN 1 ELSE 0 END) AS tools,"
-            " (julianday(MAX(ts)) - julianday(MIN(ts))) * 86400 AS duration"
-            " FROM events GROUP BY session_id"
+            "SELECT session_id, last_ts, event_count AS events, tool_count AS tools,"
+            " (julianday(last_ts) - julianday(first_ts)) * 86400 AS duration"
+            " FROM session_stats"
         ).fetchall()
         active = sum(1 for r in event_rows if timeutil.live_status(r["last_ts"]) == "active")
         by_status = {"active": active, "completed": max(sessions - active, 0)}
@@ -4171,6 +4527,23 @@ def stats() -> dict[str, Any]:
         tool_calls = sum(r["tools"] or 0 for r in event_rows)
         durations = [r["duration"] for r in event_rows if r["duration"] is not None]
         avg_duration = round(sum(durations) / len(durations), 2) if durations else None
+        # Navigation counts, so the dashboard shell needs neither /v1/metrics nor
+        # an insights pass. Sessions and projects count what the sessions list
+        # (and the Overview) show: top-level, unarchived sessions with content,
+        # not subagents, import fragments or hook-only bookkeeping, which the
+        # ``sessions`` total above includes. Findings come from the last
+        # reconcile, not a new one.
+        listed = conn.execute(
+            "SELECT COUNT(*) AS n, COUNT(DISTINCT COALESCE(s.cwd, '')) AS projects"
+            " FROM sessions s"
+            " JOIN session_stats e ON e.session_id = s.id AND e.content_count > 0"
+            " WHERE s.archived = 0 AND s.parent_session_id IS NULL"
+            " AND (s.import_root_id IS NULL OR s.import_root_id = s.id)"
+        ).fetchone()
+        open_findings = conn.execute(
+            "SELECT COUNT(*) AS n FROM insight_findings"
+            " WHERE status = 'active' AND severity != 'info'"
+        ).fetchone()["n"]
         return {
             "sessions": sessions,
             "events": events,
@@ -4179,6 +4552,9 @@ def stats() -> dict[str, Any]:
             "avg_duration_seconds": avg_duration,
             "by_source": by_source,
             "by_status": by_status,
+            "listed_sessions": listed["n"],
+            "projects": listed["projects"],
+            "open_findings": open_findings,
         }
 
 
@@ -4220,6 +4596,37 @@ _TOOL_CALLS_INDEX_SQL = (
 
 
 _INSIGHT_SESSION_BATCH = 50
+
+
+def backfill_composer_mode(batch: int = 2000) -> None:
+    """Copy ``composer_mode`` out of the raw payload into its own column for rows
+    written before the column existed, in short write transactions so ingest gets
+    in between, resuming where a previous run stopped. Display reads stop
+    fetching ``payload`` once it is done (store.event_columns)."""
+    if get_setting("composer_mode_backfill") == "done":
+        store.mark_composer_backfilled()
+        return
+    start = int(get_setting("composer_mode_backfill") or 0)
+    with store.read() as conn:
+        last = conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
+    # Rows after ``last`` were inserted with the column set.
+    while start < last:
+        end = start + batch
+        with store.write() as conn:
+            conn.execute(
+                "UPDATE events SET composer_mode = json_extract(payload, '$.composer_mode')"
+                " WHERE id > ? AND id <= ? AND composer_mode IS NULL"
+                " AND payload LIKE '%\"composer_mode\"%' AND json_valid(payload)",
+                (start, end),
+            )
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('composer_mode_backfill', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(end),),
+            )
+        start = end
+    set_setting("composer_mode_backfill", "done")
+    store.mark_composer_backfilled()
 
 
 def ensure_insight_indexes() -> None:
@@ -4284,6 +4691,38 @@ def read_rule_events(*, cutoff: str | None, with_detail: bool) -> list[dict[str,
     )
     return _read_working_set(cutoff, None, cols)
 
+# Indexes for hot queries that otherwise read rows past their payload/detail
+# blobs. Built off the startup path like the findings index (a first build is a
+# scan of a large table); every query is correct, just slower, without them.
+_QUERY_INDEX_SQL = (
+    # Covers the model, source and status breakdowns, and connections().
+    "CREATE INDEX IF NOT EXISTS idx_events_metrics ON events("
+    " model, source, status, session_id, ts,"
+    " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)",
+    # The few events that carry attachments. The WHERE matches metrics()' query.
+    "CREATE INDEX IF NOT EXISTS idx_events_attachments ON events(id)"
+    " WHERE attachments IS NOT NULL AND attachments != ''",
+    # The ingest dedup check (record_event) runs on every hook event.
+    "CREATE INDEX IF NOT EXISTS idx_events_dedup ON events(session_id, dedup_key)",
+    # Imported (transcript) rows by session: every live hook event deletes its
+    # session's imported approximation, which otherwise inspects every row of the
+    # session (reading past its payload/detail) under the write lock.
+    "CREATE INDEX IF NOT EXISTS idx_events_import ON events(session_id) WHERE origin = 'import'",
+    # Distinct files touched. The WHERE matches metrics()' query; leading with
+    # category makes this strictly better than idx_events_category for it, which
+    # the planner otherwise picks (there are no ANALYZE stats to say otherwise).
+    "CREATE INDEX IF NOT EXISTS idx_events_file_targets ON events(category, target)"
+    " WHERE category IN ('file_edit','file_read') AND target IS NOT NULL",
+)
+
+
+def ensure_query_indexes() -> None:
+    """Create the query indexes if missing, one write at a time so ingest gets
+    in between builds."""
+    for sql in _QUERY_INDEX_SQL:
+        with store.write() as conn:
+            conn.execute(sql)
+
 
 def read_insight_inputs(
     *, cutoff: str | None, session_id: str | None, trend_since: str | None
@@ -4313,7 +4752,7 @@ def read_insight_inputs(
     session_last_ts = {
         r["session_id"]: r["t"]
         for r in rows(
-            "SELECT session_id, MAX(ts) t FROM events" + per_session[0] + " GROUP BY session_id",
+            "SELECT session_id, last_ts t FROM session_stats" + per_session[0],
             per_session[1],
         )
     }
@@ -4378,14 +4817,27 @@ class InsightFindingsRepo:
              finding["recommendation"], json.dumps(finding["evidence"]), now, now),
         )
 
+    # A re-detected finding whose snapshot is unchanged only needs ``last_seen``
+    # moved forward, and only for the resolve grace period (days), so it is
+    # rewritten at most this often. Every insights GET reconciles; rewriting
+    # every finding each time made a read endpoint a steady stream of writes.
+    _LAST_SEEN_REFRESH = timedelta(minutes=15)
+
     def refresh(self, finding: Any, status: str, now: str) -> None:
+        evidence = json.dumps(finding["evidence"])
+        parsed_now = timeutil.parse_ts(now)
+        fresh_since = (parsed_now - self._LAST_SEEN_REFRESH).isoformat() if parsed_now else now
         self._conn.execute(
             "UPDATE insight_findings SET severity = ?, title = ?, detail = ?,"
             " recommendation = ?, evidence = ?, status = ?, last_seen = ?,"
-            " resolved_at = NULL WHERE fingerprint = ?",
+            " resolved_at = NULL WHERE fingerprint = ?"
+            " AND NOT (severity IS ? AND title IS ? AND detail IS ? AND recommendation IS ?"
+            " AND evidence IS ? AND status IS ? AND resolved_at IS NULL AND last_seen > ?)",
             (finding["severity"], finding["title"], finding["detail"],
-             finding["recommendation"], json.dumps(finding["evidence"]), status, now,
-             finding["fingerprint"]),
+             finding["recommendation"], evidence, status, now,
+             finding["fingerprint"],
+             finding["severity"], finding["title"], finding["detail"],
+             finding["recommendation"], evidence, status, fresh_since),
         )
 
     def resolve(self, fingerprint: str, now: str) -> Any:

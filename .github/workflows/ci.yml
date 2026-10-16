@@ -43,6 +43,8 @@ jobs:
         run: node --test bridge/tests/opencode-plugin.test.mjs
       - name: Build
         run: npm run build
+      - name: Entry bundle size budget
+        run: node scripts/check-bundle-size.mjs
 
   smoke:
     runs-on: ubuntu-latest

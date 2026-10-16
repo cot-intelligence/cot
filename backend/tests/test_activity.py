@@ -413,3 +413,25 @@ def test_via_sudo_means_as_root_in_any_form() -> None:
         {"id": 1, "target": "ssh host 'sudo systemctl restart x'", "title": "Shell command", "status": "ok"}, "shell"
     )
     assert "sudo" in item["via"]
+
+
+def test_shell_history_cache_follows_new_and_deleted_events(fresh_db):
+    def shell(cmd: str) -> int:
+        with store.write() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO sessions (id, source, started_at, status, created_at)"
+                " VALUES ('cache', 'claude', '2026-01-01T00:00:00Z', 'completed', '2026-01-01T00:00:00Z')"
+            )
+            return store.insert_event(
+                conn, session_id="cache", source="claude", category="shell", phase="end",
+                target=cmd, title="Shell command", status="ok", ts=timeutil.now(),
+            )
+
+    first = shell("ls -la")
+    assert activity.log("shell", 0)["total"] == 1
+    assert activity.summarize("shell", 7) is activity.summarize("shell", 7)  # reused while unchanged
+    shell("git status")
+    assert activity.log("shell", 0)["total"] == 2
+    with store.write() as conn:
+        conn.execute("DELETE FROM events WHERE id = ?", (first,))
+    assert activity.log("shell", 0)["total"] == 1

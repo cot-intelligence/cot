@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node scripts/run-node-tool.mjs vite",
     "build": "node scripts/run-node-tool.mjs vite build",
+    "check:bundle": "node scripts/check-bundle-size.mjs",
     "preview": "npm run build && node scripts/run-node-tool.mjs vite preview",
     "test": "node scripts/run-node-tool.mjs vitest run",
     "typecheck": "node scripts/run-node-tool.mjs tsc --noEmit"

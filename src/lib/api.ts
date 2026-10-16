@@ -46,6 +46,8 @@ export interface SessionSummary {
   };
   cost_usd: number;
   has_cost: boolean;
+  /** Session-level thumbs from its annotation: 1 up, -1 down. */
+  rating?: Rating | null;
   /** Session Replay copies only: the id the session had where it was exported. */
   imported_from?: string;
   imported_at?: string | null;
@@ -208,6 +210,12 @@ export interface Stats {
   avg_duration_seconds: number | null;
   by_source: Record<string, number>;
   by_status: Record<string, number>;
+  /** Sessions the sessions list shows (top-level, unarchived, with content). */
+  listed_sessions: number;
+  /** Projects among those sessions. */
+  projects: number;
+  /** Active, non-info findings as of the last insights pass. */
+  open_findings: number;
 }
 
 export interface Health {
@@ -538,9 +546,10 @@ export interface ActivityFailure {
   last: ActivityRef | null;
 }
 
-/** One entry in "Worth a look": an anomaly, a repeated failure or a risky command. */
+/** One entry in "Worth a look": an anomaly, a repeated failure, a risky command, or
+ *  extensions that sit in every prompt without being used (`idle_overhead`, no ref). */
 export interface ActivityAttention {
-  kind: 'loop' | 'failure_spike' | 'failing' | 'risky' | 'first_seen' | 'slow';
+  kind: 'loop' | 'failure_spike' | 'failing' | 'risky' | 'first_seen' | 'slow' | 'idle_overhead';
   severity: 'critical' | 'warn' | 'info';
   title: string;
   detail: string | null;
@@ -549,7 +558,8 @@ export interface ActivityAttention {
   program?: string | null;
   /** Grouped "first time" entries list every name. */
   names?: string[];
-  ref: ActivityRef;
+  /** The run to open; null when there is none (idle extensions). */
+  ref: ActivityRef | null;
 }
 
 export interface ActivitySummary {
@@ -980,6 +990,42 @@ export async function setSessionArchived(id: string, archived: boolean): Promise
 export async function setSessionBookmarked(id: string, bookmarked: boolean): Promise<void> {
   const action = bookmarked ? 'bookmark' : 'unbookmark';
   await json(await fetch(`/v1/sessions/${id}/${action}`, { method: 'POST' }));
+}
+
+export type Rating = 1 | -1;
+
+/** What the person thought of a session (`event_id` null) or one event in it. */
+export interface Annotation {
+  session_id: string;
+  event_id: number | null;
+  rating: Rating | null;
+  labels: string[];
+  note: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface SessionAnnotations {
+  session: Annotation | null;
+  events: Annotation[];
+}
+
+export async function getSessionAnnotations(sessionId: string): Promise<SessionAnnotations> {
+  return json<SessionAnnotations>(await fetch(`/v1/sessions/${encodeURIComponent(sessionId)}/annotations`));
+}
+
+/** Replaces the annotation; no rating, labels or note clears it. */
+export async function putAnnotation(
+  sessionId: string,
+  body: { event_id?: number | null; rating: Rating | null; labels: string[]; note: string | null },
+): Promise<Annotation> {
+  return json<Annotation>(
+    await fetch(`/v1/sessions/${encodeURIComponent(sessionId)}/annotations`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  );
 }
 
 /** Downloads the whole session (untrimmed events, raw hook rows) as JSON. */

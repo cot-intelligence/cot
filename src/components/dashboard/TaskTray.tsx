@@ -1,13 +1,17 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useRef, useState } from 'react';
 import { getTasks, type TaskRecent, type TaskRunning } from '../../lib/api';
+import { subscribeStream } from '../../lib/useServerRevision';
 import { agentLabel } from '../forest/AgentMark';
 import { fmt, project } from '../forest/format';
 import { Icon } from '../forest/icons';
 import { EASE_OUT } from '../forest/motion';
 import { stagePercent } from '../passive/PassiveBanner';
 
-const POLL_MS = 5000;
+// New data arrives over the live stream, which drives the refresh; the timer
+// only catches what changes with time alone (a session going quiet ends it).
+const POLL_MS = 30_000;
+const LIVE_DEBOUNCE_MS = 2000;
 const events = (n: number) => `${fmt.n(n)} event${n === 1 ? '' : 's'}`;
 const STORE_KEY = 'cot.tasks.v1';
 const DONE_MAX = 30;
@@ -140,6 +144,7 @@ export function TaskTray() {
           }
           for (const r of recent) if (!known.has(r.id)) fresh.push(finishedImport(r));
           const next = { ...prev, lastRunning: cur, done: [...fresh, ...prev.done].slice(0, DONE_MAX) };
+          if (JSON.stringify(next) === JSON.stringify(prev)) return prev;
           save(next);
           return next;
         });
@@ -148,10 +153,16 @@ export function TaskTray() {
       }
       if (live) timer = window.setTimeout(tick, POLL_MS);
     };
+    const soon = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(tick, LIVE_DEBOUNCE_MS);
+    };
     void tick();
+    const unsubscribe = subscribeStream(soon);
     return () => {
       live = false;
       window.clearTimeout(timer);
+      unsubscribe();
     };
   }, []);
 

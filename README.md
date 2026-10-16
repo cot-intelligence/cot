@@ -60,6 +60,35 @@ OpenCode. OpenCode sessions recorded before plugin installation are not imported
 | `cot down` | Stop the collector, keeping your hooks and local data |
 | `cot purge` | Remove the collector, unwire cot hooks, and delete `~/.cot` after asking |
 
+### Ask cot from your agent
+
+`cot mcp` is a read-only MCP server over stdio. Register it, and your agent can list and
+search past sessions, read one, and explain what a session cost:
+
+```bash
+claude mcp add cot -- ~/.cot/bin/cot mcp
+```
+
+Codex takes the same command (`codex mcp add cot -- ~/.cot/bin/cot mcp`). For Cursor, add
+`"cot": {"command": "/Users/<you>/.cot/bin/cot", "args": ["mcp"]}` under `mcpServers` in
+`~/.cursor/mcp.json`, with the full path. Every tool reads the local collector; nothing
+leaves the machine.
+
+### Other agents over OpenTelemetry
+
+Agents without a cot hook can export OpenTelemetry instead. Point their OTLP/HTTP exporter
+at the collector (JSON or protobuf):
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:31337
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+```
+
+Prompts, tool calls and model usage become events in a session named after the agent's
+`service.name`, from GenAI spans (`gen_ai.*`) or agent log events such as Gemini CLI's.
+Most agents redact prompt and tool content unless told to export it. Keep hooks for agents
+cot already supports: exporting OTel from them too counts their events twice.
+
 ## How it works
 
 ```mermaid
@@ -83,6 +112,23 @@ backend/app/   FastAPI collector
 bridge/        Installer and cot bridge CLI
 src/           React and TypeScript dashboard
 ```
+
+### Performance
+
+Every collector response carries an `X-Response-Time` header (and `Server-Timing`
+for the browser's DevTools), and reads or writes that hold the database longer
+than `COT_SLOW_QUERY_MS` (default 100; 0 turns it off) are logged with the code
+that ran them. To time the hot endpoints against a running collector:
+
+```bash
+scripts/bench_api.sh http://127.0.0.1:31337
+```
+
+The Mac app keeps its database in WAL mode, so the dashboard's reads never wait
+on hook writes. The Docker image defaults to SQLite's rollback journal, because
+WAL is not safe across Docker Desktop's file sharing. On a Linux host, where
+`~/.cot` is a local filesystem, set `COT_DB_JOURNAL_MODE=wal` on the container
+for the same behavior.
 
 ### Development
 
