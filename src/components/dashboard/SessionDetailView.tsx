@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getSessionDetail, getSessionExtensions, sessionExportUrl, setSessionBookmarked, type Annotation, type ComponentEntry, type SessionDetail, type Store, type TimelineItem } from '../../lib/api';
 import { setDocumentTitle } from '../../lib/documentTitle';
@@ -307,7 +307,18 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   );
 }
 
-function TraceRow({ e, open, live, focusQuery, onToggle, sessionId, onJump, annotatable, annotation }: { e: TimelineItem; open: boolean; live: boolean; focusQuery?: string; onToggle: () => void; sessionId: string; onJump: (id: number) => void; annotatable: boolean; annotation?: Annotation }) {
+type TraceRowProps = { e: TimelineItem; open: boolean; live: boolean; focusQuery?: string; onToggle: () => void; sessionId: string; onJump: (id: number) => void; annotatable: boolean; annotation?: Annotation };
+
+// Opening one row (or a poll landing) used to re-render every row on the page,
+// markdown and all. A row only changes with its own props; its callbacks are
+// recreated each render but always act on the same row, so they're not compared.
+const TraceRow = memo(TraceRowView, (a, b) =>
+  a.e === b.e && a.open === b.open && a.live === b.live && a.focusQuery === b.focusQuery &&
+  a.sessionId === b.sessionId && a.annotatable === b.annotatable && a.annotation === b.annotation &&
+  a.onJump === b.onJump,
+);
+
+function TraceRowView({ e, open, live, focusQuery, onToggle, sessionId, onJump, annotatable, annotation }: TraceRowProps) {
   const failed = e.status === 'error' || e.status === 'failed';
   const text = TEXT_KINDS.has(e.category) ? e.detail?.trim() : '';
   return (
