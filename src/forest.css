@@ -654,3 +654,15 @@
 /* Read notifications step back; unread ones keep full weight. */
 .vf .tray-i[data-read] .tray-t b { font-weight: 400; color: var(--v-dim); }
 .vf .tray-i[data-read] .tray-ic { opacity: 0.6; }
+
+/* For teams confirmation (TeamsModal): centered, above the scrim. */
+.vf .teams-wrap { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; padding: 16px; pointer-events: none; }
+.vf .scrim:has(+ .teams-wrap) { z-index: 69; }
+.vf .teams-modal { pointer-events: auto; width: min(420px, 100%); display: grid; gap: 10px; padding: 24px; background: var(--v-surface); border: 1px solid var(--v-line); border-radius: 16px; box-shadow: var(--v-pop); transform-origin: center; }
+.vf .teams-modal h2 { margin: 0; font-size: 20px; line-height: 26px; font-weight: 600; letter-spacing: -0.01em; }
+.vf .teams-modal p { margin: 0; font-size: 14px; line-height: 21px; }
+.vf .teams-ic { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; color: var(--v-hot); background: color-mix(in srgb, var(--v-hot) 12%, transparent); margin-bottom: 4px; }
+.vf .teams-url { display: flex; align-items: center; gap: 8px; min-width: 0; margin-top: 4px; padding: 9px 12px; border-radius: 10px; background: var(--v-panel); border: 1px solid var(--v-line); font-size: 12px; color: var(--v-fg); }
+.vf .teams-note { display: flex; gap: 8px; align-items: flex-start; font-size: 12px !important; line-height: 18px !important; color: var(--v-dim); }
+.vf .teams-note svg { flex: none; margin-top: 2px; }
+.vf .teams-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
