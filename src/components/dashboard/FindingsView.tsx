@@ -9,6 +9,7 @@ import {
   restoreInsight,
   type ActionableInsight,
   type InsightPillar,
+  type InsightSeverity,
   type InsightsResponse,
   type InsightStatus,
   type SessionSummary,
@@ -16,6 +17,7 @@ import {
 } from '../../lib/api';
 import { usePolling } from '../../lib/usePolling';
 import { agentLabel } from '../forest/AgentMark';
+import { Dropdown } from '../forest/Dropdown';
 import { fmt, project, shortId } from '../forest/format';
 import { Icon } from '../forest/icons';
 import { listItem, listParent } from '../forest/motion';
@@ -31,6 +33,7 @@ const WINDOWS = [
   { k: 90, l: '90d' },
   { k: 0, l: 'all' },
 ];
+const SEVERITIES: InsightSeverity[] = ['critical', 'warn', 'info'];
 
 interface FindingsViewProps {
   onSelect: (id: string, eventId?: number) => void;
@@ -46,6 +49,11 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
   const [sel, setSel] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const queryClient = useQueryClient();
+  const [q, setQ] = useState('');
+  const [sev, setSev] = useState('');
+  const [rule, setRule] = useState('');
+  const [proj, setProj] = useState('');
+  const [agent, setAgent] = useState('');
   const { data: ins, error } = usePolling<InsightsResponse>(
     ['insights', days, refreshKey || undefined].filter((x) => x !== undefined),
     () => getInsights(days, 'all'),
@@ -62,8 +70,33 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
   }, [initialPillar]);
 
   const all = ins?.insights ?? [];
-  const count = (s: InsightStatus) => all.filter((f) => f.status === s).length;
-  const rows = all.filter((f) => f.status === status && (!pillar || f.pillar === pillar));
+  // Project and agent come from the evidence sessions; a finding matches if any of them does.
+  const sessionsOf = (f: ActionableInsight) => f.evidence.map((e) => byId.get(e.session_id)).filter((s): s is SessionSummary => !!s);
+  const needle = q.trim().toLowerCase();
+  const filtered = all.filter((f) => {
+    if (sev && f.severity !== sev) return false;
+    if (rule && f.group_title !== rule) return false;
+    if (needle && ![f.title, f.detail, f.id, f.group_title, ...f.evidence.map((e) => e.label)].some((t) => t?.toLowerCase().includes(needle))) return false;
+    if (proj || agent) {
+      const ss = sessionsOf(f);
+      if (proj && !ss.some((s) => project(s.cwd) === proj)) return false;
+      if (agent && !ss.some((s) => s.source === agent)) return false;
+    }
+    return true;
+  });
+  const count = (s: InsightStatus) => filtered.filter((f) => f.status === s).length;
+  const rows = filtered.filter((f) => f.status === status && (!pillar || f.pillar === pillar));
+  const tally = (key: (f: ActionableInsight) => string[]) => {
+    const m = new Map<string, number>();
+    for (const f of all) if (f.status === status) for (const k of new Set(key(f))) m.set(k, (m.get(k) ?? 0) + 1);
+    return [...m].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  };
+  const ruleOpts = tally((f) => [f.group_title]);
+  const projOpts = tally((f) => sessionsOf(f).map((s) => project(s.cwd)));
+  const agentOpts = tally((f) => sessionsOf(f).map((s) => s.source));
+  const anyFilter = !!(q || sev || rule || proj || agent);
+  const filter = <T,>(set: (v: T) => void) => (v: T) => { set(v); setSel(null); };
+  const clear = () => { setQ(''); setSev(''); setRule(''); setProj(''); setAgent(''); setSel(null); };
   const cur: ActionableInsight | undefined = rows.find((f) => f.fingerprint === sel) ?? rows[0];
 
   const act = async (f: ActionableInsight, action: 'dismiss' | 'restore') => {
@@ -127,9 +160,18 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
               style={pillar === p ? { borderColor: 'var(--v-hot)', color: 'var(--v-hot)' } : undefined}>
               {p && <Icon name={PILLAR_ICON[p]} size={14} />}
               {p ? p[0].toUpperCase() + p.slice(1) : 'All pillars'}
-              <span className="mono faint" style={{ fontSize: 11 }}>{ins ? all.filter((f) => (!p || f.pillar === p) && f.status === status).length : '…'}</span>
+              <span className="mono faint" style={{ fontSize: 11 }}>{ins ? filtered.filter((f) => (!p || f.pillar === p) && f.status === status).length : '…'}</span>
             </button>
           ))}
+        </div>
+        <div className="toolbar">
+          <label className="vfield"><Icon name="search" size={15} /><input value={q} onChange={(e) => filter(setQ)(e.target.value)} placeholder="Search title, detail or evidence" aria-label="Search findings" /></label>
+          <Dropdown label="Severity" value={sev} onChange={filter(setSev)} options={[{ value: '', label: 'Any severity' }, ...SEVERITIES.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1), meta: all.filter((f) => f.status === status && f.severity === s).length }))]} />
+          <Dropdown label="Rule" value={rule} onChange={filter(setRule)} options={[{ value: '', label: 'All rules' }, ...ruleOpts.map(([r, n]) => ({ value: r, label: r, meta: n }))]} />
+          <Dropdown label="Project" value={proj} onChange={filter(setProj)} options={[{ value: '', label: 'All projects' }, ...projOpts.map(([p, n]) => ({ value: p, label: p, meta: n }))]} />
+          <Dropdown label="Agent" value={agent} onChange={filter(setAgent)} options={[{ value: '', label: 'All agents' }, ...agentOpts.map(([a, n]) => ({ value: a, label: agentLabel(a), meta: n }))]} />
+          {anyFilter && <button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={clear}>Clear</button>}
+          <span className="mono faint" style={{ marginLeft: 'auto', fontSize: 12 }}>{ins ? `${fmt.n(rows.length)} finding${rows.length === 1 ? '' : 's'}` : '…'}</span>
         </div>
 
         {error && !ins ? (
@@ -148,7 +190,7 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
                   <p className="faint" style={{ fontSize: 12, padding: '4px 12px 8px', margin: 0 }}>Computing findings on your traces. Large databases take a little while.</p>
                 </div>
               )}
-              {ins && rows.length === 0 && <div className="empty">Nothing {status} here.</div>}
+              {ins && rows.length === 0 && <div className="empty">{anyFilter ? `No ${status} findings match these filters.` : `Nothing ${status} here.`}</div>}
               {ins && (
                 <motion.ul variants={listParent} initial={false} animate="show" style={{ listStyle: 'none', margin: 0, padding: 6 }}>
                   {rows.map((f) => {
