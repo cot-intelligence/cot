@@ -46,8 +46,8 @@ it and keeps collecting; Quit stops the collector (SIGTERM, then SIGKILL after
 gone (`COT_PARENT_PID`) and exits.
 
 The window only navigates to `127.0.0.1`/`localhost`; other links open in the
-browser. The dashboard page gets one IPC permission, dragging the window by
-its header.
+browser. The dashboard page gets two IPC permissions: dragging the window by
+its header, and double-clicking the header to zoom it.
 
 ## Updates
 

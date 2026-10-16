@@ -6,6 +6,7 @@ mod chrome;
 mod collector;
 mod updates;
 mod sandbox;
+mod zoom;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
@@ -393,14 +394,19 @@ fn sync_tray_glyph(app: &AppHandle) {
     }
 }
 
-/// Adds Reload Dashboard (Cmd+R) to the standard macOS View menu.
+/// Adds Reload Dashboard (Cmd+R) and the zoom items (Cmd+= / Cmd+- / Cmd+0)
+/// to the standard macOS View menu.
 fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::default(app)?;
     let reload = MenuItem::with_id(app, "reload", "Reload Dashboard", true, Some("CmdOrCtrl+R"))?;
+    let actual = MenuItem::with_id(app, zoom::ZOOM_RESET, "Actual Size", true, Some("CmdOrCtrl+0"))?;
+    let zoom_in = MenuItem::with_id(app, zoom::ZOOM_IN, "Zoom In", true, Some("CmdOrCtrl+="))?;
+    let zoom_out = MenuItem::with_id(app, zoom::ZOOM_OUT, "Zoom Out", true, Some("CmdOrCtrl+-"))?;
+    let (sep1, sep2) = (PredefinedMenuItem::separator(app)?, PredefinedMenuItem::separator(app)?);
     for item in menu.items()? {
         if let MenuItemKind::Submenu(submenu) = item {
             if submenu.text()? == "View" {
-                submenu.prepend(&reload)?;
+                submenu.prepend_items(&[&reload, &sep1, &actual, &zoom_in, &zoom_out, &sep2])?;
             }
         }
     }
@@ -515,11 +521,15 @@ pub fn run() {
                 if let Some(window) = main_window(app) {
                     let _ = window.eval("location.reload()");
                 }
+            } else {
+                zoom::handle_menu(app, main_window(app), event.id().as_ref());
             }
         })
         .setup(|app| {
             let handle = app.handle().clone();
+            app.manage(zoom::Zoom::load(&handle));
             let window = build_main_window(&handle)?;
+            let _ = window.set_zoom(handle.state::<zoom::Zoom>().level());
             *handle.state::<AppState>().local_page.lock().unwrap() = window.url().ok();
             build_tray(&handle)?;
             watch_collector(handle.clone());
