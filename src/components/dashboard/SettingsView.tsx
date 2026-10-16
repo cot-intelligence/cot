@@ -461,7 +461,7 @@ function DataSection({ onExport }: { onExport: () => void }) {
         <Switch on={!!r?.policy.enabled} disabled={!r} label="Retention" onChange={(v) => void set({ enabled: v })} />
       </Row>
       <Row label="Window" hint={r ? `A ${r.policy.days}-day window would remove ${fmt.n(r.preview_sessions)} sessions and ${fmt.n(r.preview_events)} events.` : undefined}>
-        <Seg id="set-ret" value={r?.policy.days ?? 30} onChange={(d) => void set({ days: d })} options={WINDOWS} />
+        <Seg id="set-ret" value={r?.policy.days ?? 30} onChange={(d) => void set({ days: d })} options={WINDOWS} disabled={!r?.policy.enabled} disabledHint="Turn on retention to choose a window" />
       </Row>
       <Row
         label="Clean up"

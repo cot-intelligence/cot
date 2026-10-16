@@ -25,12 +25,14 @@ const AGENT_VAR: Record<string, string> = { claude: 'var(--v-claude)', cursor: '
 export const agentColor = (id: string) => AGENT_VAR[id] ?? 'var(--v-faint)';
 
 /** Segmented control with the demo's sliding thumb (a state change, so it animates; a short spring, no bounce). */
-export function Seg<K extends string | number>({ value, options, onChange, id, label }: { value: K; options: { k: K; l: ReactNode; name?: string }[]; onChange: (k: K) => void; id: string; label?: string }) {
+export function Seg<K extends string | number>({ value, options, onChange, id, label, disabled, disabledHint }: { value: K; options: { k: K; l: ReactNode; name?: string }[]; onChange: (k: K) => void; id: string; label?: string; disabled?: boolean; disabledHint?: string }) {
+  // A disabled group explains itself on hover. Disabled buttons get no pointer
+  // events, so the tooltip lives on the group and the buttons let the pointer through.
   return (
-    <div className="vseg" role="group" aria-label={label}>
+    <div className="vseg" role="group" aria-label={label} aria-disabled={disabled || undefined} title={disabled ? disabledHint : undefined}>
       {options.map((o) => (
         // `name` labels an icon-only option for screen readers and the hover tooltip.
-        <button key={String(o.k)} type="button" aria-pressed={value === o.k} aria-label={o.name} title={o.name} data-icon={o.name ? '' : undefined} onClick={() => onChange(o.k)}>
+        <button key={String(o.k)} type="button" aria-pressed={value === o.k} aria-label={o.name} title={disabled ? undefined : o.name} data-icon={o.name ? '' : undefined} disabled={disabled} onClick={() => onChange(o.k)}>
           {value === o.k && <motion.span layoutId={id} className="thumb" transition={{ type: 'spring', duration: 0.28, bounce: 0 }} />}
           <span>{o.l}</span>
         </button>
