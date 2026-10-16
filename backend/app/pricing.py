@@ -39,7 +39,7 @@ _TRAILING_NOISE_RE = re.compile(r"(\[.*\]|-thinking(?:-\w+)?)$")
 _GPT_VARIANT_RE = re.compile(r"^(gpt-\d+\.\d+)-(codex|medium)$")
 # Effort suffixes do not change GPT pricing.
 _GPT_EFFORT_RE = re.compile(
-    r"^(gpt-\d+(?:\.\d+)?(?:-(?:sol|terra|luna|codex))?)"
+    r"^(gpt-\d+(?:\.\d+)?(?:-(?:sol|terra|luna|astra|codex))?)"
     r"-(?:low|medium|high|xhigh)$"
 )
 # Cursor Grok slugs encode effort and speed. Effort is free; Fast has its own rate.
@@ -113,6 +113,9 @@ _TIER_OF_RES = (
     (re.compile(r"^gemini-.*-(pro|flash)$"), lambda m: f"gemini-{m.group(1)}"),
     (re.compile(r"^gemini-"), lambda _m: "gemini"),
     (re.compile(r"^composer-"), lambda _m: "composer"),
+    # Cursor's Grok: Fast has its own (double) rate, so it is its own tier.
+    (re.compile(r"^cursor-grok-[\d.]+-fast$"), lambda _m: "cursor-grok-fast"),
+    (re.compile(r"^cursor-grok-"), lambda _m: "cursor-grok"),
 )
 
 
