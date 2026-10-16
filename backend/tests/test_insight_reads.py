@@ -96,13 +96,39 @@ def test_concurrent_requests_share_one_pass(monkeypatch):
     assert calls == [30, 7]  # a different window is its own pass
 
 
-def test_dismiss_drops_the_shared_result(monkeypatch):
+def test_dismiss_patches_the_shared_result(monkeypatch):
     calls = []
-    monkeypatch.setattr(insights, "compute_insights", lambda days=30, **_: calls.append(days) or {"insights": []})
+    finding = {"fingerprint": "fp1", "status": "active", "pillar": "cost", "severity": "warn"}
+    monkeypatch.setattr(
+        insights, "compute_insights", lambda days=30, **_: calls.append(days) or {"insights": [dict(finding)], "counts": {}}
+    )
+    monkeypatch.setattr(db, "set_insight_finding_status", lambda fp, status, at: fp == "fp1")
     insights.compute_insights_shared(30)
-    insights.set_finding_status("nope", "dismissed")
-    insights.compute_insights_shared(30)
-    assert calls == [30, 30]
+    assert insights.set_finding_status("fp1", "dismissed")
+    out = insights.compute_insights_shared(30)
+    assert calls == [30]  # no new pass
+    assert out["insights"][0]["status"] == "dismissed"
+    assert out["counts"]["by_severity"]["warn"] == 0
+
+
+def test_stale_result_is_served_at_once_and_refreshed_in_background(monkeypatch):
+    calls = []
+
+    def compute(days=30, **_):
+        calls.append(days)
+        time.sleep(0.2)
+        return {"insights": [{"id": len(calls)}]}
+
+    monkeypatch.setattr(insights, "compute_insights", compute)
+    assert insights.compute_insights_shared(30)["insights"] == [{"id": 1}]
+    monkeypatch.setattr(insights, "_SHARED_MAX_AGE_S", 0.0)
+    started = time.monotonic()
+    assert insights.compute_insights_shared(30)["insights"] == [{"id": 1}]  # stale, not waited for
+    assert time.monotonic() - started < 0.1
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and insights.compute_insights_shared(30)["insights"] != [{"id": 2}]:
+        time.sleep(0.05)
+    assert insights.compute_insights_shared(30)["insights"][0]["id"] >= 2
 
 
 def test_failed_pass_lets_a_waiter_retry(monkeypatch):

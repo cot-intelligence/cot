@@ -618,3 +618,27 @@ def test_sensitive_file_and_reread_count_each_read_once():
     assert churn and "5 times" in churn[0]["title"]
     sens = _rules(insights.compute_insights(), "security.sensitive_files")
     assert sens and "5 time(s)" in sens[0]["detail"]
+
+
+def test_refresh_skips_unchanged_findings_until_last_seen_is_due():
+    finding = {
+        "fingerprint": "fp-refresh", "id": "rule", "pillar": "cost", "tier": 2,
+        "severity": "warning", "title": "t", "detail": "d", "recommendation": "r",
+        "evidence": [{"session_id": "s"}],
+    }
+    with db.insight_findings_repo() as repo:
+        repo.insert(finding, _ts(minutes_ago=5))
+
+    def refresh(f: dict, now: str) -> int:
+        with store.write() as conn:
+            before = conn.total_changes
+            db.InsightFindingsRepo(conn).refresh(f, "active", now)
+            return conn.total_changes - before
+
+    assert refresh(finding, _ts()) == 0  # same snapshot, seen 5 min ago
+    assert refresh({**finding, "severity": "critical"}, _ts()) == 1
+    assert refresh({**finding, "severity": "critical"}, _ts()) == 0
+    with store.write() as conn:
+        conn.execute("UPDATE insight_findings SET last_seen = ? WHERE fingerprint = 'fp-refresh'",
+                     (_ts(minutes_ago=30),))
+    assert refresh({**finding, "severity": "critical"}, _ts()) == 1  # last_seen due

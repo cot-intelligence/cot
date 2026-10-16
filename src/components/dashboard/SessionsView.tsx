@@ -1,4 +1,4 @@
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -17,6 +17,7 @@ import {
   type TimelineItem,
 } from '../../lib/api';
 import { usePolling } from '../../lib/usePolling';
+import { sessionDetailKey, useHoverPrefetch } from '../../lib/sessionDetailQuery';
 import { agentLabel } from '../forest/AgentMark';
 import { categoryLabel, fmt, modelLabel, project, shortId } from '../forest/format';
 import { CATEGORY_ICON, Icon } from '../forest/icons';
@@ -54,6 +55,7 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
   const [page, setPage] = useState(0);
 
   const queryClient = useQueryClient();
+  const hoverPrefetch = useHoverPrefetch();
   const { data: ins } = usePolling<InsightsResponse>(['insights', 30], () => getInsights(30, 'all'), 60000);
 
   // Worst active finding per session, for the chip and the "With findings" filter.
@@ -193,7 +195,7 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
                 {rows.map((s) => {
                   const sev = flagged.get(s.id);
                   return (
-                    <tr key={s.id} className="click" data-sel={peek?.id === s.id} onClick={() => setPeek(s)} onKeyDown={(e) => e.key === 'Enter' && setPeek(s)} tabIndex={0}>
+                    <tr key={s.id} className="click" data-sel={peek?.id === s.id} onClick={() => setPeek(s)} onKeyDown={(e) => e.key === 'Enter' && setPeek(s)} onPointerEnter={() => hoverPrefetch.start(s.id)} onPointerLeave={hoverPrefetch.cancel} onFocus={() => hoverPrefetch.start(s.id)} tabIndex={0}>
                       <td>
                         <button
                           type="button"
@@ -261,16 +263,13 @@ function Peek({
   onOpen: (id: string, eventId?: number) => void;
   onArchive: (s: SessionSummary) => void;
 }) {
-  const [detail, setDetail] = useState<SessionDetail | null>(null);
-  useEffect(() => {
-    setDetail(null);
-    if (!s) return;
-    let live = true;
-    getSessionDetail(s.id).then((d) => live && setDetail(d)).catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [s?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Same cache entry as the trace page, so "Open full trace" after a peek is instant.
+  const { data: detail } = useQuery<SessionDetail>({
+    queryKey: sessionDetailKey(s?.id ?? ''),
+    queryFn: () => getSessionDetail(s!.id),
+    enabled: !!s,
+    staleTime: 30_000,
+  });
   const moments = useMemo(() => (detail && s ? keyMoments(detail.events ?? detail.timeline ?? [], findings, s.id) : null), [detail, findings, s]);
 
   return (

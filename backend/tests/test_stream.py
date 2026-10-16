@@ -27,6 +27,19 @@ def test_bump_revision_advances_counter():
     assert main._revision == before + 2
 
 
+def test_changed_sessions_names_sessions_or_none():
+    start = main._revision
+    main._bump_revision("b")
+    main._bump_revision("a")
+    main._bump_revision("b")
+    assert main._changed_sessions(start, main._revision) == ["a", "b"]
+    mid = main._revision
+    main._bump_revision()  # not tied to a session: the client must refetch broadly
+    assert main._changed_sessions(mid, main._revision) is None
+    # Older than the buffer remembers: unknown.
+    assert main._changed_sessions(main._revision - 10_000, main._revision) is None
+
+
 def test_stream_route_registered():
     paths = {getattr(r, "path", None) for r in main.app.routes}
     assert "/v1/stream" in paths

@@ -1,6 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { getInsights, getMetrics, getSettings, getStats, updateSettings, type InsightPillar, type InsightsResponse, type Metrics, type Stats, type Store } from '../../lib/api';
-import { userTimeZone } from '../../lib/categoryMeta';
+import { getSettings, getStats, updateSettings, type InsightPillar, type Stats, type Store } from '../../lib/api';
 import { useTheme } from '../../lib/theme';
 import { usePrefs } from '../../lib/prefs';
 import { Icon as FIcon } from '../forest/icons';
@@ -10,27 +9,52 @@ import { project as fproject } from '../forest/format';
 import { setDocumentTitle } from '../../lib/documentTitle';
 import { sessionHref } from '../../lib/sessionStore';
 import { readNavCollapsed, readSidebarOpen, writeNavCollapsed, writeSidebarOpen } from '../../lib/settings';
-import { MetricsSkeleton } from '../ui/Skeleton';
+import { MetricsSkeleton, SessionDetailSkeleton } from '../ui/Skeleton';
 import { AppSidebar, type NavKey } from './AppSidebar';
 import { CommandPalette, type PaletteCommand, type PaletteScope } from './CommandPalette';
 import { PassiveBanner } from '../passive/PassiveBanner';
 import { TaskTray } from './TaskTray';
+import { FetchBar } from '../ui/FetchBar';
 import { SessionsView } from './SessionsView';
-import { ReplayView } from './ReplayView';
-import { SessionDetailView } from './SessionDetailView';
-import { SessionList } from './SessionList';
-import { SettingsView } from './SettingsView';
-import { FindingsView } from './FindingsView';
-import { GovernanceView } from './GovernanceView';
-import { ExtensionDetailView } from './ExtensionsView';
 
-// Code-split: recharts (~heavy) only loads when the Overview tab is opened.
+// Code-split: the sessions list (the landing view) ships in the main bundle;
+// every other view loads on first visit, so the first paint doesn't wait on
+// recharts, markdown rendering or views the user may never open.
 const OverviewView = lazy(() =>
   import('./OverviewView').then((m) => ({ default: m.OverviewView })),
 );
 const MetricsHistoryView = lazy(() =>
   import('./MetricsHistoryView').then((m) => ({ default: m.MetricsHistoryView })),
 );
+const loadSessionDetail = () => import('./SessionDetailView');
+const SessionDetailView = lazy(() => loadSessionDetail().then((m) => ({ default: m.SessionDetailView })));
+const SessionList = lazy(() => import('./SessionList').then((m) => ({ default: m.SessionList })));
+const ReplayView = lazy(() => import('./ReplayView').then((m) => ({ default: m.ReplayView })));
+const SettingsView = lazy(() => import('./SettingsView').then((m) => ({ default: m.SettingsView })));
+const FindingsView = lazy(() => import('./FindingsView').then((m) => ({ default: m.FindingsView })));
+const GovernanceView = lazy(() => import('./GovernanceView').then((m) => ({ default: m.GovernanceView })));
+const ExtensionDetailView = lazy(() =>
+  import('./ExtensionsView').then((m) => ({ default: m.ExtensionDetailView })),
+);
+
+// Opening a session is the usual next step from the list, so fetch its code
+// once the page is idle; the first click then doesn't wait on a download.
+function prefetchSessionDetail(): () => void {
+  const w = window as Window & { requestIdleCallback?: (cb: () => void) => number; cancelIdleCallback?: (id: number) => void };
+  const run = () => void loadSessionDetail().catch(() => {});
+  if (w.requestIdleCallback) {
+    const id = w.requestIdleCallback(run);
+    return () => w.cancelIdleCallback?.(id);
+  }
+  // WKWebView (the Mac app) has no requestIdleCallback.
+  const id = window.setTimeout(run, 1500);
+  return () => window.clearTimeout(id);
+}
+
+function sameRoute(a: DashboardRoute, b: DashboardRoute): boolean {
+  const strip = (r: DashboardRoute) => ('focusNonce' in r ? { ...r, focusNonce: undefined } : r);
+  return JSON.stringify(strip(a)) === JSON.stringify(strip(b));
+}
 
 interface DashboardProps {
   onSetup: () => void;
@@ -163,7 +187,11 @@ export function Dashboard({ onSetup }: DashboardProps) {
   useEffect(() => {
     const onHash = () => {
       canonicalizeHash();
-      setRoute(parseHash());
+      // In-app navigation sets the route and then the hash; the hashchange that
+      // follows parses the same route again. Keep the current one then, or every
+      // navigation renders twice (and re-runs focus effects keyed on the nonce).
+      const next = parseHash();
+      setRoute((prev) => (sameRoute(prev, next) ? prev : next));
     };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
@@ -261,13 +289,8 @@ export function Dashboard({ onSetup }: DashboardProps) {
   const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay && !onFindings && !onGovernance && !onExtensions;
 
   // Counts for the navigation: sessions traced, and findings that still need a look.
+  // /v1/stats carries them all, so the shell never pays for metrics or an insights pass.
   const { data: stats } = usePolling<Stats>(['stats'], () => getStats(), 15000);
-  // Same query key as Overview and Findings use for their default window, so the collector computes findings once.
-  const { data: openInsights } = usePolling<InsightsResponse>(['insights', 30], () => getInsights(30, 'all'), 60000);
-  const openFindings = openInsights?.insights.filter((f) => f.status === 'active' && f.severity !== 'info').length ?? 0;
-  const tz = userTimeZone();
-  // Same key as the Overview's metrics, so it is shared rather than fetched twice.
-  const { data: metrics } = usePolling<Metrics>(['metrics', tz], () => getMetrics(tz), 60000);
   const { theme } = useTheme();
   const { density } = usePrefs();
   const narrow = useNarrow();
@@ -392,6 +415,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
           : 'sessions';
 
   const queryClient = useQueryClient();
+  useEffect(prefetchSessionDetail, []);
   const cachedSummary = selectedId ? queryClient.getQueryData<{ summary: { cwd: string | null } }>(['sessionDetail', selectedId])?.summary : undefined;
   const crumbs: { label: string; href?: string }[] = selectedId
     ? [{ label: 'Sessions', href: '#/sessions' }, { label: cachedSummary ? `${fproject(cachedSummary.cwd)} · ${selectedId.slice(0, 8)}` : shortSession(selectedId) }]
@@ -420,7 +444,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
         onMobileClose={() => setMobileOpen(false)}
         onToggleCollapsed={toggleNav}
         onSearch={() => setPaletteOpen(true)}
-        counts={{ sessions: stats?.sessions, findings: openFindings, projects: metrics?.totals.projects, agents: stats ? Object.keys(stats.by_source).length : undefined }}
+        counts={{ sessions: stats?.sessions, findings: stats?.open_findings ?? 0, projects: stats?.projects, agents: stats ? Object.keys(stats.by_source).length : undefined }}
       />
       <div className="main">
         <header className="top">
@@ -443,30 +467,39 @@ export function Dashboard({ onSetup }: DashboardProps) {
           </button>
           <TaskTray />
         </header>
+        <FetchBar />
         <PassiveBanner />
 
         <div className="relative z-10 flex min-h-0 flex-1 overflow-hidden">
           {onSettings ? (
             <main className="flex min-w-0 flex-1 flex-col">
-              <SettingsView
-                sidebarOpen={sidebarOpen}
-                onSidebarOpenChange={saveSidebarOpen}
-                navCollapsed={navCollapsed}
-                onNavCollapsedChange={(c) => c !== navCollapsed && toggleNav()}
-                onRunOnboarding={onSetup}
-              />
+              <Suspense fallback={<MetricsSkeleton />}>
+                <SettingsView
+                  sidebarOpen={sidebarOpen}
+                  onSidebarOpenChange={saveSidebarOpen}
+                  navCollapsed={navCollapsed}
+                  onNavCollapsedChange={(c) => c !== navCollapsed && toggleNav()}
+                  onRunOnboarding={onSetup}
+                />
+              </Suspense>
             </main>
           ) : onFindings ? (
             <main className="flex min-w-0 flex-1 flex-col">
-              <FindingsView onSelect={selectSession} initialPillar={route.view === 'findings' ? route.pillar : undefined} />
+              <Suspense fallback={<MetricsSkeleton />}>
+                <FindingsView onSelect={selectSession} initialPillar={route.view === 'findings' ? route.pillar : undefined} />
+              </Suspense>
             </main>
           ) : onExtensions ? (
             <main className="flex min-w-0 flex-1 flex-col">
-              <ExtensionDetailView extKey={extensionKey!} onSelect={selectSession} />
+              <Suspense fallback={<MetricsSkeleton />}>
+                <ExtensionDetailView extKey={extensionKey!} onSelect={selectSession} />
+              </Suspense>
             </main>
           ) : onGovernance ? (
             <main className="flex min-w-0 flex-1 flex-col">
-              <GovernanceView onRunOnboarding={onSetup} onSelect={(id) => selectSession(id)} />
+              <Suspense fallback={<MetricsSkeleton />}>
+                <GovernanceView onRunOnboarding={onSetup} onSelect={(id) => selectSession(id)} />
+              </Suspense>
             </main>
           ) : onMetricsHistory ? (
             <main className="flex min-w-0 flex-1 flex-col">
@@ -481,17 +514,21 @@ export function Dashboard({ onSetup }: DashboardProps) {
             </main>
           ) : route.view === 'replay' ? (
             <main className="flex min-w-0 flex-1 flex-col">
-              <ReplayView />
+              <Suspense fallback={<MetricsSkeleton />}>
+                <ReplayView />
+              </Suspense>
             </main>
           ) : replayId ? (
             <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-              <SessionDetailView
-                sessionId={replayId}
-                store="replay"
-                focusEventId={route.view === 'replay-session' ? route.focusEventId : undefined}
-                focusQuery={route.view === 'replay-session' ? route.focusQuery : undefined}
-                focusNonce={route.view === 'replay-session' ? route.focusNonce : undefined}
-              />
+              <Suspense fallback={<SessionDetailSkeleton />}>
+                <SessionDetailView
+                  sessionId={replayId}
+                  store="replay"
+                  focusEventId={route.view === 'replay-session' ? route.focusEventId : undefined}
+                  focusQuery={route.view === 'replay-session' ? route.focusQuery : undefined}
+                  focusNonce={route.view === 'replay-session' ? route.focusNonce : undefined}
+                />
+              </Suspense>
             </main>
           ) : onOverview ? (
             <main className="flex min-w-0 flex-1 flex-col">
@@ -505,16 +542,20 @@ export function Dashboard({ onSetup }: DashboardProps) {
                   and only from xl, so beside the nav it never squeezes the trace below a readable width. */}
               {sidebarOpen && (
                 <div className="relative z-20 hidden w-80 shrink-0 border-r border-line/10 xl:block">
-                  <SessionList selectedId={selectedId} onSelect={selectSession} collapsed={false} peeking={false} onToggle={toggleSidebar} />
+                  <Suspense fallback={null}>
+                    <SessionList selectedId={selectedId} onSelect={selectSession} collapsed={false} peeking={false} onToggle={toggleSidebar} />
+                  </Suspense>
                 </div>
               )}
               <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-                <SessionDetailView
-                  sessionId={selectedId}
-                  focusEventId={route.view === 'session' ? route.focusEventId : undefined}
-                  focusQuery={route.view === 'session' ? route.focusQuery : undefined}
-                  focusNonce={route.view === 'session' ? route.focusNonce : undefined}
-                />
+                <Suspense fallback={<SessionDetailSkeleton />}>
+                  <SessionDetailView
+                    sessionId={selectedId}
+                    focusEventId={route.view === 'session' ? route.focusEventId : undefined}
+                    focusQuery={route.view === 'session' ? route.focusQuery : undefined}
+                    focusNonce={route.view === 'session' ? route.focusNonce : undefined}
+                  />
+                </Suspense>
               </main>
             </>
           ) : (

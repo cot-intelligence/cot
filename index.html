@@ -7,9 +7,13 @@
     <meta name="description" content="Connect your agent to cot. Trace Claude and Cursor sessions with hooks — self-hosted." />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.svg" />
+    <link rel="preload" href="/fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/geist-mono-latin.woff2" as="font" type="font/woff2" crossorigin />
     <meta name="theme-color" content="#f5f6f3" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#0a1612" media="(prefers-color-scheme: dark)" />
-    <script defer src="/stats/script.js" data-website-id="f2dbacec-6230-416b-9682-53eedf073984" data-host-url="/stats"></script>
+    <!-- async, not defer: deferred scripts run in order, so a slow or offline
+         tracker would hold up the app's own module script behind it. -->
+    <script async src="/stats/script.js" data-website-id="f2dbacec-6230-416b-9682-53eedf073984" data-host-url="/stats"></script>
     <script>
       // Apply the theme before paint to avoid a flash: a saved light/dark
       // choice wins, 'system' follows the OS, and nothing saved means light.

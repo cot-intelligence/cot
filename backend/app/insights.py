@@ -57,9 +57,11 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from . import db
+from .store import use as use_store
 from .insight_lifecycle import FindingsStore
 from .insight_snapshot import Event, Snapshot, build_snapshot
 from .pricing import cost_for, normalize_model
@@ -1124,28 +1126,22 @@ def compute_insights(
             f["resolved_at"] = None
     advance()
     findings.sort(key=_severity_sort_key)
-    active = [f for f in findings if f["status"] == "active"]
-    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
     return {
         "generated_at": db.now(),
         "window_days": 0 if session_id else days,
         "insights": findings,
-        "counts": {
-            "by_pillar": {p: sum(1 for f in active if f["pillar"] == p) for p in PILLARS},
-            "by_severity": {s: sum(1 for f in active if f["severity"] == s) for s in SEVERITIES},
-            "resolved_recently": sum(
-                1
-                for f in findings
-                if f["status"] == "resolved" and (f.get("resolved_at") or "") >= week_ago
-            ),
-        },
+        "counts": _counts(findings),
     }
 
 
-# The sidebar badge, Overview and Findings all ask for the same window when the
-# dashboard opens, and each pass is a multi-second read plus reconcile. Requests
-# that arrive while a pass is running wait for it and share its result, and a
-# result stays good for a few seconds. Dismiss/restore drops it.
+# Overview, Findings and the sessions list ask for the same window, and each
+# pass is a multi-second read plus reconcile. A request never waits for one if
+# there is any result to show: it gets the last result at once, and when that is
+# more than a few seconds old a background pass refreshes it for the next
+# request. Only the very first request for a window computes inline, and the
+# collector warms the default window at startup so that is rare. Requests that
+# arrive while a pass is running share it. Dismiss/restore patch the stored
+# results instead of throwing them away.
 _SHARED_MAX_AGE_S = 5.0
 _shared_lock = threading.Lock()
 _shared_running: dict[tuple[str, int], threading.Event] = {}
@@ -1157,34 +1153,95 @@ def _shared_copy(result: dict[str, Any]) -> dict[str, Any]:
     return {**result, "insights": list(result["insights"])}
 
 
-def compute_insights_shared(days: int = 30) -> dict[str, Any]:
-    """:func:`compute_insights` for the aggregate view, one pass per burst of requests."""
-    key = (str(db.db_path()), days)  # tests and the replay store swap DBs in-process
-    while True:
-        with _shared_lock:
-            done = _shared_done.get(key)
-            if done and time.monotonic() - done[0] < _SHARED_MAX_AGE_S:
-                return _shared_copy(done[1])
-            running = _shared_running.get(key)
-            if running is None:
-                running = _shared_running[key] = threading.Event()
-                break
-        running.wait()
-        # Loop: take the leader's fresh result, or lead a pass if it failed.
+def _counts(findings: list[dict[str, Any]]) -> dict[str, Any]:
+    active = [f for f in findings if f["status"] == "active"]
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    return {
+        "by_pillar": {p: sum(1 for f in active if f["pillar"] == p) for p in PILLARS},
+        "by_severity": {s: sum(1 for f in active if f["severity"] == s) for s in SEVERITIES},
+        "resolved_recently": sum(
+            1
+            for f in findings
+            if f["status"] == "resolved" and (f.get("resolved_at") or "") >= week_ago
+        ),
+    }
+
+
+def _run_shared_pass(key: tuple[str, int], *, wait: bool) -> None:
+    """Run one pass for ``key`` and store it, or, if one is already running,
+    wait for it (``wait``) or leave it be. A failed pass raises to its leader."""
+    with _shared_lock:
+        running = _shared_running.get(key)
+        lead = running is None
+        if lead:
+            running = _shared_running[key] = threading.Event()
+    if not lead:
+        if wait:
+            running.wait()
+        return
     try:
-        result = compute_insights(days=days)
+        with use_store(Path(key[0])):
+            result = compute_insights(days=key[1])
         with _shared_lock:
             _shared_done[key] = (time.monotonic(), result)
-        return _shared_copy(result)
     finally:
         with _shared_lock:
             _shared_running.pop(key, None)
         running.set()
 
 
+def _refresh_in_background(key: tuple[str, int]) -> None:
+    def run() -> None:
+        try:
+            _run_shared_pass(key, wait=False)
+        except Exception:  # noqa: BLE001 - the stored result stays; the next request retries
+            pass
+
+    with _shared_lock:
+        if key in _shared_running:
+            return
+    threading.Thread(target=run, name="insights-refresh", daemon=True).start()
+
+
+def compute_insights_shared(days: int = 30) -> dict[str, Any]:
+    """:func:`compute_insights` for the aggregate view, off the request path
+    whenever a previous result exists."""
+    key = (str(db.db_path()), days)  # tests and the replay store swap DBs in-process
+    while True:
+        with _shared_lock:
+            done = _shared_done.get(key)
+            copy = _shared_copy(done[1]) if done else None
+        if done is not None and copy is not None:
+            if time.monotonic() - done[0] >= _SHARED_MAX_AGE_S:
+                _refresh_in_background(key)
+            return copy
+        _run_shared_pass(key, wait=True)
+        # Loop: take the leader's result, or lead a pass if it failed.
+
+
+def warm_shared_insights(days: int = 30) -> None:
+    """Compute the default window ahead of the first request (startup)."""
+    _run_shared_pass((str(db.db_path()), days), wait=False)
+
+
 def forget_shared_insights() -> None:
     with _shared_lock:
         _shared_done.clear()
+
+
+def _patch_shared_status(fingerprint: str, status: str) -> None:
+    """Apply a dismiss/restore to every stored result, so the next read shows it
+    without a new pass."""
+    with _shared_lock:
+        for key, (at, result) in list(_shared_done.items()):
+            findings = [
+                {**f, "status": status} if f.get("fingerprint") == fingerprint else f
+                for f in result["insights"]
+            ]
+            patched = {**result, "insights": findings}
+            if "counts" in result:
+                patched["counts"] = _counts(findings)
+            _shared_done[key] = (at, patched)
 
 
 def session_exists(session_id: str) -> bool:
@@ -1194,7 +1251,9 @@ def session_exists(session_id: str) -> bool:
 def set_finding_status(fingerprint: str, status: str) -> bool:
     """Manual lifecycle control: dismiss or restore. Returns False if unknown."""
     assert status in ("dismissed", "active")
-    forget_shared_insights()
-    return db.set_insight_finding_status(
+    changed = db.set_insight_finding_status(
         fingerprint, status, db.now() if status == "dismissed" else None
     )
+    if changed:
+        _patch_shared_status(fingerprint, status)
+    return changed
