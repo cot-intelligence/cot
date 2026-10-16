@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getSessionDetail, getSessionExtensions, sessionExportUrl, setSessionBookmarked, type Annotation, type ComponentEntry, type SessionDetail, type Store, type TimelineItem } from '../../lib/api';
 import { setDocumentTitle } from '../../lib/documentTitle';
 import { cachedSessionSummary, seededSessionDetail, sessionDetailKey } from '../../lib/sessionDetailQuery';
+import { useFullEventDetail } from '../../lib/useFullEventDetail';
 import { sessionHref, SessionStoreContext } from '../../lib/sessionStore';
 import { categoryLabel, fmt, modelLabel, project } from '../forest/format';
 import { CATEGORY_ICON, Icon } from '../forest/icons';
@@ -329,7 +330,7 @@ function TraceRowView({ e, open, live, focusQuery, onToggle, sessionId, onJump, 
           <div className="tl-t">{e.tool ?? categoryLabel(e.category)}{failed ? <span className="vchip c-critical" style={{ marginLeft: 8 }}>failed</span> : null}{live && e.ongoing === true ? <span className="vchip c-ok" style={{ marginLeft: 8 }}><span className="dot" />running</span> : null}<RatingMark annotation={annotation} /></div>
           {e.target && <div className="tl-x" title={e.target}>{e.target}</div>}
         </button>
-        {text && <TraceText kind={e.category} text={text} />}
+        {text && <TraceText kind={e.category} text={text} item={e} sessionId={sessionId} />}
         {e.attachments && e.attachments.length > 0 && <div style={{ marginTop: 6 }}><AttachmentTags attachments={e.attachments} /></div>}
         {open && (
           <div className="tl-detail">
@@ -345,12 +346,18 @@ function TraceRowView({ e, open, live, focusQuery, onToggle, sessionId, onJump, 
 }
 
 /** Prompt, reply and thinking text in the trace. Thinking starts folded; long text clamps with a toggle. */
-function TraceText({ kind, text }: { kind: string; text: string }) {
-  const long = text.length > 320 || text.split('\n').length > 5;
+function TraceText({ kind, text, item, sessionId }: { kind: string; text: string; item: TimelineItem; sessionId: string }) {
+  // The session payload carries long bodies as a preview (detail_truncated);
+  // expanding fetches the rest, so a long prompt reads in full, not cut at the preview.
+  const truncated = item.detail_truncated === true;
+  const long = truncated || text.length > 320 || text.split('\n').length > 5;
   const [open, setOpen] = useState(false);
+  const { resolved, loading } = useFullEventDetail(open && truncated ? item : null, sessionId);
+  const full = open && truncated && typeof resolved?.detail === 'string' ? resolved.detail.trim() : text;
   return (
     <div className="tx" data-kind={kind} data-open={open || !long}>
-      <p className="tx-b">{text}</p>
+      <p className="tx-b">{full}</p>
+      {open && loading && <p className="mono faint" style={{ fontSize: 11, margin: '6px 0 0' }}>Loading the rest…</p>}
       {long && (
         <button type="button" className="tx-more" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
           {open ? 'Show less' : kind === 'thought' ? 'Show thinking' : 'Show more'}
