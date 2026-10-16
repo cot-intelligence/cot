@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import re
 import shlex
+import threading
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -373,8 +375,8 @@ _PARSED: dict[tuple[str, int], dict[str, Any]] = {}
 _PARSED_MAX = 100_000
 
 
-def _item(row: dict[str, Any], category: str) -> dict[str, Any]:
-    key = (str(store.path()), row["id"])
+def _item(row: dict[str, Any], category: str, db_key: str) -> dict[str, Any]:
+    key = (db_key, row["id"])
     cached = _PARSED.get(key)
     if cached is None:
         cached = _parse_row(row, category)
@@ -459,14 +461,69 @@ def _group_key(category: str) -> str:
     return "program" if category == "shell" else "key"
 
 
+# Shell and web history (every finished command or request, parsed) and their
+# summaries, reused until the events table changes: a summary loads the whole
+# history as its baseline, and the log pages through it, so without this every
+# view, filter and page re-read and re-built tens of thousands of items. Keyed on
+# the newest event id and the total event count. When events were only added
+# (the count grew by as much as the id), just the new rows are read and merged
+# in; anything else (a delete, retention) reloads. Summaries add an anomaly pass
+# over the whole history, so during a live session one is reused for up to
+# _SUMMARY_FRESH_S across new events rather than rebuilt per ingest.
+_HISTORY: dict[tuple[Any, ...], tuple[tuple[int, int], list[dict[str, Any]]]] = {}
+_SUMMARIES: dict[tuple[Any, ...], tuple[tuple[int, int], float, dict[str, Any]]] = {}
+_SUMMARY_FRESH_S = 10.0
+_CACHE_LOCK = threading.Lock()
+
+
+def _events_version() -> tuple[int, int]:
+    with store.read() as conn:
+        row = conn.execute(
+            "SELECT (SELECT COALESCE(MAX(id), 0) FROM events),"
+            " (SELECT COALESCE(SUM(event_count), 0) FROM session_stats)"
+        ).fetchone()
+    return int(row[0]), int(row[1])
+
+
+def _history(category: str, project: str | None, source: str | None) -> list[dict[str, Any]]:
+    db_key = str(store.path())
+    key = (db_key, category, project, source)
+    version = _events_version()
+    with _CACHE_LOCK:
+        hit = _HISTORY.get(key)
+    if hit is not None and hit[0] == version:
+        return hit[1]
+    if hit is not None and version[0] - hit[0][0] == version[1] - hit[0][1] >= 0:
+        # Appends only: read the new rows and merge them in, newest first.
+        fresh = [
+            _item(r, category, db_key)
+            for r in db.activity_rows(category, None, project, source, after_id=hit[0][0])
+        ]
+        items = sorted(fresh + hit[1], key=lambda it: it["ts"] or "", reverse=True) if fresh else hit[1]
+    else:
+        items = [_item(r, category, db_key) for r in db.activity_rows(category, None, project, source)]
+    with _CACHE_LOCK:
+        _HISTORY[key] = (version, items)
+    return items
+
+
 def load(
     category: str, days: int, project: str | None, source: str | None, plugin: str | None = None
 ) -> list[dict[str, Any]]:
     if category in _EXTENSION_CATEGORIES:
         items = extension_usage.activity_items(category, _since(days), project, source)
         return [it for it in items if it["plugin"] == plugin] if plugin else items
-    rows = db.activity_rows(category, _since(days), project, source)
-    return [_item(r, category) for r in rows]
+    items = _history(category, project, source)
+    since = _since(days)
+    return items if since is None else [it for it in items if (it["ts"] or "") >= since]
+
+
+def warm() -> None:
+    """Build every Activity tab's data ahead of the first visit (startup,
+    background): parsing every past command is seconds of work, and the MCP
+    and skill rollups start from a cold read of their history."""
+    for category in CATEGORIES:
+        summarize(category, 7)
 
 
 def _ref(item: dict[str, Any]) -> dict[str, Any]:
@@ -482,7 +539,23 @@ def summarize(
             ("summary", category, days, project, source, plugin),
             lambda: _summarize(category, days, project, source, plugin),
         )
-    return _summarize(category, days, project, source, plugin)
+    key = (str(store.path()), category, days, project, source, plugin)
+    version = _events_version()
+    with _CACHE_LOCK:
+        hit = _SUMMARIES.get(key)
+    # Unchanged, or appended to within the last few seconds (a live session).
+    if hit is not None and (
+        hit[0] == version
+        or (
+            time.monotonic() - hit[1] < _SUMMARY_FRESH_S
+            and version[0] - hit[0][0] == version[1] - hit[0][1] >= 0
+        )
+    ):
+        return hit[2]
+    result = _summarize(category, days, project, source, plugin)
+    with _CACHE_LOCK:
+        _SUMMARIES[key] = (version, time.monotonic(), result)
+    return result
 
 
 def _summarize(

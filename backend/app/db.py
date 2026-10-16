@@ -2977,6 +2977,7 @@ def activity_rows(
     since: str | None,
     project: str | None = None,
     source: str | None = None,
+    after_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """Every finished shell command or web request in a window, newest first.
 
@@ -3001,6 +3002,10 @@ def activity_rows(
     if source:
         clauses.append("e.source = ?")
         params.append(source)
+    if after_id is not None:
+        # Only rows newer than a cached read (activity's incremental refresh).
+        clauses.append("e.id > ?")
+        params.append(after_id)
     with store.read() as conn:
         rows = conn.execute(
             "SELECT e.id, e.session_id, e.target, e.title, e.ts, e.source, e.duration_ms, e.status, s.cwd,"

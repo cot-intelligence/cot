@@ -274,6 +274,10 @@ def _build_search_index() -> None:
         db.backfill_composer_mode()
     except sqlite3.Error:
         pass  # reads keep falling back to the payload; resumes next start
+    try:
+        activity.warm()
+    except sqlite3.Error:
+        pass  # the first Activity visit parses it instead
     # Compute the default findings window now, so the dashboard's first request
     # for it is served from memory instead of waiting on a multi-second pass.
     try:
