@@ -19,6 +19,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ import urllib.error
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -202,6 +204,11 @@ if _explicit_origins:
 else:
     _cors_kwargs["allow_origin_regex"] = _LOCAL_ORIGIN_RE.pattern
 app.add_middleware(CORSMiddleware, **_cors_kwargs)
+# Compress every response a client accepts gzip for: a large session detail is
+# several MB of JSON, and the dashboard bundle over a MB. The SSE stream is left
+# alone (Starlette excludes text/event-stream), as is anything already encoded
+# (the extensions list, which caches its gzipped body).
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 def _bridge_dir() -> Path:
     here = Path(__file__).resolve()
@@ -229,6 +236,10 @@ def _build_search_index() -> None:
         db.ensure_insight_indexes()
     except sqlite3.Error:
         pass  # findings still work without it, only slower; retried next start
+    try:
+        db.ensure_metrics_indexes()
+    except sqlite3.Error:
+        pass  # metrics still work without them, only slower; retried next start
 
 
 # A findings pass is seconds of pure-Python work, and every SQLite call drops
@@ -841,7 +852,7 @@ async def ingest(source: str, request: Request) -> dict[str, Any]:
     if body is None:
         raw_text = (await request.body()).decode("utf-8", errors="replace")
         result = db.record_malformed_ingest(source, raw_text, origin="hook", error=malformed_error)
-        _bump_revision()
+        _bump_revision(result.get("session_id"))
         return result
 
     # Attachment metadata folds onto the matching prompt event, not a new row.
@@ -852,11 +863,11 @@ async def ingest(source: str, request: Request) -> dict[str, Any]:
             body.get("attachments") or [],
             body.get("timestamp"),
         )
-        _bump_revision()
+        _bump_revision(str(body.get("session_id") or ""))
         return {"ok": True, "attached": attached}
 
     result = db.record_ingest(source, body)
-    _bump_revision()
+    _bump_revision(result.get("session_id"))
     return result
 
 
@@ -927,12 +938,62 @@ async def otlp_metrics(request: Request) -> Response:
 # instead of polling on a fixed timer.
 _revision = 0
 _revision_lock = threading.Lock()
+# Which session each recent revision touched, so a `change` can name the
+# sessions that changed and the dashboard refetches only those (and the lists),
+# not every view's aggregates. ``None`` marks a change not tied to one session.
+_recent_changes: deque[tuple[int, str | None]] = deque(maxlen=4096)
 
 
-def _bump_revision() -> None:
+def _bump_revision(session_id: str | None = None) -> None:
     global _revision
     with _revision_lock:
         _revision += 1
+        _recent_changes.append((_revision, session_id or None))
+
+
+def _changed_sessions(after: int, upto: int) -> list[str] | None:
+    """Sessions changed in revisions (after, upto]; None when that can't be told
+    (a change without a session, or history older than the buffer)."""
+    with _revision_lock:
+        entries = [c for c in _recent_changes if after < c[0] <= upto]
+    if len(entries) != upto - after or any(sid is None for _, sid in entries):
+        return None
+    return sorted({sid for _, sid in entries if sid})
+
+
+# Whole-history aggregates (metrics, connections, overview totals) re-read the
+# events table on every call. Between ingests the answer can't change, and while
+# an agent is running (the revision then moves several times a second) a few
+# seconds of lag is invisible on an all-time chart, so callers share one result:
+# fresh for _AGG_FRESH_S after it was computed, and for _AGG_IDLE_S while no
+# ingest has landed. One computation per key runs at a time; concurrent callers
+# wait for it instead of starting their own.
+_AGG_FRESH_S = 10.0
+_AGG_IDLE_S = 60.0
+_agg_cache: dict[tuple[Any, ...], tuple[int, float, Any]] = {}
+_agg_locks: dict[tuple[Any, ...], threading.Lock] = {}
+_agg_guard = threading.Lock()
+
+
+def _cached_aggregate(name: str, args: tuple[Any, ...], compute: Any) -> Any:
+    key = (str(store.path()), name, args)
+    with _agg_guard:
+        lock = _agg_locks.setdefault(key, threading.Lock())
+    with lock:
+        rev = _revision
+        hit = _agg_cache.get(key)
+        if hit is not None:
+            hit_rev, at, value = hit
+            age = time.monotonic() - at
+            if age < _AGG_FRESH_S or (hit_rev == rev and age < _AGG_IDLE_S):
+                return value
+        value = compute()
+        _agg_cache[key] = (rev, time.monotonic(), value)
+        return value
+
+
+def _connections() -> list[dict[str, Any]]:
+    return _cached_aggregate("connections", (), db.connections)
 
 
 @app.get("/v1/stream")
@@ -950,9 +1011,10 @@ async def stream(request: Request) -> StreamingResponse:
                 break
             current = _revision
             if current != last:
+                changed = {"revision": current, "sessions": _changed_sessions(last, current)}
+                yield f"event: change\ndata: {json.dumps(changed)}\n\n"
                 last = current
                 idle = 0
-                yield f"event: change\ndata: {json.dumps({'revision': current})}\n\n"
             else:
                 idle += 1
                 if idle >= 15:
@@ -975,7 +1037,8 @@ def get_stats() -> dict[str, Any]:
 @app.get("/v1/overview/window")
 def get_overview_window(days: int = 30) -> dict[str, Any]:
     """Overview totals over every session in the window (0 = all time)."""
-    return db.session_window(max(0, days))
+    days = max(0, days)
+    return _cached_aggregate("overview-window", (days,), lambda: db.session_window(days))
 
 
 @app.get("/v1/sessions/projects")
@@ -1079,7 +1142,7 @@ def put_session_annotation(session_id: str, body: AnnotationBody) -> dict[str, A
     db.record_audit_event(
         "session.annotated", target=f"{session_id}#{body.event_id}" if body.event_id else session_id
     )
-    _bump_revision()
+    _bump_revision(session_id)
     return saved
 
 
@@ -1213,7 +1276,7 @@ async def set_question_answer(request: Request) -> dict[str, Any]:
 
 @app.get("/v1/connections")
 def get_connections() -> dict[str, Any]:
-    return {"connections": db.connections()}
+    return {"connections": _connections()}
 
 
 # ---------------------------------------------------------------- passive mode
@@ -1365,7 +1428,7 @@ def get_tasks() -> dict[str, Any]:
 def get_hook_status() -> dict[str, Any]:
     manifest = _read_hook_manifest()
     manifest_agents = manifest.get("agents") if isinstance(manifest.get("agents"), dict) else {}
-    connections = {c["source"]: c for c in db.connections()}
+    connections = {c["source"]: c for c in _connections()}
 
     agents: list[dict[str, Any]] = []
     for source in AGENTS:
@@ -1437,7 +1500,7 @@ def get_hook_status() -> dict[str, Any]:
 
 @app.get("/v1/metrics")
 def get_metrics(tz: str | None = Query(None)) -> dict[str, Any]:
-    return db.metrics(tz)
+    return _cached_aggregate("metrics", (tz,), lambda: db.metrics(tz))
 
 
 @app.get("/v1/metrics/history")
@@ -1824,10 +1887,15 @@ def export_session(session_id: str) -> Response:
 
 
 @app.get("/v1/sessions/{session_id}")
-def get_session(session_id: str) -> dict[str, Any]:
+def get_session(session_id: str, compat: int = 0) -> dict[str, Any]:
     session = db.get_session_detail(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
+    # The deprecated parent-only `timeline` repeats every parent row already in
+    # `events` (the dashboard filters `events` by owner instead), roughly doubling
+    # the payload of a big session. Old callers can still ask for it.
+    if not compat:
+        session.pop("timeline", None)
     return session
 
 

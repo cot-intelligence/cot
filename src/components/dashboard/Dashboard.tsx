@@ -1,6 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { getInsights, getMetrics, getSettings, getStats, updateSettings, type InsightPillar, type InsightsResponse, type Metrics, type Stats, type Store } from '../../lib/api';
-import { userTimeZone } from '../../lib/categoryMeta';
+import { getSettings, getStats, updateSettings, type InsightPillar, type Stats, type Store } from '../../lib/api';
 import { useTheme } from '../../lib/theme';
 import { usePrefs } from '../../lib/prefs';
 import { Icon as FIcon } from '../forest/icons';
@@ -261,13 +260,8 @@ export function Dashboard({ onSetup }: DashboardProps) {
   const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay && !onFindings && !onGovernance && !onExtensions;
 
   // Counts for the navigation: sessions traced, and findings that still need a look.
+  // /v1/stats carries them all, so the shell never pays for metrics or an insights pass.
   const { data: stats } = usePolling<Stats>(['stats'], () => getStats(), 15000);
-  // Same query key as Overview and Findings use for their default window, so the collector computes findings once.
-  const { data: openInsights } = usePolling<InsightsResponse>(['insights', 30], () => getInsights(30, 'all'), 60000);
-  const openFindings = openInsights?.insights.filter((f) => f.status === 'active' && f.severity !== 'info').length ?? 0;
-  const tz = userTimeZone();
-  // Same key as the Overview's metrics, so it is shared rather than fetched twice.
-  const { data: metrics } = usePolling<Metrics>(['metrics', tz], () => getMetrics(tz), 60000);
   const { theme } = useTheme();
   const { density } = usePrefs();
   const narrow = useNarrow();
@@ -420,7 +414,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
         onMobileClose={() => setMobileOpen(false)}
         onToggleCollapsed={toggleNav}
         onSearch={() => setPaletteOpen(true)}
-        counts={{ sessions: stats?.sessions, findings: openFindings, projects: metrics?.totals.projects, agents: stats ? Object.keys(stats.by_source).length : undefined }}
+        counts={{ sessions: stats?.sessions, findings: stats?.open_findings ?? 0, projects: stats?.projects, agents: stats ? Object.keys(stats.by_source).length : undefined }}
       />
       <div className="main">
         <header className="top">

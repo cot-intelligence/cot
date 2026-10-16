@@ -2448,6 +2448,11 @@ def _resolve_tz(tz: str | None) -> ZoneInfo | None:
         return None
 
 
+# Timestamps already in canonical UTC text form (``...Z`` or ``...+00:00``), whose
+# first 16 characters are the UTC date, hour and minute.
+_UTC_TS_SQL = "ts GLOB '????-??-??T??:??*' AND (ts GLOB '*Z' OR ts GLOB '*+00:00')"
+
+
 def _metrics_time_buckets(
     conn: sqlite3.Connection,
     tz: ZoneInfo | None,
@@ -2472,15 +2477,31 @@ def _metrics_time_buckets(
 
     day_counts: dict[str, int] = {}
     hour_counts: dict[int, int] = {}
-    for r in conn.execute("SELECT ts FROM events WHERE ts IS NOT NULL"):
-        dt = timeutil.parse_ts(r["ts"])
-        if dt is None:
-            continue
+
+    def add(dt: datetime, n: int) -> None:
         local = dt.astimezone(tz)
         day = local.strftime("%Y-%m-%d")
-        day_counts[day] = day_counts.get(day, 0) + 1
-        hour = local.hour
-        hour_counts[hour] = hour_counts.get(hour, 0) + 1
+        day_counts[day] = day_counts.get(day, 0) + n
+        hour_counts[local.hour] = hour_counts.get(local.hour, 0) + n
+
+    # UTC timestamps are counted per quarter hour in SQL (from the ts index),
+    # then shifted: every UTC offset is a multiple of 15 minutes, so a bucket
+    # never straddles a local day or hour. Parsing each row in Python instead
+    # took seconds per call on a large DB.
+    for r in conn.execute(
+        "SELECT substr(ts,1,13) h, CAST(substr(ts,15,2) AS INTEGER) / 15 q, COUNT(*) n"
+        f" FROM events WHERE {_UTC_TS_SQL} GROUP BY h, q"
+    ):
+        try:
+            hour_start = datetime.strptime(r["h"], "%Y-%m-%dT%H").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        add(hour_start + timedelta(minutes=15 * r["q"]), r["n"])
+    # Anything else (offset or epoch timestamps) is rare; parse it row by row.
+    for r in conn.execute(f"SELECT ts FROM events WHERE ts IS NOT NULL AND NOT ({_UTC_TS_SQL})"):
+        dt = timeutil.parse_ts(r["ts"])
+        if dt is not None:
+            add(dt, 1)
     by_day = [{"day": d, "events": n} for d, n in sorted(day_counts.items())]
     by_hour = [{"hour": h, "events": n} for h, n in sorted(hour_counts.items())]
     return by_day, by_hour
@@ -4330,6 +4351,15 @@ def stats() -> dict[str, Any]:
         tool_calls = sum(r["tools"] or 0 for r in event_rows)
         durations = [r["duration"] for r in event_rows if r["duration"] is not None]
         avg_duration = round(sum(durations) / len(durations), 2) if durations else None
+        # Navigation counts, so the dashboard shell needs neither /v1/metrics nor
+        # an insights pass. Findings come from the last reconcile, not a new one.
+        projects = conn.execute(
+            "SELECT COUNT(DISTINCT cwd) AS n FROM sessions WHERE cwd IS NOT NULL"
+        ).fetchone()["n"]
+        open_findings = conn.execute(
+            "SELECT COUNT(*) AS n FROM insight_findings"
+            " WHERE status = 'active' AND severity != 'info'"
+        ).fetchone()["n"]
         return {
             "sessions": sessions,
             "events": events,
@@ -4338,6 +4368,8 @@ def stats() -> dict[str, Any]:
             "avg_duration_seconds": avg_duration,
             "by_source": by_source,
             "by_status": by_status,
+            "projects": projects,
+            "open_findings": open_findings,
         }
 
 
@@ -4384,6 +4416,34 @@ def ensure_insight_indexes() -> None:
     """Create the findings indexes if missing (a few seconds on a large DB, once)."""
     with store.write() as conn:
         conn.execute(_TOOL_CALLS_INDEX_SQL)
+
+
+# Serve /v1/metrics from indexes. Without them its status, source, model,
+# attachment and file-target breakdowns each read the whole events table
+# (payload and detail blobs included): seconds apiece on a multi-GB DB. Built
+# off the startup path like the findings index; metrics are correct without them.
+_METRICS_INDEX_SQL = (
+    # Covers the model, source and status breakdowns, and connections().
+    "CREATE INDEX IF NOT EXISTS idx_events_metrics ON events("
+    " model, source, status, session_id, ts,"
+    " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)",
+    # The few events that carry attachments. The WHERE matches metrics()' query.
+    "CREATE INDEX IF NOT EXISTS idx_events_attachments ON events(id)"
+    " WHERE attachments IS NOT NULL AND attachments != ''",
+    # Distinct files touched. The WHERE matches metrics()' query; leading with
+    # category makes this strictly better than idx_events_category for it, which
+    # the planner otherwise picks (there are no ANALYZE stats to say otherwise).
+    "CREATE INDEX IF NOT EXISTS idx_events_file_targets ON events(category, target)"
+    " WHERE category IN ('file_edit','file_read') AND target IS NOT NULL",
+)
+
+
+def ensure_metrics_indexes() -> None:
+    """Create the metrics indexes if missing, one write at a time so ingest
+    gets in between builds."""
+    for sql in _METRICS_INDEX_SQL:
+        with store.write() as conn:
+            conn.execute(sql)
 
 
 def read_insight_inputs(
@@ -4500,14 +4560,27 @@ class InsightFindingsRepo:
              finding["recommendation"], json.dumps(finding["evidence"]), now, now),
         )
 
+    # A re-detected finding whose snapshot is unchanged only needs ``last_seen``
+    # moved forward, and only for the resolve grace period (days), so it is
+    # rewritten at most this often. Every insights GET reconciles; rewriting
+    # every finding each time made a read endpoint a steady stream of writes.
+    _LAST_SEEN_REFRESH = timedelta(minutes=15)
+
     def refresh(self, finding: Any, status: str, now: str) -> None:
+        evidence = json.dumps(finding["evidence"])
+        parsed_now = timeutil.parse_ts(now)
+        fresh_since = (parsed_now - self._LAST_SEEN_REFRESH).isoformat() if parsed_now else now
         self._conn.execute(
             "UPDATE insight_findings SET severity = ?, title = ?, detail = ?,"
             " recommendation = ?, evidence = ?, status = ?, last_seen = ?,"
-            " resolved_at = NULL WHERE fingerprint = ?",
+            " resolved_at = NULL WHERE fingerprint = ?"
+            " AND NOT (severity IS ? AND title IS ? AND detail IS ? AND recommendation IS ?"
+            " AND evidence IS ? AND status IS ? AND resolved_at IS NULL AND last_seen > ?)",
             (finding["severity"], finding["title"], finding["detail"],
-             finding["recommendation"], json.dumps(finding["evidence"]), status, now,
-             finding["fingerprint"]),
+             finding["recommendation"], evidence, status, now,
+             finding["fingerprint"],
+             finding["severity"], finding["title"], finding["detail"],
+             finding["recommendation"], evidence, status, fresh_since),
         )
 
     def resolve(self, fingerprint: str, now: str) -> Any:
