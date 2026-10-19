@@ -5018,7 +5018,7 @@ class InsightFindingsRepo:
             severity=finding.get("severity"),
             title=finding.get("title") or "New finding",
             body=finding.get("recommendation") or finding.get("detail"),
-            href=_finding_href(finding["fingerprint"], finding.get("pillar")),
+            href=_finding_href(finding["fingerprint"], finding.get("pillar"), finding.get("evidence")),
             dedup_key=f"finding:{finding['fingerprint']}",
             now=now,
         )
@@ -5070,19 +5070,37 @@ class InsightFindingsRepo:
         self._conn.commit()
 
 
-def _finding_href(fingerprint: str, pillar: str | None = None) -> str:
-    """Link that opens the Findings page on this one finding."""
+def _finding_href(fingerprint: str, pillar: str | None = None, evidence: Any = None) -> str:
+    """Where a finding's notification leads: straight to the event when the
+    finding rests on a single one (the command, file or prompt it's about), to
+    the session when it's about a whole session (its cost), otherwise the
+    Findings page opened on the finding, which lists every piece of evidence."""
+    if isinstance(evidence, str):
+        try:
+            evidence = json.loads(evidence)
+        except (json.JSONDecodeError, TypeError):
+            evidence = None
+    if isinstance(evidence, list) and len(evidence) == 1 and isinstance(evidence[0], dict):
+        sid, eid = evidence[0].get("session_id"), evidence[0].get("event_id")
+        if sid and eid is not None:
+            return f"#/session/{sid}?e={eid}"
+        if sid:  # about the session as a whole, e.g. its cost
+            return f"#/session/{sid}"
     return f"#/findings?pillar={pillar}&f={fingerprint}" if pillar else f"#/findings?f={fingerprint}"
 
 
-def _notification_out(row: sqlite3.Row) -> dict[str, Any]:
+def _notification_out(row: sqlite3.Row, findings: dict[str, sqlite3.Row] | None = None) -> dict[str, Any]:
     item = dict(row)
-    # Finding notifications queued before links named the finding only opened
-    # its pillar; point them at the finding itself.
+    # Finding links are worked out again when listed, so notifications queued
+    # before a link format existed (pillar only, then the finding) still land
+    # on the event itself.
     key = item.get("dedup_key") or ""
-    if key.startswith("finding:") and "f=" not in (item.get("href") or ""):
-        pillar = (item.get("href") or "").partition("pillar=")[2] or None
-        item["href"] = _finding_href(key.removeprefix("finding:"), pillar)
+    if key.startswith("finding:"):
+        fp = key.removeprefix("finding:")
+        f = (findings or {}).get(fp)
+        href = item.get("href") or ""
+        pillar = f["pillar"] if f is not None else (href.partition("pillar=")[2].partition("&")[0] or None)
+        item["href"] = _finding_href(fp, pillar, f["evidence"] if f is not None else None)
     return item
 
 
@@ -5119,7 +5137,15 @@ def list_notifications(limit: int = 30, after: int | None = None) -> dict[str, A
             ).fetchall()
         unread = conn.execute("SELECT COUNT(*) FROM notifications WHERE read_at IS NULL").fetchone()[0]
         latest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM notifications").fetchone()[0]
-    return {"items": [_notification_out(r) for r in rows], "unread": unread, "latest_id": latest}
+        fps = [r["dedup_key"].removeprefix("finding:") for r in rows if (r["dedup_key"] or "").startswith("finding:")]
+        findings = {
+            f["fingerprint"]: f
+            for f in conn.execute(
+                f"SELECT fingerprint, pillar, evidence FROM insight_findings WHERE fingerprint IN ({','.join('?' * len(fps))})",
+                fps,
+            )
+        } if fps else {}
+    return {"items": [_notification_out(r, findings) for r in rows], "unread": unread, "latest_id": latest}
 
 
 def mark_notifications_read(ids: list[int] | None = None) -> int:

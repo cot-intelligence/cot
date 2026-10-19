@@ -124,26 +124,34 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   );
   useEffect(() => {
     if (!reveal || tab !== 'timeline') return;
+    // Timers, not animation frames: a notification click sets the link while the
+    // window may still be hidden or just coming forward, where frames don't run.
     let tries = 0;
-    let raf = 0;
+    const timers: number[] = [];
     const seek = () => {
       const el = document.querySelector<HTMLElement>(`[data-ev="${reveal.id}"]`);
-      if (!el) {
-        if (++tries < 30) raf = requestAnimationFrame(seek);
+      // The row can exist before it has layout (still mounting, or the window hidden).
+      if (!el?.getClientRects().length) {
+        if (++tries < 120) timers.push(window.setTimeout(seek, 25));
         return;
       }
       // Centre a row that fits; a tall one (an open event with its detail) starts at the top so its header shows.
-      const tall = el.getBoundingClientRect().height > window.innerHeight * 0.6;
-      el.scrollIntoView({ block: tall ? 'start' : 'center' });
+      const align = () => {
+        const tall = el.getBoundingClientRect().height > window.innerHeight * 0.6;
+        el.scrollIntoView({ block: tall ? 'start' : 'center' });
+      };
+      align();
+      // Rows above it mount lazily and grow as they do, so re-align a few times.
+      for (const ms of [80, 200, 400]) timers.push(window.setTimeout(align, ms));
       const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
       el.animate(
         [{ backgroundColor: 'color-mix(in srgb, var(--v-hot) 14%, transparent)' }, { backgroundColor: 'transparent' }],
         { duration: reduce ? 600 : 1400, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' },
       );
-      setReveal(null);
+      timers.push(window.setTimeout(() => setReveal(null), 450));
     };
-    raf = requestAnimationFrame(seek);
-    return () => cancelAnimationFrame(raf);
+    seek();
+    return () => timers.forEach(clearTimeout);
   }, [reveal, tab, shown, cat]);
 
   // A link that names an event (search, a finding, Key moments, Activity) lands on it.
