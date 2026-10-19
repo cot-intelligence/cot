@@ -1,8 +1,9 @@
 name: Desktop release
 
-# Builds cot.app (Tauri) for Apple Silicon on the same v* tags as the Docker
-# image, attaches the DMG and updater artifacts to the GitHub Release, and opens
-# a PR on the site repo that points version.json at them. Merging that PR is
+# Builds cot.app (Tauri) for Apple Silicon and the Linux x86_64 .deb and
+# .AppImage on the same v* tags as the Docker image, attaches them and the
+# updater artifacts to the GitHub Release, and opens a PR on the site repo that
+# points version.json at them (the AppImage is the Linux updater's target). Merging that PR is
 # what ships the update to installed apps.
 #
 # Secrets:
@@ -104,8 +105,94 @@ jobs:
           aws s3 cp out/ "s3://${{ vars.R2_BUCKET }}/desktop/v${{ steps.version.outputs.version }}/" \
             --recursive --endpoint-url "https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
 
+  build-linux:
+    # 22.04, not latest: the frozen collector needs a glibc at least as new as
+    # the one it was built against, so the oldest supported distro builds.
+    runs-on: ubuntu-22.04
+    outputs:
+      signature: ${{ steps.artifacts.outputs.signature }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev file xdg-utils
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Read version
+        id: version
+        run: |
+          version="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' backend/app/__init__.py)"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix desktop
+
+      - name: Build .deb and .AppImage
+        env:
+          COT_PYTHON: python
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: desktop/scripts/build.sh --release
+
+      - name: Verify bundle
+        run: desktop/scripts/verify-bundle.sh
+
+      - name: Collect artifacts
+        id: artifacts
+        run: |
+          bundle=desktop/src-tauri/target/release/bundle
+          version=${{ steps.version.outputs.version }}
+          mkdir -p out
+          cp "${bundle}"/deb/*.deb "out/cot_${version}_amd64.deb"
+          cp "${bundle}"/appimage/*.AppImage "out/cot_${version}_amd64.AppImage"
+          cp "${bundle}"/appimage/*.AppImage.sig "out/cot_${version}_amd64.AppImage.sig"
+          echo "signature=$(cat out/*.AppImage.sig)" >> "${GITHUB_OUTPUT}"
+          ls -la out
+
+      - name: Upload to GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          gh release view "${TAG}" >/dev/null 2>&1 \
+            || gh release create "${TAG}" --title "${TAG}" --generate-notes \
+            || gh release view "${TAG}" >/dev/null
+          gh release upload "${TAG}" out/* --clobber
+
+      - name: Mirror to R2
+        if: vars.R2_BUCKET != '' && github.ref_type == 'tag'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp out/ "s3://${{ vars.R2_BUCKET }}/desktop/v${{ steps.version.outputs.version }}/" \
+            --recursive --endpoint-url "https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+
   site-pr:
-    needs: build
+    needs: [build, build-linux]
     if: vars.SITE_REPO != '' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
@@ -119,12 +206,16 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
           SIGNATURE: ${{ needs.build.outputs.signature }}
           URL: https://github.com/${{ github.repository }}/releases/download/v${{ needs.build.outputs.version }}/cot.app.tar.gz
+          LINUX_SIGNATURE: ${{ needs.build-linux.outputs.signature }}
+          LINUX_URL: https://github.com/${{ github.repository }}/releases/download/v${{ needs.build.outputs.version }}/cot_${{ needs.build.outputs.version }}_amd64.AppImage
         run: |
           file=public/version.json
           jq --arg v "${VERSION}" --arg url "${URL}" --arg sig "${SIGNATURE}" \
+             --arg linux_url "${LINUX_URL}" --arg linux_sig "${LINUX_SIGNATURE}" \
              --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
              '.version = $v | .pub_date = $date
-              | .platforms["darwin-aarch64"] = {url: $url, signature: $sig}' \
+              | .platforms["darwin-aarch64"] = {url: $url, signature: $sig}
+              | .platforms["linux-x86_64"] = {url: $linux_url, signature: $linux_sig}' \
              "${file}" > "${file}.tmp"
           mv "${file}.tmp" "${file}"
           cat "${file}"

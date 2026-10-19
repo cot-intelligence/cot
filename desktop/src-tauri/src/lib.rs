@@ -36,6 +36,7 @@ const MAIN_WINDOW: &str = "main";
 /// 56px the lights overhang it, so the page header is padded instead. The top
 /// row reads as a titlebar: the header's breadcrumb is hidden and the rail's
 /// divider starts below the row.
+#[cfg(target_os = "macos")]
 const CHROME_SCRIPT: &str = r#"
 (function () {
   if (location.hostname !== '127.0.0.1' && location.hostname !== 'localhost') return;
@@ -294,26 +295,62 @@ fn watch_collector(app: AppHandle) {
 }
 
 /// Runs the same install.sh the curl path uses, served by our collector.
-/// Interactive prompts need a terminal, so it opens in Terminal.app.
+/// Interactive prompts need a terminal, so it opens in one.
 fn run_hook_installer(port: u16, repair: bool) {
     let mut command = format!("COT_ENDPOINT=http://127.0.0.1:{port} curl -fsSL http://127.0.0.1:{port}/install.sh | sh");
     if repair {
         command.push_str(" -s -- --repair");
     }
+    open_in_terminal(&command);
+}
+
+#[cfg(target_os = "macos")]
+fn open_in_terminal(command: &str) {
     let escaped = command.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!("tell application \"Terminal\"\n  activate\n  do script \"{escaped}\"\nend tell");
     let _ = std::process::Command::new("/usr/bin/osascript").arg("-e").arg(script).spawn();
 }
 
+/// Linux has no one terminal, so try the common ones in order. The window
+/// waits for Enter at the end, or it would close before the summary is read.
+#[cfg(not(target_os = "macos"))]
+fn open_in_terminal(command: &str) {
+    let script = format!("{command}; printf '\\nPress Enter to close.'; read _");
+    // How each terminal takes a program to run: the args before `sh -c <script>`.
+    const TERMINALS: &[(&str, &[&str])] = &[
+        ("x-terminal-emulator", &["-e"]),
+        ("gnome-terminal", &["--"]),
+        ("ptyxis", &["--"]),
+        ("kgx", &["--"]),
+        ("konsole", &["-e"]),
+        ("xfce4-terminal", &["-x"]),
+        ("tilix", &["-e"]),
+        ("kitty", &[]),
+        ("alacritty", &["-e"]),
+        ("wezterm", &["start", "--"]),
+        ("foot", &[]),
+        ("xterm", &["-e"]),
+    ];
+    for (terminal, args) in TERMINALS {
+        let spawned = std::process::Command::new(terminal).args(*args).args(["sh", "-c", &script]).spawn();
+        if spawned.is_ok() {
+            return;
+        }
+    }
+}
+
 /// The menu-bar "cot." pill: filled while the collector serves, outlined
 /// otherwise. Template images, so macOS tints them to match the menu bar.
-/// Regenerate with scripts/make-tray-icons.swift.
+/// Linux panels show the icon as drawn and are mostly dark, so it gets the
+/// white variants. Regenerate with scripts/make-tray-icons.swift.
 fn tray_glyph(serving: bool) -> Image<'static> {
-    let png: &'static [u8] = if serving {
-        include_bytes!("../icons/tray/cot-on.png")
-    } else {
-        include_bytes!("../icons/tray/cot-off.png")
-    };
+    #[cfg(target_os = "macos")]
+    let (on, off): (&'static [u8], &'static [u8]) =
+        (include_bytes!("../icons/tray/cot-on.png"), include_bytes!("../icons/tray/cot-off.png"));
+    #[cfg(not(target_os = "macos"))]
+    let (on, off): (&'static [u8], &'static [u8]) =
+        (include_bytes!("../icons/tray/cot-on-light.png"), include_bytes!("../icons/tray/cot-off-light.png"));
+    let png = if serving { on } else { off };
     Image::from_bytes(png).expect("bundled tray icon is a valid PNG")
 }
 
@@ -396,9 +433,12 @@ fn sync_tray_glyph(app: &AppHandle) {
 }
 
 /// Adds Reload Dashboard (Cmd+R) and the zoom items (Cmd+= / Cmd+- / Cmd+0)
-/// to the standard macOS View menu.
+/// to the standard macOS View menu. The Linux default menu has no View menu,
+/// so there it gets one of its own.
 fn build_app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::default(app)?;
+    #[cfg(not(target_os = "macos"))]
+    menu.insert(&tauri::menu::Submenu::new(app, "View", true)?, 1)?;
     let reload = MenuItem::with_id(app, "reload", "Reload Dashboard", true, Some("CmdOrCtrl+R"))?;
     let actual = MenuItem::with_id(app, zoom::ZOOM_RESET, "Actual Size", true, Some("CmdOrCtrl+0"))?;
     let zoom_in = MenuItem::with_id(app, zoom::ZOOM_IN, "Zoom In", true, Some("CmdOrCtrl+="))?;
@@ -424,7 +464,6 @@ fn build_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .title("cot")
         .inner_size(1280.0, 860.0)
         .min_inner_size(900.0, 600.0)
-        .initialization_script(CHROME_SCRIPT)
         .on_navigation(move |url| {
             if is_internal_url(url) {
                 // Swiping back past the dashboard would reach the "Starting…"
@@ -462,8 +501,11 @@ fn build_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             true
         });
 
+    // Elsewhere the window keeps the desktop's own titlebar, so the dashboard
+    // needs no room made for window buttons.
     #[cfg(target_os = "macos")]
     let builder = builder
+        .initialization_script(CHROME_SCRIPT)
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true);
 

@@ -33,6 +33,12 @@
       "resources/static/": "static/"
     },
     "createUpdaterArtifacts": false,
+    "shortDescription": "Observability for coding agents",
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
     "macOS": {
       "minimumSystemVersion": "14.0",
       "entitlements": "Entitlements.plist",

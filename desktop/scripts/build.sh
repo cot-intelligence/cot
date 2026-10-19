@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Build cot.app with Tauri.
+# Build cot.app with Tauri (on Linux: cot's .deb and .AppImage).
 #
-#   scripts/build.sh              .app only
-#   scripts/build.sh --dmg        .app and .dmg
-#   scripts/build.sh --release    .app, .dmg and updater artifacts (.tar.gz + .sig);
-#                                 needs TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)
+#   scripts/build.sh              .app only (Linux: .deb)
+#   scripts/build.sh --dmg        .app and .dmg (Linux: .deb and .AppImage)
+#   scripts/build.sh --release    the --dmg bundles and updater artifacts (.sig; macOS also
+#                                 .app.tar.gz); needs TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)
 #   scripts/build.sh --sandbox    .app and .dmg as "cot Sandbox": test icon, own bundle id,
-#                                 empty HOME (fresh onboarding); see README
-#   scripts/build.sh --shell      .app only, reusing the frozen collector: rebuilds the
-#                                 dashboard and the Tauri shell (minutes faster when the
+#                                 empty HOME (fresh onboarding); see README. macOS only
+#   scripts/build.sh --shell      the default bundle, reusing the frozen collector: rebuilds
+#                                 the dashboard and the Tauri shell (minutes faster when the
 #                                 backend didn't change)
+#
+# Linux needs the WebKitGTK and AppIndicator dev packages (see README).
 #
 # The version comes from backend/app/__init__.py, the one version source for the
 # collector, the Docker image and the app.
@@ -21,15 +23,22 @@ REPO_ROOT="$(cd "${DESKTOP_DIR}/.." && pwd)"
 VERSION="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "${REPO_ROOT}/backend/app/__init__.py")"
 [ -n "${VERSION}" ] || { echo "could not read backend/app/__init__.py version" >&2; exit 1; }
 
-bundles="app"
+# The bundles a plain build makes, and the installers on top of it.
+if [ "$(uname -s)" = Linux ]; then
+  base="deb" installers="deb,appimage"
+else
+  base="app" installers="app,dmg"
+fi
+bundles="${base}"
 config="{\"version\": \"${VERSION}\"}"
 shell_only=0
 case "${1:-}" in
   "") ;;
   --shell) shell_only=1 ;;
-  --dmg) bundles="app,dmg" ;;
+  --dmg) bundles="${installers}" ;;
   --sandbox)
-    bundles="app,dmg"
+    [ "${base}" = app ] || { echo "--sandbox is macOS only" >&2; exit 2; }
+    bundles="${installers}"
     export COT_DESKTOP_SANDBOX_ID="$(date -u +%Y%m%d%H%M%S)-$$"
     icons="${DESKTOP_DIR}/build/sandbox-icons"
     "${DESKTOP_DIR}/scripts/make-sandbox-icon.sh" "${icons}"
@@ -37,7 +46,7 @@ case "${1:-}" in
     config="{\"version\": \"${VERSION}\", \"productName\": \"cot Sandbox\", \"identifier\": \"run.cot.sandbox.s${COT_DESKTOP_SANDBOX_ID}\", \"bundle\": {\"icon\": [${icon_list}]}}"
     ;;
   --release)
-    bundles="app,dmg"
+    bundles="${installers}"
     config="{\"version\": \"${VERSION}\", \"bundle\": {\"createUpdaterArtifacts\": true}}"
     ;;
   *) echo "unknown flag: $1 (--dmg|--release|--shell|--sandbox)" >&2; exit 2 ;;

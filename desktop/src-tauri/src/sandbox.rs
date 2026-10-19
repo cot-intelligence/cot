@@ -10,10 +10,14 @@ pub fn initialize() {
         return;
     };
     let real_home = PathBuf::from(std::env::var_os("HOME").expect("HOME is required"));
-    let home = real_home
-        .join("Library/Application Support/cot-sandbox")
-        .join(id)
-        .join("home");
+    #[cfg(target_os = "macos")]
+    let data = real_home.join("Library/Application Support");
+    #[cfg(not(target_os = "macos"))]
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| real_home.join(".local/share"));
+    let home = data.join("cot-sandbox").join(id).join("home");
     std::fs::create_dir_all(&home).expect("could not create sandbox HOME");
     std::env::set_var("HOME", &home);
     // Import reads real transcripts; import offsets and everything else stay in the sandbox.
