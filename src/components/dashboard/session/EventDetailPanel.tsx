@@ -6,6 +6,7 @@ import { useFullEventDetail } from '../../../lib/useFullEventDetail';
 import { Icon } from '../../ui/icons';
 import { MarkdownContent } from '../../ui/MarkdownContent';
 import { AttachmentTags } from './AttachmentTags';
+import { QuestionCards } from './QuestionCards';
 
 function Pane({ label, children, tone }: { label: string; children: string; tone?: 'add' | 'del' }) {
   const ringCls =
@@ -45,45 +46,6 @@ function DiffBlock({ edit, index, total }: { edit: EditChunk; index: number; tot
           {edit.newText}
         </Pane>
       </div>
-    </div>
-  );
-}
-
-function QuestionList({ questions }: { questions: NonNullable<TimelineItem['questions']> }) {
-  return (
-    <div className="space-y-3">
-      {questions.map((q, i) => (
-        <div key={i} className="rounded-md border border-line/10 bg-panel p-3">
-          <div className="flex items-baseline gap-2">
-            {q.header && (
-              <span className="font-mono text-label font-semibold uppercase tracking-label text-hot">
-                {q.header}
-              </span>
-            )}
-            {questions.length > 1 && (
-              <span className="font-mono text-label tabular-nums text-fg/40">
-                {i + 1}/{questions.length}
-              </span>
-            )}
-          </div>
-          <p className="mt-1 font-mono text-small font-semibold text-fg">{q.question}</p>
-          {q.options && q.options.length > 0 && (
-            <p className="mt-1 font-mono text-data text-fg/40">{q.options.join(' · ')}</p>
-          )}
-          <div className="mt-2 flex items-start gap-1.5">
-            <Icon name="reply" className="mt-0.5 h-3 w-3 shrink-0 text-cobalt" />
-            {q.answer ? (
-              <span className="font-mono text-code font-semibold text-cobalt">{q.answer}</span>
-            ) : q.skipped ? (
-              <span className="font-mono text-code font-semibold uppercase tracking-label text-fg/40">
-                skipped
-              </span>
-            ) : (
-              <span className="font-mono text-code italic text-fg/40">no recorded answer</span>
-            )}
-          </div>
-        </div>
-      ))}
     </div>
   );
 }
@@ -151,7 +113,7 @@ function PlanView({ item }: { item: TimelineItem }) {
 
 function Body({ item }: { item: TimelineItem }) {
   if (item.category === 'question' && item.questions && item.questions.length > 0) {
-    return <QuestionList questions={item.questions} />;
+    return <QuestionCards questions={item.questions} waiting={false} />;
   }
 
   if (item.category === 'plan') {
@@ -359,9 +321,20 @@ export function EventDetailPanel({ item, sessionId, onViewInAll, onJump, compact
             {item.model && <span className="font-mono text-label uppercase tracking-label text-fg/40">{formatModel(item.model)}</span>}
           </div>
         )}
-        <QaBanner item={item} onJump={onJump} />
-        {loading && <p className="font-mono text-label uppercase tracking-label text-fg/40">Loading full detail…</p>}
-        <Body item={resolved ?? item} />
+        {item.questions?.length ? (
+          // The row already shows the questions and answers; only the link to the reply is new here.
+          item.answer_event_id != null && onJump && (
+            <button type="button" className="vbtn vbtn-ghost vbtn-sm" style={{ marginLeft: -10 }} onClick={() => onJump(item.answer_event_id!)}>
+              <Icon name="reply" className="h-3.5 w-3.5" />Jump to the answer
+            </button>
+          )
+        ) : (
+          <>
+            <QaBanner item={item} onJump={onJump} />
+            {loading && <p className="font-mono text-label uppercase tracking-label text-fg/40">Loading full detail…</p>}
+            <Body item={resolved ?? item} />
+          </>
+        )}
       </div>
     );
   }

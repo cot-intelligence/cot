@@ -899,3 +899,22 @@ def test_session_components_count_each_tool_call_once():
     assert components["shell_count"] == 1
     assert components["files_edited"] == [{"path": "a.py", "count": 1}]
     assert components["mcp_plugins"] == [{"target": "browser", "count": 1}]
+
+
+def test_questions_keep_options_and_mark_the_picked_ones():
+    import json as _json
+
+    from app.session_read import parse_questions
+
+    q = {"question": "Which?", "header": "Pick", "multiSelect": True,
+         "options": [{"label": "A, with comma", "description": "first"}, {"label": "B"}, {"label": "C"}]}
+    claude = parse_questions(_json.dumps({"input": {"questions": [q]}, "response": {
+        "answers": {"Which?": "A, with comma,C"}, "annotations": {"Which?": {"notes": "only these"}}}}))[0]
+    assert claude["choices"][0] == {"label": "A, with comma", "description": "first"}
+    assert claude["multi"] and claude["picked"] == ["A, with comma", "C"] and claude["custom"] is None
+    assert claude["note"] == "only these"
+
+    single = {**q, "multiSelect": False}
+    opencode = parse_questions(_json.dumps({"input": {"questions": [single]}, "response":
+        'User has answered your questions: "Which?"="something else". You can now continue'}))[0]
+    assert opencode["picked"] == [] and opencode["custom"] == "something else"

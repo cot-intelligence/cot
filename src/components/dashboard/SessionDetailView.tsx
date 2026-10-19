@@ -6,6 +6,7 @@ import { setDocumentTitle } from '../../lib/documentTitle';
 import { cachedSessionSummary, seededSessionDetail, sessionDetailKey } from '../../lib/sessionDetailQuery';
 import { useFullEventDetail } from '../../lib/useFullEventDetail';
 import { SessionRowsSkeleton } from '../ui/Skeleton';
+import { QuestionCards } from './session/QuestionCards';
 import { BackToTop } from '../ui/BackToTop';
 import { sessionHref, SessionStoreContext } from '../../lib/sessionStore';
 import { categoryLabel, fmt, modelLabel, project } from '../forest/format';
@@ -345,15 +346,17 @@ const TraceRow = memo(TraceRowView, (a, b) =>
 
 function TraceRowView({ e, open, live, focusQuery, onToggle, sessionId, onJump, annotatable, annotation, ruleable }: TraceRowProps) {
   const failed = e.status === 'error' || e.status === 'failed';
-  const text = TEXT_KINDS.has(e.category) ? e.detail?.trim() : '';
+  // A question's body is its raw tool JSON; QuestionCards shows it properly instead.
+  const text = TEXT_KINDS.has(e.category) && !e.questions?.length ? e.detail?.trim() : '';
   return (
     <li className="tl-i" data-cat={e.category} data-err={failed} data-ev={e.id} data-open={open}>
       <span className="tl-ic"><Icon name={CATEGORY_ICON[e.category] ?? 'file'} size={15} /></span>
       <div style={{ minWidth: 0 }}>
         <button type="button" onClick={onToggle} aria-expanded={open} style={{ all: 'unset', cursor: 'pointer', display: 'block', width: '100%' }}>
           <div className="tl-t">{e.tool ?? categoryLabel(e.category)}{failed ? <span className="vchip c-critical" style={{ marginLeft: 8 }}>failed</span> : null}{live && e.ongoing === true ? <span className="vchip c-ok" style={{ marginLeft: 8 }}><span className="dot" />running</span> : null}<RatingMark annotation={annotation} /></div>
-          {e.target && <div className="tl-x" title={e.target}>{e.target}</div>}
+          {e.target && !e.questions?.length && <div className="tl-x" title={e.target}>{e.target}</div>}
         </button>
+        {e.questions && e.questions.length > 0 && <QuestionCards questions={e.questions} waiting={live && e.ongoing === true} />}
         {text && <TraceText kind={e.category} text={text} item={e} sessionId={sessionId} />}
         {e.attachments && e.attachments.length > 0 && <div style={{ marginTop: 6 }}><AttachmentTags attachments={e.attachments} /></div>}
         {open && (

@@ -163,13 +163,16 @@
 
 .vf .grid-2 { display: grid; grid-template-columns: 1.6fr 1fr; gap: 16px; margin-top: 16px; }
 .vf .grid-2e { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
-.vf .grid-trace { grid-template-columns: minmax(0, 1fr) 260px; }
+.vf .grid-trace { grid-template-columns: minmax(0, 1fr) 200px; }
 /* The trace's filter column stays in view while the timeline scrolls. As a grid
    item it would stretch to the row's full height and have nowhere to stick, so
    it aligns to the top; a list taller than the visible area (56px app bar plus
    the 16px offset above and below) scrolls on its own. Stacked under the
    timeline on narrow screens, it is a plain block again. */
-.vf .trace-filter { display: grid; gap: 4px; align-content: start; align-self: start; position: sticky; top: 16px; max-height: calc(100dvh - 56px - 32px); overflow-y: auto; overscroll-behavior: contain; }
+.vf .trace-filter { display: grid; gap: 1px; align-content: start; align-self: start; position: sticky; top: 16px; max-height: calc(100dvh - 56px - 32px); overflow-y: auto; overscroll-behavior: contain; }
+.vf .trace-filter .nav-i { height: 28px; padding: 0 8px; gap: 8px; font-size: 12px; border-radius: 7px; }
+.vf .trace-filter .nav-i > svg { width: 13px; height: 13px; }
+.vf .trace-filter .label { font-size: 10px; }
 @media (max-width: 1000px) { .vf .grid-2, .vf .grid-2e { grid-template-columns: 1fr; } .vf .trace-filter { position: static; max-height: none; overflow: visible; } }
 
 .vf table.t { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
@@ -735,3 +738,24 @@
 .vf .ih-axis { position: relative; display: flex; justify-content: space-between; font-size: 11px; }
 .vf .ih-tip { position: absolute; left: 50%; transform: translateX(-50%); color: var(--v-fg); white-space: nowrap; }
 .vf .tl-more { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 14px 0 4px; font-size: 12px; color: var(--v-dim); }
+
+/* Timeline: agent questions with their options and the answer */
+.vf .qa { display: grid; gap: 14px; margin-top: 8px; }
+.vf .qa-q { display: grid; gap: 8px; padding: 12px; border-radius: 12px; background: var(--v-panel); }
+.vf .qa-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.vf .qa-tag { font-family: 'Geist Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--v-dim); }
+.vf .qa-hint { font-size: 11px; color: var(--v-faint); }
+.vf .qa-hint[data-state='open'] { color: var(--v-amber); }
+.vf .qa-t { margin: 0; font-size: 14px; line-height: 21px; font-weight: 500; text-wrap: pretty; }
+.vf .qa-opts { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.vf .qa-o { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 10px; align-items: start; padding: 8px 10px; border-radius: 8px; transition: opacity 150ms ease; }
+.vf .qa-o[data-on] { background: color-mix(in srgb, var(--v-hot) 9%, var(--v-surface)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--v-hot) 35%, transparent); }
+.vf .qa-o[data-dim] { opacity: 0.55; }
+.vf .qa-mark { width: 16px; height: 16px; margin-top: 2px; border-radius: 999px; display: grid; place-items: center; box-shadow: inset 0 0 0 1.5px var(--v-mute); color: var(--v-onHot); }
+.vf .qa-mark[data-multi] { border-radius: 4px; }
+.vf .qa-o[data-on] .qa-mark { background: var(--v-hot); box-shadow: none; }
+.vf .qa-l { display: block; font-size: 13px; line-height: 20px; font-weight: 500; overflow-wrap: anywhere; }
+.vf .qa-d { display: block; margin-top: 1px; font-size: 12px; line-height: 18px; color: var(--v-dim); text-wrap: pretty; }
+.vf .qa-note { display: flex; gap: 6px; align-items: flex-start; margin: 0; font-size: 12px; color: var(--v-dim); }
+.vf .qa-note svg { flex: none; margin-top: 3px; }
+.vf .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

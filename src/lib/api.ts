@@ -116,8 +116,17 @@ export interface TimelineItem {
 export interface QuestionPart {
   header?: string | null;
   question: string;
+  /** Option labels, kept for older readers; `choices` adds descriptions. */
   options?: string[];
+  choices?: { label: string; description: string | null }[];
+  /** More than one option could be picked. */
+  multi?: boolean;
   answer?: string | null;
+  /** Labels of the options that were picked. */
+  picked?: string[];
+  /** A typed answer that isn't one of the options. */
+  custom?: string | null;
+  note?: string | null;
   skipped?: boolean;
 }
 

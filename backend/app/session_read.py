@@ -8,6 +8,7 @@ clarifications, and preview metadata come out.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any, Literal
 
@@ -61,15 +62,54 @@ def _coerce_dict(val: Any) -> dict[str, Any]:
     return {}
 
 
+# Answers that come back as text rather than a dict (OpenCode's question tool, and
+# Claude Code when only the tool's message survives):
+#   User has answered your questions: "Q1"="A1", "Q2"="A2". You can now continue…
+_TEXT_ANSWER_RE = re.compile(r'"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _text_answers(text: str) -> dict[str, str]:
+    return {q: a for q, a in _TEXT_ANSWER_RE.findall(text)}
+
+
+def _picked_options(answer: str | None, labels: list[str], multi: bool) -> tuple[list[str], str | None]:
+    """Which option labels an answer chose, and any free text that isn't an option
+    (the "Other" box). Multi-select answers arrive comma-joined, and a label can
+    itself contain a comma, so whole labels are matched before splitting."""
+    if not answer:
+        return [], None
+    text = answer.strip()
+    if text in labels:
+        return [text], None
+    if not multi:
+        return [], text
+    picked: list[str] = []
+    rest = text
+    for label in sorted(labels, key=len, reverse=True):
+        if label and label in rest:
+            picked.append(label)
+            rest = rest.replace(label, "")
+    leftover = ", ".join(p.strip() for p in rest.split(",") if p.strip())
+    return [label for label in labels if label in picked], leftover or None
+
+
 def parse_questions(detail: Any) -> list[dict[str, Any]]:
-    """Return structured sub-questions plus recovered answers, if present."""
+    """Return structured sub-questions plus recovered answers, if present.
+
+    Each question keeps its options with their descriptions (``choices``), whether
+    several could be picked (``multi``), which were picked (``picked``), a typed
+    answer that isn't one of the options (``custom``) and any note left with it."""
     obj = _coerce_dict(detail)
     if not obj:
         return []
     src = obj.get("input") if isinstance(obj.get("input"), dict) else obj
     qs = src.get("questions") if isinstance(src.get("questions"), list) else []
-    resp = _coerce_dict(obj.get("response") or obj.get("output"))
+    raw_resp = obj.get("response") or obj.get("output")
+    resp = _coerce_dict(raw_resp)
     answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
+    if not answers and isinstance(raw_resp, str):
+        answers = _text_answers(raw_resp)
+    notes = resp.get("annotations") if isinstance(resp.get("annotations"), dict) else {}
     skipped_raw = resp.get("skipped") or resp.get("skipped_questions") or []
     skipped = {str(v) for v in skipped_raw if v} if isinstance(skipped_raw, list) else set()
 
@@ -77,28 +117,38 @@ def parse_questions(detail: Any) -> list[dict[str, Any]]:
     for q in qs:
         if not isinstance(q, dict) or not (q.get("question") or q.get("prompt")):
             continue
+        text = str(q.get("question") or q.get("prompt"))
         ans: str | None = None
         picked = answers.get(q.get("id")) if q.get("id") else None
         if picked is None:
-            picked = answers.get(q.get("question")) or answers.get(q.get("prompt"))
+            picked = answers.get(text)
         if isinstance(picked, dict) and isinstance(picked.get("answers"), list):
             ans = ", ".join(str(a) for a in picked["answers"] if a)
         elif isinstance(picked, list):
             ans = ", ".join(str(a) for a in picked if a)
         elif isinstance(picked, str):
             ans = picked
-        options = [
-            str(o.get("label"))
+        choices = [
+            {"label": str(o.get("label")), "description": o.get("description") or None}
             for o in (q.get("options") or [])
             if isinstance(o, dict) and o.get("label")
         ]
+        labels = [c["label"] for c in choices]
+        multi = bool(q.get("multiSelect") or q.get("multiple"))
+        chosen, custom = _picked_options(ans, labels, multi)
+        note = notes.get(text) if isinstance(notes.get(text), dict) else {}
         qid = str(q.get("id") or "")
         out.append(
             {
                 "header": q.get("header"),
-                "question": str(q.get("question") or q.get("prompt")),
-                "options": options,
+                "question": text,
+                "options": labels,
+                "choices": choices,
+                "multi": multi,
                 "answer": ans or None,
+                "picked": chosen,
+                "custom": custom,
+                "note": note.get("notes") or None,
                 "skipped": bool(qid and qid in skipped and not ans),
             }
         )
