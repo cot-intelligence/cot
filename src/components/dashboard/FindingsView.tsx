@@ -38,10 +38,13 @@ const SEVERITIES: InsightSeverity[] = ['critical', 'warn', 'info'];
 interface FindingsViewProps {
   onSelect: (id: string, eventId?: number) => void;
   initialPillar?: InsightPillar;
+  /** Open on this finding (by fingerprint), e.g. from a notification; a new nonce re-opens it. */
+  focusFinding?: string;
+  focusNonce?: number;
 }
 
 /** Markup mirrors the demo's Findings page (demo-variants/src/variants/forest/pages-b.tsx). */
-export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
+export function FindingsView({ onSelect, initialPillar, focusFinding, focusNonce }: FindingsViewProps) {
   const [days, setDays] = useState(30);
   const [status, setStatus] = useState<InsightStatus>('active');
   const [pillar, setPillar] = useState<InsightPillar | ''>(initialPillar ?? '');
@@ -68,6 +71,57 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
   useEffect(() => {
     if (initialPillar) setPillar(initialPillar);
   }, [initialPillar]);
+
+  // A link to one finding: once it is loaded, clear whatever hides it (window, status,
+  // pillar, filters), select it, then scroll its row into view and pulse it once.
+  const [focus, setFocus] = useState<string | null>(null);
+  const [reveal, setReveal] = useState<{ fp: string; at: number } | null>(null);
+  useEffect(() => {
+    if (focusFinding) setFocus(focusFinding);
+  }, [focusFinding, focusNonce]);
+  useEffect(() => {
+    if (!focus || !ins || ins.window_days !== days) return;
+    const f = ins.insights.find((x) => x.fingerprint === focus);
+    if (!f && days !== 0) {
+      setDays(0); // outside this window: look through all history
+      return;
+    }
+    setFocus(null);
+    // Drop the finding from the URL so following the same link again is a new navigation.
+    window.history.replaceState(null, '', f ? `#/findings?pillar=${f.pillar}` : '#/findings');
+    if (!f) return; // gone since the link was made
+    setStatus(f.status);
+    setPillar(f.pillar);
+    setQ(''); setSev(''); setRule(''); setProj(''); setAgent('');
+    setSel(f.fingerprint);
+    setReveal({ fp: f.fingerprint, at: Date.now() });
+  }, [focus, ins, days]);
+  useEffect(() => {
+    if (!reveal) return;
+    // Timers, not animation frames: a window just brought forward can hold frames back.
+    let tries = 0;
+    const timers: number[] = [];
+    const seek = () => {
+      const el = document.querySelector<HTMLElement>(`[data-fp="${reveal.fp}"]`);
+      // On a cold load the row can exist before it has layout (a lazy chunk still suspending).
+      if (!el?.getClientRects().length) {
+        if (++tries < 120) timers.push(window.setTimeout(seek, 25));
+        return;
+      }
+      // Rows and the detail card settle around it, so re-align a few times.
+      el.scrollIntoView({ block: 'center' });
+      for (const ms of [80, 200, 400]) timers.push(window.setTimeout(() => el.scrollIntoView({ block: 'center' }), ms));
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      el.animate(
+        [{ backgroundColor: 'color-mix(in srgb, var(--v-hot) 14%, transparent)' }, { backgroundColor: 'transparent' }],
+        { duration: reduce ? 600 : 1400, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' },
+      );
+    };
+    seek();
+    return () => {
+      timers.forEach(clearTimeout);
+    };
+  }, [reveal]);
 
   const all = ins?.insights ?? [];
   // Project and agent come from the evidence sessions; a finding matches if any of them does.

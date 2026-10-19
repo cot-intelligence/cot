@@ -4958,7 +4958,7 @@ class InsightFindingsRepo:
             severity=finding.get("severity"),
             title=finding.get("title") or "New finding",
             body=finding.get("recommendation") or finding.get("detail"),
-            href=f"#/findings?pillar={finding.get('pillar')}" if finding.get("pillar") else "#/findings",
+            href=_finding_href(finding["fingerprint"], finding.get("pillar")),
             dedup_key=f"finding:{finding['fingerprint']}",
             now=now,
         )
@@ -5010,6 +5010,22 @@ class InsightFindingsRepo:
         self._conn.commit()
 
 
+def _finding_href(fingerprint: str, pillar: str | None = None) -> str:
+    """Link that opens the Findings page on this one finding."""
+    return f"#/findings?pillar={pillar}&f={fingerprint}" if pillar else f"#/findings?f={fingerprint}"
+
+
+def _notification_out(row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    # Finding notifications queued before links named the finding only opened
+    # its pillar; point them at the finding itself.
+    key = item.get("dedup_key") or ""
+    if key.startswith("finding:") and "f=" not in (item.get("href") or ""):
+        pillar = (item.get("href") or "").partition("pillar=")[2] or None
+        item["href"] = _finding_href(key.removeprefix("finding:"), pillar)
+    return item
+
+
 def _insert_notification(
     conn: sqlite3.Connection,
     *,
@@ -5043,7 +5059,7 @@ def list_notifications(limit: int = 30, after: int | None = None) -> dict[str, A
             ).fetchall()
         unread = conn.execute("SELECT COUNT(*) FROM notifications WHERE read_at IS NULL").fetchone()[0]
         latest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM notifications").fetchone()[0]
-    return {"items": [dict(r) for r in rows], "unread": unread, "latest_id": latest}
+    return {"items": [_notification_out(r) for r in rows], "unread": unread, "latest_id": latest}
 
 
 def mark_notifications_read(ids: list[int] | None = None) -> int:

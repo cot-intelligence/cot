@@ -71,7 +71,7 @@ type DashboardRoute =
   | { view: 'replay' }
   | { view: 'replay-session'; sessionId: string; focusEventId?: number; focusQuery?: string; focusNonce?: number }
   | { view: 'settings' }
-  | { view: 'findings'; pillar?: InsightPillar }
+  | { view: 'findings'; pillar?: InsightPillar; finding?: string; focusNonce?: number }
   | { view: 'governance' }
   | { view: 'rules'; fromEvent?: number }
   | { view: 'project'; name: string }
@@ -100,8 +100,17 @@ function parseHash(): DashboardRoute {
   if (extPage) return { view: 'extension', key: decodeURIComponent(extPage[1]) };
   // The old Extensions list now lives in Activity (MCP / Skills → Installed, Plugins).
   if (/^extensions(\?.*)?$/.test(hash)) return { view: 'metrics-history', tab: 'mcp' };
-  const findingsMatch = hash.match(/^findings(?:\?pillar=(security|cost|usability))?$/);
-  if (findingsMatch) return { view: 'findings', pillar: findingsMatch[1] as InsightPillar | undefined };
+  // #/findings[?pillar=<pillar>][&f=<fingerprint>]: a pillar, optionally opened on one finding.
+  const findingsMatch = hash.match(/^findings(?:\?(.*))?$/);
+  if (findingsMatch) {
+    const q = new URLSearchParams(findingsMatch[1] ?? '');
+    const pillar = q.get('pillar');
+    return {
+      view: 'findings',
+      pillar: pillar === 'security' || pillar === 'cost' || pillar === 'usability' ? pillar : undefined,
+      finding: q.get('f') ?? undefined,
+    };
+  }
   // The workspace opens on the Overview.
   if (hash === '') return { view: 'overview' };
   // #/metrics-history?tab=mcp[&group=<server>][&view=installed]: a tab, optionally with the log
@@ -202,6 +211,12 @@ export function Dashboard({ onSetup }: DashboardProps) {
       // follows parses the same route again. Keep the current one then, or every
       // navigation renders twice (and re-runs focus effects keyed on the nonce).
       const next = parseHash();
+      // A link to one finding (a notification) is followed every time, even to
+      // the finding already open, so it always lands on and pulses it.
+      if (next.view === 'findings' && next.finding) {
+        setRoute({ ...next, focusNonce: Date.now() });
+        return;
+      }
       setRoute((prev) => (sameRoute(prev, next) ? prev : next));
     };
     window.addEventListener('hashchange', onHash);
@@ -526,7 +541,12 @@ export function Dashboard({ onSetup }: DashboardProps) {
           ) : onFindings ? (
             <main className="flex min-w-0 flex-1 flex-col">
               <Suspense fallback={<MetricsSkeleton />}>
-                <FindingsView onSelect={selectSession} initialPillar={route.view === 'findings' ? route.pillar : undefined} />
+                <FindingsView
+                  onSelect={selectSession}
+                  initialPillar={route.view === 'findings' ? route.pillar : undefined}
+                  focusFinding={route.view === 'findings' ? route.finding : undefined}
+                  focusNonce={route.view === 'findings' ? route.focusNonce : undefined}
+                />
               </Suspense>
             </main>
           ) : onExtensions ? (
