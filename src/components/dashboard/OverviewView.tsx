@@ -27,7 +27,7 @@ import { Icon as FIcon } from '../forest/icons';
 import { Agent, agentColor as fAgentColor, Seg as FSeg, Sev } from '../forest/ui';
 import { AttachmentsDrawer } from './AttachmentsDrawer';
 import { ExportModal } from './ExportModal';
-import { ContributionHeatmap } from './metricsCharts';
+import { ContributionHeatmap, HeatStrip, lastDays } from './metricsCharts';
 import { ShareCardModal } from './ShareCardModal';
 
 const CARD_GRID = 'overflow-hidden rounded-cell border border-line/10 bg-line/10';
@@ -172,6 +172,7 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
   const t = m.totals;
   const fun = m.fun;
   const activeDays = m.by_day.length;
+  const usage = usageFor(days, m.by_day, win.series);
   const avgPerActive = activeDays
     ? Math.round(m.by_day.reduce((n, d) => n + d.events, 0) / activeDays)
     : 0;
@@ -245,30 +246,30 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
         </div>
 
         <>
-          <Section n="01" title="Daily usage">
+          <Section n="01" title={days === 1 ? 'Hourly usage' : 'Daily usage'} aside={<span className="label">{windowText(days).toLowerCase()}</span>}>
             <div className="space-y-4">
               <div className="flex flex-wrap items-baseline gap-x-7 gap-y-1">
                 <span className="font-mono text-sm font-semibold tabular-nums text-fg">
-                  {compact(t.events)}{' '}
-                  <span className="text-label font-normal uppercase tracking-label text-fg/60">
-                    events tracked
-                  </span>
+                  {compact(usage.total)}{' '}
+                  <span className="text-label font-normal uppercase tracking-label text-fg/60">{usage.unit}</span>
                 </span>
                 <span className="font-mono text-label text-fg/60">
-                  {activeDays} active {activeDays === 1 ? 'day' : 'days'}
+                  {usage.active} active {usage.step}{usage.active === 1 ? '' : 's'}
                 </span>
                 <span className="font-mono text-label text-fg/60">
-                  ~{compact(avgPerActive)} events / day
+                  ~{compact(usage.avg)} / {usage.step}
                 </span>
-                {fun.busiest_day && (
+                {usage.busiest && (
                   <span className="font-mono text-label text-fg/60">
-                    busiest{' '}
-                    <span className="font-semibold text-fg/80">{formatMetricsDay(fun.busiest_day.day)}</span> ·{' '}
-                    {compact(fun.busiest_day.events)}
+                    busiest <span className="font-semibold text-fg/80">{usage.busiest.label}</span> · {compact(usage.busiest.value)}
                   </span>
                 )}
               </div>
-              <ContributionHeatmap data={m.by_day.map((d) => ({ label: d.day, value: d.events }))} />
+              {usage.cells ? (
+                <HeatStrip cells={usage.cells} unit={usage.unit} />
+              ) : (
+                <ContributionHeatmap data={m.by_day.map((d) => ({ label: d.day, value: d.events }))} />
+              )}
             </div>
           </Section>
         </>
@@ -626,6 +627,33 @@ function RankBadge({ n }: { n: number }) {
       {n}
     </span>
   );
+}
+
+/**
+ * Daily usage for the selected window: the year calendar for "all", otherwise
+ * one strip cell per day (per hour, from tool calls, for the 24-hour window),
+ * with the headline figures worked out over the same cells.
+ */
+function usageFor(days: number, byDay: Metrics['by_day'], series: ReturnType<typeof windowed>['series']) {
+  type Cell = { key: string; label: string; value: number };
+  let cells: Cell[] | null;
+  let unit = 'events tracked';
+  let step = 'day';
+  if (days === 1) {
+    cells = series.map((x) => ({ key: x.day, label: hourBucketLabel(x.day), value: x.tools }));
+    unit = 'tool calls';
+    step = 'hour';
+  } else if (days > 0) {
+    const counts = new Map(byDay.map((d) => [d.day, d.events]));
+    cells = lastDays(days).map((day) => ({ key: day, label: formatMetricsDay(day), value: counts.get(day) ?? 0 }));
+  } else {
+    cells = null;
+  }
+  const all: Cell[] = cells ?? byDay.map((d) => ({ key: d.day, label: formatMetricsDay(d.day), value: d.events }));
+  const active = all.filter((c) => c.value > 0);
+  const total = all.reduce((n, c) => n + c.value, 0);
+  const busiest = active.reduce<Cell | null>((b, c) => (!b || c.value > b.value ? c : b), null);
+  return { cells, unit, step, total, active: active.length, avg: active.length ? Math.round(total / active.length) : 0, busiest };
 }
 
 /** The window's totals with one series point per day (per hour for the 24-hour
