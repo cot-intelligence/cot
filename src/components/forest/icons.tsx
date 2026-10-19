@@ -54,6 +54,7 @@ const P: Record<string, string> = {
   archive: 'M4 5h16v4H4zM5 9v10h14V9M10 13h4',
   folder: 'M3 6h6l2 2h10v11H3z',
   branch: 'M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 9a9 9 0 0 1-9 9',
+  more: 'M5 12h.01M12 12h.01M19 12h.01',
 };
 
 export type IconName = keyof typeof P;

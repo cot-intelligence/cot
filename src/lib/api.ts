@@ -191,6 +191,8 @@ export interface TimelineRun {
 }
 
 export interface SessionDetail {
+  /** Only the opening events; the full read is still to come. */
+  partial?: boolean;
   summary: SessionSummary;
   links: SessionLinks;
   components: Components;
@@ -1063,8 +1065,9 @@ export async function getSessionProjects(archived = false): Promise<{ project: s
   return [...counts].map(([project, sessions]) => ({ project, sessions })).sort((a, b) => a.project.localeCompare(b.project));
 }
 
-export async function getSessionDetail(id: string, store: Store = 'main'): Promise<SessionDetail> {
-  return json<SessionDetail>(await fetch(inStore(`/v1/sessions/${id}`, store)));
+/** `first` asks for only the opening events (`partial` is set when there are more). */
+export async function getSessionDetail(id: string, store: Store = 'main', first?: number): Promise<SessionDetail> {
+  return json<SessionDetail>(await fetch(inStore(`/v1/sessions/${id}${first ? `?first=${first}` : ''}`, store)));
 }
 
 export interface EventDetail {
@@ -1520,7 +1523,7 @@ export async function sendTestEvent(source: AgentId): Promise<string> {
 
 // ---------------------------------------------------------------- passive mode
 
-export type PassiveAgent = 'claude' | 'cursor' | 'codex';
+export type PassiveAgent = 'claude' | 'cursor' | 'codex' | 'opencode';
 
 /** What's on disk for one agent (a scan, nothing imported) plus sessions already in cot. */
 export interface PassiveAgentDetail {
@@ -1635,6 +1638,56 @@ export async function runPassiveNow(): Promise<{ started: boolean }> {
 /** Light progress check (no transcript scan) for the dashboard banner. */
 export async function getPassiveRunning(): Promise<{ running: PassiveStatus['running']; last_run: PassiveRun | null }> {
   return json(await fetch('/v1/passive/running'));
+}
+
+/** Sessions on disk that cot hasn't imported yet (enabled agents only). */
+export interface PassivePending {
+  total: number;
+  by_agent: Partial<Record<PassiveAgent, number>>;
+  newest: string | null;
+}
+
+export async function getPassivePending(fresh = false): Promise<PassivePending> {
+  return json(await fetch(`/v1/passive/pending${fresh ? '?fresh=1' : ''}`));
+}
+
+export interface PassiveHistoryRun {
+  id: number;
+  trigger: string;
+  status: PassiveRun['status'];
+  started_at: string;
+  finished_at: string | null;
+  new_sessions?: number | null;
+  events?: number | null;
+  findings?: number | null;
+}
+
+/** Import runs over the last `days` (the collector keeps 30). */
+export async function getPassiveHistory(days = 30): Promise<{ days: number; runs: PassiveHistoryRun[] }> {
+  return json(await fetch(`/v1/passive/history?days=${days}`));
+}
+
+// ---------------------------------------------------------------- attachments
+
+export interface AttachmentRow extends Attachment {
+  session_id: string;
+  event_id: number;
+  index: number;
+  ts: string;
+  cwd: string | null;
+  source: AgentId;
+  extension: string | null;
+  path: string | null;
+}
+
+export async function getAttachments(limit = 500): Promise<AttachmentRow[]> {
+  const data = await json<{ attachments: AttachmentRow[] }>(await fetch(`/v1/attachments?limit=${limit}`));
+  return data.attachments;
+}
+
+/** Permanently delete a traced session and its subagent sessions. */
+export async function deleteSession(id: string): Promise<void> {
+  await json(await fetch(`/v1/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }));
 }
 
 // ----------------------------------------------------------------- task tray

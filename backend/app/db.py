@@ -2983,6 +2983,49 @@ def metrics(
         }
 
 
+def list_attachments(limit: int = 500) -> list[dict[str, Any]]:
+    """Every file attached to a prompt, newest first, with where it was attached.
+
+    Agents hand over the file's name, type and size, not where it lived on
+    disk, so the location is the session and prompt it went into."""
+    with store.read() as conn:
+        rows = conn.execute(
+            "SELECT e.id, e.session_id, e.ts, e.attachments, s.cwd, s.source"
+            " FROM events e JOIN sessions s ON s.id = e.session_id"
+            " WHERE e.attachments IS NOT NULL AND e.attachments NOT IN ('', '[]')"
+            " ORDER BY e.ts DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            atts = json.loads(r["attachments"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for i, a in enumerate(atts if isinstance(atts, list) else []):
+            if not isinstance(a, dict):
+                continue
+            name = a.get("name")
+            ext = a.get("extension") or (Path(str(name)).suffix.lstrip(".") if name else None)
+            out.append({
+                "session_id": r["session_id"],
+                "event_id": r["id"],
+                "index": i,
+                "ts": timeutil.format_ts(r["ts"]),
+                "cwd": r["cwd"],
+                "source": r["source"],
+                "kind": a.get("kind"),
+                "media_type": a.get("media_type"),
+                "extension": ext or None,
+                "name": name,
+                "path": a.get("path"),
+                "size_bytes": a.get("size_bytes"),
+                "width": a.get("width"),
+                "height": a.get("height"),
+            })
+    return out
+
+
 def metrics_history(category: str, limit: int = 200) -> list[dict[str, Any]]:
     """Return individual shell commands or web URLs across all sessions,
     each with enough info to deep-link to the originating event."""
@@ -4064,10 +4107,10 @@ def session_components(session_id: str) -> dict[str, Any]:
     }
 
 
-def get_session_detail(session_id: str) -> dict[str, Any] | None:
+def get_session_detail(session_id: str, first: int | None = None) -> dict[str, Any] | None:
     from .session_read import build_session_detail
 
-    return build_session_detail(session_id)
+    return build_session_detail(session_id, first=first)
 
 
 EXPORT_FORMAT = "cot.session-export"
@@ -4246,6 +4289,23 @@ def delete_imported_session(session_id: str) -> bool:
         if row is None:
             return False
         conn.execute("DELETE FROM sessions WHERE import_root_id = ?", (session_id,))
+    return True
+
+
+def delete_session(session_id: str) -> bool:
+    """Permanently delete a traced session, its subagent sessions, and the raw
+    hook rows they came from. Events, annotations and extension uses cascade."""
+    with store.write() as conn:
+        ids = [session_id] + [
+            r["id"] for r in conn.execute(
+                "SELECT id FROM sessions WHERE parent_session_id = ?", (session_id,)
+            )
+        ]
+        if conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone() is None:
+            return False
+        marks = ",".join("?" * len(ids))
+        conn.execute(f"DELETE FROM raw_ingest_events WHERE session_id_guess IN ({marks})", ids)
+        conn.execute(f"DELETE FROM sessions WHERE id IN ({marks})", ids)
     return True
 
 

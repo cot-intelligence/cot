@@ -5,6 +5,7 @@ import { getSessionDetail, getSessionExtensions, sessionExportUrl, setSessionBoo
 import { setDocumentTitle } from '../../lib/documentTitle';
 import { cachedSessionSummary, seededSessionDetail, sessionDetailKey } from '../../lib/sessionDetailQuery';
 import { useFullEventDetail } from '../../lib/useFullEventDetail';
+import { SessionRowsSkeleton } from '../ui/Skeleton';
 import { BackToTop } from '../ui/BackToTop';
 import { sessionHref, SessionStoreContext } from '../../lib/sessionStore';
 import { categoryLabel, fmt, modelLabel, project } from '../forest/format';
@@ -34,6 +35,8 @@ interface SessionDetailViewProps {
 
 type Tab = 'timeline' | 'files' | 'findings' | 'map';
 const PAGE = 200;
+/** Events in the quick first read; matches one rendered page. */
+const FIRST_EVENTS = PAGE;
 const TEXT_KINDS = new Set(['prompt', 'response', 'thought', 'question', 'plan', 'subagent', 'notification']);
 
 /** Markup mirrors the demo's session page (demo-variants/src/variants/forest/pages-a.tsx, SessionPage),
@@ -48,15 +51,27 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   // Only a live session changes, so only a live one refetches: a finished trace can be large,
   // and re-reading it every 15s holds up whatever the collector is asked next.
   // Until it arrives, the row from the sessions list (if cached) paints the header and figures.
-  const { data: detail, isPlaceholderData: seeded } = useQuery({
+  // A big session takes seconds to read in full, so the opening events come first (a much
+  // smaller read) and render while the whole session loads behind them.
+  const haveFull = queryClient.getQueryData(key) !== undefined;
+  const { data: head } = useQuery({
+    queryKey: [...key, 'first'],
+    queryFn: () => getSessionDetail(sessionId, store, FIRST_EVENTS),
+    enabled: !haveFull,
+    staleTime: 60_000,
+  });
+  const row = store === 'main' ? cachedSessionSummary(queryClient, sessionId) : undefined;
+  const { data: detail, isPlaceholderData } = useQuery({
     queryKey: key,
     queryFn: () => getSessionDetail(sessionId, store),
     refetchInterval: (q) => (store === 'main' && q.state.data?.summary.status === 'active' ? 15000 : false),
-    placeholderData: () => {
-      const row = store === 'main' ? cachedSessionSummary(queryClient, sessionId) : undefined;
-      return row ? seededSessionDetail(row) : undefined;
-    },
+    placeholderData: head ?? (row ? seededSessionDetail(row) : undefined),
   });
+  // `seeded`: only the list row so far, no events. `partial`: the opening events, more coming.
+  const fromHead = isPlaceholderData && !!head && detail === head;
+  const seeded = isPlaceholderData && !fromHead;
+  const partial = fromHead && !!head?.partial;
+  const settled = !isPlaceholderData || (fromHead && !partial);
 
   // Which plugins, skills and MCP servers this session (and its subagents) used.
   const { data: used } = useQuery({
@@ -131,9 +146,10 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   }, [reveal, tab, shown, cat]);
 
   // A link that names an event (search, a finding, Key moments, Activity) lands on it.
+  // Tried again once the full session lands, for an event past the opening page.
   useEffect(() => {
     if (focusEventId != null && events.length) revealEvent(focusEventId);
-  }, [focusEventId, focusNonce, events.length > 0]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [focusEventId, focusNonce, events.length > 0, partial]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!detail) {
     return (
@@ -142,7 +158,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
           <span className="sk" style={{ display: 'block', height: 14, width: 90, marginBottom: 16 }} />
           <span className="sk" style={{ display: 'block', height: 28, width: '55%', marginBottom: 12 }} />
           <span className="sk" style={{ display: 'block', height: 18, width: 300, marginBottom: 24 }} />
-          <div className="kpis">{[0, 1, 2, 3].map((i) => <div className="kpi" key={i}><span className="sk" style={{ height: 10, width: 70 }} /><span className="sk" style={{ height: 28, width: 90 }} /></div>)}</div>
+          <SessionRowsSkeleton />
         </div>
       </div>
     );
@@ -165,7 +181,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   };
   const tabs: { k: Tab; l: string }[] = [
     { k: 'timeline', l: `Timeline · ${seeded ? s.event_count : events.length}` },
-    { k: 'files', l: seeded ? 'Files' : `Files · ${fileCount}` },
+    { k: 'files', l: settled ? `Files · ${fileCount}` : 'Files' },
     { k: 'findings', l: 'Findings' },
     { k: 'map', l: 'Map' },
   ];
@@ -239,13 +255,9 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
             ))}
           </div>
 
-          {seeded && (
-            <div className="card" aria-busy="true">
-              <div className="card-b" style={{ display: 'grid', gap: 14 }}>
-                {[72, 54, 86, 61, 78, 47].map((w, i) => (
-                  <span key={i} className="sk" style={{ display: 'block', height: 18, width: `${w}%` }} />
-                ))}
-              </div>
+          {(seeded || (partial && tab !== 'timeline')) && (
+            <div aria-busy="true" style={{ paddingTop: 8 }}>
+              <SessionRowsSkeleton rows={6} />
             </div>
           )}
 
@@ -259,7 +271,13 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
                     ))}
                   </ol>
                   {list.length === 0 && <div className="empty">No events{cat ? ' of this kind' : ''}.</div>}
-                  {list.length > shown && (
+                  {partial && (
+                    <div className="tl-more" role="status">
+                      <span className="sk" style={{ width: 14, height: 14, borderRadius: 999 }} />
+                      Loading the other {fmt.n(Math.max(0, s.event_count - events.length))} events…
+                    </div>
+                  )}
+                  {!partial && list.length > shown && (
                     <div style={{ textAlign: 'center', paddingTop: 12 }}>
                       <button type="button" className="vbtn vbtn-quiet vbtn-sm" onClick={() => setShown((n) => n + PAGE)}>Show {Math.min(PAGE, list.length - shown)} more of {list.length - shown}</button>
                     </div>
@@ -284,7 +302,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
             </div>
           )}
 
-          {!seeded && tab === 'files' && (
+          {settled && tab === 'files' && (
             <div className="grid-2e" style={{ marginTop: 0 }}>
               <FileCard title="Edited" icon="edit" color="var(--v-olive)" items={c.files_edited} strip={strip} />
               <FileCard title="Read" icon="file" color="var(--v-cobalt)" items={c.files_read} strip={strip} />
@@ -295,11 +313,11 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
             </div>
           )}
 
-          {!seeded && tab === 'findings' && (
+          {settled && tab === 'findings' && (
             <div className="card"><div className="card-b"><Suspense fallback={null}><InsightsTab detail={detail} /></Suspense></div></div>
           )}
 
-          {!seeded && tab === 'map' && (
+          {settled && tab === 'map' && (
             <div className="card"><div className="card-b" style={{ overflowX: 'auto' }}>
               <ActivityMap items={events} sessionId={sessionId} activeKey={null} onJump={(it) => revealEvent(it.id)} />
             </div></div>

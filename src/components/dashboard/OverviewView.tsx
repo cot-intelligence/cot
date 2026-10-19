@@ -1,12 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
-  getAiAnalyses,
   getInsights,
   getMetrics,
   getConnections,
   getOverviewWindow,
   getSessionsPage,
-  type AiAnalysis,
   type Connection,
   type InsightPillar,
   type InsightsResponse,
@@ -14,21 +12,20 @@ import {
   type OverviewWindow,
   type SessionSummary,
 } from '../../lib/api';
-import { formatDuration, formatRelative, getCategoryMeta, userTimeZone } from '../../lib/categoryMeta';
+import { formatRelative, getCategoryMeta, userTimeZone } from '../../lib/categoryMeta';
 import { compact, formatCost, formatMetricsDay, hourLabel } from '../../lib/format';
 import { formatModel } from '../../lib/modelMeta';
 import { sourceLabel } from '../../lib/sourceLabels';
 import { usePolling } from '../../lib/usePolling';
 import { getPrefs } from '../../lib/prefs';
 import { Icon, type IconName } from '../ui/icons';
-import { CardNote } from '../ui/Surface';
 import { CHART_COLORS, type Datum } from './chartConstants';
-import { DailyArea, DonutChart, HBars, HourBars } from './chartTheme';
-import { ExecutiveSummary } from './ExecutiveSummary';
+import { DonutChart, HBars } from './chartTheme';
 import { Columns, ShareBars as FShareBars, Sparkline, StackBar as FStackBar } from '../forest/charts';
 import { fmt, modelLabel, project as fproject } from '../forest/format';
 import { Icon as FIcon } from '../forest/icons';
 import { Agent, agentColor as fAgentColor, Seg as FSeg, Sev } from '../forest/ui';
+import { AttachmentsDrawer } from './AttachmentsDrawer';
 import { ExportModal } from './ExportModal';
 import { ContributionHeatmap } from './metricsCharts';
 import { ShareCardModal } from './ShareCardModal';
@@ -49,6 +46,11 @@ const WINDOWS = [
   { k: 0, l: 'all' },
 ];
 const DAY_MS = 86_400_000;
+/** Rows in the Projects and Spend-by-model cards; the full lists are a click away. */
+const TOP_ROWS = 5;
+const SPEND_CHART_MIN = 96;
+/** Height of Columns' date/value line (12px text + 8px gap), plus a hair of slack. */
+const SPEND_LABEL_H = 30;
 const HOUR_MS = 3_600_000;
 
 /** "14:00" for an hour bucket key ("2026-10-16T14", UTC) in the viewer's time. */
@@ -81,16 +83,6 @@ function Section({ title, aside, children }: { n?: string; title: string; aside?
 /** Seamless ruled grid — cells share single hairlines, no outer box. */
 function Grid({ cols, children }: { cols: string; children: React.ReactNode }) {
   return <div className={`grid gap-px ${CARD_GRID} ${cols}`}>{children}</div>;
-}
-
-function Stat({ label, value, hint, accent }: { label: string; value: string; hint?: string; accent?: string }) {
-  return (
-    <div className="bg-surface px-4 py-3">
-      <p className="font-mono text-label uppercase tracking-label text-fg/40">{label}</p>
-      <p className={`mt-1 font-mono text-2xl font-semibold tabular-nums ${accent ?? 'text-fg'}`}>{value}</p>
-      {hint && <p className="font-mono text-label text-fg/40">{hint}</p>}
-    </div>
-  );
 }
 
 function Spotlight({
@@ -131,6 +123,23 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
   const { data: m, error } = usePolling<Metrics>(['metrics', tz], () => getMetrics(tz), 5000);
   const [shareOpen, setShareOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [attachments, setAttachments] = useState<{ type: string | null } | null>(null);
+  // The spend chart fills its card, which stretches to the Needs review card beside it.
+  const spendBody = useRef<HTMLDivElement>(null);
+  const [spendChartH, setSpendChartH] = useState(SPEND_CHART_MIN);
+  const spendReady = !!m;
+  useLayoutEffect(() => {
+    const el = spendBody.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const cs = getComputedStyle(el);
+      const inner = el.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+      // Leave room for the date/value line above the bars.
+      setSpendChartH(Math.max(SPEND_CHART_MIN, Math.floor(inner - SPEND_LABEL_H)));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [spendReady]);
 
   // The window drives findings, spend and the projects table; the deeper charts below stay all-time.
   const [days, setDays] = useState<number>(() => getPrefs().range);
@@ -149,15 +158,6 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
   );
   const { data: connections } = usePolling<Connection[]>(['connections'], () => getConnections(), 30000);
 
-  // The executive summary leads with the latest saved AI analysis, if one exists.
-  const [analyses, setAnalyses] = useState<AiAnalysis[]>([]);
-  useEffect(() => {
-    getAiAnalyses().then(setAnalyses).catch(() => {});
-  }, []);
-  const latestAi = analyses.find((a) => a.status === 'ok' && a.result) ?? null;
-
-  const jumpToPillar = (pillar: InsightPillar) => onFindings?.(pillar);
-
   if (!m) {
     if (error) {
       return (
@@ -171,7 +171,6 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
 
   const t = m.totals;
   const fun = m.fun;
-  const dayData = m.by_day.map((d) => ({ day: d.day, events: d.events }));
   const activeDays = m.by_day.length;
   const avgPerActive = activeDays
     ? Math.round(m.by_day.reduce((n, d) => n + d.events, 0) / activeDays)
@@ -245,85 +244,6 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
           ))}
         </div>
 
-        <div className="grid-2">
-          <section className="card" aria-labelledby="vf-spend">
-            <div className="card-h"><span className="card-t" id="vf-spend">{days === 1 ? 'Hourly spend' : 'Daily spend'}</span><span className="mono faint" style={{ fontSize: 12 }}>{fmt.usd(win.cost)} total</span></div>
-            <div className="card-b">
-              <Columns key={days} data={win.series.map((x) => ({ key: x.day, value: x.cost }))} color="var(--v-hot)" muted="var(--v-mute)" label={days === 1 ? hourBucketLabel : fmt.day} format={fmt.usd} height={180} />
-            </div>
-          </section>
-          <section className="card" aria-labelledby="vf-review">
-            <div className="card-h"><span className="card-t" id="vf-review">Needs review</span><button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={() => onFindings?.()}>All findings <FIcon name="arrow" size={14} /></button></div>
-            {!ins ? (
-              <div className="card-b dim" style={{ fontSize: 13 }}>Computing findings…</div>
-            ) : (
-              <ul className="card-b" style={{ listStyle: 'none', margin: 0, display: 'grid', gap: 2 }}>
-                {review.length === 0 && <li className="dim" style={{ fontSize: 13 }}>Nothing needs review.</li>}
-                {review.slice(0, 5).map((f) => (
-                  <li key={f.fingerprint}>
-                    <button type="button" onClick={() => onFindings?.(f.pillar)} className="hov" style={{ width: 'calc(100% + 16px)', display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 10, alignItems: 'center', padding: '8px 8px', margin: '0 -8px', borderRadius: 10, border: 0, background: 'none', textAlign: 'left' }}>
-                      <Sev s={f.severity} />
-                      <span className="truncate" style={{ fontSize: 13, fontWeight: 500 }}>{f.title}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        </div>
-
-        <div className="grid-2">
-          <section className="card" aria-labelledby="vf-proj" style={{ overflow: 'hidden' }}>
-            <div className="card-h" style={{ paddingBottom: 12 }}><span className="card-t" id="vf-proj">Projects</span><a href="#/projects" className="vbtn vbtn-ghost vbtn-sm">All <FIcon name="arrow" size={14} /></a></div>
-            <div style={{ overflowX: 'auto' }}>
-              <table className="t">
-                <thead><tr><th>Project</th><th>Agents</th><th className="num">Sessions</th><th className="num">Spend</th><th className="num">Findings</th></tr></thead>
-                <tbody>
-                  {win.projects.map((p) => {
-                    const fx = projectFindings(p.cwd);
-                    return (
-                      <tr key={p.cwd ?? '-'}>
-                        <td><a href={`#/project/${encodeURIComponent(fproject(p.cwd))}`} className="mono proj-link" style={{ fontSize: 12 }} title={p.cwd ?? ''}>{fproject(p.cwd)}</a></td>
-                        <td style={{ minWidth: 120 }}><FStackBar parts={sources.map((a) => ({ key: sourceLabel(a), value: p.agents[a] ?? 0, color: fAgentColor(a) }))} /></td>
-                        <td className="num">{p.sessions}</td>
-                        <td className="num">{fmt.usd(p.cost)}</td>
-                        <td className="num">{fx.critical ? <span style={{ color: 'var(--v-alert)' }}>{fx.n}</span> : fx.n}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-            <div style={{ display: 'flex', gap: 14, padding: '10px 20px 14px', borderTop: '1px solid var(--v-line)', fontSize: 12 }} className="dim">
-              {sources.map((a) => <span key={a} style={{ display: 'flex', alignItems: 'center', gap: 6 }}><i style={{ width: 8, height: 8, borderRadius: 2, background: fAgentColor(a) }} />{sourceLabel(a)}</span>)}
-            </div>
-          </section>
-          <section className="card" aria-labelledby="vf-models">
-            <div className="card-h"><span className="card-t" id="vf-models">Spend by model</span><span className="label">all time</span></div>
-            <div className="card-b">
-              <FShareBars rows={models.map((x) => ({ key: x.model, label: <span className="mono" style={{ fontSize: 12 }}>{modelLabel(x.model)}</span>, value: x.cost ?? 0 }))} color="var(--v-hot)" track="var(--v-panel)" format={fmt.usd} />
-              {m.cost.unpriced_models.length > 0 && <p className="faint" style={{ fontSize: 12, margin: '14px 0 0' }}>Unpriced: {m.cost.unpriced_models.slice(0, 4).map(modelLabel).join(', ')}{m.cost.unpriced_models.length > 4 ? '…' : ''}</p>}
-            </div>
-          </section>
-        </div>
-
-        <section className="card" style={{ marginTop: 16 }} aria-labelledby="vf-agents">
-          <div className="card-h"><span className="card-t" id="vf-agents">Agents</span><a href="#/governance" className="vbtn vbtn-ghost vbtn-sm">Coverage <FIcon name="arrow" size={14} /></a></div>
-          <div className="card-b" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
-            {(connections ?? m.by_source.map((x) => ({ source: x.source, sessions: x.sessions, events: x.events, last_event: null, connected: true }))).map((c) => (
-              <div key={c.source} style={{ display: 'grid', gap: 6, padding: 14, borderRadius: 12, background: 'var(--v-bg)', border: '1px solid var(--v-line)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}><Agent id={c.source} /><span className={`vchip ${c.connected ? 'c-ok' : 'c-dim'}`}><span className="dot" />{c.connected ? 'connected' : 'not connected'}</span></div>
-                <span className="mono" style={{ fontSize: 12 }}>{c.sessions} sessions · {fmt.n(c.events)} events</span>
-                <span className="faint" style={{ fontSize: 12 }}>{c.last_event ? `Last event ${fmt.ago(c.last_event, now)}` : 'No events yet'}</span>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <Section title="Executive summary">
-          <ExecutiveSummary insights={ins ?? null} metrics={m} aiAnalysis={latestAi} onJump={jumpToPillar} />
-        </Section>
-
         <>
           <Section n="01" title="Daily usage">
             <div className="space-y-4">
@@ -353,6 +273,84 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
           </Section>
         </>
 
+        <div className="grid-2">
+          <section className="card" aria-labelledby="vf-spend" style={{ display: 'flex', flexDirection: 'column' }}>
+            <div className="card-h"><span className="card-t" id="vf-spend">{days === 1 ? 'Hourly spend' : 'Daily spend'}</span><span className="mono faint" style={{ fontSize: 12 }}>{fmt.usd(win.cost)} total</span></div>
+            {/* Out of flow, so the chart can't push the card taller than the row. */}
+            <div style={{ flex: 1, position: 'relative', minHeight: SPEND_CHART_MIN + SPEND_LABEL_H + 40 }}>
+              <div className="card-b" ref={spendBody} style={{ position: 'absolute', inset: 0 }}>
+                <Columns key={days} data={win.series.map((x) => ({ key: x.day, value: x.cost }))} color="var(--v-hot)" muted="var(--v-mute)" label={days === 1 ? hourBucketLabel : fmt.day} format={fmt.usd} height={spendChartH} />
+              </div>
+            </div>
+          </section>
+          <section className="card" aria-labelledby="vf-review">
+            <div className="card-h"><span className="card-t" id="vf-review">Needs review</span><button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={() => onFindings?.()}>All findings <FIcon name="arrow" size={14} /></button></div>
+            {!ins ? (
+              <div className="card-b dim" style={{ fontSize: 13 }}>Computing findings…</div>
+            ) : (
+              <ul className="card-b" style={{ listStyle: 'none', margin: 0, display: 'grid', gap: 0, paddingTop: 4 }}>
+                {review.length === 0 && <li className="dim" style={{ fontSize: 13 }}>Nothing needs review.</li>}
+                {review.slice(0, 5).map((f) => (
+                  <li key={f.fingerprint}>
+                    <button type="button" onClick={() => onFindings?.(f.pillar)} className="hov" style={{ width: 'calc(100% + 16px)', display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 10, alignItems: 'center', padding: '5px 8px', margin: '0 -8px', borderRadius: 8, border: 0, background: 'none', textAlign: 'left' }}>
+                      <Sev s={f.severity} />
+                      <span className="truncate" style={{ fontSize: 13, fontWeight: 500 }}>{f.title}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </div>
+
+        <div className="grid-2">
+          <section className="card" aria-labelledby="vf-proj" style={{ overflow: 'hidden' }}>
+            <div className="card-h" style={{ paddingBottom: 12 }}><span className="card-t" id="vf-proj">Projects</span><a href="#/projects" className="vbtn vbtn-ghost vbtn-sm">All <FIcon name="arrow" size={14} /></a></div>
+            <div style={{ overflowX: 'auto' }}>
+              <table className="t t-compact">
+                <thead><tr><th>Project</th><th>Agents</th><th className="num">Sessions</th><th className="num">Spend</th><th className="num">Findings</th></tr></thead>
+                <tbody>
+                  {win.projects.slice(0, TOP_ROWS).map((p) => {
+                    const fx = projectFindings(p.cwd);
+                    return (
+                      <tr key={p.cwd ?? '-'}>
+                        <td><a href={`#/project/${encodeURIComponent(fproject(p.cwd))}`} className="mono proj-link" style={{ fontSize: 12 }} title={p.cwd ?? ''}>{fproject(p.cwd)}</a></td>
+                        <td style={{ minWidth: 120 }}><FStackBar parts={sources.map((a) => ({ key: sourceLabel(a), value: p.agents[a] ?? 0, color: fAgentColor(a) }))} /></td>
+                        <td className="num">{p.sessions}</td>
+                        <td className="num">{fmt.usd(p.cost)}</td>
+                        <td className="num">{fx.critical ? <span style={{ color: 'var(--v-alert)' }}>{fx.n}</span> : fx.n}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ display: 'flex', gap: 14, padding: '10px 20px 14px', borderTop: '1px solid var(--v-line)', fontSize: 12 }} className="dim">
+              {sources.map((a) => <span key={a} style={{ display: 'flex', alignItems: 'center', gap: 6 }}><i style={{ width: 8, height: 8, borderRadius: 2, background: fAgentColor(a) }} />{sourceLabel(a)}</span>)}
+            </div>
+          </section>
+          <section className="card" aria-labelledby="vf-models">
+            <div className="card-h"><span className="card-t" id="vf-models">Spend by model</span><span className="label">all time · top {TOP_ROWS}</span></div>
+            <div className="card-b">
+              <FShareBars rows={models.slice(0, TOP_ROWS).map((x) => ({ key: x.model, label: <span className="mono" style={{ fontSize: 12 }}>{modelLabel(x.model)}</span>, value: x.cost ?? 0 }))} color="var(--v-hot)" track="var(--v-panel)" format={fmt.usd} compact />
+              {m.cost.unpriced_models.length > 0 && <p className="faint" style={{ fontSize: 12, margin: '14px 0 0' }}>Unpriced: {m.cost.unpriced_models.slice(0, 4).map(modelLabel).join(', ')}{m.cost.unpriced_models.length > 4 ? '…' : ''}</p>}
+            </div>
+          </section>
+        </div>
+
+        <section className="card" style={{ marginTop: 16 }} aria-labelledby="vf-agents">
+          <div className="card-h"><span className="card-t" id="vf-agents">Agents</span><a href="#/governance" className="vbtn vbtn-ghost vbtn-sm">Coverage <FIcon name="arrow" size={14} /></a></div>
+          <div className="card-b" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+            {(connections ?? m.by_source.map((x) => ({ source: x.source, sessions: x.sessions, events: x.events, last_event: null, connected: true }))).map((c) => (
+              <div key={c.source} style={{ display: 'grid', gap: 6, padding: 14, borderRadius: 12, background: 'var(--v-bg)', border: '1px solid var(--v-line)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}><Agent id={c.source} /><span className={`vchip ${c.connected ? 'c-ok' : 'c-dim'}`}><span className="dot" />{c.connected ? 'connected' : 'not connected'}</span></div>
+                <span className="mono" style={{ fontSize: 12 }}>{c.sessions} sessions · {fmt.n(c.events)} events</span>
+                <span className="faint" style={{ fontSize: 12 }}>{c.last_event ? `Last event ${fmt.ago(c.last_event, now)}` : 'No events yet'}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+
         <>
           <Section n="02" title="Highlights">
             <Grid cols="grid-cols-1 sm:grid-cols-3">
@@ -377,20 +375,6 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
             </Grid>
           </Section>
         </>
-
-        <>
-          <Section n="03" title="Activity">
-            <Grid cols="md:grid-cols-2">
-              <ChartBox label="Events per day">
-                <DailyArea data={dayData.slice(-45)} />
-              </ChartBox>
-              <ChartBox label={`By hour — peak ${fun.peak_hour != null ? hourLabel(fun.peak_hour) : '—'}`}>
-                <HourBars data={m.by_hour} peak={fun.peak_hour} />
-              </ChartBox>
-            </Grid>
-          </Section>
-        </>
-
 
         <>
           <Section n="05" title="Breakdown">
@@ -460,28 +444,6 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
         </>
 
 
-        <>
-          <Section n="08" title="All time" aside={<CardNote>since install</CardNote>}>
-            <Grid cols="grid-cols-2 sm:grid-cols-4">
-              <Stat label="Sessions" value={compact(t.sessions)} hint={`${t.active_sessions} active now`} />
-              <Stat label="Events" value={compact(t.events)} />
-              <Stat label="Tool calls" value={compact(t.tool_calls)} />
-              <Stat label="Tokens" value={compact(m.tokens.total)} />
-              <Stat label="Est. cost" value={m.cost.total > 0 ? formatCost(m.cost.total) : '—'} />
-              <Stat label="Projects" value={compact(t.projects)} />
-              <Stat label="Fixed this week" value={ins ? String(ins.counts.resolved_recently) : '…'} accent="text-olive" />
-              <Stat label="Error rate" value={`${(fun.error_rate * 100).toFixed(1)}%`} />
-              <Stat label="Errors" value={compact(t.errors)} />
-              <Stat label="Permissions" value={compact(t.permissions)} />
-              <Stat
-                label="Avg session"
-                value={t.avg_duration_seconds ? formatDuration(null, t.avg_duration_seconds) : '—'}
-              />
-            </Grid>
-          </Section>
-        </>
-
-
         {fun.busiest_day && (
           <>
             <Section n="10" title="By the numbers">
@@ -501,12 +463,19 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
         )}
 
         <>
-          <Section n="11" title="Attachments">
+          <Section
+            n="11"
+            title="Attachments"
+            aside={m.attachments.total > 0 && (
+              <button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={() => setAttachments({ type: null })}>
+                All {fmt.n(m.attachments.total)} <FIcon name="arrow" size={14} />
+              </button>
+            )}>
             {m.attachments.total > 0 ? (
               <div>
                 {m.attachments.by_type.length > 0 && (
                   <div className="flex min-h-[5rem] items-center justify-center border rounded-cell border-line/10 bg-panel/40 px-4 py-5">
-                    <WordCloud data={m.attachments.by_type} />
+                    <WordCloud data={m.attachments.by_type} onPick={(type) => setAttachments({ type })} />
                   </div>
                 )}
               </div>
@@ -577,6 +546,15 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
 
       {shareOpen && <ShareCardModal metrics={m} onClose={() => setShareOpen(false)} />}
       {exportOpen && <ExportModal onClose={() => setExportOpen(false)} />}
+      <AttachmentsDrawer
+        open={!!attachments}
+        initialType={attachments?.type}
+        onClose={() => setAttachments(null)}
+        onOpen={(sessionId, eventId) => {
+          setAttachments(null);
+          onSelect(sessionId, eventId);
+        }}
+      />
     </div>
   );
 }
@@ -612,7 +590,7 @@ function Fact({ icon, label, value, onClick }: { icon: IconName; label: string; 
   );
 }
 
-function WordCloud({ data }: { data: { type: string; count: number }[] }) {
+function WordCloud({ data, onPick }: { data: { type: string; count: number }[]; onPick: (type: string) => void }) {
   const counts = data.map((d) => d.count);
   const min = Math.min(...counts);
   const max = Math.max(...counts);
@@ -622,16 +600,18 @@ function WordCloud({ data }: { data: { type: string; count: number }[] }) {
   return (
     <div className="flex flex-wrap items-baseline justify-center gap-x-6 gap-y-2">
       {sized.map((d, i) => (
-        <span
+        <button
+          type="button"
           key={d.type}
-          title={`${d.type} · ${d.count} ${d.count === 1 ? 'file' : 'files'}`}
+          onClick={() => onPick(d.type)}
+          title={`${d.type} · ${d.count} ${d.count === 1 ? 'file' : 'files'} · show them`}
           style={{ fontSize: `${fontRem(d.count)}rem`, color: CHART_COLORS[i % CHART_COLORS.length] }}
-          className="font-mono font-semibold leading-none">
+          className="wc-word font-mono font-semibold leading-none">
           {d.type}
           <span className="ml-1 align-super font-mono text-label not-italic text-fg/40">
             {d.count}
           </span>
-        </span>
+        </button>
       ))}
     </div>
   );

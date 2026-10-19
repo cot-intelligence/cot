@@ -3,6 +3,7 @@ import {
   previewSchedule,
   type PassiveAgent,
   type PassiveAgentDetail,
+  type PassiveHistoryRun,
   type PassiveRun,
   type PassiveStatus,
 } from '../../lib/api';
@@ -230,6 +231,80 @@ function LastRun({ run }: { run: PassiveRun }) {
         <p key={a} className="mono" style={{ fontSize: 12, margin: '4px 0 0', color: 'var(--v-alert)' }}>{agentLabel(a)}: {info?.error}</p>
       ))}
       {run.error && <p className="mono" style={{ fontSize: 12, margin: '4px 0 0', color: 'var(--v-alert)' }}>{run.error}</p>}
+    </div>
+  );
+}
+
+const HISTORY_DAYS = 30;
+const DAY_MS = 86_400_000;
+
+const dayKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+/**
+ * When imports ran over the last 30 days (all the collector keeps): a headline
+ * for the latest run, one column per day (height is runs that day, with failed
+ * runs in red), and the most recent runs underneath.
+ */
+export function ImportHistory({ runs, now = new Date() }: { runs: PassiveHistoryRun[]; now?: Date }) {
+  const [hover, setHover] = useState<number | null>(null);
+  const days = Array.from({ length: HISTORY_DAYS }, (_, i) => {
+    const d = new Date(now.getTime() - (HISTORY_DAYS - 1 - i) * DAY_MS);
+    return { key: dayKey(d), date: d, ok: 0, failed: 0, sessions: 0, last: null as string | null };
+  });
+  const byKey = new Map(days.map((d) => [d.key, d]));
+  for (const r of runs) {
+    const d = byKey.get(dayKey(new Date(r.started_at)));
+    if (!d) continue;
+    if (r.status === 'error' || r.status === 'partial') d.failed += 1;
+    else if (r.status !== 'running') d.ok += 1;
+    d.sessions += r.new_sessions ?? 0;
+    d.last = r.finished_at ?? r.started_at;
+  }
+  const max = Math.max(1, ...days.map((d) => d.ok + d.failed));
+  const finished = runs.filter((r) => r.status !== 'running');
+  const last = finished[finished.length - 1];
+  const failed = finished.filter((r) => r.status === 'error' || r.status === 'partial').length;
+  const imported = finished.reduce((n, r) => n + (r.new_sessions ?? 0), 0);
+  const shown = hover != null ? days[hover] : null;
+
+  if (finished.length === 0) {
+    return <p className="dim" style={{ margin: 0, fontSize: 13 }}>No imports in the last {HISTORY_DAYS} days. Runs show up here as they happen.</p>;
+  }
+  return (
+    <div className="ih">
+      <p className="ih-line">
+        <span>Last import <b>{fmt.ago(last.finished_at ?? last.started_at, now.toISOString())}</b></span>
+        <span className="faint">·</span>
+        <span><b className="tnum">{fmt.n(finished.length)}</b> run{finished.length === 1 ? '' : 's'}</span>
+        <span className="faint">·</span>
+        <span><b className="tnum">{fmt.n(imported)}</b> session{imported === 1 ? '' : 's'} imported</span>
+        {failed > 0 && (
+          <>
+            <span className="faint">·</span>
+            <span style={{ color: 'var(--v-alert)' }}>{failed} with errors</span>
+          </>
+        )}
+      </p>
+      <div className="ih-chart" role="img" aria-label={`Import runs per day over the last ${HISTORY_DAYS} days: ${finished.length} runs, ${failed} with errors.`} onMouseLeave={() => setHover(null)}>
+        {days.map((d, i) => {
+          const n = d.ok + d.failed;
+          return (
+            <span key={d.key} className="ih-col" onMouseEnter={() => setHover(i)}>
+              <span className="ih-bar" data-on={hover === i || undefined} data-fail={d.failed > 0 || undefined} style={{ height: n ? `${Math.max(30, (n / max) * 100)}%` : undefined }} data-empty={!n || undefined} />
+            </span>
+          );
+        })}
+      </div>
+      <div className="ih-axis mono faint">
+        <span>{fmt.day(days[0].date.toISOString())}</span>
+        {shown && (
+          <span className="ih-tip">
+            {fmt.day(shown.date.toISOString())} · {shown.ok + shown.failed} run{shown.ok + shown.failed === 1 ? '' : 's'}
+            {shown.failed ? ` · ${shown.failed} failed` : ''} · {fmt.n(shown.sessions)} new{shown.last ? ` · last ${fmt.time(shown.last)}` : ''}
+          </span>
+        )}
+        <span>Today</span>
+      </div>
     </div>
   );
 }

@@ -429,13 +429,13 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
     return items
 
 
-def _session_event_rows(conn: sqlite3.Connection, session_id: str) -> list[sqlite3.Row]:
+def _session_event_rows(conn: sqlite3.Connection, session_id: str, limit: int | None = None) -> list[sqlite3.Row]:
     """A session's events in timeline order: one read feeds both the
-    clarifications and the timeline items."""
-    return conn.execute(
-        f"SELECT {store.event_columns()} FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
-        (session_id,),
-    ).fetchall()
+    clarifications and the timeline items. ``limit`` reads only the first rows."""
+    sql = f"SELECT {store.event_columns()} FROM events WHERE session_id=? ORDER BY ts ASC, id ASC"
+    if limit is not None:
+        return conn.execute(f"{sql} LIMIT ?", (session_id, limit)).fetchall()
+    return conn.execute(sql, (session_id,)).fetchall()
 
 
 def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
@@ -770,17 +770,25 @@ def _apply_event_annotations(
         _trim_detail_inplace(item, session_id)
 
 
-def build_session_detail(session_id: str, *, full_detail: bool = False) -> dict[str, Any] | None:
+def build_session_detail(
+    session_id: str, *, full_detail: bool = False, first: int | None = None
+) -> dict[str, Any] | None:
     """Return the display-ready session detail read model.
 
     Long bodies are trimmed to previews the UI lazy-loads; ``full_detail``
-    keeps them whole (session export)."""
+    keeps them whole (session export). ``first`` builds only the opening
+    events, without linked subagent rows or the files/tools rollup, so a big
+    session's page can paint at once while the full read loads behind it; the
+    result says ``partial`` when there was more."""
     with store.read() as conn:
         row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if row is None:
             return None
         summary = db.session_summary(conn, row)
-        ev_rows = _session_event_rows(conn, session_id)
+        ev_rows = _session_event_rows(conn, session_id, None if first is None else first + 1)
+        partial = first is not None and len(ev_rows) > first
+        if partial:
+            ev_rows = ev_rows[:first]
         links = db.session_links(conn, session_id)
         clarifications, annotations = build_clarifications(ev_rows)
         _stamp_clarification_session(clarifications, session_id)
@@ -790,7 +798,10 @@ def build_session_detail(session_id: str, *, full_detail: bool = False) -> dict[
         for item in events:
             item["owner_session_id"] = session_id
             _apply_event_annotations(item, annotations, session_id=session_id, trim_detail=not full_detail)
-        events, linked_clarifications = _merge_linked_session_events(conn, events, links)
+        if partial:
+            linked_clarifications = []
+        else:
+            events, linked_clarifications = _merge_linked_session_events(conn, events, links)
         clarifications.extend(linked_clarifications)
         clarifications.sort(key=lambda c: (c.get("question_ts") or "", c.get("question_event_id") or 0))
         for item in events:
@@ -805,11 +816,12 @@ def build_session_detail(session_id: str, *, full_detail: bool = False) -> dict[
             _apply_event_annotations(item, annotations, session_id=session_id, trim_detail=False)
             item["detail"] = None
 
-        components = db.session_components(session_id)
+        components = _EMPTY_COMPONENTS if partial else db.session_components(session_id)
 
     runs = _timeline_runs(timeline_items, events)
     _assign_run_membership(events, runs)
     return {
+        **({"partial": True} if partial else {}),
         "summary": summary,
         "links": links,
         "components": components,
@@ -820,6 +832,12 @@ def build_session_detail(session_id: str, *, full_detail: bool = False) -> dict[
         "timeline_runs": runs,
         "clarifications": clarifications,
     }
+
+
+_EMPTY_COMPONENTS: dict[str, Any] = {
+    "files_edited": [], "files_read": [], "skills_context": [], "mcp_plugins": [], "web_calls": [],
+    "subagents": [], "shell_count": 0, "prompt_count": 0, "response_count": 0,
+}
 
 
 def build_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:

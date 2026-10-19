@@ -3616,6 +3616,254 @@ def _session_id_from_codex_path(path: Path) -> str:
     return path.stem
 
 
+# --------------------------------------------------------------- OpenCode
+# OpenCode keeps sessions in a database rather than per-session transcripts:
+# ``opencode.db`` (SQLite) since 1.x, JSON files under ``storage/`` before that.
+# Import replays them as the same payloads the plugin sends, with the plugin's
+# dedup keys, so a pass over an already-imported session only adds what's new.
+
+
+def _opencode_data_root() -> Path:
+    if _import_home():
+        return _import_home() / ".local" / "share" / "opencode"
+    env = os.environ.get("COT_OPENCODE_HOME")
+    if env:
+        return Path(env)
+    xdg = os.environ.get("XDG_DATA_HOME")
+    return (Path(xdg) if xdg else Path.home() / ".local" / "share") / "opencode"
+
+
+def _opencode_json(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _opencode_db_connect(path: Path):
+    import sqlite3
+    # OpenCode may hold the file open in WAL mode; read-only first, then an
+    # immutable snapshot when the -shm sidecar can't be created (sandboxes).
+    for query in ("mode=ro", "immutable=1"):
+        try:
+            conn = sqlite3.connect(f"{path.as_uri()}?{query}", uri=True, timeout=5)
+            conn.row_factory = sqlite3.Row
+            conn.execute("SELECT 1 FROM session LIMIT 1")
+            return conn
+        except sqlite3.Error:
+            continue
+    return None
+
+
+def _opencode_session_index(root: Path | None = None) -> list[dict]:
+    """Every OpenCode session on disk: id, parent, directory, title, created and
+    updated (epoch ms), and how many messages it has. No message bodies."""
+    root = root or _opencode_data_root()
+    out: dict[str, dict] = {}
+    db_path = root / "opencode.db"
+    if db_path.is_file():
+        conn = _opencode_db_connect(db_path)
+        if conn is not None:
+            try:
+                rows = conn.execute(
+                    "SELECT s.id, s.parent_id, s.directory, s.title, s.time_created, s.time_updated,"
+                    " (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id) AS n"
+                    " FROM session s"
+                ).fetchall()
+                for r in rows:
+                    out[r["id"]] = {
+                        "id": r["id"], "parent_id": r["parent_id"], "directory": r["directory"],
+                        "title": r["title"], "created": r["time_created"], "updated": r["time_updated"],
+                        "messages": r["n"], "store": "sqlite",
+                    }
+            except Exception:  # noqa: BLE001 - an unknown schema reads as no sessions
+                pass
+            finally:
+                conn.close()
+    for path in sorted((root / "storage" / "session").glob("*/*.json")):
+        info = _opencode_json(path)
+        if not info or not info.get("id") or info["id"] in out:
+            continue
+        t = info.get("time") or {}
+        msg_dir = root / "storage" / "message" / info["id"]
+        out[info["id"]] = {
+            "id": info["id"], "parent_id": info.get("parentID"), "directory": info.get("directory"),
+            "title": info.get("title"), "created": t.get("created"), "updated": t.get("updated") or t.get("created"),
+            "messages": sum(1 for _ in msg_dir.glob("*.json")) if msg_dir.is_dir() else 0, "store": "json",
+        }
+    return sorted(out.values(), key=lambda s: s.get("created") or 0)
+
+
+def _opencode_messages(root: Path, session: dict) -> list[tuple[dict, list[dict]]]:
+    """A session's messages in order, each with its parts in order."""
+    msgs: list[tuple[dict, list[dict]]] = []
+    if session.get("store") == "sqlite":
+        conn = _opencode_db_connect(root / "opencode.db")
+        if conn is None:
+            return []
+        try:
+            parts: dict[str, list[dict]] = {}
+            for r in conn.execute(
+                "SELECT id, message_id, time_created, data FROM part WHERE session_id = ? ORDER BY message_id, id",
+                (session["id"],),
+            ):
+                try:
+                    data = json.loads(r["data"])
+                except (TypeError, ValueError):
+                    continue
+                parts.setdefault(r["message_id"], []).append({**data, "id": r["id"], "messageID": r["message_id"]})
+            for r in conn.execute(
+                "SELECT id, time_created, data FROM message WHERE session_id = ? ORDER BY time_created, id",
+                (session["id"],),
+            ):
+                try:
+                    info = json.loads(r["data"])
+                except (TypeError, ValueError):
+                    continue
+                info = {**info, "id": r["id"], "sessionID": session["id"]}
+                info.setdefault("time", {}).setdefault("created", r["time_created"])
+                msgs.append((info, parts.get(r["id"], [])))
+        finally:
+            conn.close()
+        return msgs
+    msg_dir = root / "storage" / "message" / session["id"]
+    for path in msg_dir.glob("*.json"):
+        info = _opencode_json(path)
+        if not info or not info.get("id"):
+            continue
+        part_dir = root / "storage" / "part" / info["id"]
+        parts = [p for p in (_opencode_json(x) for x in sorted(part_dir.glob("*.json"))) if p]
+        msgs.append((info, sorted(parts, key=lambda p: str(p.get("id") or ""))))
+    msgs.sort(key=lambda m: ((m[0].get("time") or {}).get("created") or 0, str(m[0].get("id"))))
+    return msgs
+
+
+def _opencode_ts(ms: object) -> str | None:
+    if isinstance(ms, (int, float)) and ms > 0:
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    return None
+
+
+def _opencode_session_payloads(session: dict, messages: list[tuple[dict, list[dict]]]) -> list[dict]:
+    """Plugin-shaped hook payloads for one session, oldest first."""
+    sid = session["id"]
+    cwd = session.get("directory")
+    out: list[dict] = []
+
+    def add(hook: str, ts: object, key: str, **fields) -> None:
+        out.append({
+            "session_id": sid, "hook_event_name": hook, "origin": "import", "_import": True,
+            "cwd": cwd, "timestamp": _opencode_ts(ts) or _opencode_ts(session.get("created")),
+            "_dedup_key": f"opencode:{sid}:{key}", **fields,
+        })
+
+    start = {"session_title": session.get("title")}
+    if session.get("parent_id"):
+        start["parent_session_id"] = session["parent_id"]
+    add("SessionStart", session.get("created"), f"session:{sid}", **start)
+    for info, parts in messages:
+        mid = info.get("id")
+        created = (info.get("time") or {}).get("created")
+        if info.get("role") == "user":
+            prompt = "\n".join(
+                p["text"] for p in parts
+                if p.get("type") == "text" and not p.get("synthetic") and isinstance(p.get("text"), str)
+            )
+            if prompt.strip():
+                model = (info.get("model") or {}).get("modelID") if isinstance(info.get("model"), dict) else None
+                add("UserPromptSubmit", created, f"prompt:{mid}", prompt=prompt, **({"model": model} if model else {}))
+            continue
+        if info.get("role") != "assistant":
+            continue
+        for p in parts:
+            ptype = p.get("type")
+            pt = p.get("time") or {}
+            if ptype in ("text", "reasoning") and isinstance(p.get("text"), str) and p["text"].strip():
+                response = ptype == "text"
+                add("afterAgentResponse" if response else "afterAgentThought", pt.get("end") or pt.get("start") or created,
+                    f"part:{p.get('id')}", **({"response": p["text"]} if response else {"thought": p["text"]}))
+            elif ptype == "tool":
+                state = p.get("state") or {}
+                status = state.get("status")
+                if status not in ("completed", "error"):
+                    continue
+                call = p.get("callID") or p.get("id")
+                st = state.get("time") or {}
+                tool = p.get("tool")
+                add("PreToolUse", st.get("start") or created, f"tool:start:{call}",
+                    tool_name=tool, tool_input=state.get("input"), tool_use_id=call)
+                meta = state.get("metadata") or {}
+                failed = status == "error" or (tool in ("bash", "shell") and isinstance(meta.get("exit"), int) and meta["exit"] != 0)
+                add("PostToolUseFailure" if failed else "PostToolUse", st.get("end") or st.get("start") or created,
+                    f"tool:end:{call}", tool_name=tool, tool_input=state.get("input"),
+                    tool_response=state.get("error") if state.get("error") is not None else state.get("output"),
+                    tool_metadata=meta, tool_use_id=call)
+        done = (info.get("time") or {}).get("completed")
+        if done:
+            t = info.get("tokens") or {}
+            cache = t.get("cache") or {}
+            add("OpenCodeUsage", done, f"usage:{mid}", model=info.get("modelID"), usage={
+                "input_tokens": t.get("input") or 0, "output_tokens": t.get("output") or 0,
+                "cache_read_tokens": cache.get("read") or 0, "cache_write_tokens": cache.get("write") or 0,
+            })
+    return out
+
+
+def _import_opencode(offsets: dict[str, int], origins: dict[str, str], *, verbose: bool = True,
+                     skip_active_s: float = 0, held_back: list[str] | None = None) -> int:
+    """Import OpenCode sessions changed since the last pass. ``offsets`` holds the
+    ``time_updated`` each session had when it was last imported."""
+    root = _opencode_data_root()
+    try:
+        root.resolve(strict=True).relative_to((_import_home() or Path.home()).resolve(strict=True))
+    except (OSError, ValueError):
+        if verbose:
+            print("cot import: no opencode data found", file=sys.stderr)
+        return 0
+    sessions = _opencode_session_index(root)
+    progress = bool(os.environ.get("COT_IMPORT_PROGRESS"))
+    weights = [max(1, s.get("messages") or 0) for s in sessions]
+    total_w = sum(weights)
+    last_report = 0.0
+
+    def report(done: int, frac: float = 0.0, force: bool = False) -> None:
+        nonlocal last_report
+        if not progress or (not force and time.monotonic() - last_report < 0.5):
+            return
+        last_report = time.monotonic()
+        cur = int(weights[done] * frac) if done < len(weights) else 0
+        print(f"cot-progress opencode {done} {len(sessions)} {sum(weights[:done]) + cur} {total_w}",
+              file=sys.stderr, flush=True)
+
+    now_ms = time.time() * 1000
+    posted = 0
+    for done, s in enumerate(sessions):
+        report(done)
+        key = f"opencode:{s['id']}"
+        updated = int(s.get("updated") or 0)
+        if origins.get(s["id"]) == "hook" or offsets.get(key) == updated:
+            continue
+        if skip_active_s and updated and now_ms - updated < skip_active_s * 1000:
+            if held_back is not None:
+                held_back.append(key)
+            continue
+        payloads = _opencode_session_payloads(s, _opencode_messages(root, s))
+        if verbose:
+            print(f"cot import: opencode {s['id']} ({len(payloads)} events)")
+        url = f"{COT_ENDPOINT}/v1/ingest/opencode"
+        for i, payload in enumerate(payloads):
+            # Straight to the collector: _post's per-event spool round trip is
+            # for the plugin's short-lived worker, not a bulk import.
+            if not _send_once(url, payload, timeout=10):
+                _spool_append(url, payload)
+            posted += 1
+            report(done, (i + 1) / len(payloads))
+        offsets[key] = updated
+    report(len(sessions), force=True)
+    return posted
+
+
 def _fetch_session_origins() -> dict[str, str]:
     try:
         req = urllib.request.Request(
@@ -3638,6 +3886,9 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
     (a session that's still running): their offsets stay put, so a later pass
     imports them whole once they've gone quiet. Held-back paths are appended to
     ``held_back``."""
+    if agent == "opencode":
+        return _import_opencode(offsets, origins, verbose=verbose,
+                                skip_active_s=skip_active_s, held_back=held_back)
     transcripts = _discover_transcripts(agent)
     now_ts = time.time()
     if verbose and not transcripts:
@@ -3659,12 +3910,15 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
     bytes_total = sum(sizes)
     last_report = 0.0
 
-    def report(done: int, force: bool = False) -> None:
+    def report(done: int, force: bool = False, frac: float = 0.0) -> None:
+        """``frac`` is how far through transcript ``done`` the import is, so one
+        large file moves the bar as it goes instead of all at once."""
         nonlocal last_report
-        if not progress or (not force and time.monotonic() - last_report < 0.5):
+        if not progress or (not force and time.monotonic() - last_report < 0.25):
             return
         last_report = time.monotonic()
-        print(f"cot-progress {agent} {done} {len(transcripts)} {sum(sizes[:done])} {bytes_total}",
+        within = int(sizes[done] * frac) if done < len(sizes) else 0
+        print(f"cot-progress {agent} {done} {len(transcripts)} {sum(sizes[:done]) + within} {bytes_total}",
               file=sys.stderr, flush=True)
 
     source = agent
@@ -3743,7 +3997,10 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
         state: dict = {}
         path_str = str(path)
         parsed_events: list[dict] = []
+        n_lines = len(lines)
         for lineno, line in enumerate(lines):
+            # Parsing is half a file's work, posting the other half.
+            report(done, frac=0.5 * lineno / n_lines)
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
@@ -3761,7 +4018,8 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
             )
         parsed_events.extend(_codex_flush_pending_ingest_events(state))
         events = _prepare_ingest_events(agent, parsed_events, origin="import")
-        for event in events:
+        n_events = max(1, len(events))
+        for i_event, event in enumerate(events):
             # Subagent transcripts: live hooks already hold the tool calls, so
             # import only the conversation text the hooks never deliver.
             if responses_only and event.get("kind") == "tool_call":
@@ -3780,7 +4038,7 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
                 payload.pop("_dedup_key", None)
             _post(f"{COT_ENDPOINT}/v1/ingest/{source}", payload)
             posted += 1
-            report(done)  # throttled; keeps a long transcript from looking stalled
+            report(done, frac=0.5 + 0.5 * (i_event + 1) / n_events)  # throttled
 
         offsets[str(path)] = new_offset
 
@@ -3792,7 +4050,7 @@ def _cmd_import(args: list[str]) -> int:
     import argparse
     parser = argparse.ArgumentParser(prog="cot import",
                                      description="Import historical agent transcripts")
-    parser.add_argument("--agent", action="append", choices=["claude", "cursor", "codex"],
+    parser.add_argument("--agent", action="append", choices=["claude", "cursor", "codex", "opencode"],
                         help="Agent(s) to import (default: all)")
     parser.add_argument("--since", help="Only import transcripts modified after YYYY-MM-DD")
     parser.add_argument("--report", action="store_true",
@@ -3802,7 +4060,7 @@ def _cmd_import(args: list[str]) -> int:
                              "(sessions still in progress)")
     parsed = parser.parse_args(args)
 
-    agents = parsed.agent or ["claude", "cursor", "codex"]
+    agents = parsed.agent or ["claude", "cursor", "codex", "opencode"]
     _reindex_if_parser_changed()
     origins = _fetch_session_origins()
     offsets = _import_offsets_load()

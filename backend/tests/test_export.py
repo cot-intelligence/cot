@@ -81,3 +81,29 @@ def test_export_file_is_pretty_printed():
     text = _client().get(f"/v1/sessions/{sid}/export").text
     assert text.startswith("{\n")
     json.loads(text)
+
+
+def test_markdown_export_is_a_readable_transcript():
+    from app.main import app
+
+    sid = _session()
+    res = TestClient(app, base_url="http://127.0.0.1").get(f"/v1/sessions/{sid}/export", params={"format": "md"})
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/markdown")
+    assert 'filename="cot-session-abcdef12-' in res.headers["content-disposition"]
+    body = res.text
+    assert "## Agent" in body and LONG_REPLY in body  # untrimmed, unlike the list's preview
+    assert "**Bash** `ls`" in body
+    bad = TestClient(app, base_url="http://127.0.0.1").get(f"/v1/sessions/{sid}/export", params={"format": "pdf"})
+    assert bad.status_code == 422
+
+
+def test_first_events_read_is_marked_partial():
+    from app.main import app
+
+    sid = _session()
+    client = TestClient(app, base_url="http://127.0.0.1")
+    head = client.get(f"/v1/sessions/{sid}", params={"first": 1}).json()
+    assert head["partial"] is True and len(head["events"]) == 1
+    whole = client.get(f"/v1/sessions/{sid}", params={"first": 50}).json()
+    assert "partial" not in whole and len(whole["events"]) == len(client.get(f"/v1/sessions/{sid}").json()["events"])

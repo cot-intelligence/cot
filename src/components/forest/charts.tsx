@@ -75,9 +75,11 @@ export function Columns({ data, height = 140, color = 'currentColor', muted, lab
 }
 
 /** Horizontal share bars: label, value, a flat proportional bar. */
-export function ShareBars({ rows, color = 'currentColor', track, format }: {
+export function ShareBars({ rows, color = 'currentColor', track, format, compact }: {
   rows: { label: React.ReactNode; value: number; key: string; color?: string }[];
   color?: string; track: string; format: (v: number) => string;
+  /** Tighter rows and a thinner bar, for a short top-N card. */
+  compact?: boolean;
 }) {
   const [first] = useState(intro);
   const reduce = useReducedMotion();
@@ -87,14 +89,14 @@ export function ShareBars({ rows, color = 'currentColor', track, format }: {
   const grow = first && !reduce;
   const seenOnce = useRef(!grow);
   return (
-    <ul ref={ref} style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 10 }}>
+    <ul ref={ref} style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: compact ? 7 : 10 }}>
       {rows.map((r, i) => (
         <li key={r.key}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 13, marginBottom: 5 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: compact ? 12 : 13, marginBottom: compact ? 3 : 5 }}>
             <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.label}</span>
             <span className="mono tnum" style={{ opacity: 0.8 }}>{format(r.value)}</span>
           </div>
-          <div style={{ height: 6, borderRadius: 3, background: track, overflow: 'hidden' }}>
+          <div style={{ height: compact ? 4 : 6, borderRadius: 3, background: track, overflow: 'hidden' }}>
             <motion.div
               style={{ height: '100%', width: '100%', background: r.color ?? color, borderRadius: 3, transformOrigin: 'left' }}
               initial={grow ? { scaleX: 0 } : false} animate={{ scaleX: seen || !grow ? r.value / max : 0 }}

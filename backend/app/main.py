@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field
 
 from . import (
     __version__, activity, ai_insights, context_cost, cron, db, extension_usage, insights, otlp,
-    passive, rule_drafts, store, timeutil, user_rules,
+    passive, rule_drafts, session_markdown, store, timeutil, user_rules,
 )
 
 app = FastAPI(title="cot collector", version=__version__)
@@ -1509,6 +1509,24 @@ def get_passive_running() -> dict[str, Any]:
     return {"running": passive.running(), "last_run": last[0] if last else None}
 
 
+@app.get("/v1/attachments")
+def get_attachments(limit: int = Query(500, ge=1, le=2000)) -> dict[str, Any]:
+    """Files attached to prompts, newest first, with the session they went into."""
+    return {"attachments": db.list_attachments(limit)}
+
+
+@app.get("/v1/passive/pending")
+def get_passive_pending(fresh: bool = False) -> dict[str, Any]:
+    """Sessions on disk that haven't been imported yet, for the "import now" prompt."""
+    return passive.pending(fresh=fresh)
+
+
+@app.get("/v1/passive/history")
+def get_passive_history(days: int = Query(passive.RUNS_KEPT_DAYS, ge=1, le=passive.RUNS_KEPT_DAYS)) -> dict[str, Any]:
+    """Import runs over the last ``days`` (30 at most; older runs are pruned)."""
+    return {"days": days, "runs": passive.history(days)}
+
+
 @app.post("/v1/passive/run")
 def run_passive_now() -> dict[str, Any]:
     """Start an import + analysis pass now; it runs in the background."""
@@ -2124,9 +2142,13 @@ async def import_replay_session(request: Request) -> dict[str, Any]:
 
 @app.delete("/v1/sessions/{session_id}")
 def delete_session(session_id: str) -> dict[str, Any]:
-    """Delete a Session Replay import. Traced sessions can't be deleted here."""
-    if not db.delete_imported_session(session_id):
-        raise HTTPException(status_code=404, detail="No imported session with this id")
+    """Delete a Session Replay import (``?store=replay``) or a traced session."""
+    if store.path() == store.replay_path():
+        if not db.delete_imported_session(session_id):
+            raise HTTPException(status_code=404, detail="No imported session with this id")
+    elif not db.delete_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    db.record_audit_event("session.deleted", target=session_id)
     return {"deleted": session_id}
 
 
@@ -2143,12 +2165,24 @@ def set_import_note(session_id: str, body: ImportNoteBody) -> dict[str, Any]:
 
 
 @app.get("/v1/sessions/{session_id}/export")
-def export_session(session_id: str) -> Response:
-    """The whole session as a downloadable JSON file."""
+def export_session(session_id: str, format: str = Query("json", pattern="^(json|md)$")) -> Response:  # noqa: A002
+    """The whole session as a downloadable JSON file, or ``format=md`` for a
+    readable Markdown transcript."""
+    day = datetime.now().strftime("%Y%m%d")
+    if format == "md":
+        from .session_read import build_session_detail
+
+        detail = build_session_detail(session_id, full_detail=True)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return Response(
+            content=session_markdown.render(detail),
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="cot-session-{session_id[:8]}-{day}.md"'},
+        )
     data = db.export_session(session_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    day = datetime.now().strftime("%Y%m%d")
     filename = f"cot-session-{session_id[:8]}-{day}.json"
     return Response(
         content=json.dumps(data, indent=2, ensure_ascii=False, default=str),
@@ -2158,8 +2192,10 @@ def export_session(session_id: str) -> Response:
 
 
 @app.get("/v1/sessions/{session_id}")
-def get_session(session_id: str, compat: int = 0) -> dict[str, Any]:
-    session = db.get_session_detail(session_id)
+def get_session(session_id: str, compat: int = 0, first: int | None = Query(None, ge=1, le=5000)) -> dict[str, Any]:
+    """``first=N`` returns only the opening N events (``partial: true`` when
+    there are more), for a quick first paint; the page then loads the rest."""
+    session = db.get_session_detail(session_id, first=first)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     # The deprecated parent-only `timeline` repeats every parent row already in

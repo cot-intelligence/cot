@@ -6,6 +6,7 @@ import {
   getRetention,
   getSettings,
   getPassive,
+  getPassiveHistory,
   getVersionInfo,
   runPassiveNow,
   updatePassive,
@@ -18,6 +19,7 @@ import {
   type HookStatus,
   PassiveUnsupportedError,
   type PassiveAgent,
+  type PassiveHistoryRun,
   type PassiveStatus,
   type RetentionCleanupResult,
   type RetentionStatus,
@@ -32,7 +34,7 @@ import { Icon } from '../forest/icons';
 import { Agent, Seg, Switch } from '../forest/ui';
 import { MarkPicker } from '../forest/MarkPicker';
 import { ExportModal } from './ExportModal';
-import { AgentSources, HooksGap, RunStatus, SchedulePicker } from '../passive/PassiveParts';
+import { AgentSources, HooksGap, ImportHistory, RunStatus, SchedulePicker } from '../passive/PassiveParts';
 import { homePath } from './GovernanceView';
 
 interface SettingsViewProps {
@@ -391,6 +393,14 @@ function PassiveSection() {
     await runPassiveNow();
     setP(await getPassive());
   };
+  // Reload the 30-day history whenever a run starts or finishes.
+  const lastRun = p?.runs[0];
+  const [history, setHistory] = useState<PassiveHistoryRun[] | null>(null);
+  useEffect(() => {
+    getPassiveHistory()
+      .then((h) => setHistory(h.runs))
+      .catch(() => setHistory(null));
+  }, [lastRun?.id, lastRun?.status]);
   return (
     <Section id="passive" title="Passive import" desc="Build sessions from agent transcripts on a schedule, with or without hooks. Each run imports metadata first, then runs analysis.">
       {problem && !p ? (
@@ -424,6 +434,9 @@ function PassiveSection() {
             <Icon name="bolt" size={14} />{running ? 'Running…' : 'Run now'}
           </button>
         </div>
+      </Row>
+      <Row label="Import history" hint="Every run in the last 30 days. Older runs aren't kept." stack>
+        {history ? <ImportHistory runs={history} /> : <span className="sk" style={{ display: 'block', height: 120 }} />}
       </Row>
       <Row label="Without hooks" hint="What transcripts alone can't show.">
         <button type="button" className="vbtn vbtn-ghost vbtn-sm" aria-expanded={gap} aria-controls="set-hooks-gap" onClick={() => setGap((g) => !g)}>

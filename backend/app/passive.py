@@ -20,15 +20,17 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from . import cron, db, store, timeutil
 
-AGENTS = ("claude", "cursor", "codex")
-_HOME_ENV = {"claude": "COT_CLAUDE_HOME", "cursor": "COT_CURSOR_HOME", "codex": "COT_CODEX_HOME"}
-_HOME_DIR = {"claude": ".claude", "cursor": ".cursor", "codex": ".codex"}
+AGENTS = ("claude", "cursor", "codex", "opencode")
+_HOME_ENV = {"claude": "COT_CLAUDE_HOME", "cursor": "COT_CURSOR_HOME", "codex": "COT_CODEX_HOME",
+             "opencode": "COT_OPENCODE_HOME"}
+_HOME_DIR = {"claude": ".claude", "cursor": ".cursor", "codex": ".codex",
+             "opencode": ".local/share/opencode"}
 # Same globs as the bridge's ``_discover_transcripts``.
 _GLOB = {
     "claude": "projects/**/*.jsonl",
@@ -38,7 +40,8 @@ _GLOB = {
 # An import is stopped only when it goes quiet this long: the bridge reports
 # progress per transcript, so a large history can run as long as it needs.
 _IMPORT_IDLE_TIMEOUT_S = 15 * 60
-_RUNS_KEPT = 50
+# Run history behind the Settings import chart.
+RUNS_KEPT_DAYS = 30
 _POSTED_RE = re.compile(r"done\s+\S+\s+(\d+)\s+events posted")
 _HELD_RE = re.compile(r"held back (\d+) in-progress")
 # A transcript written to this recently belongs to a session that's still
@@ -102,7 +105,47 @@ def transcript_root(agent: str) -> Path:
     if os.environ.get("COT_IMPORT_HOME"):
         return _import_home() / _HOME_DIR[agent]
     env = os.environ.get(_HOME_ENV[agent])
-    return Path(env) if env else Path.home() / _HOME_DIR[agent]
+    if env:
+        return Path(env)
+    if agent == "opencode" and os.environ.get("XDG_DATA_HOME"):
+        return Path(os.environ["XDG_DATA_HOME"]) / "opencode"
+    return Path.home() / _HOME_DIR[agent]
+
+
+_bridge_module: Any = None
+
+
+def _bridge() -> Any:
+    """The bridge script loaded as a module, for the OpenCode store reader it
+    shares with ``cot import`` (OpenCode keeps a database, not transcripts)."""
+    global _bridge_module
+    if _bridge_module is None:
+        import importlib.machinery
+        import importlib.util
+
+        loader = importlib.machinery.SourceFileLoader("cot_bridge", str(_bridge_path()))
+        spec = importlib.util.spec_from_loader("cot_bridge", loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        _bridge_module = module
+    return _bridge_module
+
+
+def _opencode_sessions(root: Path) -> list[dict[str, Any]]:
+    try:
+        return _bridge()._opencode_session_index(root)  # noqa: SLF001
+    except Exception:  # noqa: BLE001 - an unreadable store reads as empty
+        return []
+
+
+def _opencode_store_bytes(root: Path) -> int:
+    total = 0
+    for p in [root / "opencode.db", root / "opencode.db-wal", *root.glob("storage/**/*.json")]:
+        try:
+            total += p.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def _project_of(agent: str, root: Path, path: Path) -> str | None:
@@ -143,7 +186,18 @@ def scan(agent: str) -> dict[str, Any]:
     projects: set[str] = set()
     oldest = newest = None
     active_after = time.time() - ACTIVE_WINDOW_MIN * 60
-    for path in resolved.glob(_GLOB[agent]):
+    if agent == "opencode":
+        for sess in _opencode_sessions(resolved):
+            updated = (sess.get("updated") or 0) / 1000
+            out["transcripts"] += 1
+            oldest = updated if oldest is None else min(oldest, updated)
+            newest = updated if newest is None else max(newest, updated)
+            if updated >= active_after:
+                out["active"] += 1
+            if sess.get("directory"):
+                projects.add(sess["directory"])
+        out["bytes"] = _opencode_store_bytes(resolved)
+    for path in (resolved.glob(_GLOB[agent]) if agent in _GLOB else ()):
         try:
             st = path.stat()
         except OSError:
@@ -171,6 +225,87 @@ def _session_counts() -> dict[str, int]:
             " AND import_root_id IS NULL GROUP BY source"
         ).fetchall()
     return {r["source"]: r["n"] for r in rows}
+
+
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_PENDING_TTL_S = 30.0
+_pending_cache: dict[str, Any] = {}
+
+
+def _import_offsets() -> dict[str, int]:
+    # The bridge keeps its state under the real HOME even when it reads
+    # transcripts from COT_IMPORT_HOME (sandboxed desktop builds).
+    path = Path.home() / ".cot" / "import_offsets.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _on_disk(agent: str) -> list[tuple[str, str, float]]:
+    """(session id, offsets key, last written) for each quiet session on disk.
+    Sessions written to in the last ACTIVE_WINDOW_MIN are left out: an import
+    holds them back anyway."""
+    root = transcript_root(agent)
+    try:
+        resolved = root.resolve(strict=True)
+        resolved.relative_to(_import_home().resolve(strict=True))
+    except (OSError, ValueError):
+        return []
+    quiet_before = time.time() - ACTIVE_WINDOW_MIN * 60
+    out: list[tuple[str, str, float]] = []
+    if agent == "opencode":
+        for sess in _opencode_sessions(resolved):
+            updated = (sess.get("updated") or 0) / 1000
+            if updated < quiet_before:
+                out.append((sess["id"], f"opencode:{sess['id']}", updated))
+        return out
+    for path in resolved.glob(_GLOB[agent]):
+        if path.parent.name == "subagents":
+            continue
+        m = _UUID_RE.search(path.stem)
+        if not m:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < quiet_before:
+            out.append((m.group(0), str(path), mtime))
+    return out
+
+
+def pending(*, fresh: bool = False) -> dict[str, Any]:
+    """Sessions on disk that cot hasn't imported yet, per enabled agent.
+
+    A session counts as imported once it exists in cot (by hook or import) or
+    the importer has recorded reading it, so one that yields no events doesn't
+    keep the prompt up forever. Cached briefly: it walks the transcript folders."""
+    now = time.monotonic()
+    if not fresh and _pending_cache.get("at", -1e9) > now - _PENDING_TTL_S:
+        return _pending_cache["value"]
+    with store.read() as conn:
+        known = {r["id"] for r in conn.execute("SELECT id FROM sessions")}
+    offsets = _import_offsets()
+    by_agent: dict[str, int] = {}
+    newest: float | None = None
+    for agent in config()["agents"]:
+        n = 0
+        for sid, key, written in _on_disk(agent):
+            if sid in known or key in offsets:
+                continue
+            n += 1
+            newest = written if newest is None else max(newest, written)
+        if n:
+            by_agent[agent] = n
+    value = {
+        "total": sum(by_agent.values()),
+        "by_agent": by_agent,
+        "newest": datetime.fromtimestamp(newest, tz=timezone.utc).isoformat() if newest else None,
+    }
+    _pending_cache.update(at=now, value=value)
+    return value
 
 
 # ----------------------------------------------------------------- runs
@@ -217,6 +352,29 @@ def runs(limit: int = 10) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
+
+
+def _history_cutoff(days: int = RUNS_KEPT_DAYS) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+def history(days: int = RUNS_KEPT_DAYS) -> list[dict[str, Any]]:
+    """Every run in the last ``days``, oldest first, for the Settings chart."""
+    _ensure_runs_table()
+    days = max(1, min(days, RUNS_KEPT_DAYS))
+    with store.read() as conn:
+        rows = conn.execute(
+            "SELECT * FROM passive_runs WHERE started_at >= ? ORDER BY id", (_history_cutoff(days),)
+        ).fetchall()
+    out = []
+    for r in rows:
+        d = json.loads(r["detail"] or "{}")
+        out.append({
+            "id": r["id"], "trigger": r["trigger"], "status": r["status"],
+            "started_at": r["started_at"], "finished_at": r["finished_at"],
+            "new_sessions": d.get("new_sessions"), "events": d.get("events"), "findings": d.get("findings"),
+        })
+    return out
 
 
 def running() -> dict[str, Any]:
@@ -374,10 +532,8 @@ def run(
                 "UPDATE passive_runs SET finished_at = ?, status = ?, detail = ? WHERE id = ?",
                 (finished, status, json.dumps(detail), run_id),
             )
-            conn.execute(
-                "DELETE FROM passive_runs WHERE id NOT IN (SELECT id FROM passive_runs ORDER BY id DESC LIMIT ?)",
-                (_RUNS_KEPT,),
-            )
+            conn.execute("DELETE FROM passive_runs WHERE started_at < ?", (_history_cutoff(),))
+        _pending_cache.clear()
         _state.clear()
         _state["running"] = False
         _lock.release()
