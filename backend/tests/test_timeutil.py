@@ -27,3 +27,13 @@ def test_live_status_uses_ten_minute_activity_window():
     assert timeutil.live_status((current - timedelta(seconds=599)).isoformat()) == "active"
     assert timeutil.live_status((current - timedelta(seconds=601)).isoformat()) == "completed"
     assert timeutil.live_status(None) == "completed"
+
+
+def test_live_status_treats_a_recorded_end_as_completed():
+    current = datetime.now(timezone.utc)
+    end = current - timedelta(seconds=30)
+    # The SessionEnd hook is the latest event: ended, however recent.
+    assert timeutil.live_status(end.isoformat(), end.isoformat()) == "completed"
+    # Activity after the recorded end means the session was picked up again.
+    later = current - timedelta(seconds=5)
+    assert timeutil.live_status(later.isoformat(), end.isoformat()) == "active"

@@ -2425,7 +2425,7 @@ def _session_link_item(
     # Subagent sessions rarely have a user prompt; fall back to the label the
     # importer derived from the parent's Task launch.
     title = _first_prompt(conn, row["id"]) or label
-    recent_status = timeutil.live_status(agg["last_ts"])
+    recent_status = timeutil.live_status(agg["last_ts"], row["ended_at"])
     stored_status = row["status"] or "completed"
     last_status = status_event["status"] if status_event else None
     if last_status in ("error", "blocked", "interrupted"):
@@ -2554,7 +2554,7 @@ def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any
         "models": models,
         "archived": bool(row["archived"]),
         "bookmarked": bool(row["bookmarked"]),
-        "status": timeutil.live_status(last_ts),
+        "status": timeutil.live_status(last_ts, row["ended_at"]),
         "started_at": timeutil.format_ts(row["started_at"]) or str(row["started_at"] or ""),
         "ended_at": timeutil.format_ts(row["ended_at"]),
         "last_activity": timeutil.format_ts(last_ts),
@@ -2649,7 +2649,7 @@ def _batched_session_summaries(
                 "models": [mr["model"] for mr in model_rows],
                 "archived": bool(row["archived"]),
                 "bookmarked": bool(row["bookmarked"]),
-                "status": timeutil.live_status(last_ts),
+                "status": timeutil.live_status(last_ts, row["ended_at"]),
                 "started_at": timeutil.format_ts(row["started_at"]) or str(row["started_at"] or ""),
                 "ended_at": timeutil.format_ts(row["ended_at"]),
                 "last_activity": timeutil.format_ts(last_ts),
@@ -2769,8 +2769,11 @@ def metrics(
         )
         projects = one("SELECT COUNT(DISTINCT cwd) n FROM sessions WHERE cwd IS NOT NULL")["n"]
 
-        last_rows = rows("SELECT session_id, last_ts lt FROM session_stats")
-        active = sum(1 for r in last_rows if timeutil.live_status(r["lt"]) == "active")
+        last_rows = rows(
+            "SELECT st.last_ts lt, s.ended_at FROM session_stats st"
+            " LEFT JOIN sessions s ON s.id = st.session_id"
+        )
+        active = sum(1 for r in last_rows if timeutil.live_status(r["lt"], r["ended_at"]) == "active")
 
         durs = rows("SELECT (julianday(last_ts)-julianday(first_ts))*86400 d FROM session_stats")
         dvals = [r["d"] for r in durs if r["d"] is not None]
@@ -4655,11 +4658,13 @@ def stats() -> dict[str, Any]:
         # Effective status is recency-derived, so count live sessions from each
         # session's most recent event rather than the stored flag.
         event_rows = conn.execute(
-            "SELECT session_id, last_ts, event_count AS events, tool_count AS tools,"
-            " (julianday(last_ts) - julianday(first_ts)) * 86400 AS duration"
-            " FROM session_stats"
+            "SELECT st.session_id, st.last_ts, st.event_count AS events, st.tool_count AS tools,"
+            " (julianday(st.last_ts) - julianday(st.first_ts)) * 86400 AS duration, s.ended_at"
+            " FROM session_stats st LEFT JOIN sessions s ON s.id = st.session_id"
         ).fetchall()
-        active = sum(1 for r in event_rows if timeutil.live_status(r["last_ts"]) == "active")
+        active = sum(
+            1 for r in event_rows if timeutil.live_status(r["last_ts"], r["ended_at"]) == "active"
+        )
         by_status = {"active": active, "completed": max(sessions - active, 0)}
         events = sum(r["events"] or 0 for r in event_rows)
         tool_calls = sum(r["tools"] or 0 for r in event_rows)
