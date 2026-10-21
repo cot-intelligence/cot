@@ -1087,6 +1087,10 @@ def _bump_revision(session_id: str | None = None) -> None:
             pass  # that loop has closed
 
 
+# The passive import writes events in this process; tell the live stream.
+passive.on_ingest = _bump_revision
+
+
 def _changed_sessions(after: int, upto: int) -> list[str] | None:
     """Sessions changed in revisions (after, upto]; None when that can't be told
     (a change without a session, or history older than the buffer)."""

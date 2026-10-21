@@ -414,6 +414,21 @@ def _post_async(url: str, payload: dict) -> None:
 # lock that live hooks wait on.
 _IMPORT_POST_BATCH = 200
 
+# Set by a collector that runs the import in its own process: called with
+# (url, body) instead of POSTing, where body is one payload or a list of them.
+_INGEST_SINK = None
+# Set alongside it: called with (agent, files_done, files_total, bytes_done,
+# bytes_total) instead of printing cot-progress lines.
+_PROGRESS_SINK = None
+
+
+def _import_progress(agent: str, files_done: int, files_total: int, bytes_done: int, bytes_total: int) -> None:
+    if _PROGRESS_SINK is not None:
+        _PROGRESS_SINK(agent, files_done, files_total, bytes_done, bytes_total)
+    else:
+        print(f"cot-progress {agent} {files_done} {files_total} {bytes_done} {bytes_total}",
+              file=sys.stderr, flush=True)
+
 
 class _ImportPoster:
     """Posts imported events to one ingest endpoint, many per request.
@@ -427,12 +442,16 @@ class _ImportPoster:
 
     def __init__(self, url: str) -> None:
         self.url = url
+        self.pending: list[dict] = []
+        self.sink = _INGEST_SINK
+        if self.sink is not None:
+            self.batched = True
+            return
         endpoint = url.split("/v1/ingest/", 1)[0]
         # Drain an earlier outage's spool first so events stay ordered.
         if SPOOL_PATH.exists() and _collector_reachable():
             _spool_flush(endpoint=endpoint)
         self.batched = _collector_accepts_batches(endpoint)
-        self.pending: list[dict] = []
 
     def add(self, payload: dict) -> None:
         if not self.batched or payload.get("_attach_to_prompt"):
@@ -449,6 +468,9 @@ class _ImportPoster:
             self._send(group)
 
     def _send(self, group: list[dict]) -> None:
+        if self.sink is not None:
+            self.sink(self.url, group if len(group) > 1 else group[0])
+            return
         if len(group) > 1:
             sent = _collector_reachable() and _send_once(self.url, group, timeout=30, retry_5xx=True)
         else:
@@ -2628,20 +2650,45 @@ def _cmd_audit(args: list[str]) -> int:
 # ---------------------------------------------------------------------------
 
 IMPORT_OFFSETS_PATH = STATE_DIR / "import_offsets.json"
+# Per-transcript identity next to the plain offsets: inode, mtime and a digest
+# of the bytes just before the offset, so an unchanged file is skipped without
+# opening it and a rewritten or replaced one is re-read from the start. A
+# sidecar rather than richer offsets so an older bridge sharing ~/.cot still
+# reads offsets it understands; an entry whose offset no longer matches (an
+# older bridge moved it) is ignored.
+IMPORT_FILE_STATE_PATH = STATE_DIR / "import_file_state.json"
+_FILE_STATE: dict[str, dict] = {}
+# Bytes before the offset the digest covers.
+_TAIL_PROBE_BYTES = 4096
+
+
+def _read_json_dict(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    """Write via a temp file and rename, so a crash mid-write never leaves a
+    truncated file (which reads as empty and re-imports everything)."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data))
+    os.replace(tmp, path)
 
 
 def _import_offsets_load() -> dict[str, int]:
-    if not IMPORT_OFFSETS_PATH.exists():
-        return {}
-    try:
-        return json.loads(IMPORT_OFFSETS_PATH.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
+    global _FILE_STATE
+    _FILE_STATE = _read_json_dict(IMPORT_FILE_STATE_PATH)
+    return _read_json_dict(IMPORT_OFFSETS_PATH)
 
 
 def _import_offsets_save(data: dict[str, int]) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    IMPORT_OFFSETS_PATH.write_text(json.dumps(data))
+    _write_json_atomic(IMPORT_OFFSETS_PATH, data)
+    # Only entries for files the offsets still track.
+    _write_json_atomic(IMPORT_FILE_STATE_PATH, {k: v for k, v in _FILE_STATE.items() if k in data})
 
 
 def _read_import_parser_version() -> str:
@@ -2670,11 +2717,12 @@ def _reindex_if_parser_changed() -> bool:
         _api_json("POST", "/v1/import/reset", {})
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         return False
-    try:
-        if IMPORT_OFFSETS_PATH.exists():
-            IMPORT_OFFSETS_PATH.unlink()
-    except OSError:
-        pass
+    for path in (IMPORT_OFFSETS_PATH, IMPORT_FILE_STATE_PATH):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    _FILE_STATE.clear()
     print("cot: import parser updated — re-importing transcripts from scratch")
     return True
 
@@ -2712,6 +2760,17 @@ def _read_text_capped(path: Path) -> str | None:
         fh.close()
 
 
+def _tail_digest(fh, offset: int) -> str:
+    """Digest of the bytes just before ``offset``: whether the prefix an offset
+    points into is still the one that was read."""
+    fh.seek(max(0, offset - _TAIL_PROBE_BYTES))
+    return hashlib.sha256(fh.read(min(offset, _TAIL_PROBE_BYTES))).hexdigest()[:32]
+
+
+def _remember_file(key: str, st: os.stat_result, offset: int, tail: str) -> None:
+    _FILE_STATE[key] = {"offset": offset, "ino": st.st_ino, "mtime_ns": st.st_mtime_ns, "tail": tail}
+
+
 def _import_read_new_lines(path: Path, offsets: dict[str, int]) -> tuple[list[str], int]:
     """Read new complete lines from *path* past the stored offset.
 
@@ -2719,36 +2778,55 @@ def _import_read_new_lines(path: Path, offsets: dict[str, int]) -> tuple[list[st
     are not consumed — the offset stops at the last newline. Reads in binary so
     the stored byte offset seeks exactly; opens with O_NOFOLLOW and enforces a
     size cap.
+
+    A file whose inode, size and mtime match what was recorded is skipped
+    without opening it. One whose inode changed (replaced at the same path) or
+    whose bytes before the offset changed (rewritten) is read from the start;
+    dedup keys keep the re-read idempotent.
     """
     key = str(path)
     start = offsets.get(key, 0)
     try:
-        size = path.stat().st_size
+        st = path.stat()
     except OSError:
         return [], start
+    size = st.st_size
     if size > _MAX_TRANSCRIPT_BYTES:
         # Don't advance the offset; an oversized file is skipped, not consumed.
         return [], start
+    known = _FILE_STATE.get(key)
+    if known is not None and known.get("offset") != start:
+        known = None  # an older bridge moved the offset; the identity is stale
+    if known is not None:
+        if known.get("ino") != st.st_ino:
+            start = 0
+        elif size == start and known.get("mtime_ns") == st.st_mtime_ns:
+            return [], start
     if size < start:
         start = 0
-    if size == start:
-        return [], start
     fh = _open_rb_nofollow(path)
     if fh is None:
         return [], start
     try:
+        if start and known is not None and known.get("tail") and _tail_digest(fh, start) != known["tail"]:
+            start = 0
+        if size == start:
+            # Unchanged content (a touch, or no identity recorded yet): note it.
+            _remember_file(key, st, start, _tail_digest(fh, start))
+            return [], start
         fh.seek(start)
         chunk = fh.read().decode("utf-8", errors="replace")
+        # Only consume up to the last newline so partial writes are retried.
+        last_nl = chunk.rfind("\n")
+        if last_nl < 0:
+            return [], start
+        consumed = chunk[: last_nl + 1]
+        new_offset = start + len(consumed.encode("utf-8"))
+        _remember_file(key, st, new_offset, _tail_digest(fh, new_offset))
     except OSError:
         return [], start
     finally:
         fh.close()
-    # Only consume up to the last newline so partial writes are retried.
-    last_nl = chunk.rfind("\n")
-    if last_nl < 0:
-        return [], start
-    consumed = chunk[: last_nl + 1]
-    new_offset = start + len(consumed.encode("utf-8"))
     lines = [ln for ln in consumed.splitlines() if ln.strip()]
     return lines, new_offset
 
@@ -4058,7 +4136,7 @@ def _import_opencode(offsets: dict[str, int], origins: dict[str, str], *, verbos
             print("cot import: no opencode data found", file=sys.stderr)
         return 0
     sessions = _opencode_session_index(root)
-    progress = bool(os.environ.get("COT_IMPORT_PROGRESS"))
+    progress = _PROGRESS_SINK is not None or bool(os.environ.get("COT_IMPORT_PROGRESS"))
     weights = [max(1, s.get("messages") or 0) for s in sessions]
     total_w = sum(weights)
     last_report = 0.0
@@ -4069,8 +4147,7 @@ def _import_opencode(offsets: dict[str, int], origins: dict[str, str], *, verbos
             return
         last_report = time.monotonic()
         cur = int(weights[done] * frac) if done < len(weights) else 0
-        print(f"cot-progress opencode {done} {len(sessions)} {sum(weights[:done]) + cur} {total_w}",
-              file=sys.stderr, flush=True)
+        _import_progress("opencode", done, len(sessions), sum(weights[:done]) + cur, total_w)
 
     now_ms = time.time() * 1000
     posted = 0
@@ -4303,7 +4380,7 @@ def _import_hermes(offsets: dict[str, int], origins: dict[str, str], *, verbose:
     # ``origins`` was read when the whole import began; a session the plugin
     # started capturing since then must not be imported over its live events.
     origins = {**origins, **_fetch_session_origins()}
-    progress = bool(os.environ.get("COT_IMPORT_PROGRESS"))
+    progress = _PROGRESS_SINK is not None or bool(os.environ.get("COT_IMPORT_PROGRESS"))
     weights = [max(1, s.get("messages") or 0) for s in sessions]
     total_w = sum(weights)
     now = time.time()
@@ -4311,8 +4388,7 @@ def _import_hermes(offsets: dict[str, int], origins: dict[str, str], *, verbose:
     poster = _ImportPoster(f"{COT_ENDPOINT}/v1/ingest/hermes")
     for done, s in enumerate(sessions):
         if progress:
-            print(f"cot-progress hermes {done} {len(sessions)} {sum(weights[:done])} {total_w}",
-                  file=sys.stderr, flush=True)
+            _import_progress("hermes", done, len(sessions), sum(weights[:done]), total_w)
         key = f"hermes:{s['id']}"
         mark = int(s.get("last_message") or 0) * 2 + (1 if s.get("ended_at") else 0)
         if origins.get(s["id"]) == "hook" or offsets.get(key) == mark:
@@ -4332,8 +4408,7 @@ def _import_hermes(offsets: dict[str, int], origins: dict[str, str], *, verbose:
         offsets[key] = mark
     poster.flush()
     if progress:
-        print(f"cot-progress hermes {len(sessions)} {len(sessions)} {total_w} {total_w}",
-              file=sys.stderr, flush=True)
+        _import_progress("hermes", len(sessions), len(sessions), total_w, total_w)
     return posted
 
 
@@ -4379,7 +4454,7 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
 
     # The collector's passive import sets COT_IMPORT_PROGRESS and reads these
     # lines to drive its progress bar: files and bytes done out of the total.
-    progress = bool(os.environ.get("COT_IMPORT_PROGRESS"))
+    progress = _PROGRESS_SINK is not None or bool(os.environ.get("COT_IMPORT_PROGRESS"))
     sizes: list[int] = []
     if progress:
         for path in transcripts:
@@ -4398,8 +4473,7 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
             return
         last_report = time.monotonic()
         within = int(sizes[done] * frac) if done < len(sizes) else 0
-        print(f"cot-progress {agent} {done} {len(transcripts)} {sum(sizes[:done]) + within} {bytes_total}",
-              file=sys.stderr, flush=True)
+        _import_progress(agent, done, len(transcripts), sum(sizes[:done]) + within, bytes_total)
 
     source = agent
     posted = 0
@@ -4528,21 +4602,13 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
     return posted
 
 
-def _cmd_import(args: list[str]) -> int:
-    import argparse
-    parser = argparse.ArgumentParser(prog="cot import",
-                                     description="Import historical agent transcripts")
-    parser.add_argument("--agent", action="append", choices=["claude", "cursor", "codex", "opencode", "hermes"],
-                        help="Agent(s) to import (default: all)")
-    parser.add_argument("--since", help="Only import transcripts modified after YYYY-MM-DD")
-    parser.add_argument("--report", action="store_true",
-                        help="Print an ingestion quality/coverage report when done")
-    parser.add_argument("--skip-active", type=float, default=0, metavar="MINUTES",
-                        help="Leave transcripts written to in the last MINUTES for a later run "
-                             "(sessions still in progress)")
-    parsed = parser.parse_args(args)
-
-    agents = parsed.agent or ["claude", "cursor", "codex", "opencode", "hermes"]
+def _run_import(agents: list[str], *, since: str | None = None, skip_active_s: float = 0,
+                verbose: bool = True) -> tuple[int, list[str]]:
+    """One import pass over ``agents``: events, then session completion,
+    question recovery and subagent links. Returns (events posted, held-back
+    transcripts). ``cot import`` runs it over HTTP; the collector runs it in
+    its own process with ``_INGEST_SINK`` set."""
+    say = print if verbose else (lambda *a, **k: None)
     _reindex_if_parser_changed()
     origins = _fetch_session_origins()
     offsets = _import_offsets_load()
@@ -4550,11 +4616,11 @@ def _cmd_import(args: list[str]) -> int:
     held_back: list[str] = []
 
     for agent in agents:
-        count = _import_agent(agent, parsed.since, offsets, origins,
-                              skip_active_s=max(0.0, parsed.skip_active) * 60, held_back=held_back)
+        count = _import_agent(agent, since, offsets, origins, verbose=verbose,
+                              skip_active_s=skip_active_s, held_back=held_back)
         total += count
     if held_back:
-        print(f"cot import: held back {len(held_back)} in-progress transcript(s) for the next run")
+        say(f"cot import: held back {len(held_back)} in-progress transcript(s) for the next run")
 
     _import_offsets_save(offsets)
     _write_import_parser_version()
@@ -4573,16 +4639,34 @@ def _cmd_import(args: list[str]) -> int:
                 result = json.loads(resp.read().decode("utf-8"))
                 closed = result.get("completed", 0)
                 if closed:
-                    print(f"cot import: marked {closed} imported sessions as completed")
+                    say(f"cot import: marked {closed} imported sessions as completed")
         except (urllib.error.URLError, TimeoutError, OSError):
             pass
 
     recovered = _recover_questions()
     if recovered:
-        print(f"cot import: recovered {recovered} question answer(s)")
+        say(f"cot import: recovered {recovered} question answer(s)")
 
-    _sync_subagent_links(agents, verbose=True)
+    _sync_subagent_links(agents, verbose=verbose)
+    return total, held_back
 
+
+def _cmd_import(args: list[str]) -> int:
+    import argparse
+    parser = argparse.ArgumentParser(prog="cot import",
+                                     description="Import historical agent transcripts")
+    parser.add_argument("--agent", action="append", choices=["claude", "cursor", "codex", "opencode", "hermes"],
+                        help="Agent(s) to import (default: all)")
+    parser.add_argument("--since", help="Only import transcripts modified after YYYY-MM-DD")
+    parser.add_argument("--report", action="store_true",
+                        help="Print an ingestion quality/coverage report when done")
+    parser.add_argument("--skip-active", type=float, default=0, metavar="MINUTES",
+                        help="Leave transcripts written to in the last MINUTES for a later run "
+                             "(sessions still in progress)")
+    parsed = parser.parse_args(args)
+
+    agents = parsed.agent or ["claude", "cursor", "codex", "opencode", "hermes"]
+    total, _ = _run_import(agents, since=parsed.since, skip_active_s=max(0.0, parsed.skip_active) * 60)
     print(f"cot import: done — {total} events posted")
     if parsed.report:
         _print_import_report()

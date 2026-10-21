@@ -30,9 +30,9 @@ def _watch_parent() -> None:
 def _run_script(path: str) -> int:
     """`cot-collector <script> args…` runs that script, like `python <script>`.
 
-    passive.py runs the bridge as `[sys.executable, bridge/cot, "import", …]`;
+    For anything that runs the bridge as `[sys.executable, bridge/cot, …]`:
     frozen, sys.executable is this binary, which would otherwise start a second
-    server instead of the import.
+    server instead. (The passive import itself now runs in-process.)
     """
     import runpy
 
