@@ -129,8 +129,9 @@ export function RunView({ runId }: { runId: string }) {
                 <FollowUps run={run} onAsked={refresh} />
               </div>
               <aside className="an-side">
-                <section className="card" aria-label="Findings">
-                  <div className="card-h"><span className="card-t">Findings</span><span className="faint mono" style={{ fontSize: 12 }}>{run.report.findings.length}</span></div>
+                <section aria-label="Findings">
+                  <div className="an-sec-h"><span className="label">Findings</span><span className="faint mono" style={{ fontSize: 11 }}>{run.report.findings.length}</span></div>
+                  <div className="card">
                   <div className="an-findings">
                     {run.report.findings.length === 0 && <div className="card-b dim" style={{ fontSize: 13 }}>Nothing worth flagging.</div>}
                     {run.report.findings.map((f, i) => (
@@ -144,6 +145,7 @@ export function RunView({ runId }: { runId: string }) {
                   {run.report.dropped_findings > 0 && (
                     <div className="an-dropped faint">{run.report.dropped_findings} finding{run.report.dropped_findings === 1 ? '' : 's'} left out: no step backed {run.report.dropped_findings === 1 ? 'it' : 'them'}.</div>
                   )}
+                  </div>
                 </section>
                 {(run.steps?.length ?? 0) > 0 && (
                   <details className="card an-how">

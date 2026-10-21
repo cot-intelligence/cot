@@ -241,7 +241,8 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
               {store === 'main' && <div style={{ marginTop: 12 }}><Feedback sessionId={sessionId} /></div>}
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
-              <a className="vbtn vbtn-quiet vbtn-sm" href={sessionExportUrl(s.id, store)} download><Icon name="download" size={14} />Export</a>
+              <a className="vbtn vbtn-quiet vbtn-sm" href={sessionExportUrl(s.id, store)} download title="The whole session as JSON"><Icon name="download" size={14} />Export</a>
+              {store === 'main' && <a className="vbtn vbtn-quiet vbtn-sm" href={sessionExportUrl(s.id, store, 'html')} download title="A cot-branded page to share: prompts, replies, tool calls and numbers, secrets masked"><Icon name="external" size={14} />Share as HTML</a>}
               {store === 'main' && (
                 <button type="button" className="vbtn vbtn-quiet vbtn-sm" aria-pressed={s.bookmarked} onClick={toggleBookmark} style={s.bookmarked ? { borderColor: 'var(--v-hot)', color: 'var(--v-hot)' } : undefined}>
                   <Icon name="star" size={14} style={s.bookmarked ? { fill: 'currentColor' } : undefined} />{s.bookmarked ? 'Bookmarked' : 'Bookmark'}

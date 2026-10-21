@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field
 
 from . import (
     __version__, activity, ai_insights, analysis, analysis_personas, analysis_tools, context_cost, cron, db, extension_usage, insights, mcp_install, otlp,
-    passive, rule_drafts, session_markdown, store, timeutil, user_rules,
+    passive, rule_drafts, session_html, session_markdown, store, timeutil, user_rules,
 )
 
 app = FastAPI(title="cot collector", version=__version__)
@@ -2348,10 +2348,19 @@ def set_import_note(session_id: str, body: ImportNoteBody) -> dict[str, Any]:
 
 
 @app.get("/v1/sessions/{session_id}/export")
-def export_session(session_id: str, format: str = Query("json", pattern="^(json|md)$")) -> Response:  # noqa: A002
-    """The whole session as a downloadable JSON file, or ``format=md`` for a
-    readable Markdown transcript."""
+def export_session(session_id: str, format: str = Query("json", pattern="^(json|md|html)$")) -> Response:  # noqa: A002
+    """The whole session as a downloadable JSON file, ``format=md`` for a
+    readable Markdown transcript, or ``format=html`` for a branded, shareable page."""
     day = datetime.now().strftime("%Y%m%d")
+    if format == "html":
+        page = session_html.render(session_id)
+        if page is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return Response(
+            content=page,
+            media_type="text/html; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="cot-session-{session_id[:8]}-{day}.html"'},
+        )
     if format == "md":
         from .session_read import build_session_detail
 

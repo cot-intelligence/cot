@@ -1142,8 +1142,9 @@ export async function putAnnotation(
 }
 
 /** Downloads the whole session (untrimmed events, raw hook rows) as JSON. */
-export function sessionExportUrl(id: string, store: Store = 'main'): string {
-  return inStore(`/v1/sessions/${encodeURIComponent(id)}/export`, store);
+export function sessionExportUrl(id: string, store: Store = 'main', format: 'json' | 'html' = 'json'): string {
+  const url = `/v1/sessions/${encodeURIComponent(id)}/export`;
+  return inStore(format === 'json' ? url : `${url}?format=${format}`, store);
 }
 
 /** Imported sessions, newest import first (one row per imported file). */
