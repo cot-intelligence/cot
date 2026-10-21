@@ -13,7 +13,7 @@ import { categoryLabel, fmt, modelLabel, project } from '../forest/format';
 import { CATEGORY_ICON, Icon } from '../forest/icons';
 import { Agent } from '../forest/ui';
 import { extensionPageHref, SCOPE_LABEL } from './ExtensionsView';
-import { ActivityMap } from './session/ActivityMap';
+import { SessionTrace } from './session/SessionTrace';
 import { AttachmentTags } from './session/AttachmentTags';
 import { EventDetailPanel } from './session/EventDetailPanel';
 import { Feedback, RatingMark, useAnnotations } from './session/Feedback';
@@ -327,8 +327,8 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
           )}
 
           {settled && tab === 'map' && (
-            <div className="card"><div className="card-b" style={{ overflowX: 'auto' }}>
-              <ActivityMap items={events} sessionId={sessionId} activeKey={null} onJump={(it) => revealEvent(it.id)} />
+            <div className="card"><div className="card-b">
+              <SessionTrace items={events} sessionId={sessionId} onOpen={(it) => revealEvent(it.id)} />
             </div></div>
           )}
         </div>

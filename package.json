@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.104.0",
+    "elkjs": "^0.11.0",
     "framer-motion": "^13.4.4",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
