@@ -13,8 +13,10 @@ import os
 import platform as _platform
 import re
 import shlex
+import shutil
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -260,6 +262,38 @@ def _bridge_dir() -> Path:
 _BRIDGE_DIR = _bridge_dir()
 
 
+def _refresh_installed_bridge() -> bool:
+    """Bring ``~/.cot/bin/cot`` up to this collector's bridge.
+
+    Only install.sh writes that file, so after an app update agents kept running
+    the old bridge (and its old ``cot mcp`` tools) until hooks were reinstalled.
+    Keeps the shebang install.sh chose; never installs a bridge that isn't there.
+    """
+    target = mcp_install.bridge_path()
+    source = _BRIDGE_DIR / "cot"
+    if not target.is_file() or not source.is_file():
+        return False
+    installed = target.read_bytes()
+    shebang, _, _ = installed.partition(b"\n")
+    bundled_shebang, _, body = source.read_bytes().partition(b"\n")
+    if not shebang.startswith(b"#!"):
+        shebang = bundled_shebang
+    updated = shebang + b"\n" + body
+    if updated == installed:
+        return False
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(updated)
+        shutil.copymode(target, tmp)
+        # Hooks run this file constantly; a rename never shows them half a script.
+        os.replace(tmp, target)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return True
+
+
 _search_index_building = False
 
 
@@ -308,6 +342,10 @@ _GIL_SWITCH_INTERVAL_S = 0.0005
 async def _startup() -> None:
     sys.setswitchinterval(_GIL_SWITCH_INTERVAL_S)
     db.init_db(build_search_index=False)
+    try:
+        _refresh_installed_bridge()
+    except OSError:
+        pass  # agents keep the bridge they have; install.sh still replaces it
     # A first-time search index build can take longer than the desktop app waits
     # for /health; search scans until it lands.
     threading.Thread(target=_build_search_index, name="search-index", daemon=True).start()

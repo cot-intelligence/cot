@@ -63,3 +63,24 @@ def test_broken_json_is_left_alone(homes):
     with pytest.raises(mcp_install.InstallError):
         mcp_install.install("cursor")
     assert bad.read_text() == "{not json"
+
+
+def test_startup_refreshes_stale_installed_bridge(fresh_db, tmp_path, monkeypatch):
+    from app import main
+
+    bundled = tmp_path / "bundle"
+    bundled.mkdir()
+    (bundled / "cot").write_text("#!/usr/bin/env python3\nprint('new')\n")
+    monkeypatch.setattr(main, "_BRIDGE_DIR", bundled)
+    installed = fresh_db.parent / "bin" / "cot"
+
+    assert main._refresh_installed_bridge() is False  # never installs one
+    assert not installed.exists()
+
+    installed.parent.mkdir()
+    installed.write_text("#!/opt/py/bin/python3\nprint('old')\n")
+    installed.chmod(0o755)
+    assert main._refresh_installed_bridge() is True
+    assert installed.read_text() == "#!/opt/py/bin/python3\nprint('new')\n"
+    assert installed.stat().st_mode & 0o111
+    assert main._refresh_installed_bridge() is False
