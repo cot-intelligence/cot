@@ -16,6 +16,10 @@ const PORT_ATTEMPTS: u16 = 32;
 /// uvicorn binds in well under a second, but a cold frozen binary loads a lot
 /// of Python first.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a collector that is migrating the database gets instead. Stopping
+/// one mid-migration rolls the work back, so the next launch would repeat it
+/// and fail the same way; a large DB can take well over STARTUP_TIMEOUT.
+const MIGRATION_TIMEOUT: Duration = Duration::from_secs(600);
 /// Time uvicorn gets to close SQLite cleanly before SIGKILL.
 const STOP_GRACE: Duration = Duration::from_secs(5);
 
@@ -45,6 +49,12 @@ impl CotHome {
     /// doesn't leave one running against the database.
     pub fn pid_file(&self) -> PathBuf {
         self.0.join("app-collector.pid")
+    }
+
+    /// Present while the collector runs database migrations (written next to
+    /// the DB by `app.db`).
+    pub fn migrating_file(&self) -> PathBuf {
+        self.0.join("migrating")
     }
 
     /// Port recorded by a previous install, so hooks wired to a non-default
@@ -147,6 +157,16 @@ pub fn parse_health_response(response: &str) -> Option<String> {
     Some(json.get("version").and_then(|v| v.as_str()).unwrap_or("unknown").to_string())
 }
 
+/// How long to wait for `/health`: longer while the collector says it is
+/// migrating, since that is real work rather than a hang.
+fn startup_limit(migrating: bool) -> Duration {
+    if migrating {
+        MIGRATION_TIMEOUT
+    } else {
+        STARTUP_TIMEOUT
+    }
+}
+
 fn process_alive(pid: i32) -> bool {
     // kill(pid, 0) only probes; ESRCH means the process is already gone.
     unsafe { libc::kill(pid, 0) == 0 }
@@ -200,6 +220,9 @@ impl Collector {
     /// Resolve a port, spawn the bundled binary and wait for `/health`.
     pub fn start(home: &CotHome, bundle: &Bundle) -> Result<Collector, StartError> {
         reap_orphan(home);
+        // A marker left by a collector that died mid-migration would stretch a
+        // hung start to MIGRATION_TIMEOUT; a migrating collector writes a fresh one.
+        let _ = fs::remove_file(home.migrating_file());
 
         let preferred = home.preferred_port(std::env::var("COT_PORT").ok().as_deref());
         if health(preferred).is_some() {
@@ -219,8 +242,8 @@ impl Collector {
         let _ = fs::write(home.pid_file(), child.id().to_string());
 
         let log = home.log_file();
-        let deadline = Instant::now() + STARTUP_TIMEOUT;
-        while Instant::now() < deadline {
+        let started = Instant::now();
+        while started.elapsed() < startup_limit(home.migrating_file().exists()) {
             if let Ok(Some(status)) = child.try_wait() {
                 let _ = fs::remove_file(home.pid_file());
                 return Err(StartError::Failed(format!(
@@ -288,6 +311,13 @@ fn spawn(home: &CotHome, bundle: &Bundle, port: u16) -> std::io::Result<Child> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrating_collector_gets_the_long_startup_window() {
+        assert_eq!(startup_limit(false), STARTUP_TIMEOUT);
+        assert_eq!(startup_limit(true), MIGRATION_TIMEOUT);
+        assert!(MIGRATION_TIMEOUT > STARTUP_TIMEOUT);
+    }
 
     fn temp_home(name: &str) -> CotHome {
         let dir = std::env::temp_dir().join(format!("cot-desktop-test-{name}-{}", std::process::id()));
