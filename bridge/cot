@@ -4282,12 +4282,16 @@ def _import_hermes(offsets: dict[str, int], origins: dict[str, str], *, verbose:
 
 
 def _fetch_session_origins() -> dict[str, str]:
+    """Session id -> "hook"/"import", so the import skips hooked sessions. An
+    empty map on failure means nothing is skipped; the collector then drops
+    imported events for hooked sessions itself, but every one is still read and
+    posted, so the timeout allows for a cold read of a large DB (seconds)."""
     try:
         req = urllib.request.Request(
             f"{COT_ENDPOINT}/v1/sessions/origins",
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         return data.get("origins") or {}
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
