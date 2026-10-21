@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import string
@@ -16,7 +17,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterator
 
 if TYPE_CHECKING:
     from .insight_snapshot import InsightInputs
@@ -1216,6 +1217,15 @@ def _question_response_obj(detail: Any) -> dict[str, Any] | None:
 
 
 _MIGRATIONS_VERSION = "11"
+
+# The steps each migrations version added or changed. A DB already at version N
+# runs only the steps listed for N+1 through the current version; one older than
+# that (or with no record) runs the whole chain below, which stays idempotent.
+# Re-running the whole chain on every bump took 18-27s on a 3GB DB, past the
+# desktop app's startup timeout, so list each new version's steps here.
+_UPGRADES: dict[int, tuple[Callable[[sqlite3.Connection], None], ...]] = {
+    11: (_purge_import_for_hook_sessions,),
+}
 _RAW_PAYLOAD_MAX_BYTES = 64 * 1024
 
 
@@ -1440,30 +1450,79 @@ def init_db(build_search_index: bool = True) -> None:
         ).fetchone()
         if stored and stored["value"] == _MIGRATIONS_VERSION:
             return
-        _backfill(conn)
-        # Older Event rows predate Origin; normalize them before migrations
-        # whose reconciliation policy depends on distinguishing hook/import.
-        conn.execute("UPDATE events SET origin = 'hook' WHERE origin IS NULL")
-        _recategorize_network_calls(conn)
-        _recategorize_subagents(conn)
-        _repair_claude_desktop_events(conn)
-        _recategorize_cursor_tools(conn)
-        _recategorize_web_targets(conn)
-        _recategorize_questions(conn)
-        _drop_redundant_cursor_hooks(conn)
-        _recategorize_web_search(conn)
-        _recategorize_browser_navigate_starts(conn)
-        _backfill_search_targets(conn)
-        _merge_search_into_shell(conn)
-        _dedup_cursor_subagent_starts(conn)
-        _backfill_cursor_questions(conn)
-        _recategorize_other_tools(conn)
-        _purge_import_for_hook_sessions(conn)
+        with _migrating_marker():
+            _run_migrations(conn, stored["value"] if stored else None)
         conn.execute(
             "INSERT INTO settings (key, value) VALUES ('migrations_version', ?)"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (_MIGRATIONS_VERSION,),
         )
+
+
+def _pending_upgrades(stored: str | None) -> list[Callable[[sqlite3.Connection], None]] | None:
+    """The listed steps that take a DB from ``stored`` to the current version,
+    or None when some version in between has no list (run the whole chain)."""
+    try:
+        done = int(stored) if stored is not None else None
+    except ValueError:
+        return None
+    current = int(_MIGRATIONS_VERSION)
+    if done is None or done >= current:
+        return None
+    versions = range(done + 1, current + 1)
+    if not all(v in _UPGRADES for v in versions):
+        return None
+    return [step for v in versions for step in _UPGRADES[v]]
+
+
+def _migration_marker_path() -> Path:
+    return store.path().parent / "migrating"
+
+
+@contextmanager
+def _migrating_marker():
+    """Leave ``migrating`` next to the DB while migrations run. The desktop app
+    gives a collector that shows it far longer than its usual startup timeout,
+    since stopping one mid-migration rolls the work back and repeats it."""
+    marker = _migration_marker_path()
+    try:
+        marker.write_text(str(os.getpid()))
+    except OSError:
+        pass
+    try:
+        yield
+    finally:
+        try:
+            marker.unlink()
+        except OSError:
+            pass
+
+
+def _run_migrations(conn: sqlite3.Connection, stored: str | None) -> None:
+    upgrades = _pending_upgrades(stored)
+    if upgrades is not None:
+        for step in upgrades:
+            step(conn)
+        return
+    _backfill(conn)
+    # Older Event rows predate Origin; normalize them before migrations
+    # whose reconciliation policy depends on distinguishing hook/import.
+    conn.execute("UPDATE events SET origin = 'hook' WHERE origin IS NULL")
+    _recategorize_network_calls(conn)
+    _recategorize_subagents(conn)
+    _repair_claude_desktop_events(conn)
+    _recategorize_cursor_tools(conn)
+    _recategorize_web_targets(conn)
+    _recategorize_questions(conn)
+    _drop_redundant_cursor_hooks(conn)
+    _recategorize_web_search(conn)
+    _recategorize_browser_navigate_starts(conn)
+    _backfill_search_targets(conn)
+    _merge_search_into_shell(conn)
+    _dedup_cursor_subagent_starts(conn)
+    _backfill_cursor_questions(conn)
+    _recategorize_other_tools(conn)
+    _purge_import_for_hook_sessions(conn)
 
 
 def get_setting(key: str, default: str | None = None) -> str | None:
