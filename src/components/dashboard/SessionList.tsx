@@ -109,6 +109,7 @@ export function SessionList({
                 { value: 'cursor', label: 'Cursor' },
                 { value: 'codex', label: 'Codex' },
                 { value: 'opencode', label: 'OpenCode' },
+                { value: 'hermes', label: 'Hermes' },
               ]}
             />
           </div>

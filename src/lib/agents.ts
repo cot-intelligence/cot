@@ -1,6 +1,6 @@
 import { defaultCollectorUrl } from './ports';
 
-export type AgentId = 'claude' | 'cursor' | 'codex' | 'opencode';
+export type AgentId = 'claude' | 'cursor' | 'codex' | 'opencode' | 'hermes';
 
 export interface SetupStep {
   tag: string;
@@ -50,6 +50,7 @@ export const HOOK_LABELS: Record<string, string> = {
   preCompact: 'Compaction start',
   stop: 'Session stopped',
   OpenCodeUsage: 'Model usage',
+  ModelUsage: 'Model usage',
 };
 
 export function hookLabel(name: string): string {
@@ -213,6 +214,23 @@ export const AGENTS: Agent[] = [
       'PostToolUse',
       'afterAgentResponse',
       'OpenCodeUsage',
+      'Stop',
+    ],
+    steps: [INSTALL_STEP],
+  },
+  {
+    id: 'hermes',
+    name: 'Hermes',
+    product: 'Hermes Agent',
+    tagline:
+      'Trace prompts, tool calls, subagents, and per-request usage from Hermes Agent through a local plugin, and import past sessions from its state.db.',
+    events: [
+      'SessionStart',
+      'UserPromptSubmit',
+      'PostToolUse',
+      'afterAgentResponse',
+      'ModelUsage',
+      'SubagentStart',
       'Stop',
     ],
     steps: [INSTALL_STEP],

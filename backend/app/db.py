@@ -2296,7 +2296,7 @@ def _record_event(
             (norm["cwd"], sid),
         )
 
-    if norm["source"] == "opencode" and raw.get("parent_session_id"):
+    if norm["source"] in ("opencode", "hermes") and raw.get("parent_session_id"):
         parent = str(raw["parent_session_id"])
         if parent != sid:
             conn.execute(

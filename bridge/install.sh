@@ -50,7 +50,7 @@ title() {
   else
     printf '%s\n' "cot bridge installer v${COT_VERSION}"
   fi
-  printf '%s\n\n' "hooks for Claude Code | Cursor | Codex | OpenCode"
+  printf '%s\n\n' "hooks for Claude Code | Cursor | Codex | OpenCode | Hermes"
 }
 
 section() {
@@ -285,6 +285,7 @@ if [ -z "${SELECTION}" ]; then
     printf '%s\n' "  2) cursor   Cursor        ~/.cursor/hooks.json"
     printf '%s\n' "  3) codex    Codex         ~/.codex/hooks.json"
     printf '%s\n' "  4) opencode OpenCode      ~/.config/opencode/plugins/cot.js"
+    printf '%s\n' "  5) hermes   Hermes Agent  ~/.hermes/plugins/cot/"
     echo ""
     printf "Enter names/numbers (space-separated), 'all', or 'none' [all]: "
     read -r SELECTION < /dev/tty || SELECTION=""
@@ -293,7 +294,7 @@ if [ -z "${SELECTION}" ]; then
     SELECTION="none"
     echo ""
     warn "Non-interactive shell; skipping hook setup"
-    printf '%s\n' "  Re-run with COT_AGENTS=\"claude cursor codex opencode\" to wire up hooks,"
+    printf '%s\n' "  Re-run with COT_AGENTS=\"claude cursor codex opencode hermes\" to wire up hooks,"
     printf '%s\n' "  or run: ${TARGET} install"
   fi
 fi
@@ -302,7 +303,7 @@ fi
 AGENTS=""
 case " ${SELECTION} " in
   *" none "*|*" None "*|*" NONE "*) AGENTS="" ;;
-  *" all "*|*" All "*|*" ALL "*)    AGENTS="claude cursor codex opencode" ;;
+  *" all "*|*" All "*|*" ALL "*)    AGENTS="claude cursor codex opencode hermes" ;;
   *)
     for token in ${SELECTION}; do
       case "${token}" in
@@ -310,6 +311,7 @@ case " ${SELECTION} " in
         2|cursor|Cursor|CURSOR) AGENTS="${AGENTS} cursor" ;;
         3|codex|Codex|CODEX)    AGENTS="${AGENTS} codex" ;;
         4|opencode|OpenCode|OPENCODE) AGENTS="${AGENTS} opencode" ;;
+        5|hermes|Hermes|HERMES) AGENTS="${AGENTS} hermes" ;;
       esac
     done
     ;;

@@ -14,6 +14,7 @@ export const AGENT_LABELS: Record<string, string> = {
   cursor: 'Cursor',
   codex: 'Codex',
   opencode: 'OpenCode',
+  hermes: 'Hermes',
   cowork: 'Cowork',
   // Agents that arrive over OpenTelemetry, named from their service.name.
   'gemini-cli': 'Gemini CLI',
@@ -44,6 +45,14 @@ export function AgentMark({ id, className = '', size = 14 }: { id: AgentId | str
       <svg viewBox="0 0 16 20" fill="none" className={className} style={st} aria-hidden="true">
         <path d="M12 16H4V8H12V16Z" fill="currentColor" opacity="0.25" />
         <path d="M12 4H4V16H12V4ZM16 20H0V0H16V20Z" fill="currentColor" />
+      </svg>
+    );
+  }
+  if (id === 'hermes') {
+    // Hermes Agent marks itself with the caduceus (☤) in its own CLI.
+    return (
+      <svg viewBox="0 0 16 16" className={className} style={st} aria-hidden="true">
+        <text x="8" y="12.5" textAnchor="middle" fontSize="14" fill="currentColor">☤</text>
       </svg>
     );
   }

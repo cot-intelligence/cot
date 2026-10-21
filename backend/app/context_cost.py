@@ -144,6 +144,22 @@ def memory_files(agent: str, cwd: str | None) -> list[tuple[Path, int]]:
             out += _with_imports(d / "AGENTS.md", seen)
         if agent == "cursor" and chain:
             out += _cursor_always_rules(chain[-1], seen)
+    elif agent == "hermes":
+        hermes_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+        out += _with_imports(hermes_home / "SOUL.md", seen)
+        # Hermes loads one project context type, the first it finds: the nearest
+        # .hermes.md, else the AGENTS.md chain, else CLAUDE.md, else .cursorrules.
+        cwd_dir = chain[-1:] if chain else []
+        for found in (
+            next(([f] for d in reversed(chain) for f in (d / ".hermes.md", d / "HERMES.md") if f.is_file()), []),
+            [d / "AGENTS.md" for d in chain],
+            [d / "CLAUDE.md" for d in cwd_dir],
+            [d / ".cursorrules" for d in cwd_dir],
+        ):
+            loaded = [entry for path in found for entry in _with_imports(path, seen)]
+            if loaded:
+                out += loaded
+                break
     return out
 
 

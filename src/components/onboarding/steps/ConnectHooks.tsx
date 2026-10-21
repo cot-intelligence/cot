@@ -305,6 +305,22 @@ function ManualSteps({
           </a>
         </div>
       )}
+      {agentId === 'hermes' && (
+        <div className="space-y-1 font-mono text-[0.7rem] leading-relaxed text-fg/60">
+          <span className="block text-[0.55rem] font-bold uppercase tracking-widest text-fg/40">
+            MANUAL PLUGIN
+          </span>
+          <p>
+            Save both files to ~/.hermes/plugins/cot/, run hermes plugins enable cot, then restart Hermes.
+          </p>
+          <a href="/hermes-plugin/plugin.yaml" download="plugin.yaml" className="text-cobalt underline">
+            Download plugin.yaml
+          </a>{' '}
+          <a href="/hermes-plugin/__init__.py" download="__init__.py" className="text-cobalt underline">
+            Download __init__.py
+          </a>
+        </div>
+      )}
       {fileSteps.map(
         (step) =>
           step.code &&

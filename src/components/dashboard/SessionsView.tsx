@@ -102,7 +102,7 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
   useEffect(() => {
     if (data && page > 0 && page >= pages) setPage(pages - 1);
   }, [data, page, pages]);
-  const agents = useMemo(() => [...new Set(['claude', 'cursor', 'codex', 'opencode', ...rows.map((s) => s.source)])], [rows]);
+  const agents = useMemo(() => [...new Set(['claude', 'cursor', 'codex', 'opencode', 'hermes', ...rows.map((s) => s.source)])], [rows]);
 
   const sortBy = (k: SortKey) => {
     if (sort === k) setDir((d) => (d === 'desc' ? 'asc' : 'desc'));

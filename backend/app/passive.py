@@ -26,11 +26,11 @@ from typing import Any, Callable
 
 from . import cron, db, store, timeutil
 
-AGENTS = ("claude", "cursor", "codex", "opencode")
+AGENTS = ("claude", "cursor", "codex", "opencode", "hermes")
 _HOME_ENV = {"claude": "COT_CLAUDE_HOME", "cursor": "COT_CURSOR_HOME", "codex": "COT_CODEX_HOME",
-             "opencode": "COT_OPENCODE_HOME"}
+             "opencode": "COT_OPENCODE_HOME", "hermes": "COT_HERMES_HOME"}
 _HOME_DIR = {"claude": ".claude", "cursor": ".cursor", "codex": ".codex",
-             "opencode": ".local/share/opencode"}
+             "opencode": ".local/share/opencode", "hermes": ".hermes"}
 # Same globs as the bridge's ``_discover_transcripts``.
 _GLOB = {
     "claude": "projects/**/*.jsonl",
@@ -109,6 +109,8 @@ def transcript_root(agent: str) -> Path:
         return Path(env)
     if agent == "opencode" and os.environ.get("XDG_DATA_HOME"):
         return Path(os.environ["XDG_DATA_HOME"]) / "opencode"
+    if agent == "hermes" and os.environ.get("HERMES_HOME"):
+        return Path(os.environ["HERMES_HOME"])
     return Path.home() / _HOME_DIR[agent]
 
 
@@ -136,6 +138,23 @@ def _opencode_sessions(root: Path) -> list[dict[str, Any]]:
         return _bridge()._opencode_session_index(root)  # noqa: SLF001
     except Exception:  # noqa: BLE001 - an unreadable store reads as empty
         return []
+
+
+def _hermes_sessions(root: Path) -> list[dict[str, Any]]:
+    try:
+        return _bridge()._hermes_session_index(root)  # noqa: SLF001
+    except Exception:  # noqa: BLE001 - an unreadable store reads as empty
+        return []
+
+
+def _hermes_store_bytes(root: Path) -> int:
+    total = 0
+    for name in ("state.db", "state.db-wal"):
+        try:
+            total += (root / name).stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def _opencode_store_bytes(root: Path) -> int:
@@ -197,6 +216,19 @@ def scan(agent: str) -> dict[str, Any]:
             if sess.get("directory"):
                 projects.add(sess["directory"])
         out["bytes"] = _opencode_store_bytes(resolved)
+    if agent == "hermes":
+        for sess in _hermes_sessions(resolved):
+            if sess.get("parent_session_id"):
+                continue  # subagent and compression children fold into their parent
+            updated = sess.get("updated") or 0
+            out["transcripts"] += 1
+            oldest = updated if oldest is None else min(oldest, updated)
+            newest = updated if newest is None else max(newest, updated)
+            if updated >= active_after:
+                out["active"] += 1
+            if sess.get("cwd"):
+                projects.add(sess["cwd"])
+        out["bytes"] = _hermes_store_bytes(resolved)
     for path in (resolved.glob(_GLOB[agent]) if agent in _GLOB else ()):
         try:
             st = path.stat()
@@ -260,6 +292,12 @@ def _on_disk(agent: str) -> list[tuple[str, str, float]]:
             updated = (sess.get("updated") or 0) / 1000
             if updated < quiet_before:
                 out.append((sess["id"], f"opencode:{sess['id']}", updated))
+        return out
+    if agent == "hermes":
+        for sess in _hermes_sessions(resolved):
+            updated = sess.get("updated") or 0
+            if not sess.get("parent_session_id") and updated < quiet_before:
+                out.append((sess["id"], f"hermes:{sess['id']}", updated))
         return out
     for path in resolved.glob(_GLOB[agent]):
         if path.parent.name == "subagents":

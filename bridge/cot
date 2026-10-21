@@ -375,11 +375,11 @@ def _spool_flush(timeout: float = 3.0, *, endpoint: str | None = None) -> bool:
 def _post(url: str, payload: dict) -> None:
     is_ingest = "/v1/ingest/" in url
     if is_ingest:
-        if "/v1/ingest/opencode" in url:
+        if "/v1/ingest/opencode" in url or "/v1/ingest/hermes" in url:
             # The plugin bounds subprocess lifetime. Persist before HTTP work
             # so a timeout during queue replay cannot lose the new event.
             if not _spool_append(url, payload):
-                raise OSError("Unable to persist OpenCode hook event")
+                raise OSError("Unable to persist plugin hook event")
             if _collector_reachable():
                 _spool_flush(endpoint=url.split("/v1/ingest/", 1)[0])
             return
@@ -1449,13 +1449,24 @@ def _log_launch(body: dict) -> None:
         pass
 
 
-AGENTS = ("claude", "cursor", "codex", "opencode")
+AGENTS = ("claude", "cursor", "codex", "opencode", "hermes")
 OPENCODE_EVENTS = (
     "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
     "PostToolUseFailure", "afterAgentResponse", "afterAgentThought",
     "OpenCodeUsage", "PermissionRequest", "PostCompact", "Stop",
 )
 OPENCODE_PLUGIN_MARKER = 'id: "cot.observability"'
+HERMES_EVENTS = (
+    "SessionStart", "UserPromptSubmit", "PostToolUse", "PostToolUseFailure",
+    "afterAgentResponse", "ModelUsage", "PermissionRequest", "SubagentStart",
+    "SubagentStop", "PostCompact", "Stop", "SessionEnd",
+)
+HERMES_PLUGIN_MARKER = "id: cot.observability"
+HERMES_PLUGIN_FILES = ("plugin.yaml", "__init__.py")
+
+
+def _hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
 
 # Where each agent reads its hook config, and whether it is a Cursor-style file
 # (a top-level "version" alongside "hooks") vs. a Claude/Codex-style file.
@@ -1464,6 +1475,7 @@ _CONFIG_TARGETS = {
     "cursor": (Path.home() / ".cursor" / "hooks.json", True),
     "codex": (Path.home() / ".codex" / "hooks.json", False),
     "opencode": (Path.home() / ".config" / "opencode" / "plugins" / "cot.js", False),
+    "hermes": (_hermes_home() / "plugins" / "cot" / "__init__.py", False),
 }
 
 
@@ -1671,7 +1683,168 @@ def _backup_config(agent: str, path: Path, action: str) -> dict | None:
     return entry
 
 
+def _hermes_bin() -> str | None:
+    import shutil
+    found = shutil.which("hermes")
+    if found:
+        return found
+    local = Path.home() / ".local" / "bin" / "hermes"
+    return str(local) if local.exists() else None
+
+
+def _hermes_plugin_enabled() -> bool | None:
+    """Whether ``cot`` is in config.yaml's ``plugins.enabled``; None when unknown.
+
+    A line scan rather than a YAML parser (the bridge is stdlib-only); it reads
+    the block and flow list styles Hermes itself writes."""
+    try:
+        text = (_hermes_home() / "config.yaml").read_text()
+    except OSError:
+        return None
+    section = sub = None
+    enabled: list[str] = []
+    for line in text.splitlines():
+        stripped = line.split("#", 1)[0].rstrip()
+        if not stripped.strip():
+            continue
+        indent = len(stripped) - len(stripped.lstrip())
+        if indent == 0:
+            section = "plugins" if stripped.strip() == "plugins:" else None
+            sub = None
+            continue
+        if section != "plugins":
+            continue
+        body = stripped.strip()
+        if indent == 2 and ":" in body and not body.startswith("-"):
+            key, _, rest = body.partition(":")
+            sub = key.strip()
+            rest = rest.strip()
+            if sub == "enabled" and rest.startswith("["):
+                enabled += [x.strip().strip("'\"") for x in rest.strip("[]").split(",") if x.strip()]
+            continue
+        if sub == "enabled" and body.startswith("-"):
+            enabled.append(body[1:].strip().strip("'\""))
+    return "cot" in enabled
+
+
+def _hermes_status() -> dict:
+    agent = "hermes"
+    path = _CONFIG_TARGETS[agent][0]
+    try:
+        content = path.read_text()
+    except OSError:
+        content = ""
+    copied = HERMES_PLUGIN_MARKER in content and (path.parent / "plugin.yaml").exists()
+    enabled = _hermes_plugin_enabled() if copied else False
+    installed = copied and enabled is not False
+    warnings = []
+    if not copied:
+        warnings.append("plugin_missing")
+    elif enabled is False:
+        warnings.append("plugin_disabled")
+    expected = list(HERMES_EVENTS)
+    return {
+        "agent": agent,
+        "config_path": str(path.parent),
+        "config_exists": path.exists(),
+        "valid_json": None,
+        "error": None,
+        "installed": installed,
+        "expected_hooks": expected,
+        "installed_hooks": expected if installed else [],
+        "missing_hooks": [] if installed else expected,
+        "backup_count": len(_backup_entries(agent)),
+        "latest_backup": _latest_backup(agent),
+        "warnings": warnings,
+    }
+
+
+def _hermes_install(action: str) -> dict:
+    agent = "hermes"
+    path = _CONFIG_TARGETS[agent][0]
+    if not _hermes_home().is_dir():
+        # "all" includes Hermes; don't create ~/.hermes for people without it.
+        status = _hermes_status()
+        status.update({"changed": False, "backup_created": None, "status": "ok", "skipped": True})
+        return status
+    try:
+        current = path.read_text()
+    except FileNotFoundError:
+        current = None
+    if current is not None and HERMES_PLUGIN_MARKER not in current:
+        raise ValueError(f"{path.parent} exists and is not cot's plugin; move it before installing")
+    files: dict[str, str] = {}
+    for name in HERMES_PLUGIN_FILES:
+        req = urllib.request.Request(f"{COT_ENDPOINT}/hermes-plugin/{name}")
+        with urllib.request.urlopen(req, timeout=10) as response:
+            files[name] = response.read().decode("utf-8")
+    if HERMES_PLUGIN_MARKER not in files["__init__.py"]:
+        raise ValueError("collector returned an invalid Hermes plugin")
+    changed = any(
+        not (path.parent / name).exists() or (path.parent / name).read_text() != text
+        for name, text in files.items()
+    )
+    backup = None
+    if changed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        backup = _backup_config(agent, path, action)
+        for name, text in files.items():
+            (path.parent / name).write_text(text)
+    if _hermes_plugin_enabled() is not True:
+        # Hermes loads user plugins only once they are on plugins.enabled; its
+        # own command edits config.yaml so cot never rewrites the user's YAML.
+        hermes = _hermes_bin()
+        if hermes:
+            try:
+                import subprocess
+                subprocess.run([hermes, "plugins", "enable", "cot"], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=60, check=False)
+                changed = True
+            except (OSError, subprocess.SubprocessError):
+                pass
+    status = _hermes_status()
+    status.update({"changed": changed, "backup_created": backup, "status": "ok"})
+    return status
+
+
+def _hermes_uninstall(action: str) -> dict:
+    agent = "hermes"
+    path = _CONFIG_TARGETS[agent][0]
+    try:
+        content = path.read_text()
+    except FileNotFoundError:
+        content = None
+    if content is not None and HERMES_PLUGIN_MARKER not in content:
+        return {"agent": agent, "config_path": str(path.parent), "changed": False,
+                "backup_created": None, "status": "error", "error": "plugin folder is not owned by cot"}
+    backup = None
+    if content is not None:
+        backup = _backup_config(agent, path, action)
+        hermes = _hermes_bin()
+        if hermes and _hermes_plugin_enabled():
+            try:
+                import subprocess
+                subprocess.run([hermes, "plugins", "disable", "cot"], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=60, check=False)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        for name in HERMES_PLUGIN_FILES:
+            (path.parent / name).unlink(missing_ok=True)
+        import shutil
+        shutil.rmtree(path.parent / "__pycache__", ignore_errors=True)
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass
+    return {"agent": agent, "config_path": str(path.parent), "changed": content is not None,
+            "backup_created": backup, "status": "ok"}
+
+
 def _agent_hook_status(agent: str) -> dict:
+    if agent == "hermes":
+        return _hermes_status()
     if agent == "opencode":
         path = _CONFIG_TARGETS[agent][0]
         try:
@@ -1769,6 +1942,8 @@ def _hooks_installed(agent: str) -> bool:
 
 
 def _install_agent(agent: str, action: str = "install") -> dict:
+    if agent == "hermes":
+        return _hermes_install(action)
     if agent == "opencode":
         path = _CONFIG_TARGETS[agent][0]
         try:
@@ -1821,6 +1996,8 @@ def _install_agent(agent: str, action: str = "install") -> dict:
 
 
 def _uninstall_agent(agent: str, action: str = "uninstall") -> dict:
+    if agent == "hermes":
+        return _hermes_uninstall(action)
     if agent == "opencode":
         path = _CONFIG_TARGETS[agent][0]
         try:
@@ -1905,6 +2082,9 @@ def _cmd_install(args: list[str]) -> int:
         try:
             result = _install_agent(agent, action=action)
             results.append(result)
+            if result.get("skipped"):
+                print(f"cot: {agent} not found ({result['config_path']}); skipped")
+                continue
             verb = "repaired" if repair else "wired up"
             print(f"cot: {verb} {agent} hooks -> {result['config_path']}")
             if result.get("backup_created"):
@@ -3864,6 +4044,243 @@ def _import_opencode(offsets: dict[str, int], origins: dict[str, str], *, verbos
     return posted
 
 
+# ----------------------------------------------------------------- Hermes
+# Hermes keeps every session in one SQLite file, ``state.db`` (WAL mode, shared
+# by every Hermes process). It is read in place, read-only and in short
+# statements: copying it without its -wal/-shm sidecars loses recent writes.
+_HERMES_SCHEMA_MAX = 31  # newest state.db schema this reader was written against
+
+
+def _hermes_data_root() -> Path:
+    if _import_home():
+        return _import_home() / ".hermes"
+    env = os.environ.get("COT_HERMES_HOME")
+    return Path(env) if env else _hermes_home()
+
+
+def _hermes_db_connect(path: Path):
+    import sqlite3
+    if not path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        return conn
+    except sqlite3.Error:
+        return None
+
+
+def _hermes_schema_version(conn) -> int | None:
+    try:
+        row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+        return int(row[0]) if row else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _hermes_session_index(home: Path | None = None) -> list[dict]:
+    """Local Hermes sessions, newest activity last. Messaging-gateway chats
+    (Telegram, Discord, …) carry a ``chat_id`` and have no project folder;
+    they are left out unless COT_HERMES_GATEWAY=1."""
+    conn = _hermes_db_connect((home or _hermes_data_root()) / "state.db")
+    if conn is None:
+        return []
+    try:
+        version = _hermes_schema_version(conn)
+        if version is not None and version > _HERMES_SCHEMA_MAX:
+            print(f"cot import: hermes state.db schema {version} is newer than {_HERMES_SCHEMA_MAX};"
+                  " reading the columns cot knows", file=sys.stderr)
+        gateway = os.environ.get("COT_HERMES_GATEWAY") in ("1", "true", "yes")
+        rows = conn.execute(
+            "SELECT s.id, s.source, s.chat_id, s.model, s.parent_session_id, s.started_at,"
+            " s.ended_at, s.end_reason, s.title, s.cwd,"
+            " COALESCE(s.last_activity_at, s.ended_at, s.started_at) AS updated,"
+            " (SELECT MAX(m.id) FROM messages m WHERE m.session_id = s.id) AS last_message,"
+            " (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS messages"
+            " FROM sessions s ORDER BY updated"
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - an unreadable store reads as empty
+        return []
+    finally:
+        conn.close()
+    return [dict(r) for r in rows if gateway or not r["chat_id"]]
+
+
+def _hermes_messages(home: Path, sid: str) -> list[dict]:
+    conn = _hermes_db_connect(home / "state.db")
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE session_id = ? AND active = 1 ORDER BY timestamp, id", (sid,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        conn.close()
+
+
+def _hermes_model_usage(home: Path, sid: str) -> list[dict]:
+    conn = _hermes_db_connect(home / "state.db")
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute("SELECT * FROM session_model_usage WHERE session_id = ?", (sid,)).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:  # noqa: BLE001 - table predates schema v20-something
+        return []
+    finally:
+        conn.close()
+
+
+def _hermes_ts(value: object) -> str | None:
+    if isinstance(value, (int, float)) and value > 0:
+        return datetime.fromtimestamp(value, timezone.utc).isoformat()
+    return None
+
+
+def _hermes_json(value: object) -> object:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _hermes_tool_failed(tool: str | None, result: object) -> bool:
+    # Mirrors Hermes's own observer rule: a JSON result with ``error`` failed,
+    # and a terminal run failed when it exited non-zero.
+    parsed = _hermes_json(result)
+    if not isinstance(parsed, dict):
+        return False
+    if parsed.get("error"):
+        return True
+    code = parsed.get("exit_code")
+    return tool == "terminal" and isinstance(code, int) and code != 0
+
+
+def _hermes_session_payloads(session: dict, messages: list[dict], usage: list[dict]) -> list[dict]:
+    """Plugin-shaped hook payloads for one Hermes session, oldest first."""
+    sid = session["id"]
+    cwd = session.get("cwd")
+    out: list[dict] = []
+
+    def add(hook: str, ts: object, key: str, **fields) -> None:
+        out.append({
+            "session_id": sid, "hook_event_name": hook, "origin": "import", "_import": True,
+            "cwd": cwd, "timestamp": _hermes_ts(ts) or _hermes_ts(session.get("started_at")),
+            "_dedup_key": f"hermes:{sid}:{key}", **{k: v for k, v in fields.items() if v is not None},
+        })
+
+    # Hermes stamps the first message a moment before the session row's
+    # started_at; start the session no later than its first message.
+    first = min((m["timestamp"] for m in messages if isinstance(m.get("timestamp"), (int, float))), default=None)
+    started = session.get("started_at")
+    if first is not None and (not isinstance(started, (int, float)) or first < started):
+        started = first
+    add("SessionStart", started, "session", model=session.get("model"),
+        platform=session.get("source"), session_title=session.get("title"),
+        parent_session_id=session.get("parent_session_id"))
+    calls: dict[str, dict] = {}
+    for m in messages:
+        role, ts, mid = m.get("role"), m.get("timestamp"), m.get("message_uid") or m.get("id")
+        content = m.get("content")
+        if role == "user":
+            if isinstance(content, str) and content.strip():
+                add("UserPromptSubmit", ts, f"prompt:{mid}", prompt=content)
+            continue
+        if role == "assistant":
+            thought = m.get("reasoning") or m.get("reasoning_content")
+            if isinstance(thought, str) and thought.strip():
+                add("afterAgentThought", ts, f"thought:{mid}", thought=thought)
+            uids = _hermes_json(m.get("tool_call_uids")) or {}
+            tool_calls = _hermes_json(m.get("tool_calls"))
+            for call in tool_calls if isinstance(tool_calls, list) else []:
+                fn = call.get("function") or {}
+                call_id = call.get("id") or ""
+                uid = (uids.get(call_id) if isinstance(uids, dict) else None) or call_id
+                args = _hermes_json(fn.get("arguments"))
+                calls[uid] = calls[call_id] = {"tool": fn.get("name"), "input": args if isinstance(args, dict) else {"args": args}}
+                add("PreToolUse", ts, f"tool:start:{uid}", tool_name=fn.get("name"),
+                    tool_input=calls[uid]["input"], tool_use_id=call_id)
+            if isinstance(content, str) and content.strip():
+                add("afterAgentResponse", ts, f"response:{mid}", response=content,
+                    model=session.get("model"))
+            continue
+        if role == "tool":
+            uid = m.get("tool_call_uid") or m.get("tool_call_id") or str(mid)
+            call = calls.get(uid) or calls.get(m.get("tool_call_id") or "") or {}
+            tool = m.get("tool_name") or call.get("tool")
+            failed = _hermes_tool_failed(tool, content)
+            add("PostToolUseFailure" if failed else "PostToolUse", ts, f"tool:end:{uid}",
+                tool_name=tool, tool_input=call.get("input") or {}, tool_response=content,
+                tool_use_id=m.get("tool_call_id"))
+    end_ts = session.get("ended_at")
+    for row in usage:
+        add("ModelUsage", row.get("last_seen") or end_ts or session.get("updated"),
+            f"usage:{row.get('model')}:{row.get('task') or ''}", model=row.get("model"), usage={
+                "input_tokens": row.get("input_tokens") or 0, "output_tokens": row.get("output_tokens") or 0,
+                "cache_read_tokens": row.get("cache_read_tokens") or 0,
+                "cache_write_tokens": row.get("cache_write_tokens") or 0,
+                "reasoning_tokens": row.get("reasoning_tokens") or 0,
+            })
+    if end_ts:
+        add("SessionEnd", end_ts, "session:end", reason=session.get("end_reason"))
+    return out
+
+
+def _import_hermes(offsets: dict[str, int], origins: dict[str, str], *, verbose: bool = True,
+                   skip_active_s: float = 0, held_back: list[str] | None = None) -> int:
+    """Import Hermes sessions changed since the last pass. ``offsets`` holds the
+    newest message id each session had when it was last imported."""
+    home = _hermes_data_root()
+    try:
+        home.resolve(strict=True).relative_to((_import_home() or Path.home()).resolve(strict=True))
+    except (OSError, ValueError):
+        if verbose:
+            print("cot import: no hermes data found", file=sys.stderr)
+        return 0
+    sessions = _hermes_session_index(home)
+    # ``origins`` was read when the whole import began; a session the plugin
+    # started capturing since then must not be imported over its live events.
+    origins = {**origins, **_fetch_session_origins()}
+    progress = bool(os.environ.get("COT_IMPORT_PROGRESS"))
+    weights = [max(1, s.get("messages") or 0) for s in sessions]
+    total_w = sum(weights)
+    now = time.time()
+    posted = 0
+    for done, s in enumerate(sessions):
+        if progress:
+            print(f"cot-progress hermes {done} {len(sessions)} {sum(weights[:done])} {total_w}",
+                  file=sys.stderr, flush=True)
+        key = f"hermes:{s['id']}"
+        mark = int(s.get("last_message") or 0) * 2 + (1 if s.get("ended_at") else 0)
+        if origins.get(s["id"]) == "hook" or offsets.get(key) == mark:
+            continue
+        updated = s.get("updated") or 0
+        if skip_active_s and not s.get("ended_at") and updated and now - updated < skip_active_s:
+            if held_back is not None:
+                held_back.append(key)
+            continue
+        payloads = _hermes_session_payloads(s, _hermes_messages(home, s["id"]),
+                                            _hermes_model_usage(home, s["id"]))
+        if verbose:
+            print(f"cot import: hermes {s['id']} ({len(payloads)} events)")
+        url = f"{COT_ENDPOINT}/v1/ingest/hermes"
+        for payload in payloads:
+            if not _send_once(url, payload, timeout=10):
+                _spool_append(url, payload)
+            posted += 1
+        offsets[key] = mark
+    if progress:
+        print(f"cot-progress hermes {len(sessions)} {len(sessions)} {total_w} {total_w}",
+              file=sys.stderr, flush=True)
+    return posted
+
+
 def _fetch_session_origins() -> dict[str, str]:
     try:
         req = urllib.request.Request(
@@ -3889,6 +4306,9 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
     if agent == "opencode":
         return _import_opencode(offsets, origins, verbose=verbose,
                                 skip_active_s=skip_active_s, held_back=held_back)
+    if agent == "hermes":
+        return _import_hermes(offsets, origins, verbose=verbose,
+                              skip_active_s=skip_active_s, held_back=held_back)
     transcripts = _discover_transcripts(agent)
     now_ts = time.time()
     if verbose and not transcripts:
@@ -4050,7 +4470,7 @@ def _cmd_import(args: list[str]) -> int:
     import argparse
     parser = argparse.ArgumentParser(prog="cot import",
                                      description="Import historical agent transcripts")
-    parser.add_argument("--agent", action="append", choices=["claude", "cursor", "codex", "opencode"],
+    parser.add_argument("--agent", action="append", choices=["claude", "cursor", "codex", "opencode", "hermes"],
                         help="Agent(s) to import (default: all)")
     parser.add_argument("--since", help="Only import transcripts modified after YYYY-MM-DD")
     parser.add_argument("--report", action="store_true",
@@ -4060,7 +4480,7 @@ def _cmd_import(args: list[str]) -> int:
                              "(sessions still in progress)")
     parsed = parser.parse_args(args)
 
-    agents = parsed.agent or ["claude", "cursor", "codex", "opencode"]
+    agents = parsed.agent or ["claude", "cursor", "codex", "opencode", "hermes"]
     _reindex_if_parser_changed()
     origins = _fetch_session_origins()
     offsets = _import_offsets_load()
@@ -4558,7 +4978,7 @@ _MCP_TOOLS: dict[str, tuple[dict, object]] = {
         "description": "List recent coding-agent sessions cot recorded (Claude Code, Cursor, Codex, OpenCode), newest first, with title, project, duration, tokens, cost and the person's rating.",
         "inputSchema": {"type": "object", "properties": {
             "days": {**_MCP_INT, "description": "Only sessions active in the last N days (default 7, 0 = any time)."},
-            "agent": {"type": "string", "enum": ["claude", "cursor", "codex", "opencode"]},
+            "agent": {"type": "string", "enum": ["claude", "cursor", "codex", "opencode", "hermes"]},
             "project": {**_MCP_STR, "description": "Project name: the last segment of the working directory."},
             "query": {**_MCP_STR, "description": "Text in the session id, path or first prompt."},
             "rating": {"type": "string", "enum": ["up", "down"], "description": "Only sessions the person rated this way."},
@@ -4587,7 +5007,7 @@ _MCP_TOOLS: dict[str, tuple[dict, object]] = {
         "description": "What the fixed part of every prompt is made of per agent (memory files, skill listing, MCP tool definitions), with MCP servers and skills that were loaded but never used.",
         "inputSchema": {"type": "object", "properties": {
             "days": {**_MCP_INT, "description": "Window in days (default 30, 0 = all time)."},
-            "agent": {"type": "string", "enum": ["claude", "cursor", "codex", "opencode"]},
+            "agent": {"type": "string", "enum": ["claude", "cursor", "codex", "opencode", "hermes"]},
             "project": {**_MCP_STR, "description": "Exact working directory."},
         }},
     }, _mcp_context),
@@ -4596,7 +5016,7 @@ _MCP_TOOLS: dict[str, tuple[dict, object]] = {
         "inputSchema": {"type": "object", "required": ["category"], "properties": {
             "category": {"type": "string", "enum": ["shell", "web", "mcp", "skill"]},
             "days": {**_MCP_INT, "description": "Window in days (default 7, 0 = all time)."},
-            "agent": {"type": "string", "enum": ["claude", "cursor", "codex", "opencode"]},
+            "agent": {"type": "string", "enum": ["claude", "cursor", "codex", "opencode", "hermes"]},
             "project": {**_MCP_STR, "description": "Exact working directory."},
         }},
     }, _mcp_activity),
@@ -4724,8 +5144,8 @@ def main() -> int:
     if len(sys.argv) < 3 or sys.argv[1] != "hook":
         print(
             "Usage:\n"
-            "  cot hook <claude|cursor|codex|opencode>   # reads a hook payload from stdin\n"
-            "  cot install [claude cursor codex opencode]  # wire up agent integrations\n"
+            "  cot hook <claude|cursor|codex|opencode|hermes>  # reads a hook payload from stdin\n"
+            "  cot install [claude cursor codex opencode hermes]  # wire up agent integrations\n"
             "  cot import [--agent X] [--since]   # import historical transcripts\n"
             "  cot reimport                       # wipe + re-import all transcripts\n"
             "  cot recover-questions              # fill AskQuestion answers from transcripts\n"

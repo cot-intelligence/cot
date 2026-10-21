@@ -26,6 +26,14 @@ export function AgentMark({ id, className = '', variant = '2d' }: AgentMarkProps
       </svg>
     );
   }
+  if (id === 'hermes') {
+    // Hermes Agent marks itself with the caduceus (☤) in its own CLI.
+    return (
+      <svg viewBox="0 0 16 16" className={className} aria-hidden="true">
+        <text x="8" y="12.5" textAnchor="middle" fontSize="14" fill="currentColor">☤</text>
+      </svg>
+    );
+  }
   if (id === 'claude') {
     return (
       <svg
