@@ -1143,13 +1143,17 @@ def _purge_import_for_hook_sessions(conn: sqlite3.Connection) -> None:
     timestamps mixed with real ones. Live hook data is authoritative (real
     timestamps, proper Pre/Post pairs), so drop the imported approximation for
     any session that has hook events, then reset that session's bounds to the
-    surviving (real) events."""
+    surviving (real) events.
+
+    Cursor is left alone: its importer adds subagent responses and no-hook
+    tools to hooked sessions on purpose (see ``_import_shadows_hooks``)."""
     affected = [
         r["session_id"]
         for r in conn.execute(
-            "SELECT session_id FROM events GROUP BY session_id"
-            " HAVING SUM(CASE WHEN origin = 'hook' OR origin IS NULL THEN 1 ELSE 0 END) > 0"
-            "    AND SUM(CASE WHEN origin = 'import' THEN 1 ELSE 0 END) > 0"
+            "SELECT i.session_id FROM (SELECT DISTINCT session_id FROM events"
+            "   WHERE origin = 'import' AND source != 'cursor') i"
+            " WHERE EXISTS (SELECT 1 FROM events h WHERE h.session_id = i.session_id"
+            "               AND (h.origin = 'hook' OR h.origin IS NULL))"
         ).fetchall()
     ]
     if not affected:
@@ -1211,7 +1215,7 @@ def _question_response_obj(detail: Any) -> dict[str, Any] | None:
     return obj if isinstance(obj, dict) else None
 
 
-_MIGRATIONS_VERSION = "10"
+_MIGRATIONS_VERSION = "11"
 _RAW_PAYLOAD_MAX_BYTES = 64 * 1024
 
 
@@ -1410,6 +1414,7 @@ def init_db(build_search_index: bool = True) -> None:
     """``build_search_index=False`` leaves a first-time index build to
     :func:`ensure_search_index`; the server runs that after it starts, because
     on a large DB the build outlasts the desktop app's startup timeout."""
+    _import_only_sessions.clear()
     with store.write() as conn:
         for statement in SCHEMA.split(";"):
             if statement.strip():
@@ -2170,6 +2175,41 @@ def record_ingests(items: list[tuple[str, dict[str, Any]]]) -> list[dict[str, An
     return results
 
 
+# Sessions found to hold no live hook rows, so the guard below costs one query
+# per session rather than one per event of a large imported transcript. A hook
+# row landing for the session drops it from the set.
+_import_only_sessions: set[str] = set()
+
+
+def _import_shadows_hooks(
+    conn: sqlite3.Connection, norm: dict[str, Any], raw: dict[str, Any]
+) -> bool:
+    """Whether an imported event would duplicate a session captured live.
+
+    Hooks and the transcript importer each record every tool call, with their
+    own dedup keys, so a transcript imported over a hooked session stores
+    every call twice. The bridge skips hooked sessions using
+    ``/v1/sessions/origins``, but when that read fails (a cold read of a large
+    DB outlasts its timeout) it imports everything; this keeps the store
+    right regardless. Hook rows already purge imported ones as they arrive
+    (``_record_event``); this covers an import landing after the last hook.
+
+    Cursor is exempt: its importer deliberately adds subagent responses and
+    tools that never fire hooks to hooked sessions, and filters the rest."""
+    if not raw.get("_import") or norm["source"] == "cursor":
+        return False
+    sid = norm["session_id"]
+    if sid in _import_only_sessions:
+        return False
+    hooked = conn.execute(
+        "SELECT 1 FROM events WHERE session_id = ? AND origin = 'hook' LIMIT 1",
+        (sid,),
+    ).fetchone() is not None
+    if not hooked:
+        _import_only_sessions.add(sid)
+    return hooked
+
+
 def _record_ingest(conn: sqlite3.Connection, source: str, raw: dict[str, Any]) -> dict[str, Any]:
     raw_id = _append_raw_ingest(
         conn, source, raw, origin="import" if raw.get("_import") else "hook"
@@ -2177,7 +2217,7 @@ def _record_ingest(conn: sqlite3.Connection, source: str, raw: dict[str, Any]) -
     conn.execute("SAVEPOINT project_event")
     try:
         norm = normalize(source, raw)
-        if should_ignore_event(norm, raw):
+        if should_ignore_event(norm, raw) or _import_shadows_hooks(conn, norm, raw):
             conn.execute("RELEASE project_event")
             _mark_raw_ingest(conn, raw_id, "ignored")
             return {
@@ -2347,6 +2387,7 @@ def _record_event(
     # had also ingested (timing race), drop the imported approximation and
     # reset the session's start to the real events. No-op after the first.
     if origin == "hook":
+        _import_only_sessions.discard(sid)
         purged = conn.execute(
             "DELETE FROM events WHERE session_id = ? AND origin = 'import'", (sid,)
         ).rowcount
