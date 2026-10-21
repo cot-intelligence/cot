@@ -293,6 +293,11 @@ def _build_search_index() -> None:
         insights.warm_shared_insights(30)
     except Exception:  # noqa: BLE001 - the first request computes it instead
         pass
+    # Last, so it never delays a read: a one-time batched pass on existing DBs.
+    try:
+        db.prune_import_raw_payloads()
+    except sqlite3.Error:
+        pass  # resumes next start
 
 
 # A findings pass is seconds of pure-Python work, and every SQLite call drops
