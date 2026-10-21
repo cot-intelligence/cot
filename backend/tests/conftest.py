@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# Tests start the app; never watch the real transcript folders from them.
+os.environ.setdefault("COT_PASSIVE_WATCH", "0")
 
 
 BACKEND = Path(__file__).resolve().parents[1]

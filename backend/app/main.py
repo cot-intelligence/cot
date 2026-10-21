@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field
 
 from . import (
     __version__, activity, ai_insights, context_cost, cron, db, extension_usage, insights, otlp,
-    passive, rule_drafts, session_markdown, store, timeutil, user_rules,
+    passive, rule_drafts, session_markdown, store, timeutil, user_rules, watch,
 )
 
 app = FastAPI(title="cot collector", version=__version__)
@@ -318,6 +318,9 @@ async def _startup() -> None:
     # and degrades silently when offline/air-gapped.
     asyncio.create_task(_telemetry_loop())
     passive.start_scheduler()
+    # Watching sets up an FSEvents/inotify stream per transcript folder (inotify
+    # walks the tree), so it starts off the startup path too.
+    threading.Thread(target=watch.start, name="transcript-watch-start", daemon=True).start()
 
 
 @app.get("/health")
@@ -1379,8 +1382,16 @@ def get_drift_report() -> dict[str, Any]:
 
 
 @app.post("/v1/sessions/complete-imported")
-def complete_imported_sessions() -> dict[str, Any]:
-    return db.complete_imported_sessions()
+async def complete_imported_sessions(request: Request) -> dict[str, Any]:
+    """``{"quiet_seconds": N}`` closes only sessions quiet that long; an older
+    bridge sends ``{}`` and closes every import-only active session."""
+    try:
+        body = json.loads(await request.body() or b"{}")
+    except ValueError:
+        body = {}
+    quiet = body.get("quiet_seconds") if isinstance(body, dict) else None
+    quiet = float(quiet) if isinstance(quiet, (int, float)) and quiet > 0 else None
+    return await asyncio.to_thread(db.complete_imported_sessions, quiet)
 
 
 @app.post("/v1/import/reset")

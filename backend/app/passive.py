@@ -460,10 +460,12 @@ def _ingest(url: str, body: dict[str, Any] | list[dict[str, Any]]) -> None:
         on_ingest(result.get("session_id"))
 
 
-def _import_agent(agent: str) -> dict[str, int]:
+def _import_agent(agent: str, *, hold_back: bool = True, progress: bool = True) -> dict[str, int]:
     """Import one agent's transcripts in this process, with the bridge's own
     parsers, writing events straight to the store. Transcripts of sessions
-    still in progress are held back. Returns events stored and how many
+    still in progress are held back unless ``hold_back`` is off (the watcher,
+    which imports them as they're written). Either way only sessions quiet for
+    ACTIVE_WINDOW_MIN are marked completed. Returns events stored and how many
     transcripts were held back.
 
     The bridge still reaches this collector over HTTP for the few per-pass
@@ -474,10 +476,11 @@ def _import_agent(agent: str) -> dict[str, int]:
     bridge = _load_bridge()
     bridge.COT_ENDPOINT = self_url
     bridge._INGEST_SINK = _ingest  # noqa: SLF001
-    bridge._PROGRESS_SINK = _set_progress  # noqa: SLF001
+    bridge._PROGRESS_SINK = _set_progress if progress else (lambda *_: None)  # noqa: SLF001
     try:
         posted, held_back = bridge._run_import(  # noqa: SLF001
-            [agent], skip_active_s=ACTIVE_WINDOW_MIN * 60, verbose=False
+            [agent], skip_active_s=ACTIVE_WINDOW_MIN * 60 if hold_back else 0, verbose=False,
+            complete_quiet_s=ACTIVE_WINDOW_MIN * 60,
         )
     finally:
         bridge._INGEST_SINK = None  # noqa: SLF001
@@ -569,6 +572,24 @@ def run(
         _state["running"] = False
         _lock.release()
     return {"id": run_id, "trigger": trigger, "started_at": started, "finished_at": finished, "status": status, **detail}
+
+
+def import_now(agents: list[str]) -> bool:
+    """Import ``agents`` straight away, live sessions included, without the
+    analysis pass or a run record: the file watcher's path. False when another
+    pass holds the lock (the caller retries)."""
+    if not _lock.acquire(blocking=False):
+        return False
+    try:
+        for agent in agents:
+            try:
+                _import_agent(agent, hold_back=False, progress=False)
+            except Exception:  # noqa: BLE001 - one agent failing shouldn't stop the rest
+                pass
+        _pending_cache.clear()
+    finally:
+        _lock.release()
+    return True
 
 
 def run_in_background(trigger: str = "manual") -> bool:
