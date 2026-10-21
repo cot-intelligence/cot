@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { TimelineItem } from '../../../lib/api';
 import { START_ID, buildFlow, mainPaths, type FlowGraph, type FlowMode, type FlowNode } from '../../../lib/flowGraph';
-import { layoutFlow, truncateLabel, type FlowLayout } from '../../../lib/flowLayout';
+import { layoutFlow, truncateLabel, type FlowDirection, type FlowLayout } from '../../../lib/flowLayout';
 import { eventKey } from '../../../lib/sessionView';
 import { CATEGORY_ICON, Icon } from '../../forest/icons';
 
@@ -40,6 +40,7 @@ export const NEUTRAL = { tile: 'bg-fg/[0.06]', text: 'text-fg/55' };
 export const KIND_ICON: Record<string, string> = { skill: 'layers', context: 'file' };
 
 const MODE_KEY = 'cot.flowMap.mode';
+const DIRECTION_KEY = 'cot.flowMap.direction';
 const PAD = 16;
 const MIN_K = 0.15;
 const MAX_K = 2;
@@ -47,6 +48,14 @@ const MAX_K = 2;
 const COMPACT_K = 0.55;
 
 type View = { x: number; y: number; k: number };
+
+function readDirection(): FlowDirection {
+  try {
+    return localStorage.getItem(DIRECTION_KEY) === 'RIGHT' ? 'RIGHT' : 'DOWN';
+  } catch {
+    return 'DOWN';
+  }
+}
 
 function readMode(): FlowMode {
   try {
@@ -61,15 +70,22 @@ function readMode(): FlowMode {
 const READABLE_K = 0.72;
 
 /** Fit to the canvas when the graph is readable at that size; otherwise stay
- *  readable, with Start centred at the top. */
-function fitView(layout: FlowLayout, w: number, h: number): View {
+ *  readable and open at Start: centred across the top when the run flows down,
+ *  at the left edge, centred vertically, when it flows right. */
+function fitView(layout: FlowLayout, w: number, h: number, direction: FlowDirection): View {
   const fitK = Math.min(1, (w - PAD * 2) / Math.max(layout.width, 1), (h - PAD * 2) / Math.max(layout.height, 1));
   const k = Math.max(fitK, READABLE_K);
   const start = layout.nodes.get(START_ID);
-  const x =
-    layout.width * k <= w - PAD * 2 || !start ? (w - layout.width * k) / 2 : w / 2 - (start.x + start.width / 2) * k;
-  const y = layout.height * k < h ? (h - layout.height * k) / 2 : PAD;
-  return { x, y, k };
+  const fitsW = layout.width * k <= w - PAD * 2;
+  const fitsH = layout.height * k <= h - PAD * 2;
+  const centreX = (w - layout.width * k) / 2;
+  const centreY = (h - layout.height * k) / 2;
+  if (direction === 'RIGHT') {
+    const y = fitsH || !start ? centreY : h / 2 - (start.y + start.height / 2) * k;
+    return { x: fitsW ? centreX : PAD, y, k };
+  }
+  const x = fitsW || !start ? centreX : w / 2 - (start.x + start.width / 2) * k;
+  return { x, y: fitsH ? centreY : PAD, k };
 }
 
 /** An orthogonal ELK route with its corners rounded off. */
@@ -102,12 +118,15 @@ export function FlowMap({
   hint = 'Click a step to select it; click again for its next event.',
 }: FlowMapProps) {
   const [mode, setMode] = useState<FlowMode>(readMode);
+  // Expanded can run either way; Aggregated always flows down, where its loops read best.
+  const [expandedDirection, setExpandedDirection] = useState<FlowDirection>(readDirection);
+  const direction: FlowDirection = mode === 'expanded' ? expandedDirection : 'DOWN';
   // Aggregated graphs show their main paths unless asked for every transition.
   const [allPaths, setAllPaths] = useState(false);
   const full = useMemo(() => buildFlow(items, mode), [items, mode]);
   const graph = useMemo(() => (mode === 'aggregated' && !allPaths ? mainPaths(full) : full), [full, mode, allPaths]);
   const hiddenPaths = full.edges.length - graph.edges.length;
-  const [placed, setPlaced] = useState<{ graph: FlowGraph; layout: FlowLayout } | null>(null);
+  const [placed, setPlaced] = useState<{ graph: FlowGraph; layout: FlowLayout; direction: FlowDirection } | null>(null);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
   // Per-node step position for when the selection lives elsewhere: repeated
@@ -115,14 +134,29 @@ export function FlowMap({
   const [cursor, setCursor] = useState<{ id: string; index: number } | null>(null);
   const [hovered, setHovered] = useState<string | null>(null);
   const [compact, setCompact] = useState(false);
+  // Full screen is an overlay over the app window, not the browser's
+  // fullscreen API, which the desktop app's webview may not grant.
+  const [fullScreen, setFullScreen] = useState(false);
   const markerId = useId();
 
   const canvasRef = useRef<HTMLDivElement>(null);
+  const directionRef = useRef(direction);
+  directionRef.current = direction;
   const worldRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<View>({ x: 0, y: 0, k: 1 });
   // The user's last pan/zoom. Without one, the graph re-fits on every layout or resize.
   const overrideRef = useRef(false);
   const sizeRef = useRef({ w: 0, h: 0 });
+
+  const changeDirection = (next: FlowDirection) => {
+    setExpandedDirection(next);
+    overrideRef.current = false;
+    try {
+      localStorage.setItem(DIRECTION_KEY, next);
+    } catch {
+      /* per-viewer convenience only */
+    }
+  };
 
   const changeMode = (next: FlowMode) => {
     setMode(next);
@@ -141,17 +175,17 @@ export function FlowMap({
       return;
     }
     let live = true;
-    layoutFlow(graph)
+    layoutFlow(graph, direction)
       .then((layout) => {
         if (!live) return;
         setFailed(false);
-        setPlaced({ graph, layout });
+        setPlaced({ graph, layout, direction });
       })
       .catch(() => live && setFailed(true));
     return () => {
       live = false;
     };
-  }, [graph, mode, attempt]);
+  }, [graph, direction, attempt]);
 
   // Pan/zoom write the transform straight to the DOM; React only hears about the
   // label threshold.
@@ -163,7 +197,7 @@ export function FlowMap({
 
   const fit = useCallback(() => {
     const { w, h } = sizeRef.current;
-    if (placed && w) applyView(fitView(placed.layout, w, h));
+    if (placed && w) applyView(fitView(placed.layout, w, h, placed.direction));
   }, [placed, applyView]);
 
   useEffect(() => {
@@ -202,8 +236,11 @@ export function FlowMap({
         zoomAt(Math.exp(-e.deltaY * 0.01), e.clientX - r.left, e.clientY - r.top);
       } else {
         const v = viewRef.current;
+        // A plain mouse wheel only scrolls vertically; on a run that flows
+        // right, turn it into travel along the run.
+        const along = directionRef.current === 'RIGHT' && !e.shiftKey && Math.abs(e.deltaX) < Math.abs(e.deltaY);
         overrideRef.current = true;
-        applyView({ ...v, x: v.x - e.deltaX, y: v.y - e.deltaY });
+        applyView(along ? { ...v, x: v.x - e.deltaY } : { ...v, x: v.x - e.deltaX, y: v.y - e.deltaY });
       }
     };
     el.addEventListener('wheel', onWheel, { passive: false });
@@ -233,6 +270,25 @@ export function FlowMap({
     drag.current = null;
   };
 
+  const toggleFull = useCallback(() => {
+    overrideRef.current = false;
+    setFullScreen((v) => !v);
+  }, []);
+
+  useEffect(() => {
+    if (!fullScreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') toggleFull();
+    };
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = overflow;
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [fullScreen, toggleFull]);
+
   const zoomCentre = (factor: number) => zoomAt(factor, sizeRef.current.w / 2, sizeRef.current.h / 2);
   const refit = () => {
     overrideRef.current = false;
@@ -254,6 +310,25 @@ export function FlowMap({
     return cursor?.id === node.id ? cursor.index : -1;
   };
   const focus = hovered ?? selected;
+
+  // Bring the selected step into view when it was picked elsewhere (the tree,
+  // search) and sits off screen. Instant: selection follows the keyboard.
+  useEffect(() => {
+    const box = selected ? placed?.layout.nodes.get(selected) : null;
+    const { w, h } = sizeRef.current;
+    if (!box || !w) return;
+    const v = viewRef.current;
+    const left = v.x + box.x * v.k;
+    const top = v.y + box.y * v.k;
+    const inside = left >= 0 && top >= 0 && left + box.width * v.k <= w && top + box.height * v.k <= h;
+    if (inside) return;
+    overrideRef.current = true;
+    applyView({
+      ...v,
+      x: w / 2 - (box.x + box.width / 2) * v.k,
+      y: h / 2 - (box.y + box.height / 2) * v.k,
+    });
+  }, [selected, placed, applyView]);
 
   const neighbours = useMemo(() => {
     if (!hovered || !shown) return null;
@@ -284,7 +359,12 @@ export function FlowMap({
   const truncated = mode === 'expanded' ? graph.truncated : 0;
 
   return (
-    <div className={`flex min-h-0 flex-col gap-2 ${className}`}>
+    <div
+      className={`flex min-h-0 flex-col gap-2 ${fullScreen ? 'fixed inset-0 z-50 bg-bg p-4' : className}`}
+      role={fullScreen ? 'dialog' : undefined}
+      aria-modal={fullScreen || undefined}
+      aria-label={fullScreen ? 'Flow graph' : undefined}
+    >
       <div className="flex items-center gap-2">
         <div className="seg" role="tablist" aria-label="Graph view">
           {(['aggregated', 'expanded'] as const).map((m) => (
@@ -301,11 +381,34 @@ export function FlowMap({
             </button>
           ))}
         </div>
+        {mode === 'expanded' && (
+          <div className="seg" role="radiogroup" aria-label="Graph direction">
+            {(
+              [
+                { d: 'DOWN', label: 'Top to bottom', rotate: 'rotate-90' },
+                { d: 'RIGHT', label: 'Left to right', rotate: '' },
+              ] as const
+            ).map(({ d, label, rotate }) => (
+              <button
+                key={d}
+                type="button"
+                role="radio"
+                aria-checked={expandedDirection === d}
+                aria-pressed={expandedDirection === d}
+                aria-label={label}
+                title={label}
+                onClick={() => changeDirection(d)}
+                className="seg-item flex h-7 w-7 items-center justify-center px-0 py-0"
+              >
+                <Icon name="arrow" size={14} className={rotate} />
+              </button>
+            ))}
+          </div>
+        )}
         <div className="ml-auto flex items-center gap-0.5">
           {[
             { icon: 'minus', title: 'Zoom out', run: () => zoomCentre(1 / 1.25) },
             { icon: 'plus', title: 'Zoom in', run: () => zoomCentre(1.25) },
-            { icon: 'fit', title: 'Fit to view', run: refit },
           ].map((b) => (
             <button
               key={b.title}
@@ -318,6 +421,25 @@ export function FlowMap({
               <Icon name={b.icon} size={14} />
             </button>
           ))}
+          <button
+            type="button"
+            title="Fit the graph to the view"
+            onClick={refit}
+            className="btn-ghost focus-ring h-7 px-2 text-data"
+          >
+            Fit
+          </button>
+          <span className="mx-1 h-4 w-px bg-line/15" aria-hidden />
+          <button
+            type="button"
+            title={fullScreen ? 'Exit full screen (Esc)' : 'Full screen'}
+            aria-label={fullScreen ? 'Exit full screen' : 'Full screen'}
+            aria-pressed={fullScreen}
+            onClick={toggleFull}
+            className="btn-ghost focus-ring h-7 w-7 px-0"
+          >
+            <Icon name={fullScreen ? 'shrink' : 'expand'} size={14} />
+          </button>
         </div>
       </div>
 

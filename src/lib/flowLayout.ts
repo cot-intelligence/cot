@@ -7,6 +7,9 @@ import type { FlowGraph } from './flowGraph';
  * a web worker so a large session never blocks the transcript.
  */
 
+/** DOWN: top to bottom. RIGHT: left to right, Langfuse's expanded view. */
+export type FlowDirection = 'DOWN' | 'RIGHT';
+
 export interface PlacedNode {
   id: string;
   x: number;
@@ -70,13 +73,12 @@ function getElk(): Promise<ELK> {
   return elk;
 }
 
-/** Top to bottom in both modes: the graph sits in a column beside the tree. */
-export async function layoutFlow(graph: FlowGraph): Promise<FlowLayout> {
+export async function layoutFlow(graph: FlowGraph, direction: FlowDirection = 'DOWN'): Promise<FlowLayout> {
   const root: ElkNode = {
     id: 'root',
     layoutOptions: {
       ...LAYOUT_OPTIONS,
-      'elk.direction': 'DOWN',
+      'elk.direction': direction,
       'elk.padding': '[top=8,left=8,bottom=8,right=8]',
     },
     children: graph.nodes.map((n) => ({
