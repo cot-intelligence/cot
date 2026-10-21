@@ -229,9 +229,11 @@ def _collector_reachable() -> bool:
     return False
 
 
-def _send_once(url: str, payload: dict | list[dict], timeout: float) -> bool:
+def _send_once(url: str, payload: dict | list[dict], timeout: float, *, retry_5xx: bool = False) -> bool:
     """POST one payload. Returns True on success, False if the collector could
-    not be reached (the only condition that should trigger spooling)."""
+    not be reached (the only condition that should trigger spooling).
+    ``retry_5xx`` also returns False on a server error, for a batch whose
+    events would otherwise all be dropped by one busy write."""
     data = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -242,10 +244,10 @@ def _send_once(url: str, payload: dict | list[dict], timeout: float) -> bool:
     try:
         urllib.request.urlopen(req, timeout=timeout)
         return True
-    except urllib.error.HTTPError:
+    except urllib.error.HTTPError as exc:
         # The collector answered (4xx/5xx). Retrying won't help and the payload
         # is likely malformed, so don't spool — treat as delivered.
-        return True
+        return not (retry_5xx and exc.code >= 500)
     except (urllib.error.URLError, TimeoutError, OSError):
         _mark_collector_down()
         return False
@@ -405,6 +407,56 @@ def _post_async(url: str, payload: dict) -> None:
         _post(url, payload)
 
     threading.Thread(target=_send, daemon=True).start()
+
+
+# Imported events per request when the collector takes batches. Each request is
+# one write transaction, so this also bounds how long an import holds the write
+# lock that live hooks wait on.
+_IMPORT_POST_BATCH = 200
+
+
+class _ImportPoster:
+    """Posts imported events to one ingest endpoint, many per request.
+
+    A per-event POST costs a round trip and a commit for every line of history;
+    batches cost one of each per ``_IMPORT_POST_BATCH``. Order is kept. Events
+    that can't be delivered are spooled, as ``_post`` does, so the caller can
+    advance its offsets either way. Attachment bodies go alone: the collector
+    folds them onto a prompt only when they arrive as a single object.
+    Call ``flush()`` before reading the results back or exiting."""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        endpoint = url.split("/v1/ingest/", 1)[0]
+        # Drain an earlier outage's spool first so events stay ordered.
+        if SPOOL_PATH.exists() and _collector_reachable():
+            _spool_flush(endpoint=endpoint)
+        self.batched = _collector_accepts_batches(endpoint)
+        self.pending: list[dict] = []
+
+    def add(self, payload: dict) -> None:
+        if not self.batched or payload.get("_attach_to_prompt"):
+            self.flush()
+            self._send([payload])
+            return
+        self.pending.append(payload)
+        if len(self.pending) >= _IMPORT_POST_BATCH:
+            self.flush()
+
+    def flush(self) -> None:
+        if self.pending:
+            group, self.pending = self.pending, []
+            self._send(group)
+
+    def _send(self, group: list[dict]) -> None:
+        if len(group) > 1:
+            sent = _collector_reachable() and _send_once(self.url, group, timeout=30, retry_5xx=True)
+        else:
+            sent = _collector_reachable() and _send_once(self.url, group[0], timeout=10)
+        if sent:
+            return
+        for payload in group:
+            _spool_append(self.url, payload)
 
 
 def _audit_self(action: str, *, target: str | None = None, status: str = "ok", detail: dict | None = None) -> None:
@@ -2914,11 +2966,15 @@ def _import_cursor_subagent_responses(path: Path, child_id: str) -> None:
         event for event in parsed_events if event.get("kind") != "tool_call"
     ]
     events = _prepare_ingest_events("cursor", parsed_events, origin="import")
+    if not events:
+        return
+    poster = _ImportPoster(f"{COT_ENDPOINT}/v1/ingest/cursor")
     for event in events:
         payload = _ingest_event_to_hook_payload(event)
         if payload.get("_dedup_key") is None:
             payload.pop("_dedup_key", None)
-        _post(f"{COT_ENDPOINT}/v1/ingest/cursor", payload)
+        poster.add(payload)
+    poster.flush()
 
 
 def _reconcile_cursor_subagents(body: dict) -> None:
@@ -4018,6 +4074,7 @@ def _import_opencode(offsets: dict[str, int], origins: dict[str, str], *, verbos
 
     now_ms = time.time() * 1000
     posted = 0
+    poster = _ImportPoster(f"{COT_ENDPOINT}/v1/ingest/opencode")
     for done, s in enumerate(sessions):
         report(done)
         key = f"opencode:{s['id']}"
@@ -4031,15 +4088,14 @@ def _import_opencode(offsets: dict[str, int], origins: dict[str, str], *, verbos
         payloads = _opencode_session_payloads(s, _opencode_messages(root, s))
         if verbose:
             print(f"cot import: opencode {s['id']} ({len(payloads)} events)")
-        url = f"{COT_ENDPOINT}/v1/ingest/opencode"
         for i, payload in enumerate(payloads):
             # Straight to the collector: _post's per-event spool round trip is
             # for the plugin's short-lived worker, not a bulk import.
-            if not _send_once(url, payload, timeout=10):
-                _spool_append(url, payload)
+            poster.add(payload)
             posted += 1
             report(done, (i + 1) / len(payloads))
         offsets[key] = updated
+    poster.flush()
     report(len(sessions), force=True)
     return posted
 
@@ -4252,6 +4308,7 @@ def _import_hermes(offsets: dict[str, int], origins: dict[str, str], *, verbose:
     total_w = sum(weights)
     now = time.time()
     posted = 0
+    poster = _ImportPoster(f"{COT_ENDPOINT}/v1/ingest/hermes")
     for done, s in enumerate(sessions):
         if progress:
             print(f"cot-progress hermes {done} {len(sessions)} {sum(weights[:done])} {total_w}",
@@ -4269,12 +4326,11 @@ def _import_hermes(offsets: dict[str, int], origins: dict[str, str], *, verbose:
                                             _hermes_model_usage(home, s["id"]))
         if verbose:
             print(f"cot import: hermes {s['id']} ({len(payloads)} events)")
-        url = f"{COT_ENDPOINT}/v1/ingest/hermes"
         for payload in payloads:
-            if not _send_once(url, payload, timeout=10):
-                _spool_append(url, payload)
+            poster.add(payload)
             posted += 1
         offsets[key] = mark
+    poster.flush()
     if progress:
         print(f"cot-progress hermes {len(sessions)} {len(sessions)} {total_w} {total_w}",
               file=sys.stderr, flush=True)
@@ -4347,6 +4403,7 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
 
     source = agent
     posted = 0
+    poster = _ImportPoster(f"{COT_ENDPOINT}/v1/ingest/{source}")
     for done, path in enumerate(transcripts):
         report(done)
         # Derive session id
@@ -4460,12 +4517,13 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
             payload = _ingest_event_to_hook_payload(event)
             if payload.get("_dedup_key") is None:
                 payload.pop("_dedup_key", None)
-            _post(f"{COT_ENDPOINT}/v1/ingest/{source}", payload)
+            poster.add(payload)
             posted += 1
             report(done, frac=0.5 + 0.5 * (i_event + 1) / n_events)  # throttled
 
         offsets[str(path)] = new_offset
 
+    poster.flush()
     report(len(transcripts), force=True)
     return posted
 
