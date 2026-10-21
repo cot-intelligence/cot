@@ -2347,6 +2347,40 @@ def set_import_note(session_id: str, body: ImportNoteBody) -> dict[str, Any]:
     return {"session_id": session_id, "import_note": (body.note or "").strip() or None}
 
 
+class SessionHtmlExport(BaseModel):
+    redact: list[str] = Field(default_factory=list)
+    terms: list[str] = Field(default_factory=list)
+    thoughts: bool = True
+    outputs: bool = True
+
+
+@app.get("/v1/sessions/{session_id}/export/scan")
+def scan_session_export(session_id: str, thoughts: bool = True, outputs: bool = True) -> dict[str, Any]:
+    """What might be a password or token in the HTML export: suggestions for
+    the export dialog. Nothing is hidden unless the person picks it."""
+    found = session_html.scan(session_id, session_html.Options(thoughts=thoughts, outputs=outputs))
+    if found is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"suggestions": found}
+
+
+@app.post("/v1/sessions/{session_id}/export/html")
+def export_session_html(session_id: str, body: SessionHtmlExport) -> Response:
+    """The branded HTML page with the person's chosen redactions."""
+    terms = [t.strip() for t in body.terms if t.strip()][:200]
+    page = session_html.render(
+        session_id, body.redact, terms, session_html.Options(thoughts=body.thoughts, outputs=body.outputs)
+    )
+    if page is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    day = datetime.now().strftime("%Y%m%d")
+    return Response(
+        content=page,
+        media_type="text/html; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="cot-session-{session_id[:8]}-{day}.html"'},
+    )
+
+
 @app.get("/v1/sessions/{session_id}/export")
 def export_session(session_id: str, format: str = Query("json", pattern="^(json|md|html)$")) -> Response:  # noqa: A002
     """The whole session as a downloadable JSON file, ``format=md`` for a

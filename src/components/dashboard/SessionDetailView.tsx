@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getSessionDetail, getSessionExtensions, sessionExportUrl, setSessionBookmarked, type Annotation, type ComponentEntry, type SessionDetail, type Store, type TimelineItem } from '../../lib/api';
+import { getSessionDetail, getSessionExtensions, setSessionBookmarked, type Annotation, type ComponentEntry, type SessionDetail, type Store, type TimelineItem } from '../../lib/api';
 import { setDocumentTitle } from '../../lib/documentTitle';
 import { cachedSessionSummary, seededSessionDetail, sessionDetailKey } from '../../lib/sessionDetailQuery';
 import { useFullEventDetail } from '../../lib/useFullEventDetail';
@@ -20,6 +20,7 @@ import { Feedback, RatingMark, useAnnotations } from './session/Feedback';
 
 // The findings tab draws charts (recharts); load it when the tab is opened, not
 // with every session.
+import { ExportMenu } from './session/ExportMenu';
 const InsightsTab = lazy(() => import('./session/tabs/InsightsTab').then((m) => ({ default: m.InsightsTab })));
 const SessionAnalysisTab = lazy(() => import('./analysis/AnalysisView').then((m) => ({ default: m.SessionAnalysisTab })));
 
@@ -241,8 +242,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
               {store === 'main' && <div style={{ marginTop: 12 }}><Feedback sessionId={sessionId} /></div>}
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
-              <a className="vbtn vbtn-quiet vbtn-sm" href={sessionExportUrl(s.id, store)} download title="The whole session as JSON"><Icon name="download" size={14} />Export</a>
-              {store === 'main' && <a className="vbtn vbtn-quiet vbtn-sm" href={sessionExportUrl(s.id, store, 'html')} download title="A cot-branded page to share: prompts, replies, tool calls and numbers, secrets masked"><Icon name="external" size={14} />Share as HTML</a>}
+              <ExportMenu sessionId={s.id} store={store} />
               {store === 'main' && (
                 <button type="button" className="vbtn vbtn-quiet vbtn-sm" aria-pressed={s.bookmarked} onClick={toggleBookmark} style={s.bookmarked ? { borderColor: 'var(--v-hot)', color: 'var(--v-hot)' } : undefined}>
                   <Icon name="star" size={14} style={s.bookmarked ? { fill: 'currentColor' } : undefined} />{s.bookmarked ? 'Bookmarked' : 'Bookmark'}
