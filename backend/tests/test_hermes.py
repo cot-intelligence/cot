@@ -228,7 +228,10 @@ def test_import_payloads_pair_tools_and_skip_inactive_rows(hermes_home):
 def test_import_is_incremental(hermes_home, monkeypatch):
     posted: list[dict] = []
     monkeypatch.setattr(bridge, "_import_home", lambda: hermes_home.parent)
-    monkeypatch.setattr(bridge, "_send_once", lambda url, payload, timeout: posted.append(payload) or True)
+    monkeypatch.setattr(bridge, "SPOOL_PATH", hermes_home.parent / "spool.jsonl")
+    monkeypatch.setattr(bridge, "_collector_accepts_batches", lambda endpoint=None: True)
+    monkeypatch.setattr(bridge, "_collector_reachable", lambda: True)
+    monkeypatch.setattr(bridge, "_send_once", lambda url, body, timeout, **kw: posted.append(body) or True)
     live: dict = {}
     monkeypatch.setattr(bridge, "_fetch_session_origins", lambda: dict(live))
     offsets: dict = {}

@@ -37,6 +37,18 @@ def _write_jsonl(path, *objects):
 def _capture_posts(monkeypatch):
     posted = []
     monkeypatch.setattr(bridge, "_post", lambda url, payload: posted.append((url, payload)))
+
+    class _Poster:
+        def __init__(self, url):
+            self.url = url
+
+        def add(self, payload):
+            posted.append((self.url, payload))
+
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(bridge, "_ImportPoster", _Poster)
     return posted
 
 
