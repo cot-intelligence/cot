@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { TimelineItem } from '../../../lib/api';
 import { formatDateTime, formatDuration, formatTime, getCategoryMeta } from '../../../lib/categoryMeta';
-import { buildTurns, flowItems, stepName } from '../../../lib/flowGraph';
+import { buildTurns, flowItems, spanMs, stepName } from '../../../lib/flowGraph';
 import { formatModel } from '../../../lib/modelMeta';
 import { eventKey } from '../../../lib/sessionView';
 import { CATEGORY_ICON, Icon } from '../../forest/icons';
@@ -41,6 +41,13 @@ function iconOf(it: TimelineItem): { name: string; tone: { tile: string; text: s
 function matches(it: TimelineItem, q: string): boolean {
   return [stepName(it).label, it.title, it.tool, it.target, it.category, getCategoryMeta(it.category).label, String(it.id)]
     .some((v) => v?.toLowerCase().includes(q));
+}
+
+/** A parallel group takes as long as its slowest step, in the same measure the
+ *  step rows show; wall-clock span is the fallback when no step has a duration. */
+function groupMs(items: TimelineItem[]): number {
+  const slowest = Math.max(0, ...items.map((it) => it.duration_ms ?? 0));
+  return slowest || spanMs(items);
 }
 
 function rawJson(it: TimelineItem): string {
@@ -102,8 +109,15 @@ export function SessionTrace({ items, sessionId, onOpen }: SessionTraceProps) {
       turns
         .map((t, n) => {
           const promptHit = !matchKeys || (t.prompt && matchKeys.has(eventKey(t.prompt, sessionId)));
-          const steps = matchKeys ? t.items.filter((it) => matchKeys.has(eventKey(it, sessionId))) : t.items;
-          return { turn: t, n, steps, show: promptHit || steps.length > 0 };
+          // Search narrows each group but keeps it a group: a hit that ran in
+          // parallel still shows what it ran alongside.
+          const groups = t.steps
+            .map((all) => ({
+              all,
+              shown: matchKeys ? all.filter((it) => matchKeys.has(eventKey(it, sessionId))) : all,
+            }))
+            .filter((g) => g.shown.length > 0);
+          return { turn: t, n, groups, show: promptHit || groups.length > 0 };
         })
         .filter((v) => v.show),
     [turns, matchKeys, sessionId],
@@ -112,9 +126,9 @@ export function SessionTrace({ items, sessionId, onOpen }: SessionTraceProps) {
   // Row order for arrow-key navigation.
   const order = useMemo(() => {
     const keys: string[] = [];
-    for (const { turn, steps } of visible) {
+    for (const { turn, groups } of visible) {
       if (turn.prompt) keys.push(eventKey(turn.prompt, sessionId));
-      if (q || !collapsed.has(turn.id)) for (const it of steps) keys.push(eventKey(it, sessionId));
+      if (q || !collapsed.has(turn.id)) for (const g of groups) for (const it of g.shown) keys.push(eventKey(it, sessionId));
     }
     return keys;
   }, [visible, collapsed, q, sessionId]);
@@ -308,7 +322,7 @@ export function SessionTrace({ items, sessionId, onOpen }: SessionTraceProps) {
             onKeyDown={onTreeKey}
             className="scroll-thin min-h-0 overflow-y-auto px-1.5 py-1.5"
           >
-            {visible.map(({ turn, n, steps }, i) => {
+            {visible.map(({ turn, n, groups }, i) => {
               const open = !!q || !collapsed.has(turn.id);
               const head = { open, turnId: turn.id, n: n + 1, count: turn.items.length, durationMs: turn.durationMs, errors: turn.errors };
               return (
@@ -320,7 +334,26 @@ export function SessionTrace({ items, sessionId, onOpen }: SessionTraceProps) {
                       Before the first prompt
                     </div>
                   )}
-                  {open && steps.map((it) => row(it, 1))}
+                  {open &&
+                    groups.map(({ all, shown }) =>
+                      all.length === 1 ? (
+                        row(shown[0], 1)
+                      ) : (
+                        <div key={`par:${all[0].id}`} role="group" aria-label={`${all.length} steps in parallel`}>
+                          <div className="flex h-7 items-center gap-2 pl-[50px] pr-2" title="These steps ran at the same time">
+                            <Icon name="branch" size={13} className="shrink-0 text-fg/40" />
+                            <span className="font-mono text-data text-fg/55">Parallel</span>
+                            <span className="min-w-0 flex-1 truncate font-mono text-label tabular-nums text-fg/35">
+                              {all.length} steps
+                            </span>
+                            <span className="w-12 shrink-0 text-right font-mono text-label tabular-nums text-fg/40">
+                              {groupMs(all) > 0 ? formatDuration(groupMs(all)) : ''}
+                            </span>
+                          </div>
+                          {shown.map((it) => row(it, 2))}
+                        </div>
+                      ),
+                    )}
                 </div>
               );
             })}

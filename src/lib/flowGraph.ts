@@ -216,6 +216,9 @@ export interface FlowTurn {
   id: string;
   prompt: TimelineItem | null;
   items: TimelineItem[];
+  /** `items` grouped the way the graph groups them: events that ran at the
+   *  same time share a group, in the order the groups started. */
+  steps: TimelineItem[][];
   errors: number;
   /** Wall time from the prompt to the turn's last step finishing. */
   durationMs: number;
@@ -226,7 +229,7 @@ export function buildTurns(items: TimelineItem[]): FlowTurn[] {
   let turn: FlowTurn | null = null;
   for (const it of flowItems(items)) {
     if (it.category === 'prompt' || !turn) {
-      turn = { id: `turn:${it.id}`, prompt: it.category === 'prompt' ? it : null, items: [], errors: 0, durationMs: 0 };
+      turn = { id: `turn:${it.id}`, prompt: it.category === 'prompt' ? it : null, items: [], steps: [], errors: 0, durationMs: 0 };
       turns.push(turn);
       if (it.category === 'prompt') continue;
     }
@@ -234,11 +237,16 @@ export function buildTurns(items: TimelineItem[]): FlowTurn[] {
     if (isError(it)) turn.errors++;
   }
   for (const t of turns) {
-    const first = t.prompt ?? t.items[0];
-    const last = Math.max(...[t.prompt, ...t.items].filter((x): x is TimelineItem => !!x).map(endMs));
-    t.durationMs = first ? last - startMs(first) : 0;
+    t.steps = flowSteps(t.items);
+    t.durationMs = spanMs([t.prompt, ...t.items].filter((x): x is TimelineItem => !!x));
   }
   return turns;
+}
+
+/** Wall time from the first event's start to the last one's end. */
+export function spanMs(items: TimelineItem[]): number {
+  if (!items.length) return 0;
+  return Math.max(...items.map(endMs)) - Math.min(...items.map(startMs));
 }
 
 /**

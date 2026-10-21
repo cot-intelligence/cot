@@ -133,6 +133,15 @@ describe('buildTurns', () => {
     expect(turns[1].errors).toBe(1);
     expect(turns[1].durationMs).toBe(4000);
   });
+
+  it('groups steps that ran at the same time, as the graph does', () => {
+    const p = prompt(0);
+    const plan = ev(1, { category: 'mcp', title: 'MCP', target: 'ccd_turn/update_plan' }, 1);
+    const cmd = bash(1, 'sed -n 1,55p x.tsx');
+    const next = bash(5, 'sed -n 175,240p y.css');
+    const [turn] = buildTurns([p, plan, cmd, next]);
+    expect(turn.steps.map((s) => s.map((it) => it.id))).toEqual([[plan.id, cmd.id], [next.id]]);
+  });
 });
 
 describe('mainPaths', () => {
