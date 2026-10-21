@@ -4409,15 +4409,22 @@ def get_session(session_id: str) -> dict[str, Any] | None:
 
 def session_origins() -> dict[str, str]:
     """Return the dominant origin per session: 'hook' if any hook events exist,
-    else 'import'. Used by the bridge to skip already-hooked sessions."""
+    else 'import'. Used by the bridge to skip already-hooked sessions.
+
+    A session is import-only when all of its events are imported, so this
+    compares session_stats' event count with a count over idx_events_import
+    (import rows only) instead of grouping every event: the full scan took
+    seconds on a large DB and outlasted the bridge's timeout."""
     with store.read() as conn:
         rows = conn.execute(
-            "SELECT session_id,"
-            " MAX(CASE WHEN origin = 'hook' OR origin IS NULL THEN 1 ELSE 0 END) AS has_hook"
-            " FROM events GROUP BY session_id"
+            "SELECT s.session_id, s.event_count, COALESCE(i.n, 0) AS imported"
+            " FROM session_stats s LEFT JOIN ("
+            "   SELECT session_id, COUNT(*) AS n FROM events"
+            "   WHERE origin = 'import' GROUP BY session_id"
+            " ) i ON i.session_id = s.session_id"
         ).fetchall()
     return {
-        r["session_id"]: "hook" if r["has_hook"] else "import"
+        r["session_id"]: "import" if r["imported"] >= r["event_count"] else "hook"
         for r in rows
     }
 

@@ -128,3 +128,20 @@ def test_migration_purges_existing_duplicates_but_keeps_cursor_supplements(monke
 
     assert _counts(SID) == (2, 2)
     assert _counts(cursor_sid) == cursor_before
+
+
+def test_session_origins_matches_a_full_group_by():
+    _hook_bash_call(SID)
+    for p in _transcript_payloads("import-only"):
+        db.record_ingest("claude", p)
+    db.ensure_query_indexes()
+
+    with store.read() as conn:
+        expected = {
+            r["session_id"]: "hook" if r["has_hook"] else "import"
+            for r in conn.execute(
+                "SELECT session_id, MAX(origin = 'hook' OR origin IS NULL) AS has_hook"
+                " FROM events GROUP BY session_id"
+            )
+        }
+    assert db.session_origins() == expected == {SID: "hook", "import-only": "import"}
