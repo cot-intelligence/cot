@@ -2691,8 +2691,17 @@ def _import_read_new_lines(path: Path, offsets: dict[str, int]) -> tuple[list[st
         return [], start
     finally:
         fh.close()
-    # Only consume up to the last newline so partial writes are retried.
+    # Only consume up to the last newline so partial writes are retried. Cursor
+    # writes its final line with no newline at all, so a tail that is already a
+    # whole JSON object counts as a line too (a mid-flush one doesn't parse).
     last_nl = chunk.rfind("\n")
+    tail = chunk[last_nl + 1:]
+    if tail.strip():
+        try:
+            json.loads(tail)
+            last_nl = len(chunk) - 1
+        except ValueError:
+            pass
     if last_nl < 0:
         return [], start
     consumed = chunk[: last_nl + 1]
@@ -4022,7 +4031,7 @@ def _import_opencode(offsets: dict[str, int], origins: dict[str, str], *, verbos
         report(done)
         key = f"opencode:{s['id']}"
         updated = int(s.get("updated") or 0)
-        if origins.get(s["id"]) == "hook" or offsets.get(key) == updated:
+        if origins.get(s["id"]) in ("hook", "deleted") or offsets.get(key) == updated:
             continue
         if skip_active_s and updated and now_ms - updated < skip_active_s * 1000:
             if held_back is not None:
@@ -4258,7 +4267,7 @@ def _import_hermes(offsets: dict[str, int], origins: dict[str, str], *, verbose:
                   file=sys.stderr, flush=True)
         key = f"hermes:{s['id']}"
         mark = int(s.get("last_message") or 0) * 2 + (1 if s.get("ended_at") else 0)
-        if origins.get(s["id"]) == "hook" or offsets.get(key) == mark:
+        if origins.get(s["id"]) in ("hook", "deleted") or offsets.get(key) == mark:
             continue
         updated = s.get("updated") or 0
         if skip_active_s and not s.get("ended_at") and updated and now - updated < skip_active_s:
@@ -4282,7 +4291,8 @@ def _import_hermes(offsets: dict[str, int], origins: dict[str, str], *, verbose:
 
 
 def _fetch_session_origins() -> dict[str, str]:
-    """Session id -> "hook"/"import", so the import skips hooked sessions. An
+    """Session id -> "hook"/"import"/"deleted", so the import skips hooked and
+    deleted sessions and re-reads transcripts whose session is missing. An
     empty map on failure means nothing is skipped; the collector then drops
     imported events for hooked sessions itself, but every one is still read and
     posted, so the timeout allows for a cold read of a large DB (seconds)."""
@@ -4382,6 +4392,14 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
         )
         if origins.get(sid) == "hook" and not is_cursor_subagent and not hook_supplement:
             continue
+        if origins.get(sid) == "deleted":
+            continue
+        # Read before, but the session isn't in cot (an import reset raced
+        # another import, say): read it again from the top. Needs a real origins
+        # map; an empty one means the collector didn't answer.
+        if (origins and sid not in origins and offsets.get(str(path))
+                and path.parent.name != "subagents"):
+            offsets[str(path)] = 0
 
         if skip_active_s:
             try:
@@ -4465,6 +4483,10 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
             report(done, frac=0.5 + 0.5 * (i_event + 1) / n_events)  # throttled
 
         offsets[str(path)] = new_offset
+        if events:
+            # cot watch refreshes origins only every few polls; without this the
+            # next poll would read the file again as a missing session.
+            origins.setdefault(sid, "import")
 
     report(len(transcripts), force=True)
     return posted

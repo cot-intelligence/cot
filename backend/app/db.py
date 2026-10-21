@@ -4585,7 +4585,8 @@ def get_session(session_id: str) -> dict[str, Any] | None:
 
 def session_origins() -> dict[str, str]:
     """Return the dominant origin per session: 'hook' if any hook events exist,
-    else 'import'. Used by the bridge to skip already-hooked sessions.
+    else 'import', or 'deleted' for a session someone deleted. Used by the
+    bridge to skip already-hooked sessions and never re-import deleted ones.
 
     A session is import-only when all of its events are imported, so this
     compares session_stats' event count with a count over idx_events_import
@@ -4599,10 +4600,18 @@ def session_origins() -> dict[str, str]:
             "   WHERE origin = 'import' GROUP BY session_id"
             " ) i ON i.session_id = s.session_id"
         ).fetchall()
-    return {
+        # Deleted on purpose: the bridge must not import these again when it
+        # re-reads a transcript whose session is gone.
+        deleted = conn.execute(
+            "SELECT DISTINCT target FROM audit_events"
+            " WHERE action = 'session.deleted' AND target IS NOT NULL"
+        ).fetchall()
+    origins = {r["target"]: "deleted" for r in deleted}
+    origins.update({
         r["session_id"]: "import" if r["imported"] >= r["event_count"] else "hook"
         for r in rows
-    }
+    })
+    return origins
 
 
 def import_summary() -> dict[str, Any]:
