@@ -2128,3 +2128,41 @@ export async function draftRuleFromText(text: string): Promise<RuleSpec> {
   }
   return (await ruleJson<{ spec: RuleSpec }>(res)).spec;
 }
+
+/** Whether `cot mcp` is registered with each agent (backend/app/mcp_install.py). */
+export interface McpInstallAgent {
+  agent: 'claude' | 'cursor' | 'codex';
+  present: boolean;
+  config_path: string;
+  installed: boolean;
+  /** Registered and pointing at this machine's bridge. */
+  current: boolean;
+}
+
+export interface McpInstallStatus {
+  bridge: string;
+  bridge_exists: boolean;
+  agents: McpInstallAgent[];
+}
+
+async function detailOrStatus<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    let message = `${res.status}`;
+    try {
+      const body = await res.json();
+      if (typeof body.detail === 'string') message = body.detail;
+    } catch {
+      /* not JSON */
+    }
+    throw new Error(message);
+  }
+  return (await res.json()) as T;
+}
+
+export async function getMcpInstall(): Promise<McpInstallStatus> {
+  return json<McpInstallStatus>(await fetch('/v1/mcp/install'));
+}
+
+export async function setMcpInstalled(agent: McpInstallAgent['agent'], on: boolean): Promise<McpInstallAgent> {
+  return detailOrStatus<McpInstallAgent>(await fetch(`/v1/mcp/install/${agent}`, { method: on ? 'POST' : 'DELETE' }));
+}

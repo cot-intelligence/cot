@@ -10,7 +10,7 @@ import { TeamsModal } from './TeamsModal';
 
 export type ActivityTab = 'shell' | 'web' | 'mcp' | 'skill' | 'plugin';
 export type NavKey =
-  | 'sessions' | 'overview' | 'projects' | 'replay' | 'findings' | 'rules' | 'governance' | 'settings'
+  | 'sessions' | 'overview' | 'projects' | 'replay' | 'analysis' | 'findings' | 'rules' | 'governance' | 'settings'
   | `activity-${ActivityTab}`;
 
 // Markup and classes follow the demo's sidebar (demo-variants/src/variants/forest/App.tsx) one to one;
@@ -23,6 +23,7 @@ const NAV: { group: string; items: { key: NavKey; label: string; href: string; i
       { key: 'projects', label: 'Projects', href: '#/projects', icon: 'folder' },
       { key: 'sessions', label: 'Sessions', href: '#/sessions', icon: 'sessions' },
       { key: 'replay', label: 'Session Replay', href: '#/replay', icon: 'replay' },
+      { key: 'analysis', label: 'Analysis', href: '#/analysis', icon: 'sparkle' },
     ],
   },
   {

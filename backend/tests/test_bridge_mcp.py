@@ -56,7 +56,8 @@ def test_handshake_and_tool_list(monkeypatch):
     assert replies[0]["result"]["capabilities"] == {"tools": {"listChanged": False}}
     tools = replies[1]["result"]["tools"]
     assert {t["name"] for t in tools} >= {"list_sessions", "get_session", "explain_session_cost", "search"}
-    assert all(t["annotations"]["readOnlyHint"] for t in tools)
+    writers = {"save_analysis", "run_analysis", "apply_deliverable", "ask_followup"}
+    assert {t["name"] for t in tools if not t["annotations"]["readOnlyHint"]} == writers
     assert all(t["inputSchema"]["type"] == "object" for t in tools)
     assert replies[2]["error"]["code"] == -32601
 

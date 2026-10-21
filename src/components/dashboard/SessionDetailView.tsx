@@ -21,6 +21,7 @@ import { Feedback, RatingMark, useAnnotations } from './session/Feedback';
 // The findings tab draws charts (recharts); load it when the tab is opened, not
 // with every session.
 const InsightsTab = lazy(() => import('./session/tabs/InsightsTab').then((m) => ({ default: m.InsightsTab })));
+const SessionAnalysisTab = lazy(() => import('./analysis/AnalysisView').then((m) => ({ default: m.SessionAnalysisTab })));
 
 interface SessionDetailViewProps {
   sessionId: string;
@@ -34,7 +35,7 @@ interface SessionDetailViewProps {
   focusNonce?: number;
 }
 
-type Tab = 'timeline' | 'files' | 'findings' | 'map';
+type Tab = 'timeline' | 'files' | 'findings' | 'map' | 'analysis';
 const PAGE = 200;
 /** Events in the quick first read; matches one rendered page. */
 const FIRST_EVENTS = PAGE;
@@ -193,6 +194,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
     { k: 'files', l: settled ? `Files · ${fileCount}` : 'Files' },
     { k: 'findings', l: 'Findings' },
     { k: 'map', l: 'Map' },
+    ...(store === 'main' ? [{ k: 'analysis' as const, l: 'Analysis' }] : []),
   ];
   const strip = (p: string) => (s.cwd && p.startsWith(s.cwd + '/') ? p.slice(s.cwd.length + 1) : p);
 
@@ -324,6 +326,10 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
 
           {settled && tab === 'findings' && (
             <div className="card"><div className="card-b"><Suspense fallback={null}><InsightsTab detail={detail} /></Suspense></div></div>
+          )}
+
+          {tab === 'analysis' && store === 'main' && (
+            <Suspense fallback={null}><SessionAnalysisTab sessionId={sessionId} /></Suspense>
           )}
 
           {settled && tab === 'map' && (

@@ -1,3 +1,4 @@
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   cleanupRetention,
@@ -25,6 +26,9 @@ import {
   type RetentionStatus,
   type Settings,
   type VersionInfo,
+  getMcpInstall,
+  setMcpInstalled,
+  type McpInstallAgent,
 } from '../../lib/api';
 import { setPref, usePrefs, type Prefs } from '../../lib/prefs';
 import { useTheme } from '../../lib/theme';
@@ -50,6 +54,7 @@ const SECTIONS = [
   { id: 'defaults', label: 'Defaults', icon: 'overview' },
   { id: 'ai', label: 'AI insights', icon: 'sparkle' },
   { id: 'collector', label: 'Collector & hooks', icon: 'plug' },
+  { id: 'mcp', label: 'cot MCP', icon: 'layers' },
   { id: 'passive', label: 'Passive import', icon: 'clock' },
   { id: 'privacy', label: 'Privacy', icon: 'lock' },
   { id: 'data', label: 'Data & retention', icon: 'database' },
@@ -157,6 +162,7 @@ export function SettingsView({ sidebarOpen, onSidebarOpenChange, navCollapsed, o
 
             <AiSection settings={settings} onSettings={setSettings} />
             <CollectorSection onRunOnboarding={onRunOnboarding} />
+            <McpSection />
             <PassiveSection />
             <PrivacySection settings={settings} onSettings={setSettings} />
             <DataSection onExport={() => setExportOpen(true)} />
@@ -324,6 +330,69 @@ function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) 
         {v?.update_available && v.url && <a className="vbtn vbtn-ghost vbtn-sm" href={v.url} target="_blank" rel="noreferrer">Instructions <Icon name="external" size={14} /></a>}
         <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={checking || error} onClick={check}>Check for updates</button>
       </Row>
+    </Section>
+  );
+}
+
+const MCP_AGENT_LABEL: Record<McpInstallAgent['agent'], string> = { claude: 'Claude Code', cursor: 'Cursor', codex: 'Codex' };
+
+/** Registers `cot mcp` with the agents on this machine, so they can read cot's
+ *  sessions and run Analysis with their own model. Merges one entry; restart the agent to load it. */
+function McpSection() {
+  const queryClient = useQueryClient();
+  const { data, isError } = useQuery({ queryKey: ['mcpInstall'], queryFn: getMcpInstall });
+  const [error, setError] = useState<string | null>(null);
+  const [changed, setChanged] = useState(false);
+  const toggle = useMutation({
+    mutationFn: async (targets: { agent: McpInstallAgent['agent']; on: boolean }[]) => {
+      for (const t of targets) await setMcpInstalled(t.agent, t.on);
+    },
+    onMutate: () => setError(null),
+    onSuccess: () => setChanged(true),
+    onError: (e) => setError((e as Error).message),
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: ['mcpInstall'] }),
+  });
+  const agents = data?.agents ?? [];
+  const pending = agents.filter((a) => a.present && !a.current);
+  const allDone = agents.length > 0 && pending.length === 0 && agents.some((a) => a.current);
+  return (
+    <Section id="mcp" title="cot MCP" desc="Lets your agents read cot's sessions, costs and findings, and write Analysis reports with their own model, no API key needed.">
+      <Row
+        label="Install for your agents"
+        hint={!data ? 'Checking your agents…' : !data.bridge_exists ? 'Install agent hooks first: the MCP server runs through the same cot bridge.' : allDone ? 'Installed everywhere it can be. Restart an agent to pick it up.' : `Adds cot to ${pending.map((a) => MCP_AGENT_LABEL[a.agent]).join(', ') || 'your agents'}. Existing servers and settings are kept.`}>
+        <button
+          type="button"
+          className="vbtn vbtn-primary vbtn-sm"
+          disabled={!data?.bridge_exists || pending.length === 0 || toggle.isPending}
+          onClick={() => toggle.mutate(pending.map((a) => ({ agent: a.agent, on: true })))}>
+          {toggle.isPending ? 'Installing…' : allDone ? <><Icon name="check" size={14} />Installed</> : 'Install'}
+        </button>
+      </Row>
+      <ul className="set-list">
+        {agents.map((a) => (
+          <li key={a.agent}>
+            <div style={{ display: 'grid', gap: 2, minWidth: 0 }}>
+              <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <Agent id={a.agent} />
+                <span className={`vchip ${a.current ? 'c-ok' : a.installed ? 'c-warn' : 'c-dim'}`}><span className="dot" />{a.current ? 'Installed' : a.installed ? 'Points elsewhere' : a.present ? 'Not installed' : 'Agent not found'}</span>
+              </span>
+              <span className="mono faint truncate" style={{ fontSize: 11 }} title={a.config_path}>{homePath(a.config_path)}</span>
+            </div>
+            {a.installed ? (
+              <button type="button" className="vbtn vbtn-ghost vbtn-sm" disabled={toggle.isPending} onClick={() => toggle.mutate([{ agent: a.agent, on: false }])}>Remove</button>
+            ) : (
+              <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={!data?.bridge_exists || toggle.isPending} onClick={() => toggle.mutate([{ agent: a.agent, on: true }])}>Install</button>
+            )}
+          </li>
+        ))}
+        {!data && !isError && <li className="dim" style={{ fontSize: 13 }}>Checking your agents…</li>}
+        {isError && <li className="dim" style={{ fontSize: 13 }}>The collector didn't answer.</li>}
+      </ul>
+      {(error || changed) && (
+        <p className={error ? 'an-err' : 'dim'} role={error ? 'alert' : 'status'} style={{ margin: '0 20px 16px', fontSize: 12 }}>
+          {error ?? 'Saved. Restart the agent (or start a new session) to load cot.'}
+        </p>
+      )}
     </Section>
   );
 }

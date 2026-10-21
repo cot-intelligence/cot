@@ -195,6 +195,11 @@ Guidance:
 """
 
 
+def schema_text() -> str:
+    """The field/operator vocabulary, for prompts that ask a model for a spec."""
+    return _schema_text()
+
+
 def _schema_text() -> str:
     s = user_rules.schema()
     fields = "\n".join(

@@ -4772,13 +4772,15 @@ def _cmd_watch(args: list[str]) -> int:
 # --- MCP server ---------------------------------------------------------------
 #
 # `cot mcp` speaks the Model Context Protocol over stdio so an agent can ask
-# cot about past sessions: what ran, what it cost, what failed. Every tool is
-# read-only and goes through the collector's HTTP API on localhost; nothing
-# here writes to the DB or leaves the machine. stdout carries only JSON-RPC.
+# cot about past sessions: what ran, what it cost, what failed. Every tool goes
+# through the collector's HTTP API on localhost. The session tools are
+# read-only; the Analysis tools can save a report, start a run with the
+# person's configured provider, or apply a deliverable (marked non-read-only,
+# so the agent asks first). stdout carries only JSON-RPC.
 
 _MCP_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 # The tool interface's own version, bumped when a tool's inputs or output change.
-_MCP_SERVER_VERSION = "1"
+_MCP_SERVER_VERSION = "2"
 _MCP_TEXT_MAX = 400
 
 
@@ -4794,6 +4796,24 @@ def _mcp_get(path: str, params: dict | None = None) -> dict:
     req = urllib.request.Request(f"{COT_ENDPOINT}{path}{'?' + query if query else ''}", method="GET")
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def _mcp_post(path: str, body: dict | None = None) -> dict:
+    req = urllib.request.Request(
+        f"{COT_ENDPOINT}{path}", method="POST",
+        data=json.dumps(body or {}).encode("utf-8"), headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (400, 403, 409, 422, 502):
+            try:
+                detail = json.loads(exc.read().decode("utf-8")).get("detail")
+            except (ValueError, AttributeError):
+                detail = None
+            raise ValueError(detail if isinstance(detail, str) else json.dumps(detail) if detail else f"HTTP {exc.code}") from exc
+        raise
 
 
 def _mcp_since(days: object) -> str | None:
@@ -4975,6 +4995,129 @@ def _mcp_annotations(args: dict) -> dict:
     return data
 
 
+# The connected agent's name from `initialize`, recorded on reports it saves.
+_mcp_client: dict = {}
+
+
+def _mcp_scope(args: dict) -> dict:
+    scope = "across" if args.get("scope") == "across" or not args.get("session_id") else "session"
+    return {
+        "persona": str(args.get("persona") or ""), "scope": scope,
+        "session_id": args.get("session_id") if scope == "session" else None,
+        "question": args.get("question"), "days": int(args.get("days") or 30),
+    }
+
+
+def _mcp_analysis_brief(args: dict) -> dict:
+    data = _mcp_get("/v1/analysis/brief", _mcp_scope(args))
+    data["next"] = (
+        "Follow `instructions`. Investigate with the `investigate` tool (tool names under `tools`; "
+        "always pass session_id in its args), then call save_analysis with the same "
+        "persona/scope/session_id and a report matching `report_schema`."
+    )
+    data["tools"] = [{"name": t["name"], "description": t["description"], "args": t["schema"]["properties"]} for t in data.get("tools") or []]
+    return data
+
+
+def _mcp_investigate(args: dict) -> dict:
+    name = str(args.get("tool") or "")
+    params = args.get("args") if isinstance(args.get("args"), dict) else {}
+    return _mcp_post(f"/v1/analysis/tools/{urllib.parse.quote(name)}", params)
+
+
+def _mcp_save_analysis(args: dict) -> dict:
+    report = args.get("report")
+    if isinstance(report, str):
+        try:
+            report = json.loads(report)
+        except json.JSONDecodeError:
+            raise ValueError("report must be a JSON object") from None
+    body = {**_mcp_scope(args), "report": report, "agent": _mcp_client.get("name") or "agent", "model": args.get("model")}
+    run = _mcp_post("/v1/analysis/runs/external", body)["run"]
+    return _mcp_run_view(run)
+
+
+def _mcp_run_view(run: dict) -> dict:
+    report = run.get("report") or {}
+    return {
+        "run_id": run.get("id"),
+        "status": run.get("status"),
+        "persona": run.get("persona"),
+        "scope": run.get("scope"),
+        "session_id": run.get("session_id"),
+        "error": run.get("error"),
+        "title": report.get("title"),
+        "summary": report.get("summary"),
+        "findings": report.get("findings"),
+        "dropped_findings_without_evidence": report.get("dropped_findings"),
+        "deliverables": [
+            {k: d.get(k) for k in ("id", "kind", "title", "status", "file", "rule_text") if d.get(k) is not None}
+            for d in run.get("deliverables") or []
+        ],
+        "steps": len(run.get("steps") or []),
+        "cost_usd": (run.get("usage") or {}).get("cost_usd"),
+        "open_in_cot": f"{COT_ENDPOINT}/#/analysis/{run.get('id')}",
+    }
+
+
+def _mcp_run_analysis(args: dict) -> dict:
+    run = _mcp_post("/v1/analysis/runs", _mcp_scope(args))["run"]
+    return {"run_id": run["id"], "status": run["status"], "provider": run.get("provider"), "model": run.get("model"),
+            "note": "Runs in the background (typically 1-3 minutes). Check it with get_analysis."}
+
+
+def _mcp_list_analyses(args: dict) -> dict:
+    return _mcp_get("/v1/analysis/runs", {
+        "session_id": args.get("session_id"), "limit": max(1, min(int(args.get("limit") or 20), 100)),
+        "days": int(args.get("days") or 0),
+    })
+
+
+def _mcp_get_analysis(args: dict) -> dict:
+    run_id = urllib.parse.quote(str(args.get("run_id") or ""))
+    if str(args.get("format") or "") == "markdown":
+        req = urllib.request.Request(f"{COT_ENDPOINT}/v1/analysis/runs/{run_id}/export.md", method="GET")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return {"run_id": args.get("run_id"), "markdown": resp.read().decode("utf-8")}
+    run = _mcp_get(f"/v1/analysis/runs/{run_id}")["run"]
+    view = _mcp_run_view(run)
+    view["sections"] = (run.get("report") or {}).get("sections")
+    view["deliverables"] = run.get("deliverables")
+    view["followups"] = [{k: f.get(k) for k in ("question", "status", "answer", "points", "evidence")} for f in run.get("followups") or []]
+    if run.get("status") == "running":
+        view["recent_steps"] = [s.get("summary") for s in (run.get("steps") or [])[-5:]]
+    return view
+
+
+def _mcp_apply_deliverable(args: dict) -> dict:
+    run_id = urllib.parse.quote(str(args.get("run_id") or ""))
+    did = urllib.parse.quote(str(args.get("deliverable_id") or ""))
+    action = str(args.get("action") or "apply")
+    if action == "apply":
+        return _mcp_post(f"/v1/analysis/runs/{run_id}/deliverables/{did}/apply", {"cwd": args.get("cwd")})
+    status = {"dismiss": "dismissed", "mark_applied": "applied", "reset": "new"}.get(action)
+    if status is None:
+        raise ValueError("action must be apply, mark_applied, dismiss or reset")
+    return _mcp_post(f"/v1/analysis/runs/{run_id}/deliverables/{did}/status", {"status": status})
+
+
+def _mcp_ask_followup(args: dict) -> dict:
+    run_id = urllib.parse.quote(str(args.get("run_id") or ""))
+    data = _mcp_post(f"/v1/analysis/runs/{run_id}/followups", {"question": args.get("question")})
+    return {**data, "note": "Answered in the background; read it with get_analysis."}
+
+
+_MCP_PERSONA = {"type": "string", "enum": ["coach", "debugger", "cost", "security", "manager", "custom"],
+                "description": "coach = prompting, debugger = where the agent went wrong, cost = spend, security = risky actions, manager = shareable recap, custom = answer `question`."}
+_MCP_SCOPE_PROPS = {
+    "persona": _MCP_PERSONA,
+    "session_id": {"type": "string", "description": "The session to analyse. Omit for a cross-session analysis."},
+    "scope": {"type": "string", "enum": ["session", "across"]},
+    "question": {"type": "string", "description": "Required for persona=custom; optional focus otherwise."},
+    "days": {"type": "integer", "description": "Window for a cross-session analysis (default 30)."},
+}
+
+
 _MCP_STR = {"type": "string"}
 _MCP_INT = {"type": "integer"}
 _MCP_TOOLS: dict[str, tuple[dict, object]] = {
@@ -5033,7 +5176,54 @@ _MCP_TOOLS: dict[str, tuple[dict, object]] = {
             "limit": {**_MCP_INT, "description": "Default 50, at most 200."},
         }},
     }, _mcp_annotations),
+    "analysis_brief": ({
+        "description": "Start an Analysis yourself, with no API key: returns a persona's instructions, the opening data for a session (or for all sessions), the investigation tools and the report schema. Investigate with `investigate`, then save with `save_analysis`. The report appears in cot's Analysis page with its deliverables.",
+        "inputSchema": {"type": "object", "required": ["persona"], "properties": _MCP_SCOPE_PROPS},
+    }, _mcp_analysis_brief),
+    "investigate": ({
+        "description": "Run one Analysis investigation tool: get_overview, get_turns, get_step, search, get_findings, get_cost, compare_to_baseline, list_sessions, get_past_analyses. Arguments are listed in analysis_brief.",
+        "inputSchema": {"type": "object", "required": ["tool"], "properties": {
+            "tool": _MCP_STR, "args": {"type": "object", "description": "e.g. {\"session_id\": \"…\", \"start\": 3, \"end\": 5}"},
+        }},
+    }, _mcp_investigate),
+    "save_analysis": ({
+        "description": "Save a finished Analysis report (from analysis_brief). cot checks every cited event id, drops findings that cite nothing, validates rule specs, and stores it with its deliverables.",
+        "inputSchema": {"type": "object", "required": ["persona", "report"], "properties": {
+            **_MCP_SCOPE_PROPS, "report": {"type": "object", "description": "Matches report_schema from analysis_brief."},
+            "model": {**_MCP_STR, "description": "Your model id, recorded on the run."},
+        }},
+    }, _mcp_save_analysis),
+    "run_analysis": ({
+        "description": "Have cot run an Analysis in the background with the person's configured AI provider (costs them money; typically under $1). Returns a run id for get_analysis.",
+        "inputSchema": {"type": "object", "required": ["persona"], "properties": _MCP_SCOPE_PROPS},
+    }, _mcp_run_analysis),
+    "list_analyses": ({
+        "description": "Saved Analysis runs, newest first: persona, title, summary, finding and deliverable counts.",
+        "inputSchema": {"type": "object", "properties": {
+            "session_id": _MCP_STR, "days": _MCP_INT, "limit": {**_MCP_INT, "description": "Default 20."},
+        }},
+    }, _mcp_list_analyses),
+    "get_analysis": ({
+        "description": "One Analysis run: report sections, findings with evidence, deliverables (full content), follow-ups. format=markdown returns the exportable report.",
+        "inputSchema": {"type": "object", "required": ["run_id"], "properties": {
+            "run_id": _MCP_STR, "format": {"type": "string", "enum": ["json", "markdown"]},
+        }},
+    }, _mcp_get_analysis),
+    "apply_deliverable": ({
+        "description": "Act on a deliverable. apply: create a rule deliverable as a cot rule, or append a project-instructions deliverable to the project's CLAUDE.md/AGENTS.md. mark_applied / dismiss / reset only change its status (e.g. after you applied it yourself).",
+        "inputSchema": {"type": "object", "required": ["run_id", "deliverable_id"], "properties": {
+            "run_id": _MCP_STR, "deliverable_id": _MCP_STR,
+            "action": {"type": "string", "enum": ["apply", "mark_applied", "dismiss", "reset"]},
+            "cwd": {**_MCP_STR, "description": "Project folder for an instructions edit, when the run has none (cross-session)."},
+        }},
+    }, _mcp_apply_deliverable),
+    "ask_followup": ({
+        "description": "Ask a follow-up question about a finished cot-run Analysis; answered in the background with the configured provider.",
+        "inputSchema": {"type": "object", "required": ["run_id", "question"], "properties": {"run_id": _MCP_STR, "question": _MCP_STR}},
+    }, _mcp_ask_followup),
 }
+
+_MCP_WRITE_TOOLS = frozenset({"save_analysis", "run_analysis", "apply_deliverable", "ask_followup"})
 
 
 def _mcp_result(req_id: object, result: dict) -> dict:
@@ -5073,18 +5263,20 @@ def _mcp_handle(msg: object) -> dict | None:
     if req_id is None:
         return None  # notifications (initialized, cancelled) need no answer
     if method == "initialize":
+        if isinstance(params.get("clientInfo"), dict):
+            _mcp_client["name"] = str(params["clientInfo"].get("name") or "")[:60]
         asked = params.get("protocolVersion")
         return _mcp_result(req_id, {
             "protocolVersion": asked if asked in _MCP_PROTOCOLS else _MCP_PROTOCOLS[0],
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": "cot", "title": "cot", "version": _MCP_SERVER_VERSION},
-            "instructions": "Read-only access to the coding-agent sessions cot recorded on this machine. Start with list_sessions or search, then get_session or explain_session_cost on an id.",
+            "instructions": "Access to the coding-agent sessions cot recorded on this machine. Start with list_sessions or search, then get_session or explain_session_cost on an id. For a persona report with deliverables (prompt coach, agent debugger, cost, security, manager), use analysis_brief → investigate → save_analysis, or run_analysis to have cot do it with the person's own AI key.",
         })
     if method == "ping":
         return _mcp_result(req_id, {})
     if method == "tools/list":
         tools = [
-            {"name": name, **spec, "annotations": {"readOnlyHint": True, "openWorldHint": False}}
+            {"name": name, **spec, "annotations": {"readOnlyHint": name not in _MCP_WRITE_TOOLS, "openWorldHint": False}}
             for name, (spec, _fn) in _MCP_TOOLS.items()
         ]
         return _mcp_result(req_id, {"tools": tools})
