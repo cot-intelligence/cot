@@ -1,0 +1,4 @@
+name: cot
+version: "1.0.0"
+description: cot observability. Forwards Hermes lifecycle, prompt, tool and usage events to the local cot collector.
+# id: cot.observability

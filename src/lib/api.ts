@@ -1461,6 +1461,17 @@ export async function sendTestEvent(source: AgentId): Promise<string> {
       { hook_event_name: 'Stop', timestamp: ts() },
     ];
     for (const ev of events) await ingest('opencode', { ...base, ...ev });
+  } else if (source === 'hermes') {
+    const base = { session_id: sid, cwd, model: 'hermes-4-405b' };
+    const events: Record<string, unknown>[] = [
+      { hook_event_name: 'SessionStart', platform: 'cli', timestamp: ts() },
+      { hook_event_name: 'UserPromptSubmit', prompt: 'Inspect the parser and fix the failing test.', timestamp: ts() },
+      { hook_event_name: 'PostToolUse', tool_name: 'terminal', tool_input: { command: 'npm test' }, tool_response: '{"output": "Tests passed", "exit_code": 0}', timestamp: ts() },
+      { hook_event_name: 'afterAgentResponse', response: 'The parser test now passes.', timestamp: ts() },
+      { hook_event_name: 'ModelUsage', usage: { input_tokens: 120, output_tokens: 40 }, timestamp: ts() },
+      { hook_event_name: 'Stop', completed: true, timestamp: ts() },
+    ];
+    for (const ev of events) await ingest('hermes', { ...base, ...ev });
   } else {
     const base = { conversation_id: sid, workspace_roots: [cwd], cwd };
     const events: Record<string, unknown>[] = [
@@ -1532,7 +1543,7 @@ export async function sendTestEvent(source: AgentId): Promise<string> {
 
 // ---------------------------------------------------------------- passive mode
 
-export type PassiveAgent = 'claude' | 'cursor' | 'codex' | 'opencode';
+export type PassiveAgent = 'claude' | 'cursor' | 'codex' | 'opencode' | 'hermes';
 
 /** What's on disk for one agent (a scan, nothing imported) plus sessions already in cot. */
 export interface PassiveAgentDetail {

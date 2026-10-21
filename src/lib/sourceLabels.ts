@@ -12,6 +12,8 @@ export function sourceLabel(source: string): string {
       return 'Codex';
     case 'opencode':
       return 'OpenCode';
+    case 'hermes':
+      return 'Hermes';
     case 'api':
       return 'API';
     case 'custom':
@@ -41,11 +43,13 @@ export function sourceTag(source: string): string {
       return 'CODEX';
     case 'opencode':
       return 'OPENCODE';
+    case 'hermes':
+      return 'HERMES';
     default:
       return source.toUpperCase();
   }
 }
 
 export function isKnownAgent(source: string): source is AgentId {
-  return source === 'claude' || source === 'cursor' || source === 'codex' || source === 'opencode';
+  return source === 'claude' || source === 'cursor' || source === 'codex' || source === 'opencode' || source === 'hermes';
 }

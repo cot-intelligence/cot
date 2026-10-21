@@ -16,6 +16,8 @@ a = Analysis(
         (os.path.join(REPO, "bridge", "install.sh"), "bridge"),
         (os.path.join(REPO, "bridge", "cot"), "bridge"),
         (os.path.join(REPO, "bridge", "opencode-plugin.js"), "bridge"),
+        (os.path.join(REPO, "bridge", "hermes-plugin", "plugin.yaml"), "bridge/hermes-plugin"),
+        (os.path.join(REPO, "bridge", "hermes-plugin", "__init__.py"), "bridge/hermes-plugin"),
     ],
     hiddenimports=[
         "uvicorn.logging",

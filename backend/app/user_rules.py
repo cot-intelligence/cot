@@ -80,7 +80,7 @@ SPEC_VERSION = 1
 RULE_TYPES = ("match", "threshold")
 PILLARS = ("usability", "cost", "security")
 SEVERITIES = ("info", "warn", "critical")
-SOURCES = ("claude", "cursor", "codex", "opencode")
+SOURCES = ("claude", "cursor", "codex", "opencode", "hermes")
 CATEGORIES = (
     "shell", "file_read", "file_edit", "context_read", "memory", "mcp", "web",
     "permission", "prompt", "question", "response", "thought", "plan",

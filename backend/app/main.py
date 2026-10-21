@@ -47,7 +47,7 @@ from . import (
 
 app = FastAPI(title="cot collector", version=__version__)
 
-AGENTS = ("claude", "cursor", "codex", "opencode")
+AGENTS = ("claude", "cursor", "codex", "opencode", "hermes")
 EXPECTED_HOOKS = {
     "claude": [
         "SessionStart",
@@ -92,6 +92,11 @@ EXPECTED_HOOKS = {
         "PostToolUseFailure", "afterAgentResponse", "afterAgentThought",
         "OpenCodeUsage", "PermissionRequest", "PostCompact", "Stop",
     ],
+    "hermes": [
+        "SessionStart", "UserPromptSubmit", "PostToolUse", "PostToolUseFailure",
+        "afterAgentResponse", "ModelUsage", "PermissionRequest", "SubagentStart",
+        "SubagentStop", "PostCompact", "Stop", "SessionEnd",
+    ],
 }
 HOOK_LABELS = {
     "SessionStart": "Session start",
@@ -120,6 +125,7 @@ HOOK_LABELS = {
     "preCompact": "Compaction start",
     "stop": "Session stopped",
     "OpenCodeUsage": "Model usage",
+    "ModelUsage": "Model usage",
 }
 
 # --- Local-only network hardening -------------------------------------------
@@ -914,6 +920,18 @@ def opencode_plugin() -> FileResponse:
     return FileResponse(script, media_type="text/javascript")
 
 
+_HERMES_PLUGIN_FILES = {"plugin.yaml": "text/yaml", "__init__.py": "text/x-python"}
+
+
+@app.get("/hermes-plugin/{name}")
+def hermes_plugin(name: str) -> FileResponse:
+    media_type = _HERMES_PLUGIN_FILES.get(name)
+    script = _BRIDGE_DIR / "hermes-plugin" / name
+    if media_type is None or not script.exists():
+        raise HTTPException(status_code=404, detail="Hermes plugin file not found")
+    return FileResponse(script, media_type=media_type)
+
+
 async def _json_body(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
@@ -1627,7 +1645,7 @@ def get_hook_status() -> dict[str, Any]:
         connected = bool(conn.get("connected"))
         manifest_installed = bool(entry.get("installed"))
         installed = manifest_installed or (not manifest_agents and events > 0)
-        if source == "opencode" and source not in manifest_agents and events > 0:
+        if source in ("opencode", "hermes") and source not in manifest_agents and events > 0:
             # A manually copied plugin has no bridge-written manifest. Its
             # events prove installation only when no explicit entry exists.
             installed = True
@@ -1674,7 +1692,7 @@ def get_hook_status() -> dict[str, Any]:
         "updated_at": manifest.get("updated_at"),
         "endpoint": manifest.get("endpoint"),
         "manifest_found": bool(manifest_agents),
-        "repair_all_url": "/repair.sh?agents=claude,cursor,codex,opencode",
+        "repair_all_url": "/repair.sh?agents=" + ",".join(AGENTS),
         "agents": agents,
     }
 
