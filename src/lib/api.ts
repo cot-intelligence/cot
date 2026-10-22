@@ -1156,8 +1156,9 @@ export async function putAnnotation(
 }
 
 /** Downloads the whole session (untrimmed events, raw hook rows) as JSON. */
-export function sessionExportUrl(id: string, store: Store = 'main'): string {
-  return inStore(`/v1/sessions/${encodeURIComponent(id)}/export`, store);
+export function sessionExportUrl(id: string, store: Store = 'main', format: 'json' | 'md' | 'html' = 'json'): string {
+  const url = `/v1/sessions/${encodeURIComponent(id)}/export`;
+  return inStore(format === 'json' ? url : `${url}?format=${format}`, store);
 }
 
 /** Imported sessions, newest import first (one row per imported file). */
@@ -2337,4 +2338,72 @@ export interface OutcomesSummaryLite {
 
 export async function getOutcomeTotals(days: number): Promise<OutcomesSummaryLite> {
   return json(await fetch(`/v1/outcomes?days=${days}`));
+}
+
+/** Whether `cot mcp` is registered with each agent (backend/app/mcp_install.py). */
+export interface McpInstallAgent {
+  agent: 'claude' | 'cursor' | 'codex';
+  present: boolean;
+  config_path: string;
+  installed: boolean;
+  /** Registered and pointing at this machine's bridge. */
+  current: boolean;
+}
+
+export interface McpInstallStatus {
+  bridge: string;
+  bridge_exists: boolean;
+  agents: McpInstallAgent[];
+}
+
+async function detailOrStatus<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    let message = `${res.status}`;
+    try {
+      const body = await res.json();
+      if (typeof body.detail === 'string') message = body.detail;
+    } catch {
+      /* not JSON */
+    }
+    throw new Error(message);
+  }
+  return (await res.json()) as T;
+}
+
+export async function getMcpInstall(): Promise<McpInstallStatus> {
+  return json<McpInstallStatus>(await fetch('/v1/mcp/install'));
+}
+
+export async function setMcpInstalled(agent: McpInstallAgent['agent'], on: boolean): Promise<McpInstallAgent> {
+  return detailOrStatus<McpInstallAgent>(await fetch(`/v1/mcp/install/${agent}`, { method: on ? 'POST' : 'DELETE' }));
+}
+
+/** Something in a session's HTML export that might be a password or token. */
+export interface ExportSuggestion {
+  id: string;
+  kind: string;
+  /** The value with its middle elided. */
+  preview: string;
+  /** Where it appeared, value elided. */
+  context: string;
+  count: number;
+}
+
+export async function scanSessionExport(id: string, opts: { thoughts: boolean; outputs: boolean }): Promise<ExportSuggestion[]> {
+  const q = new URLSearchParams({ thoughts: String(opts.thoughts), outputs: String(opts.outputs) });
+  return (await json<{ suggestions: ExportSuggestion[] }>(await fetch(`/v1/sessions/${encodeURIComponent(id)}/export/scan?${q}`))).suggestions;
+}
+
+export async function exportSessionHtml(
+  id: string,
+  body: { redact: string[]; terms: string[]; thoughts: boolean; outputs: boolean },
+): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch(`/v1/sessions/${encodeURIComponent(id)}/export/html`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Export failed (${res.status})`);
+  const name = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') ?? '')?.[1] ?? `cot-session-${id.slice(0, 8)}.html`;
+  return { blob: await res.blob(), filename: name };
 }

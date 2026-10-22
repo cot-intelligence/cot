@@ -210,6 +210,32 @@ CREATE TABLE IF NOT EXISTS ai_analyses (
 
 CREATE INDEX IF NOT EXISTS idx_ai_analyses_created ON ai_analyses(created_at);
 
+-- Analysis runs (analysis.py): a persona's report on one session or across
+-- sessions, with its deliverables and follow-ups. ``runner`` is 'cot' (the
+-- configured provider, BYOK) or 'agent' (an outside agent over cot mcp).
+CREATE TABLE IF NOT EXISTS analysis_runs (
+    id            TEXT PRIMARY KEY,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    scope         TEXT NOT NULL,
+    session_id    TEXT,
+    days          INTEGER,
+    persona       TEXT NOT NULL,
+    question      TEXT,
+    status        TEXT NOT NULL,
+    runner        TEXT NOT NULL,
+    provider      TEXT,
+    model         TEXT,
+    steps         TEXT,
+    report        TEXT,
+    deliverables  TEXT,
+    followups     TEXT,
+    usage         TEXT,
+    error         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_runs_created ON analysis_runs(created_at);
+CREATE INDEX IF NOT EXISTS idx_analysis_runs_session ON analysis_runs(session_id, created_at);
+
 -- Things worth telling the person about (a new finding, a rule match), shown in
 -- the dashboard's inbox and, in the Mac app, as macOS notifications.
 CREATE TABLE IF NOT EXISTS notifications (
@@ -1589,6 +1615,97 @@ def list_ai_analyses(limit: int = 10) -> list[dict[str, Any]]:
             (limit,),
         ).fetchall()
     return [_ai_analysis_row(r) for r in rows]
+
+
+_ANALYSIS_JSON = ("steps", "report", "deliverables", "followups", "usage")
+
+
+def insert_analysis_run(run: dict[str, Any]) -> None:
+    cols = (
+        "id", "created_at", "updated_at", "scope", "session_id", "days", "persona", "question",
+        "status", "runner", "provider", "model", *_ANALYSIS_JSON, "error",
+    )
+    values = [
+        json.dumps(run.get(c), ensure_ascii=False) if c in _ANALYSIS_JSON and run.get(c) is not None else run.get(c)
+        for c in cols
+    ]
+    with store.write() as conn:
+        conn.execute(
+            f"INSERT INTO analysis_runs ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+            values,
+        )
+
+
+def update_analysis_run(run_id: str, **fields: Any) -> None:
+    if not fields:
+        return
+    fields["updated_at"] = timeutil.now()
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    values = [
+        json.dumps(v, ensure_ascii=False) if k in _ANALYSIS_JSON and v is not None else v
+        for k, v in fields.items()
+    ]
+    with store.write() as conn:
+        conn.execute(f"UPDATE analysis_runs SET {sets} WHERE id = ?", (*values, run_id))
+
+
+def _analysis_run_row(r: Any) -> dict[str, Any]:
+    out = dict(r)
+    for c in _ANALYSIS_JSON:
+        raw = out.get(c)
+        try:
+            out[c] = json.loads(raw) if raw else None
+        except (json.JSONDecodeError, TypeError):
+            out[c] = None
+    return out
+
+
+def get_analysis_run(run_id: str) -> dict[str, Any] | None:
+    with store.read() as conn:
+        row = conn.execute("SELECT * FROM analysis_runs WHERE id = ?", (run_id,)).fetchone()
+    return _analysis_run_row(row) if row is not None else None
+
+
+def list_analysis_runs(
+    limit: int = 50, session_id: str | None = None, days: int = 0
+) -> list[dict[str, Any]]:
+    clauses, params = [], []
+    if session_id:
+        clauses.append("session_id = ?")
+        params.append(session_id)
+    if days > 0:
+        clauses.append("created_at >= ?")
+        params.append((datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S"))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with store.read() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM analysis_runs {where} ORDER BY created_at DESC LIMIT ?",
+            (*params, max(1, min(limit, 200))),
+        ).fetchall()
+    return [_analysis_run_row(r) for r in rows]
+
+
+def delete_analysis_run(run_id: str) -> bool:
+    with store.write() as conn:
+        return conn.execute("DELETE FROM analysis_runs WHERE id = ?", (run_id,)).rowcount > 0
+
+
+def event_session_id(event_id: int) -> str | None:
+    with store.read() as conn:
+        row = conn.execute("SELECT session_id FROM events WHERE id = ?", (event_id,)).fetchone()
+    return row["session_id"] if row is not None else None
+
+
+def events_in_sessions(event_ids: list[int]) -> dict[int, str]:
+    """Which session each of these event ids belongs to (unknown ids omitted)."""
+    ids = sorted({int(i) for i in event_ids})[:500]
+    if not ids:
+        return {}
+    with store.read() as conn:
+        rows = conn.execute(
+            f"SELECT id, session_id FROM events WHERE id IN ({', '.join('?' * len(ids))})", ids
+        ).fetchall()
+    return {int(r["id"]): r["session_id"] for r in rows}
 
 
 def _ai_analysis_row(r: Any) -> dict[str, Any]:
@@ -4519,7 +4636,8 @@ def get_session(session_id: str) -> dict[str, Any] | None:
 
 def session_origins() -> dict[str, str]:
     """Return the dominant origin per session: 'hook' if any hook events exist,
-    else 'import'. Used by the bridge to skip already-hooked sessions.
+    else 'import', or 'deleted' for a session someone deleted. Used by the
+    bridge to skip already-hooked sessions and never re-import deleted ones.
 
     A session is import-only when all of its events are imported, so this
     compares session_stats' event count with a count over idx_events_import
@@ -4533,10 +4651,18 @@ def session_origins() -> dict[str, str]:
             "   WHERE origin = 'import' GROUP BY session_id"
             " ) i ON i.session_id = s.session_id"
         ).fetchall()
-    return {
+        # Deleted on purpose: the bridge must not import these again when it
+        # re-reads a transcript whose session is gone.
+        deleted = conn.execute(
+            "SELECT DISTINCT target FROM audit_events"
+            " WHERE action = 'session.deleted' AND target IS NOT NULL"
+        ).fetchall()
+    origins = {r["target"]: "deleted" for r in deleted}
+    origins.update({
         r["session_id"]: "import" if r["imported"] >= r["event_count"] else "hook"
         for r in rows
-    }
+    })
+    return origins
 
 
 def import_summary() -> dict[str, Any]:

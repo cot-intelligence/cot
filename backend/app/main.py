@@ -13,8 +13,10 @@ import os
 import platform as _platform
 import re
 import shlex
+import shutil
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -41,9 +43,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import (
-    __version__, activity, ai_insights, context_cost, cron, db, edits, extension_usage, folders, insights, otlp,
-    outcomes, passive, recovery, rule_drafts, semantic, session_markdown, session_shape, store, timeutil, usage_line,
-    user_rules, watch,
+    __version__, activity, ai_insights, analysis, analysis_personas, analysis_tools, context_cost, cron, db, edits,
+    extension_usage, folders, insights, mcp_install, otlp, outcomes, passive, recovery, rule_drafts, semantic,
+    session_html, session_markdown, session_shape, store, timeutil, usage_line, user_rules, watch,
 )
 
 app = FastAPI(title="cot collector", version=__version__)
@@ -265,6 +267,38 @@ def _bridge_dir() -> Path:
 _BRIDGE_DIR = _bridge_dir()
 
 
+def _refresh_installed_bridge() -> bool:
+    """Bring ``~/.cot/bin/cot`` up to this collector's bridge.
+
+    Only install.sh writes that file, so after an app update agents kept running
+    the old bridge (and its old ``cot mcp`` tools) until hooks were reinstalled.
+    Keeps the shebang install.sh chose; never installs a bridge that isn't there.
+    """
+    target = mcp_install.bridge_path()
+    source = _BRIDGE_DIR / "cot"
+    if not target.is_file() or not source.is_file():
+        return False
+    installed = target.read_bytes()
+    shebang, _, _ = installed.partition(b"\n")
+    bundled_shebang, _, body = source.read_bytes().partition(b"\n")
+    if not shebang.startswith(b"#!"):
+        shebang = bundled_shebang
+    updated = shebang + b"\n" + body
+    if updated == installed:
+        return False
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(updated)
+        shutil.copymode(target, tmp)
+        # Hooks run this file constantly; a rename never shows them half a script.
+        os.replace(tmp, target)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return True
+
+
 _search_index_building = False
 
 
@@ -318,6 +352,10 @@ _GIL_SWITCH_INTERVAL_S = 0.0005
 async def _startup() -> None:
     sys.setswitchinterval(_GIL_SWITCH_INTERVAL_S)
     db.init_db(build_search_index=False)
+    try:
+        _refresh_installed_bridge()
+    except OSError:
+        pass  # agents keep the bridge they have; install.sh still replaces it
     # A first-time search index build can take longer than the desktop app waits
     # for /health; search scans until it lands.
     threading.Thread(target=_build_search_index, name="search-index", daemon=True).start()
@@ -2091,6 +2129,171 @@ class AnalyzeRequest(BaseModel):
     days: int = 30
 
 
+class AnalysisRunRequest(BaseModel):
+    scope: str = "session"
+    session_id: str | None = None
+    persona: str
+    question: str | None = None
+    days: int = 30
+    budget_usd: float | None = None
+
+
+class AnalysisExternalRequest(AnalysisRunRequest):
+    report: dict[str, Any]
+    agent: str | None = None
+    model: str | None = None
+
+
+class AnalysisFollowupRequest(BaseModel):
+    question: str
+
+
+class AnalysisApplyRequest(BaseModel):
+    cwd: str | None = None
+
+
+class AnalysisStatusRequest(BaseModel):
+    status: str
+
+
+def _analysis_call(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+    """Map analysis/provider errors onto HTTP the same way /v1/insights/analyze does."""
+    try:
+        return fn(*args, **kwargs)
+    except ai_insights.AiDisabledError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ai_insights.AiNotConfiguredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ai_insights.AiProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except rule_drafts.DraftError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except user_rules.SpecError as exc:
+        raise _spec_error(exc)
+    except analysis.AnalysisError as exc:
+        raise HTTPException(status_code=404 if "unknown run" in str(exc) else 400, detail=str(exc))
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"could not write the file: {exc.strerror or exc}")
+
+
+@app.get("/v1/mcp/install")
+def get_mcp_install() -> dict[str, Any]:
+    """Whether `cot mcp` is registered with Claude Code, Cursor and Codex."""
+    return mcp_install.status()
+
+
+@app.post("/v1/mcp/install/{agent}")
+def post_mcp_install(agent: str) -> dict[str, Any]:
+    try:
+        result = mcp_install.install(agent)
+    except mcp_install.InstallError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"could not write {mcp_install.config_path(agent)}: {exc.strerror or exc}")
+    db.record_audit_event("mcp.installed", target=agent, detail={"config": result["config_path"]})
+    return result
+
+
+@app.delete("/v1/mcp/install/{agent}")
+def delete_mcp_install(agent: str) -> dict[str, Any]:
+    try:
+        result = mcp_install.uninstall(agent)
+    except mcp_install.InstallError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"could not write {mcp_install.config_path(agent)}: {exc.strerror or exc}")
+    db.record_audit_event("mcp.uninstalled", target=agent, detail={"config": result["config_path"]})
+    return result
+
+
+@app.get("/v1/analysis/personas")
+def get_analysis_personas() -> dict[str, Any]:
+    return analysis_personas.catalog()
+
+
+@app.get("/v1/analysis/estimate")
+def get_analysis_estimate(scope: str = "session", session_id: str | None = None) -> dict[str, Any]:
+    return analysis.estimate(scope, session_id)
+
+
+@app.post("/v1/analysis/runs", status_code=202)
+def post_analysis_run(body: AnalysisRunRequest) -> dict[str, Any]:
+    """Start a run (costs the user money: explicit action, never polled). The
+    investigation runs on a thread; poll GET /v1/analysis/runs/{id}."""
+    days = max(1, min(body.days, 365))
+    run = _analysis_call(analysis.start_run, body.scope, body.session_id, body.persona, body.question, days, body.budget_usd)
+    db.record_audit_event("analysis.started", target=run["id"], detail={"persona": run["persona"], "scope": run["scope"], "provider": run["provider"], "model": run["model"]})
+    return {"run": run}
+
+
+@app.post("/v1/analysis/runs/external")
+def post_analysis_external(body: AnalysisExternalRequest) -> dict[str, Any]:
+    """A report an outside agent wrote over cot mcp (see GET /v1/analysis/brief)."""
+    days = max(1, min(body.days, 365))
+    run = _analysis_call(analysis.save_external, body.scope, body.session_id, body.persona, body.report, body.question, days, body.agent, body.model)
+    db.record_audit_event("analysis.saved", target=run["id"], detail={"persona": run["persona"], "scope": run["scope"], "agent": run["provider"]})
+    return {"run": run}
+
+
+@app.get("/v1/analysis/brief")
+def get_analysis_brief(persona: str, scope: str = "session", session_id: str | None = None, question: str | None = None, days: int = 30) -> dict[str, Any]:
+    return _analysis_call(analysis.brief, scope, session_id, persona, question, max(1, min(days, 365)))
+
+
+@app.post("/v1/analysis/tools/{name}")
+def post_analysis_tool(name: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """One investigation tool call, for outside agents over cot mcp."""
+    args = dict(body or {})
+    box = analysis_tools.Toolbox(args.get("session_id"), int(args.get("days") or 30))
+    try:
+        return analysis_tools.call(box, name, args)
+    except analysis_tools.ToolError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/v1/analysis/runs")
+def get_analysis_runs(session_id: str | None = None, limit: int = 50, days: int = 0) -> dict[str, Any]:
+    return {"runs": analysis.list_runs(limit=limit, session_id=session_id, days=days)}
+
+
+@app.get("/v1/analysis/runs/{run_id}")
+def get_analysis_run(run_id: str) -> dict[str, Any]:
+    return {"run": _analysis_call(analysis.get_run, run_id)}
+
+
+@app.delete("/v1/analysis/runs/{run_id}")
+def delete_analysis_run(run_id: str) -> dict[str, Any]:
+    if not analysis.delete_run(run_id):
+        raise HTTPException(status_code=404, detail="unknown run")
+    return {"deleted": run_id}
+
+
+@app.post("/v1/analysis/runs/{run_id}/cancel")
+def cancel_analysis_run(run_id: str) -> dict[str, Any]:
+    return {"cancelled": analysis.cancel_run(run_id)}
+
+
+@app.get("/v1/analysis/runs/{run_id}/export.md")
+def export_analysis_run(run_id: str) -> PlainTextResponse:
+    text = _analysis_call(analysis.markdown, run_id)
+    return PlainTextResponse(text, media_type="text/markdown", headers={"Content-Disposition": f'attachment; filename="cot-analysis-{run_id}.md"'})
+
+
+@app.post("/v1/analysis/runs/{run_id}/followups", status_code=202)
+def post_analysis_followup(run_id: str, body: AnalysisFollowupRequest) -> dict[str, Any]:
+    return {"followup": _analysis_call(analysis.ask_followup, run_id, body.question)}
+
+
+@app.post("/v1/analysis/runs/{run_id}/deliverables/{did}/apply")
+def apply_analysis_deliverable(run_id: str, did: str, body: AnalysisApplyRequest | None = None) -> dict[str, Any]:
+    return {"deliverable": _analysis_call(analysis.apply_deliverable, run_id, did, body.cwd if body else None)}
+
+
+@app.post("/v1/analysis/runs/{run_id}/deliverables/{did}/status")
+def set_analysis_deliverable_status(run_id: str, did: str, body: AnalysisStatusRequest) -> dict[str, Any]:
+    return {"deliverable": _analysis_call(analysis.set_deliverable_status, run_id, did, body.status)}
+
+
 @app.post("/v1/insights/analyze")
 def analyze_insights(req: AnalyzeRequest | None = None) -> dict[str, Any]:
     """Explicit BYOK LLM analysis — costs the user money, so never polled.
@@ -2375,11 +2578,54 @@ def set_import_note(session_id: str, body: ImportNoteBody) -> dict[str, Any]:
     return {"session_id": session_id, "import_note": (body.note or "").strip() or None}
 
 
-@app.get("/v1/sessions/{session_id}/export")
-def export_session(session_id: str, format: str = Query("json", pattern="^(json|md)$")) -> Response:  # noqa: A002
-    """The whole session as a downloadable JSON file, or ``format=md`` for a
-    readable Markdown transcript."""
+class SessionHtmlExport(BaseModel):
+    redact: list[str] = Field(default_factory=list)
+    terms: list[str] = Field(default_factory=list)
+    thoughts: bool = True
+    outputs: bool = True
+
+
+@app.get("/v1/sessions/{session_id}/export/scan")
+def scan_session_export(session_id: str, thoughts: bool = True, outputs: bool = True) -> dict[str, Any]:
+    """What might be a password or token in the HTML export: suggestions for
+    the export dialog. Nothing is hidden unless the person picks it."""
+    found = session_html.scan(session_id, session_html.Options(thoughts=thoughts, outputs=outputs))
+    if found is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"suggestions": found}
+
+
+@app.post("/v1/sessions/{session_id}/export/html")
+def export_session_html(session_id: str, body: SessionHtmlExport) -> Response:
+    """The branded HTML page with the person's chosen redactions."""
+    terms = [t.strip() for t in body.terms if t.strip()][:200]
+    page = session_html.render(
+        session_id, body.redact, terms, session_html.Options(thoughts=body.thoughts, outputs=body.outputs)
+    )
+    if page is None:
+        raise HTTPException(status_code=404, detail="Session not found")
     day = datetime.now().strftime("%Y%m%d")
+    return Response(
+        content=page,
+        media_type="text/html; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="cot-session-{session_id[:8]}-{day}.html"'},
+    )
+
+
+@app.get("/v1/sessions/{session_id}/export")
+def export_session(session_id: str, format: str = Query("json", pattern="^(json|md|html)$")) -> Response:  # noqa: A002
+    """The whole session as a downloadable JSON file, ``format=md`` for a
+    readable Markdown transcript, or ``format=html`` for a branded, shareable page."""
+    day = datetime.now().strftime("%Y%m%d")
+    if format == "html":
+        page = session_html.render(session_id)
+        if page is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return Response(
+            content=page,
+            media_type="text/html; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="cot-session-{session_id[:8]}-{day}.html"'},
+        )
     if format == "md":
         from .session_read import build_session_detail
 

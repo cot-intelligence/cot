@@ -34,6 +34,7 @@ const SettingsView = lazy(() => import('./SettingsView').then((m) => ({ default:
 const FindingsView = lazy(() => import('./FindingsView').then((m) => ({ default: m.FindingsView })));
 const GovernanceView = lazy(() => import('./GovernanceView').then((m) => ({ default: m.GovernanceView })));
 const RulesView = lazy(() => import('./RulesView').then((m) => ({ default: m.RulesView })));
+const AnalysisView = lazy(() => import('./analysis/AnalysisView').then((m) => ({ default: m.AnalysisView })));
 const ProjectView = lazy(() => import('./ProjectView').then((m) => ({ default: m.ProjectView })));
 const ProjectsView = lazy(() => import('./ProjectsView').then((m) => ({ default: m.ProjectsView })));
 const ExtensionDetailView = lazy(() =>
@@ -74,6 +75,7 @@ type DashboardRoute =
   | { view: 'findings'; pillar?: InsightPillar; finding?: string; focusNonce?: number }
   | { view: 'governance' }
   | { view: 'rules'; fromEvent?: number }
+  | { view: 'analysis'; runId?: string }
   | { view: 'project'; name: string }
   | { view: 'projects' }
   | { view: 'extension'; key: string };
@@ -93,6 +95,9 @@ function parseHash(): DashboardRoute {
   if (settingsTab) return { view: 'settings', tab: settingsTab[1] };
   if (hash === 'governance') return { view: 'governance' };
   if (hash === 'projects') return { view: 'projects' };
+  // #/analysis, or #/analysis/<runId> for one saved run.
+  const analysisMatch = hash.match(/^analysis(?:\/([^?]+))?$/);
+  if (analysisMatch) return { view: 'analysis', runId: analysisMatch[1] ? decodeURIComponent(analysisMatch[1]) : undefined };
   const rulesMatch = hash.match(/^rules(?:\?from=(\d+))?$/);
   if (rulesMatch) return { view: 'rules', fromEvent: rulesMatch[1] ? Number(rulesMatch[1]) : undefined };
   const projectPage = hash.match(/^project\/(.+)$/);
@@ -253,6 +258,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
     else if (route.view === 'findings') setDocumentTitle('Findings');
     else if (route.view === 'governance') setDocumentTitle('Governance');
     else if (route.view === 'rules') setDocumentTitle('Rules');
+    else if (route.view === 'analysis') setDocumentTitle('Analysis');
     else if (route.view === 'project') setDocumentTitle(route.name);
     else if (route.view === 'projects') setDocumentTitle('Projects');
     else if (route.view === 'extension') setDocumentTitle(route.key.split(':').slice(1).join(':'));
@@ -301,6 +307,11 @@ export function Dashboard({ onSetup }: DashboardProps) {
     window.location.hash = '#/rules';
   }, []);
 
+  const goAnalysis = useCallback(() => {
+    setRoute({ view: 'analysis' });
+    window.location.hash = '#/analysis';
+  }, []);
+
   const goInstalled = useCallback((kind: 'mcp' | 'skill' | 'plugin') => {
     window.location.hash = installedHref(kind);
   }, []);
@@ -319,12 +330,13 @@ export function Dashboard({ onSetup }: DashboardProps) {
   const onFindings = route.view === 'findings';
   const onGovernance = route.view === 'governance';
   const onRules = route.view === 'rules';
+  const onAnalysis = route.view === 'analysis';
   const onProject = route.view === 'project';
   const onProjects = route.view === 'projects';
   const extensionKey = route.view === 'extension' ? route.key : null;
   const extensionKind = extensionKey ? (extensionKey.split(':')[0] as 'mcp' | 'skill' | 'plugin') : null;
   const onExtensions = !!extensionKey;
-  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay && !onFindings && !onGovernance && !onRules && !onExtensions && !onProject && !onProjects;
+  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay && !onFindings && !onGovernance && !onRules && !onAnalysis && !onExtensions && !onProject && !onProjects;
 
   // Counts for the navigation: sessions traced, and findings that still need a look.
   // /v1/stats carries them all, so the shell never pays for metrics or an insights pass.
@@ -411,6 +423,14 @@ export function Dashboard({ onSetup }: DashboardProps) {
         run: goRules,
       },
       {
+        id: 'nav-analysis',
+        label: 'Go to Analysis',
+        icon: 'brain',
+        keywords: 'analysis agentic ai llm persona report deliverables coach debugger cost security manager',
+        active: onAnalysis,
+        run: goAnalysis,
+      },
+      {
         id: 'nav-governance',
         label: 'Go to Governance',
         icon: 'plug',
@@ -437,10 +457,12 @@ export function Dashboard({ onSetup }: DashboardProps) {
       onFindings,
       onGovernance,
       onRules,
+      onAnalysis,
       onExtensions,
       goFindings,
       goGovernance,
       goRules,
+      goAnalysis,
       goInstalled,
       route,
       goSessions,
@@ -470,6 +492,8 @@ export function Dashboard({ onSetup }: DashboardProps) {
       ? 'governance'
       : onRules
       ? 'rules'
+      : onAnalysis
+      ? 'analysis'
       : onSettings
     ? 'settings'
     : onOverview
@@ -501,6 +525,8 @@ export function Dashboard({ onSetup }: DashboardProps) {
           ? [{ label: 'Projects', href: '#/projects' }, { label: route.name }]
         : onProjects
           ? [{ label: 'Projects' }]
+        : route.view === 'analysis'
+          ? route.runId ? [{ label: 'Analysis', href: '#/analysis' }, { label: 'Report' }] : [{ label: 'Analysis' }]
         : onMetricsHistory
       ? [{ label: 'Activity', href: '#/metrics-history' }, { label: ACTIVITY_LABEL[route.view === 'metrics-history' ? route.tab ?? 'shell' : 'shell'] }]
       : [{ label: onFindings ? 'Findings' : onGovernance ? 'Governance' : onRules ? 'Rules' : onSettings ? 'Settings' : onOverview ? 'Overview' : 'Sessions' }];
@@ -583,6 +609,12 @@ export function Dashboard({ onSetup }: DashboardProps) {
             <main className="flex min-w-0 flex-1 flex-col">
               <Suspense fallback={<MetricsSkeleton />}>
                 <ProjectsView />
+              </Suspense>
+            </main>
+          ) : route.view === 'analysis' ? (
+            <main className="flex min-w-0 flex-1 flex-col">
+              <Suspense fallback={<MetricsSkeleton />}>
+                <AnalysisView runId={route.runId} />
               </Suspense>
             </main>
           ) : onRules ? (
