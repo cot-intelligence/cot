@@ -1109,3 +1109,19 @@
 .vf .xr-term button { display: grid; place-items: center; width: 20px; height: 20px; border: 0; border-radius: 999px; background: none; color: var(--v-dim); cursor: pointer; }
 @media (hover: hover) and (pointer: fine) { .vf .xr-term button:hover { background: var(--v-wash); color: var(--v-fg); } }
 .vf .xr-f { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 14px 22px; border-top: 1px solid var(--v-line); background: var(--v-panel); font-size: 12px; }
+
+/* Session header: one plain meta line, one quiet signals line (shipped,
+   failures, extensions), and the rating beside Export and Bookmark. */
+.vf .sd-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; margin-top: 8px; font-size: 13px; color: var(--v-dim); }
+.vf .sd-meta > * + *::before { content: '·'; margin: 0 8px; color: var(--v-faint); }
+.vf .sd-live { display: inline-flex; align-items: center; gap: 6px; color: var(--v-olive); }
+.vf .sd-sig { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 4px; margin: 8px 0 0 -8px; }
+.vf .sd-sig-i { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px; border: 0; border-radius: 8px; background: none; color: var(--v-dim); font: inherit; font-size: 12px; text-decoration: none; cursor: pointer; transition: background-color 150ms ease, color 150ms ease; }
+.vf .sd-sig-i svg { color: var(--v-faint); flex: none; }
+@media (hover: hover) and (pointer: fine) { .vf .sd-sig-i:hover { background: var(--v-wash); color: var(--v-fg); } }
+.vf .sd-sig-i:active { transform: scale(0.98); }
+.vf .sd-sig-i[aria-expanded='true'] { background: var(--v-wash); color: var(--v-fg); }
+.vf .sd-sig-i.is-warn, .vf .sd-sig-i.is-warn svg { color: var(--v-amber); }
+.vf .sd-sig-i.is-faint { color: var(--v-faint); }
+.vf .fb-bar { position: relative; }
+.vf .fb-pop { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20; width: min(420px, calc(100vw - 32px)); background: var(--v-surface); box-shadow: var(--v-pop); }

@@ -210,12 +210,12 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
             <div style={{ minWidth: 0, maxWidth: 820 }}>
               <span className="mono faint" style={{ fontSize: 12 }}>{s.cwd ? <a href={`#/project/${encodeURIComponent(project(s.cwd))}`} className="proj-link">{project(s.cwd)}</a> : project(s.cwd)} · {s.id}</span>
               <h1 style={{ fontSize: 24, lineHeight: '30px', overflowWrap: 'anywhere' }}>{s.title || 'Untitled session'}</h1>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10, alignItems: 'center' }}>
-                {s.status === 'active' ? <span className="vchip c-ok"><span className="dot" />live</span> : <span className="vchip c-dim">completed</span>}
+              <div className="sd-meta">
+                {s.status === 'active' ? <span className="sd-live"><span className="live" />Live</span> : <span>Completed</span>}
                 <Agent id={s.source} />
-                {s.machine && <span className="vchip c-info" title="Imported from this machine's session folders">{s.machine}</span>}
-                {s.models.map((m) => <span key={m} className="vchip c-dim">{modelLabel(m)}</span>)}
-                <span className="mono faint" style={{ fontSize: 12 }}>started {fmt.dayTime(s.started_at)}</span>
+                {s.machine && <span title="Imported from this machine's session folders">{s.machine}</span>}
+                {s.models.length > 0 && <span>{s.models.map(modelLabel).join(', ')}</span>}
+                <span>{fmt.dayTime(s.started_at)}</span>
               </div>
               {(parents.length > 0 || subagents.length > 0) && (
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10, fontSize: 12 }} className="dim">
@@ -223,28 +223,28 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
                   {subagents.map((p) => <a key={p.session_id} href={sessionHref(p.session_id, store)} className="vchip c-dim">subagent · {p.label || p.session_id.slice(0, 8)}</a>)}
                 </div>
               )}
-              {used && used.length > 0 && (
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 10 }}>
-                  <span className="label" style={{ marginRight: 2 }}>Extensions</span>
-                  {used.map((x) => (
-                    <a
-                      key={x.key}
-                      href={extensionPageHref(x.key)}
-                      aria-label={`${x.display_name}, ${x.calls} use${x.calls === 1 ? '' : 's'}`}
-                      className={`vchip ${x.installed ? (x.kind === 'mcp' ? 'c-info' : 'c-fg') : 'c-dim'}`}
-                      title={`${x.kind === 'mcp' ? 'MCP server' : 'Skill'} · ${x.calls} use${x.calls === 1 ? '' : 's'}${x.errors ? ` · ${x.errors} failed` : ''}${x.scopes.length ? ` · ${x.scopes.map((sc) => SCOPE_LABEL[sc]).join(', ')}` : ''}${x.tools.length ? `\n${x.tools.join(', ')}` : ''}`}
-                      style={{ textTransform: 'none', letterSpacing: 0 }}>
-                      <Icon name={x.kind === 'mcp' ? 'plug' : 'layers'} size={11} />
-                      {x.display_name}
-                      <span style={{ opacity: 0.7 }}>{x.calls}</span>
-                    </a>
-                  ))}
-                </div>
-              )}
-              {store === 'main' && <SessionOutcomes sessionId={sessionId} onSelect={(sid, eventId) => { window.location.hash = `#/session/${encodeURIComponent(sid)}${eventId ? `?e=${eventId}` : ''}`; }} />}
-              {store === 'main' && <div style={{ marginTop: 12 }}><Feedback sessionId={sessionId} /></div>}
+              {(() => {
+                const extensions = used?.map((x) => (
+                  <a
+                    key={x.key}
+                    href={extensionPageHref(x.key)}
+                    aria-label={`${x.display_name}, ${x.calls} use${x.calls === 1 ? '' : 's'}`}
+                    className={`sd-sig-i${x.installed ? '' : ' is-faint'}`}
+                    title={`${x.kind === 'mcp' ? 'MCP server' : 'Skill'} · ${x.calls} use${x.calls === 1 ? '' : 's'}${x.errors ? ` · ${x.errors} failed` : ''}${x.scopes.length ? ` · ${x.scopes.map((sc) => SCOPE_LABEL[sc]).join(', ')}` : ''}${x.tools.length ? `\n${x.tools.join(', ')}` : ''}`}>
+                    <Icon name={x.kind === 'mcp' ? 'plug' : 'layers'} size={13} />
+                    {x.display_name}
+                    <span className="num-t faint">{x.calls}</span>
+                  </a>
+                ));
+                return store === 'main' ? (
+                  <SessionOutcomes sessionId={sessionId} onSelect={(sid, eventId) => { window.location.hash = `#/session/${encodeURIComponent(sid)}${eventId ? `?e=${eventId}` : ''}`; }}>
+                    {extensions?.length ? extensions : null}
+                  </SessionOutcomes>
+                ) : extensions?.length ? <div className="sd-sig">{extensions}</div> : null;
+              })()}
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+              {store === 'main' && <Feedback sessionId={sessionId} toolbar />}
               <ExportMenu sessionId={s.id} store={store} />
               {store === 'main' && (
                 <button type="button" className="vbtn vbtn-quiet vbtn-sm" aria-pressed={s.bookmarked} onClick={toggleBookmark} style={s.bookmarked ? { borderColor: 'var(--v-hot)', color: 'var(--v-hot)' } : undefined}>
