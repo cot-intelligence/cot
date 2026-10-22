@@ -57,10 +57,22 @@ def config() -> dict[str, Any]:
         chosen = set(agents) | {a for a in AGENTS if a not in seen and not readers()[a].opt_in}
     expr = db.get_setting("passive_cron") or cron.DEFAULT_CRON
     return {
-        "enabled": db.get_setting("passive_enabled") == "1",
+        "enabled": _enabled(),
         "agents": [a for a in AGENTS if a in chosen],
         "cron": expr,
     }
+
+
+def _enabled() -> bool:
+    """On when chosen, or by default once onboarding is done: hooks and
+    transcript import work together (hooked sessions are skipped), so an install
+    that never chose either way, like one upgraded from before the two were
+    paired, imports too. An explicit "off" stays off, and nothing imports before
+    someone has finished onboarding."""
+    value = db.get_setting("passive_enabled")
+    if value in ("0", "1"):
+        return value == "1"
+    return db.get_setting("ui_onboarded") == "1"
 
 
 def update_config(*, enabled: bool | None = None, agents: list[str] | None = None, expr: str | None = None) -> dict[str, Any]:

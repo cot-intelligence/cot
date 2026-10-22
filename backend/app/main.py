@@ -41,7 +41,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import (
-    __version__, activity, ai_insights, context_cost, cron, db, edits, extension_usage, insights, otlp,
+    __version__, activity, ai_insights, context_cost, cron, db, edits, extension_usage, folders, insights, otlp,
     outcomes, passive, recovery, rule_drafts, semantic, session_markdown, session_shape, store, timeutil, usage_line,
     user_rules, watch,
 )
@@ -631,6 +631,9 @@ def get_settings() -> dict[str, Any]:
         "ui_onboarding_agents": _stored_onboarding_agents(),
         # macOS notifications from the Mac app for new inbox items.
         "notify_desktop": db.get_setting("notify_desktop", "1") != "0",
+        # Reading project folders macOS protects (Documents, Desktop …); see folders.py.
+        "read_protected_folders": folders.allowed(),
+        "protected_folder_sessions": folders.sessions_in_protected(),
     }
 
 
@@ -678,6 +681,8 @@ async def update_settings(request: Request) -> dict[str, Any]:
     for key in ("ui_nav_collapsed", "ui_sidebar_open", "ui_onboarded", "notify_desktop"):
         if key in body:
             db.set_setting(key, "1" if bool(body[key]) else "0")
+    if "read_protected_folders" in body:
+        folders.set_allowed(bool(body["read_protected_folders"]))
     if "ui_onboarding_agents" in body:
         agents = body["ui_onboarding_agents"]
         if not isinstance(agents, list):

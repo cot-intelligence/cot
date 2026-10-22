@@ -283,7 +283,7 @@
 .vf .onb-steps button { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px 0 6px; border: 0; border-radius: 999px; background: none; color: var(--v-faint); font-size: 13px; }
 .vf .onb-steps button:disabled { cursor: default; }
 @media (hover: hover) and (pointer: fine) { .vf .onb-steps button:not(:disabled):hover { background: var(--v-wash); color: var(--v-fg); } }
-.vf .onb-n { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-family: 'Geist Mono', monospace; font-size: 11px; border: 1px solid var(--v-line); }
+.vf .onb-n { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-family: 'Geist Mono', monospace; font-size: 11px; line-height: 1; font-variant-numeric: tabular-nums; border: 1px solid var(--v-line); box-sizing: border-box; }
 .vf .onb-steps li[data-state='now'] button { color: var(--v-fg); font-weight: 500; }
 .vf .onb-steps li[data-state='now'] .onb-n { border-color: var(--v-hot); color: var(--v-hot); }
 .vf .onb-steps li[data-state='done'] button { color: var(--v-dim); }
@@ -909,22 +909,6 @@
 @media (hover: hover) and (pointer: fine) { .vf .oc-proj a:hover { background: var(--v-wash); } }
 /* Overview → Next up: the first call to action. A flat tint of its tone with a
    hairline ring (no side bar); the primary button is the only filled control. */
-.vf .nextup { --tone: var(--v-hot); display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px 14px; margin: 0 0 16px; padding: 14px 16px; border-radius: 14px; background: color-mix(in srgb, var(--tone) 6%, var(--v-surface)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone) 22%, transparent); }
-.vf .nextup[data-tone='critical'] { --tone: var(--v-alert); }
-.vf .nextup[data-tone='warn'] { --tone: var(--v-amber); }
-.vf .nextup[data-tone='ok'] { --tone: var(--v-olive); }
-.vf .nextup-ic { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; color: var(--tone); background: color-mix(in srgb, var(--tone) 12%, transparent); }
-.vf .nextup-txt { display: grid; gap: 2px; min-width: 0; }
-.vf .nextup-txt b { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vf .nextup-txt span { font-size: 12px; color: var(--v-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vf .nextup .vbtn svg { transition: transform 160ms var(--ease-out-strong); }
-@media (hover: hover) and (pointer: fine) { .vf .nextup .vbtn:hover svg { transform: translateX(2px); } }
-.vf .nextup-more { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding-top: 10px; border-top: 1px solid color-mix(in srgb, var(--tone) 18%, transparent); }
-.vf .nextup-link { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; font-size: 12px; color: var(--v-fg); text-decoration: none; padding: 3px 6px; margin: 0 -6px; border-radius: 6px; transition: background-color 150ms ease; }
-@media (hover: hover) and (pointer: fine) { .vf .nextup-link:hover { background: var(--v-wash); } }
-.vf .nextup-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--v-amber); }
-.vf .nextup-dot[data-tone='critical'] { background: var(--v-alert); }
-@media (max-width: 640px) { .vf .nextup { grid-template-columns: auto minmax(0, 1fr); } .vf .nextup > .vbtn { grid-column: 1 / -1; justify-content: center; } .vf .nextup-more { grid-column: 1 / -1; } .vf .nextup-txt b, .vf .nextup-txt span { white-space: normal; } }
 /* Overview: KPI tiles and agent tiles are links to the list behind the number. */
 .vf a.kpi-link { color: inherit; text-decoration: none; transition: background-color 150ms ease; }
 @media (hover: hover) and (pointer: fine) { .vf a.kpi-link:hover { background: var(--v-bg); } }

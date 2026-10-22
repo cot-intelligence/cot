@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import extension_usage, extensions, store, timeutil
+from . import extension_usage, extensions, folders, store, timeutil
 from .pricing import cost_for
 
 BYTES_PER_TOKEN = 4
@@ -84,7 +84,7 @@ def _within(cwd: str | None, project: str) -> bool:
 
 def _dir_chain(cwd: str | None) -> list[Path]:
     """The cwd and its ancestors up to the git root (never above $HOME), root first."""
-    if not cwd or not cwd.startswith("/"):
+    if not cwd or not cwd.startswith("/") or not folders.readable(cwd):
         return []
     home = Path.home()
     out: list[Path] = []

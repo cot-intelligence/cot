@@ -324,3 +324,13 @@ def test_real_opencode_import(_home):
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+
+
+def test_on_by_default_once_onboarded_unless_turned_off(fresh_db):
+    from app import db, passive
+
+    assert passive.config()["enabled"] is False  # not onboarded yet: nothing imports
+    db.set_setting("ui_onboarded", "1")
+    assert passive.config()["enabled"] is True  # never chosen either way: on
+    passive.update_config(enabled=False)
+    assert passive.config()["enabled"] is False  # an explicit "off" stays off

@@ -315,6 +315,10 @@ export interface Settings {
   ui_onboarding_agents: AgentId[];
   /** The Mac app posts new inbox items as macOS notifications. */
   notify_desktop: boolean;
+  /** Read project folders macOS protects (Documents, Desktop, Downloads, iCloud Drive, volumes). */
+  read_protected_folders: boolean;
+  /** Sessions whose project sits in one of those folders. */
+  protected_folder_sessions: number;
 }
 
 export async function getSettings(): Promise<Settings> {

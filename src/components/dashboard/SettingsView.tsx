@@ -362,12 +362,28 @@ function PrivacySection({ settings: s, onSettings }: { settings: Settings | null
       onSettings({ ...s, telemetry_enabled: !on });
     }
   };
+  const setFolders = async (on: boolean) => {
+    if (!s) return;
+    onSettings({ ...s, read_protected_folders: on });
+    try {
+      onSettings(await updateSettings({ read_protected_folders: on }));
+    } catch {
+      onSettings({ ...s, read_protected_folders: !on });
+    }
+  };
+  const affected = s?.protected_folder_sessions ?? 0;
   return (
-    <Section id="privacy" title="Privacy" desc="What, if anything, leaves this machine.">
+    <Section id="privacy" title="Privacy" desc="What, if anything, leaves this machine, and what cot reads on it.">
       <Row
         label="Usage metrics"
         hint={s?.telemetry_env_disabled ? 'Turned off for this install by COT_DISABLE_TELEMETRY.' : `Anonymous totals (sessions, events, models, error rate) sent to ${s?.telemetry_endpoint ?? 'cot.run'}. No traces, prompts, paths or code.`}>
         <Switch on={!!s?.telemetry_enabled} disabled={locked} label="Usage metrics" onChange={(v) => void setOn(v)} />
+      </Row>
+      <Row
+        label="Protected folders"
+        hint={`Let cot read git history and project files in Documents, Desktop, Downloads, iCloud Drive and external drives. macOS asks once per folder when you turn this on.${
+          affected ? ` ${fmt.n(affected)} session${affected === 1 ? '' : 's'} ran in one of them.` : ''}`}>
+        <Switch on={!!s?.read_protected_folders} disabled={!s} label="Read protected folders" onChange={(v) => void setFolders(v)} />
       </Row>
       <Row label="AI analysis" hint="Sends findings and masked excerpts to your provider, only when you run it.">
         <a href={settingsHref('ai')} className="vbtn vbtn-ghost vbtn-sm">

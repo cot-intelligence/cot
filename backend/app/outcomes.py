@@ -24,7 +24,7 @@ from typing import Any
 
 from pathlib import Path
 
-from . import repo_info, store
+from . import folders, repo_info, store
 from .activity import _program_and_args, _split_top_level, _tokens, _verb, strip_heredocs
 
 # A commit lands this long after a session's last event and still counts as its work
@@ -89,7 +89,7 @@ def _git_log(repo: str, since: str) -> list[dict[str, Any]]:
 
 
 def _repo_root(cwd: str) -> str | None:
-    if not cwd or not os.path.isdir(cwd):
+    if not folders.readable(cwd) or not os.path.isdir(cwd):
         return None
     try:
         out = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
@@ -211,7 +211,7 @@ def _project_web(cwd: str | None) -> str | None:
         return None
     if cwd not in _remotes:
         try:
-            info = repo_info.git_info(Path(cwd)) if os.path.isdir(cwd) else None
+            info = repo_info.git_info(Path(cwd)) if folders.readable(cwd) and os.path.isdir(cwd) else None
         except OSError:
             info = None
         _remotes[cwd] = _web(info.get("remote")) if info else None

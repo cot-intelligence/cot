@@ -89,8 +89,14 @@ def test_project_list_groups_by_name_newest_folder_first(fresh_db: Path, tmp_pat
 
 
 def test_describe_skips_macos_protected_folders(monkeypatch, tmp_path: Path):
-    monkeypatch.setattr(repo_info.sys, "platform", "darwin")
-    monkeypatch.setattr(repo_info.Path, "home", classmethod(lambda cls: tmp_path))
+    from app import folders
+
+    monkeypatch.setattr(folders.sys, "platform", "darwin")
+    monkeypatch.setattr(folders, "homes", lambda: [tmp_path])
+    monkeypatch.setattr(folders, "allowed", lambda: False)
     _repo(tmp_path / "Documents" / "alpha")
     assert repo_info.describe(str(tmp_path / "Documents" / "alpha")) == {"exists": None}
     assert repo_info.describe(str(tmp_path / "Dev")) == {"exists": False}
+    # Turned on in Settings › Privacy, the folder is read like any other.
+    monkeypatch.setattr(folders, "allowed", lambda: True)
+    assert repo_info.describe(str(tmp_path / "Documents" / "alpha"))["exists"] is True

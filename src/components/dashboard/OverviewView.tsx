@@ -3,13 +3,15 @@ import {
   getInsights,
   getMetrics,
   getConnections,
+  getHookStatus,
   getOverviewWindow,
   getSessionsPage,
   getOutcomeTotals,
   getSessionShape,
   getShipped,
-  type ActionableInsight,
   type Connection,
+  type HookHealthState,
+  type HookStatus,
   type OutcomesSummaryLite,
   type ShippedList,
   type InsightPillar,
@@ -174,6 +176,11 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
     60000,
   );
   const { data: connections } = usePolling<Connection[]>(['connections'], () => getConnections(), 30000);
+  // How cot gets each agent's sessions: live hooks, hooks that went missing, or
+  // import only (agents cot reads from disk). "Connected" above only means an
+  // event arrived in the last few minutes, so it can't say whether hooks work.
+  const { data: hooks } = usePolling<HookStatus>(['hooks-status'], () => getHookStatus(), 60000);
+  const hookHealth = useMemo(() => new Map((hooks?.agents ?? []).map((a) => [a.source as string, a.health])), [hooks]);
   const { data: shipped } = usePolling<ShippedList>(['shipped', days], () => getShipped(days), 60000);
   const { data: outcomeTotals } = usePolling<OutcomesSummaryLite>(['outcomes', days], () => getOutcomeTotals(days), 120000);
   const shapeDays = days || 365;
@@ -260,7 +267,6 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
           </div>
         </div>
 
-        <NextUp findings={ins ? active : null} connections={connections} />
 
         <div className="kpis">
           {kpis.map((k) => (
@@ -436,7 +442,7 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
           <div className="card-b agent-grid" style={{ ['--cols' as string]: agentCols(connections?.length ?? m.by_source.length) }}>
             {(connections ?? m.by_source.map((x) => ({ source: x.source, sessions: x.sessions, events: x.events, last_event: null, connected: true }))).map((c) => (
               <a key={c.source} href={`#/sessions?agent=${encodeURIComponent(c.source)}`} className="agent-tile" title={`${sourceLabel(c.source)} sessions`}>
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}><Agent id={c.source} /><span className={`vchip ${c.connected ? 'c-ok' : 'c-dim'}`}><span className="dot" />{c.connected ? 'connected' : 'not connected'}</span></div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}><Agent id={c.source} /><CaptureChip health={hookHealth.get(c.source)} /></div>
                 <span className="mono" style={{ fontSize: 12 }}>{c.sessions} sessions · {fmt.n(c.events)} events</span>
                 <span className="faint" style={{ fontSize: 12 }}>{c.last_event ? `Last event ${fmt.ago(c.last_event, now)}` : 'No events yet'}</span>
               </a>
@@ -806,84 +812,6 @@ function OverviewSkeleton() {
   );
 }
 
-interface NextAction {
-  key: string;
-  tone: 'critical' | 'warn' | 'info';
-  title: string;
-  detail: string;
-  cta: string;
-  href: string;
-}
-
-const findingHref = (f: ActionableInsight) => `#/findings?pillar=${f.pillar}&f=${encodeURIComponent(f.fingerprint)}`;
-
-/** What to do next, worst first: an agent that stopped reporting, critical findings,
- *  then the costliest habit (tool failures agents keep working around). */
-function nextActions(findings: ActionableInsight[], connections: Connection[] | null): NextAction[] {
-  const out: NextAction[] = [];
-  const lost = (connections ?? []).filter((c) => !c.connected && c.sessions > 0);
-  if (lost.length) {
-    out.push({
-      key: 'hooks', tone: 'warn',
-      title: `${lost.map((c) => sourceLabel(c.source)).join(', ')} ${lost.length === 1 ? 'is' : 'are'} not reporting`,
-      detail: 'Its hooks are missing, so new sessions are not being traced.',
-      cta: 'Reconnect', href: '#/governance',
-    });
-  }
-  const critical = findings.filter((f) => f.severity === 'critical');
-  if (critical.length) {
-    const f = critical[0];
-    out.push({
-      key: 'critical', tone: 'critical',
-      title: critical.length === 1 ? f.title : `${critical.length} critical findings, starting with: ${f.title}`,
-      detail: f.recommendation, cta: 'Review', href: findingHref(f),
-    });
-  }
-  const unfixed = findings.find((f) => f.id === 'usability.unfixed_failures');
-  if (unfixed) out.push({ key: 'unfixed', tone: 'warn', title: unfixed.title, detail: unfixed.detail, cta: 'See failures', href: findingHref(unfixed) });
-  const warn = findings.filter((f) => f.severity === 'warn' && f.id !== 'usability.unfixed_failures');
-  if (warn.length) {
-    out.push({
-      key: 'warn', tone: 'warn', title: `${warn.length} warning${warn.length === 1 ? '' : 's'} to triage`,
-      detail: warn[0].title, cta: 'Triage', href: `#/findings?pillar=${warn[0].pillar}`,
-    });
-  }
-  return out;
-}
-
-/** The Overview's first call to action: the one thing worth doing now, plus up to two more. */
-function NextUp({ findings, connections }: { findings: ActionableInsight[] | null; connections: Connection[] | null }) {
-  if (!findings) return <div className="nextup"><span className="sk" style={{ height: 52, gridColumn: '1 / -1' }} /></div>;
-  const actions = nextActions(findings, connections);
-  if (!actions.length) {
-    return (
-      <div className="nextup" data-tone="ok">
-        <span className="nextup-ic"><FIcon name="check" size={16} /></span>
-        <div className="nextup-txt"><b>Nothing needs you right now</b><span>No critical or open findings, and every agent is reporting.</span></div>
-        <a href="#/metrics-history?tab=shipped" className="vbtn vbtn-quiet vbtn-sm">See what shipped<FIcon name="arrow" size={14} /></a>
-      </div>
-    );
-  }
-  const [top, ...rest] = actions;
-  return (
-    <div className="nextup" data-tone={top.tone}>
-      <span className="nextup-ic"><FIcon name={top.tone === 'critical' ? 'findings' : top.key === 'hooks' ? 'plug' : 'bolt'} size={16} /></span>
-      <div className="nextup-txt"><b>{top.title}</b><span>{top.detail}</span></div>
-      <a href={top.href} className="vbtn vbtn-primary vbtn-sm">{top.cta}<FIcon name="arrow" size={14} /></a>
-      {rest.length > 0 && (
-        <div className="nextup-more">
-          <span className="label">Then</span>
-          {rest.slice(0, 2).map((a) => (
-            <a key={a.key} href={a.href} className="nextup-link" title={a.detail}>
-              <i className="nextup-dot" data-tone={a.tone} /><span className="truncate">{a.title}</span><FIcon name="arrow" size={12} />
-            </a>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 /** Where a click on an Event categories bar goes: the Activity page for that kind of event. */
 const CATEGORY_HREF: Record<string, string> = {
   shell: '#/metrics-history',
@@ -899,4 +827,14 @@ const CATEGORY_HREF: Record<string, string> = {
 function agentCols(n: number): number {
   if (n <= 4) return Math.max(1, n);
   return Math.ceil(n / Math.ceil(n / 4));
+}
+
+/** One quiet word per agent tile on how its sessions reach cot. Only missing hooks
+ *  are a warning; agents read from disk are simply imported. */
+function CaptureChip({ health }: { health: HookHealthState | undefined }) {
+  if (health === undefined) return <span className="vchip c-dim" title="Read from the agent's files on disk">imported</span>;
+  if (health === 'missing_hooks' || health === 'not_installed') {
+    return <span className="vchip c-warn" title="Hooks are missing: new sessions only arrive by import. Fix it under Coverage."><span className="dot" />hooks off</span>;
+  }
+  return <span className="vchip c-ok" title="Events arrive live from the agent's hooks"><span className="dot" />live hooks</span>;
 }
