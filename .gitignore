@@ -15,11 +15,40 @@ secrets.json
 .env.*
 _DESIGN_LANGUAGE.md
 
-# macOS app build output
-
 # Tauri desktop app build output
 desktop/build/
 desktop/node_modules/
 desktop/src-tauri/target/
 desktop/src-tauri/resources/
 desktop/src-tauri/gen/
+
+# Release artifacts (DMG, updater bundle, CI out/)
+*.dmg
+*.app/
+*.app.tar.gz
+*.app.tar.gz.sig
+/out/
+
+# Signing keys and certificates
+*.key
+*.key.pub
+*.key.password
+*.pem
+*.p12
+*.cer
+*.mobileprovision
+
+# Local databases and logs
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+
+# Tool caches and coverage
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
