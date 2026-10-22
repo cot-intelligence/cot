@@ -36,6 +36,12 @@ _last_session: str | None = None
 # Hermes finalizes session ids that never ran a turn (a startup that failed);
 # only end sessions this process has reported on.
 _seen: set[str] = set()
+# Why a running turn was stopped, held until its interrupted turn-end reports it.
+_stop_reasons: dict[str, str] = {}
+# When each human-input wait began, by request_id, so its resolution carries the wait.
+_input_waits: dict[str, float] = {}
+# post_approval_response choices that let the command run.
+_APPROVED = frozenset({"once", "session", "always", "smart_approve"})
 
 
 def _iso(ts: Any = None) -> str:
@@ -53,6 +59,22 @@ def _text(value: Any) -> Any:
     if isinstance(value, str) and len(value) > _MAX_TEXT:
         return value[:_MAX_TEXT] + "\n…[truncated by cot]"
     return value
+
+
+def _ms(seconds: Any) -> int | None:
+    return int(seconds * 1000) if isinstance(seconds, (int, float)) else None
+
+
+def _tokens(usage: Any) -> dict[str, int] | None:
+    if not isinstance(usage, dict):
+        return None
+    return {
+        "input_tokens": usage.get("input_tokens") or 0,
+        "output_tokens": usage.get("output_tokens") or 0,
+        "cache_read_tokens": usage.get("cache_read_tokens") or 0,
+        "cache_write_tokens": usage.get("cache_write_tokens") or 0,
+        "reasoning_tokens": usage.get("reasoning_tokens") or 0,
+    }
 
 
 def _jsonable(value: Any) -> Any:
@@ -131,6 +153,20 @@ def _on_pre_llm_call(session_id=None, user_message=None, turn_id=None, model=Non
               prompt=user_message, model=model, turn_id=turn_id, platform=platform)
 
 
+def _on_pre_command(command=None, alias_used=None, args_raw=None, surface=None, session_key=None,
+                    platform=None, **kw):
+    # Local commands (/context, /model, ...) never reach pre_llm_call. Record them
+    # as the prompt the user typed, as Claude Code's own /commands arrive. On the
+    # CLI session_key is the session id; the gateway's is a chat key, so attribute
+    # those like approvals.
+    name = alias_used or command
+    if not name:
+        return
+    typed = f"/{name} {args_raw}".rstrip() if args_raw else f"/{name}"
+    _send(session_key if surface == "cli" else None, "UserPromptSubmit", None, prompt=typed,
+          command=command, platform=platform)
+
+
 def _result_status(result: Any) -> str | None:
     # A command the approval gate refused reports status "error"; its result
     # says "blocked".
@@ -142,6 +178,13 @@ def _result_status(result: Any) -> str | None:
         if isinstance(parsed, dict) and isinstance(parsed.get("status"), str):
             return parsed["status"]
     return None
+
+
+def _on_pre_tool_call(tool_name=None, args=None, session_id=None, tool_call_id=None, turn_id=None, **kw):
+    # Hermes coerces missing ids to "".
+    _send(session_id or None, "PreToolUse", f"tool:start:{tool_call_id}" if tool_call_id else None,
+          tool_name=tool_name, tool_input=args if isinstance(args, dict) else {"args": args},
+          tool_use_id=tool_call_id or None, turn_id=turn_id or None)
 
 
 def _on_post_tool_call(tool_name=None, args=None, result=None, session_id=None, tool_call_id=None,
@@ -181,18 +224,41 @@ def _on_post_api_request(session_id=None, api_request_id=None, model=None, respo
     if isinstance(thought, str) and thought.strip():
         _send(session_id, "afterAgentThought", f"thought:{api_request_id}" if api_request_id else None,
               thought=thought, model=response_model or model, turn_id=turn_id)
-    if not isinstance(usage, dict):
+    tokens = _tokens(usage)
+    if tokens:
+        _send(session_id, "ModelUsage", f"usage:{api_request_id}" if api_request_id else None,
+              model=response_model or model, usage=tokens, finish_reason=finish_reason, turn_id=turn_id,
+              duration_ms=_ms(api_duration))
+
+
+def _on_api_request_error(session_id=None, api_request_id=None, model=None, provider=None,
+                          status_code=None, reason=None, error=None, retryable=None, retry_count=None,
+                          max_retries=None, api_duration=None, turn_id=None, **kw):
+    # One call per failed attempt; retries of a request share its api_request_id.
+    _send(session_id, "ApiRequestError",
+          f"api:error:{api_request_id}:{retry_count}" if api_request_id else None,
+          model=model, provider=provider, status_code=status_code, reason=reason, error=error,
+          retryable=retryable, retry_count=retry_count, max_retries=max_retries, turn_id=turn_id or None,
+          duration_ms=_ms(api_duration))
+
+
+def _on_post_auxiliary_call(aux_task=None, session_id=None, api_request_id=None, model=None,
+                            response_model=None, usage=None, api_duration=None, error=None,
+                            turn_id=None, **kw):
+    # Side calls (titling, compaction, vision, approval checks) skip post_api_request,
+    # so their tokens only arrive here. session_id is empty outside a turn.
+    if error:
         return
-    tokens = {
-        "input_tokens": usage.get("input_tokens") or 0,
-        "output_tokens": usage.get("output_tokens") or 0,
-        "cache_read_tokens": usage.get("cache_read_tokens") or 0,
-        "cache_write_tokens": usage.get("cache_write_tokens") or 0,
-        "reasoning_tokens": usage.get("reasoning_tokens") or 0,
-    }
-    _send(session_id, "ModelUsage", f"usage:{api_request_id}" if api_request_id else None,
-          model=response_model or model, usage=tokens, finish_reason=finish_reason, turn_id=turn_id,
-          duration_ms=int(api_duration * 1000) if isinstance(api_duration, (int, float)) else None)
+    tokens = _tokens(usage)
+    if tokens:
+        _send(session_id or None, "ModelUsage", f"usage:{api_request_id}" if api_request_id else None,
+              model=response_model or model, usage=tokens, aux_task=aux_task, turn_id=turn_id or None,
+              duration_ms=_ms(api_duration))
+    # Hermes reports a finished compaction only to gateway event hooks; plugins
+    # see its summary call succeed.
+    if aux_task == "compression":
+        _send(session_id or None, "PostCompact", f"compact:{api_request_id}" if api_request_id else None,
+              trigger="auto", model=response_model or model, turn_id=turn_id or None)
 
 
 def _on_subagent_start(parent_session_id=None, child_session_id=None, child_role=None,
@@ -213,10 +279,13 @@ def _on_subagent_stop(parent_session_id=None, child_session_id=None, child_role=
         _send(child_session_id, "SessionEnd", "session:end", reason=child_status)
 
 
-def _on_post_compaction(session_id=None, kind=None, reason=None, before_tokens=None,
-                        after_tokens=None, messages_removed=None, **kw):
-    _send(session_id, "PostCompact", None, kind=kind, reason=reason, before_tokens=before_tokens,
-          after_tokens=after_tokens, messages_removed=messages_removed)
+def _on_skill_lifecycle(action=None, skill_name=None, session_id=None, provenance=None, **kw):
+    # skill_view loads carry a session id and already arrive as that tool call;
+    # /skill commands and cron loads carry none.
+    if action != "loaded" or session_id or not skill_name:
+        return
+    _send(None, "PostToolUse", None, tool_name="Skill", tool_input={"name": skill_name},
+          tool_response="", provenance=provenance)
 
 
 def _on_pre_approval_request(command=None, description=None, pattern_key=None, surface=None, **kw):
@@ -225,12 +294,59 @@ def _on_pre_approval_request(command=None, description=None, pattern_key=None, s
           pattern_key=pattern_key, surface=surface)
 
 
+def _on_post_approval_response(command=None, description=None, pattern_key=None, surface=None,
+                               choice=None, decided_by=None, tool_call_id=None, turn_id=None, **kw):
+    _send(None, "PermissionGranted" if choice in _APPROVED else "PermissionDenied", None,
+          tool_name="terminal", tool_input={"command": command}, description=description,
+          pattern_key=pattern_key, surface=surface, choice=choice, decided_by=decided_by,
+          tool_use_id=tool_call_id or None, turn_id=turn_id or None)
+
+
+def _on_human_input_request(kind=None, request_id=None, session_id=None, prompt=None, **kw):
+    # Approvals already report through the approval hooks.
+    if kind == "approval":
+        return
+    if request_id:
+        _input_waits[str(request_id)] = time.monotonic()
+    _send(session_id or None, "Notification", f"input:{request_id}" if request_id else None,
+          notification_type=f"{kind}_request", message=prompt, kind=kind)
+
+
+def _on_human_input_resolved(kind=None, request_id=None, session_id=None, outcome=None, **kw):
+    if kind == "approval":
+        return
+    started = _input_waits.pop(str(request_id), None)
+    _send(session_id or None, "Notification", f"input:done:{request_id}" if request_id else None,
+          notification_type=f"{kind}_resolved", kind=kind, outcome=outcome,
+          duration_ms=_ms(time.monotonic() - started) if started is not None else None)
+
+
+def _on_agent_loop_stopped(reason=None, invalidation_reason=None, **kw):
+    # Carries a gateway session_key; the interrupted turn's end reports the reason.
+    if _last_session and (reason or invalidation_reason):
+        _stop_reasons[_last_session] = str(reason or invalidation_reason)
+
+
 def _on_session_end(session_id=None, completed=None, interrupted=None, failed=None,
                     turn_exit_reason=None, model=None, turn_id=None, **kw):
     # Fires at the end of every turn, not once per session.
+    stop_reason = _stop_reasons.pop(str(session_id), None) if interrupted else None
     _send(session_id, "Stop", f"stop:{turn_id}" if turn_id else None, completed=completed,
           interrupted=interrupted or None, error=turn_exit_reason if failed else None,
-          turn_exit_reason=turn_exit_reason, model=model)
+          turn_exit_reason=turn_exit_reason, stop_reason=stop_reason, model=model)
+
+
+def _on_session_reset(session_id=None, old_session_id=None, new_session_id=None, reason=None,
+                      platform=None, **kw):
+    # /new ends the conversation it replaces. The gateway names it; the CLI's
+    # session_id is already the new one, so the replaced one is the last reported.
+    global _last_session
+    new = new_session_id or session_id
+    old = old_session_id or (_last_session if platform == "cli" else None)
+    if old and str(old) in _seen and old != new:
+        _send(old, "SessionEnd", "session:end", reason=reason or "new_session")
+    if new:
+        _last_session = str(new)
 
 
 def _on_session_finalize(session_id=None, reason=None, **kw):
@@ -241,15 +357,24 @@ def _on_session_finalize(session_id=None, reason=None, **kw):
 HOOKS = {
     "on_session_start": _on_session_start,
     "pre_llm_call": _on_pre_llm_call,
+    "pre_command": _on_pre_command,
+    "pre_tool_call": _on_pre_tool_call,
     "post_tool_call": _on_post_tool_call,
     "post_llm_call": _on_post_llm_call,
     "on_interim_message": _on_interim_message,
     "post_api_request": _on_post_api_request,
+    "api_request_error": _on_api_request_error,
+    "post_auxiliary_call": _on_post_auxiliary_call,
+    "on_skill_lifecycle": _on_skill_lifecycle,
     "subagent_start": _on_subagent_start,
     "subagent_stop": _on_subagent_stop,
-    "post_compaction": _on_post_compaction,
     "pre_approval_request": _on_pre_approval_request,
+    "post_approval_response": _on_post_approval_response,
+    "on_human_input_request": _on_human_input_request,
+    "on_human_input_resolved": _on_human_input_resolved,
+    "agent_loop_stopped": _on_agent_loop_stopped,
     "on_session_end": _on_session_end,
+    "on_session_reset": _on_session_reset,
     "on_session_finalize": _on_session_finalize,
 }
 

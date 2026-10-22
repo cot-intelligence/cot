@@ -94,8 +94,9 @@ EXPECTED_HOOKS = {
         "OpenCodeUsage", "PermissionRequest", "PostCompact", "Stop",
     ],
     "hermes": [
-        "SessionStart", "UserPromptSubmit", "PostToolUse", "PostToolUseFailure",
-        "afterAgentResponse", "ModelUsage", "PermissionRequest", "SubagentStart",
+        "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
+        "afterAgentResponse", "ModelUsage", "ApiRequestError", "PermissionRequest",
+        "PermissionGranted", "PermissionDenied", "Notification", "SubagentStart",
         "SubagentStop", "PostCompact", "Stop", "SessionEnd",
     ],
 }
@@ -113,6 +114,9 @@ HOOK_LABELS = {
     "PostCompact": "Compaction finish",
     "Notification": "Notification",
     "PermissionRequest": "Permission requested",
+    "PermissionGranted": "Permission granted",
+    "PermissionDenied": "Permission denied",
+    "ApiRequestError": "API request failed",
     "sessionStart": "Session start",
     "sessionEnd": "Session end",
     "beforeSubmitPrompt": "Prompt submitted",
