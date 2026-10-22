@@ -4786,13 +4786,19 @@ def import_quality() -> dict[str, Any]:
     }
 
 
-def complete_imported_sessions() -> dict[str, Any]:
+def complete_imported_sessions(quiet_seconds: float | None = None) -> dict[str, Any]:
     """Mark import-only sessions as completed.
 
     Transcripts don't carry lifecycle-end events so imported sessions
     stay 'active' forever.  This closes them using the timestamp of
-    their most recent event as ended_at.
+    their most recent event as ended_at. With ``quiet_seconds``, only
+    sessions whose last event is at least that old: an import that reads
+    transcripts while they're still being written (the watcher) must not
+    close a session that's still running.
     """
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(seconds=quiet_seconds) if quiet_seconds else None
+    )
     with store.write() as conn:
         rows = conn.execute(
             "SELECT s.id, MAX(e.ts) AS last_ts"
@@ -4805,6 +4811,8 @@ def complete_imported_sessions() -> dict[str, Any]:
             "   )"
             " GROUP BY s.id"
         ).fetchall()
+        if cutoff is not None:
+            rows = [r for r in rows if (last := timeutil.parse_ts(r["last_ts"])) is not None and last <= cutoff]
         for r in rows:
             conn.execute(
                 "UPDATE sessions SET status = 'completed', ended_at = ? WHERE id = ?",

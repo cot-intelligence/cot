@@ -413,6 +413,8 @@ def _post_async(url: str, payload: dict) -> None:
 # one write transaction, so this also bounds how long an import holds the write
 # lock that live hooks wait on.
 _IMPORT_POST_BATCH = 200
+# Batches queued for the poster's sender thread before parsing waits on it.
+_IMPORT_SEND_QUEUE = 2
 
 # Set by a collector that runs the import in its own process: called with
 # (url, body) instead of POSTing, where body is one payload or a list of them.
@@ -438,11 +440,19 @@ class _ImportPoster:
     that can't be delivered are spooled, as ``_post`` does, so the caller can
     advance its offsets either way. Attachment bodies go alone: the collector
     folds them onto a prompt only when they arrive as a single object.
-    Call ``flush()`` before reading the results back or exiting."""
+
+    Batches are sent from one background thread while the caller parses the
+    next: the send (an HTTP round trip, or SQLite writes, which release the
+    GIL) overlaps the parsing. At most ``_IMPORT_SEND_QUEUE`` batches wait.
+    Call ``flush()`` before reading the results back or exiting; it returns
+    once everything is delivered and re-raises a send's error."""
 
     def __init__(self, url: str) -> None:
         self.url = url
         self.pending: list[dict] = []
+        self._queue = None
+        self._thread: threading.Thread | None = None
+        self._error: BaseException | None = None
         self.sink = _INGEST_SINK
         if self.sink is not None:
             self.batched = True
@@ -455,17 +465,51 @@ class _ImportPoster:
 
     def add(self, payload: dict) -> None:
         if not self.batched or payload.get("_attach_to_prompt"):
-            self.flush()
-            self._send([payload])
+            self._ship()
+            self._submit([payload])
             return
         self.pending.append(payload)
         if len(self.pending) >= _IMPORT_POST_BATCH:
-            self.flush()
+            self._ship()
 
     def flush(self) -> None:
+        self._ship()
+        if self._thread is not None:
+            self._queue.put(None)
+            self._thread.join()
+            self._thread = self._queue = None
+        self._raise()
+
+    def _ship(self) -> None:
         if self.pending:
             group, self.pending = self.pending, []
-            self._send(group)
+            self._submit(group)
+
+    def _raise(self) -> None:
+        if self._error is not None:
+            error, self._error = self._error, None
+            raise error
+
+    def _submit(self, group: list[dict]) -> None:
+        self._raise()
+        if self._thread is None:
+            import queue
+
+            self._queue = queue.Queue(maxsize=_IMPORT_SEND_QUEUE)
+            self._thread = threading.Thread(target=self._sender, daemon=True, name="cot-import-send")
+            self._thread.start()
+        self._queue.put(group)
+
+    def _sender(self) -> None:
+        while True:
+            group = self._queue.get()
+            if group is None:
+                return
+            if self._error is None:  # after a failure, drop the rest; flush raises
+                try:
+                    self._send(group)
+                except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+                    self._error = exc
 
     def _send(self, group: list[dict]) -> None:
         if self.sink is not None:
@@ -2767,67 +2811,135 @@ def _tail_digest(fh, offset: int) -> str:
     return hashlib.sha256(fh.read(min(offset, _TAIL_PROBE_BYTES))).hexdigest()[:32]
 
 
-def _remember_file(key: str, st: os.stat_result, offset: int, tail: str) -> None:
-    _FILE_STATE[key] = {"offset": offset, "ino": st.st_ino, "mtime_ns": st.st_mtime_ns, "tail": tail}
+def _remember_file(key: str, st: os.stat_result, offset: int, tail: str, lines: int) -> None:
+    _FILE_STATE[key] = {"offset": offset, "ino": st.st_ino, "mtime_ns": st.st_mtime_ns,
+                        "tail": tail, "lines": lines}
 
 
-def _import_read_new_lines(path: Path, offsets: dict[str, int]) -> tuple[list[str], int]:
-    """Read new complete lines from *path* past the stored offset.
+# New bytes read per step. A large transcript is imported a chunk at a time so
+# memory stays flat however big the file is; parser state carries across. 1 MB
+# measured as fast as 8 MB with a third of the peak memory.
+_IMPORT_CHUNK_BYTES = 1024 * 1024
+# A single line longer than a chunk is read whole up to this size (a large
+# inlined tool output); a longer one is skipped rather than held in memory.
+_MAX_LINE_BYTES = 64 * 1024 * 1024
 
-    Returns (lines, new_offset). Incomplete trailing lines (writer mid-flush)
-    are not consumed — the offset stops at the last newline. Reads in binary so
-    the stored byte offset seeks exactly; opens with O_NOFOLLOW and enforces a
-    size cap.
+
+def _count_lines_before(fh, offset: int) -> int:
+    """Non-empty lines in the first ``offset`` bytes: the line number the next
+    read starts at, for transcripts tracked before line counts were kept."""
+    fh.seek(0)
+    count, read = 0, 0
+    while read < offset:
+        raw = fh.readline(offset - read)
+        if not raw:
+            break
+        read += len(raw)
+        if raw.strip():
+            count += 1
+    return count
+
+
+def _import_read_chunk(path: Path, offsets: dict[str, int],
+                       max_bytes: int | None = None) -> tuple[list[str], int, int, bool]:
+    """Read up to ``max_bytes`` of new complete lines from *path* past the
+    stored offset.
+
+    Returns (lines, new_offset, first_lineno, more). ``first_lineno`` is the
+    file-wide index (counting non-empty lines) of the first returned line, so
+    line-keyed dedup stays stable across appends and chunks. ``more`` is True
+    when the read stopped at ``max_bytes`` with more data behind it. An
+    incomplete trailing line (writer mid-flush) is not consumed; a single line
+    longer than ``max_bytes`` is read whole, and one past ``_MAX_LINE_BYTES``
+    is skipped. Reads in binary so the stored byte
+    offset seeks exactly; opens with O_NOFOLLOW.
 
     A file whose inode, size and mtime match what was recorded is skipped
     without opening it. One whose inode changed (replaced at the same path) or
     whose bytes before the offset changed (rewritten) is read from the start;
     dedup keys keep the re-read idempotent.
     """
+    max_bytes = max_bytes or _IMPORT_CHUNK_BYTES
     key = str(path)
     start = offsets.get(key, 0)
     try:
         st = path.stat()
     except OSError:
-        return [], start
+        return [], start, 0, False
     size = st.st_size
-    if size > _MAX_TRANSCRIPT_BYTES:
-        # Don't advance the offset; an oversized file is skipped, not consumed.
-        return [], start
     known = _FILE_STATE.get(key)
     if known is not None and known.get("offset") != start:
         known = None  # an older bridge moved the offset; the identity is stale
     if known is not None:
         if known.get("ino") != st.st_ino:
-            start = 0
+            start, known = 0, None
         elif size == start and known.get("mtime_ns") == st.st_mtime_ns:
-            return [], start
+            return [], start, int(known.get("lines") or 0), False
     if size < start:
-        start = 0
+        start, known = 0, None
     fh = _open_rb_nofollow(path)
     if fh is None:
-        return [], start
+        return [], start, 0, False
     try:
         if start and known is not None and known.get("tail") and _tail_digest(fh, start) != known["tail"]:
-            start = 0
+            start, known = 0, None
+        if start == 0:
+            base = 0
+        elif known is not None and isinstance(known.get("lines"), int):
+            base = known["lines"]
+        else:
+            base = _count_lines_before(fh, start)
         if size == start:
             # Unchanged content (a touch, or no identity recorded yet): note it.
-            _remember_file(key, st, start, _tail_digest(fh, start))
-            return [], start
+            _remember_file(key, st, start, _tail_digest(fh, start), base)
+            return [], start, base, False
         fh.seek(start)
-        chunk = fh.read().decode("utf-8", errors="replace")
-        # Only consume up to the last newline so partial writes are retried.
-        last_nl = chunk.rfind("\n")
+        raw = fh.read(max_bytes)
+        last_nl = raw.rfind(b"\n")
         if last_nl < 0:
-            return [], start
-        consumed = chunk[: last_nl + 1]
-        new_offset = start + len(consumed.encode("utf-8"))
-        _remember_file(key, st, new_offset, _tail_digest(fh, new_offset))
+            if len(raw) < max_bytes:
+                return [], start, base, False  # a partial line still being written
+            # One line longer than a whole chunk: read on to its end.
+            parts, length, keep = [raw], len(raw), True
+            while True:
+                block = fh.read(1024 * 1024)
+                if not block:
+                    return [], start, base, False  # still unterminated
+                nl = block.find(b"\n")
+                if nl >= 0:
+                    length += nl + 1
+                    if keep:
+                        parts.append(block[: nl + 1])
+                    break
+                length += len(block)
+                if keep:
+                    parts.append(block)
+                    if length > _MAX_LINE_BYTES:
+                        keep, parts = False, []
+            if not keep:
+                new_offset = start + length
+                print(f"cot import: skipped a {length // (1024 * 1024)} MB line in {path.name}", file=sys.stderr)
+                _remember_file(key, st, new_offset, _tail_digest(fh, new_offset), base + 1)
+                return [], new_offset, base + 1, True
+            raw = b"".join(parts)
+            last_nl = len(raw) - 1
+        consumed = raw[: last_nl + 1]
+        new_offset = start + len(consumed)
+        more = len(raw) >= max_bytes and new_offset < size
+        # JSONL splits on "\n" only: splitlines() would also break on U+2028 and
+        # friends, which JSON allows unescaped inside strings.
+        lines = [ln for ln in consumed.decode("utf-8", errors="replace").split("\n") if ln.strip()]
+        _remember_file(key, st, new_offset, _tail_digest(fh, new_offset), base + len(lines))
     except OSError:
-        return [], start
+        return [], start, 0, False
     finally:
         fh.close()
-    lines = [ln for ln in consumed.splitlines() if ln.strip()]
+    return lines, new_offset, base, more
+
+
+def _import_read_new_lines(path: Path, offsets: dict[str, int]) -> tuple[list[str], int]:
+    """Every new complete line past the stored offset, in one read."""
+    lines, new_offset, _, _ = _import_read_chunk(path, offsets, max_bytes=_MAX_TRANSCRIPT_BYTES)
     return lines, new_offset
 
 
@@ -4535,67 +4647,77 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
             except (OSError, ValueError):
                 pass
 
-        lines, new_offset = _import_read_new_lines(path, offsets)
-        if not lines:
-            offsets[str(path)] = new_offset
-            continue
-
-        if verbose:
-            print(f"cot import: {agent} {path.name} ({len(lines)} new lines)")
-
+        key = str(path)
+        # Per-file state lets parsers correlate across lines (Claude/Codex pair a
+        # tool call with its result; reset per file so ids never bleed across).
+        # It carries across chunks of the same file.
+        state: dict = {}
         try:
             mtime = path.stat().st_mtime
         except OSError:
             mtime = None
-        # Per-file state lets parsers correlate across lines (Claude/Codex pair a
-        # tool call with its result; reset per file so ids never bleed across).
-        state: dict = {}
-        path_str = str(path)
-        parsed_events: list[dict] = []
-        n_lines = len(lines)
-        for lineno, line in enumerate(lines):
-            # Parsing is half a file's work, posting the other half.
-            report(done, frac=0.5 * lineno / n_lines)
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            parsed_events.extend(
-                line_parser(
-                    obj,
-                    sid,
-                    lineno=lineno,
-                    mtime=mtime,
-                    state=state,
-                    path=path_str,
-                    origin="import",
-                )
-            )
-        parsed_events.extend(_codex_flush_pending_ingest_events(state))
-        events = _prepare_ingest_events(agent, parsed_events, origin="import")
-        n_events = max(1, len(events))
-        for i_event, event in enumerate(events):
-            # Subagent transcripts: live hooks already hold the tool calls, so
-            # import only the conversation text the hooks never deliver.
-            if responses_only and event.get("kind") == "tool_call":
-                continue
-            # Hook-supplemented sessions: hooks already cover responses,
-            # thoughts, and hooked tool calls. Only import tool_call events
-            # for tools that the hook system never fires (the same set that
-            # _keep_live_event preserves during live mode).
-            if hook_supplement:
-                if event.get("kind") != "tool_call":
-                    continue
-                if not _keep_live_event(source, event):
-                    continue
-            payload = _ingest_event_to_hook_payload(event)
-            if payload.get("_dedup_key") is None:
-                payload.pop("_dedup_key", None)
-            poster.add(payload)
-            posted += 1
-            report(done, frac=0.5 + 0.5 * (i_event + 1) / n_events)  # throttled
+        begin = offsets.get(key, 0)
+        span = max(1, (sizes[done] if done < len(sizes) else 0) - begin)
 
-        offsets[str(path)] = new_offset
+        def emit(parsed_events: list[dict]) -> None:
+            nonlocal posted
+            for event in _prepare_ingest_events(agent, parsed_events, origin="import"):
+                # Subagent transcripts: live hooks already hold the tool calls, so
+                # import only the conversation text the hooks never deliver.
+                if responses_only and event.get("kind") == "tool_call":
+                    continue
+                # Hook-supplemented sessions: hooks already cover responses,
+                # thoughts, and hooked tool calls. Only import tool_call events
+                # for tools that the hook system never fires (the same set that
+                # _keep_live_event preserves during live mode).
+                if hook_supplement:
+                    if event.get("kind") != "tool_call":
+                        continue
+                    if not _keep_live_event(source, event):
+                        continue
+                payload = _ingest_event_to_hook_payload(event)
+                if payload.get("_dedup_key") is None:
+                    payload.pop("_dedup_key", None)
+                poster.add(payload)
+                posted += 1
+
+        while True:
+            lines, new_offset, first_lineno, more = _import_read_chunk(path, offsets)
+            if not lines:
+                offsets[key] = new_offset
+                if more:
+                    continue  # skipped an oversized line; keep going
+                # Codex holds its last message until the end of what's there.
+                emit(_codex_flush_pending_ingest_events(state))
+                break
+            if verbose:
+                print(f"cot import: {agent} {path.name} ({len(lines)} new lines)")
+            parsed_events: list[dict] = []
+            for i, line in enumerate(lines):
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                parsed_events.extend(
+                    line_parser(
+                        obj,
+                        sid,
+                        lineno=first_lineno + i,
+                        mtime=mtime,
+                        state=state,
+                        path=key,
+                        origin="import",
+                    )
+                )
+            if not more:
+                # Codex holds its last message until the end of what's there.
+                parsed_events.extend(_codex_flush_pending_ingest_events(state))
+            emit(parsed_events)
+            del parsed_events
+            offsets[key] = new_offset
+            report(done, frac=min(1.0, (new_offset - begin) / span))  # throttled
+            if not more:
+                break
 
     poster.flush()
     report(len(transcripts), force=True)
@@ -4603,11 +4725,12 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
 
 
 def _run_import(agents: list[str], *, since: str | None = None, skip_active_s: float = 0,
-                verbose: bool = True) -> tuple[int, list[str]]:
+                verbose: bool = True, complete_quiet_s: float | None = None) -> tuple[int, list[str]]:
     """One import pass over ``agents``: events, then session completion,
     question recovery and subagent links. Returns (events posted, held-back
     transcripts). ``cot import`` runs it over HTTP; the collector runs it in
-    its own process with ``_INGEST_SINK`` set."""
+    its own process with ``_INGEST_SINK`` set. ``complete_quiet_s`` closes only
+    imported sessions quiet that long, for a pass that reads live transcripts."""
     say = print if verbose else (lambda *a, **k: None)
     _reindex_if_parser_changed()
     origins = _fetch_session_origins()
@@ -4633,7 +4756,7 @@ def _run_import(agents: list[str], *, since: str | None = None, skip_active_s: f
                 f"{COT_ENDPOINT}/v1/sessions/complete-imported",
                 method="POST",
                 headers={"Content-Type": "application/json"},
-                data=b"{}",
+                data=json.dumps({"quiet_seconds": complete_quiet_s} if complete_quiet_s else {}).encode(),
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 result = json.loads(resp.read().decode("utf-8"))

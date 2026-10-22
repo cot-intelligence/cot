@@ -162,3 +162,15 @@ def test_batched_import_stores_what_single_posts_store(monkeypatch, tmp_path):
     single = _import_into(tmp_path / "single.db", home, monkeypatch, batched=False)
     batched = _import_into(tmp_path / "batched.db", home, monkeypatch, batched=True)
     assert single and batched == single
+
+
+def test_sink_error_is_raised_on_the_callers_thread(monkeypatch):
+    def broken(url, body):
+        raise RuntimeError("store is gone")
+
+    monkeypatch.setattr(bridge, "_INGEST_SINK", broken)
+    poster = bridge._ImportPoster(URL)
+    poster.add({"n": 0})
+    with pytest.raises(RuntimeError, match="store is gone"):
+        poster.flush()
+    assert poster._thread is None  # the sender thread was stopped

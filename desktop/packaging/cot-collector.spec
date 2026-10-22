@@ -31,6 +31,8 @@ a = Analysis(
         # stdlib modules it needs that the collector itself may not pull in.
         "argparse", "base64", "fcntl", "hashlib", "mimetypes", "shutil", "socket", "struct",
         "urllib.request", "urllib.error",
+        # watchdog picks its platform observer at runtime (app/watch.py).
+        "watchdog.observers.fsevents", "_watchdog_fsevents",
     ],
     hookspath=[],
     runtime_hooks=[],
