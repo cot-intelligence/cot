@@ -622,6 +622,8 @@
 .vf .set-nav { position: sticky; top: 0; display: grid; gap: 2px; }
 .vf .set-nav .nav-i { font-size: 13px; }
 .vf .set-nav .nav-i[aria-current='page'] { color: var(--v-fg); }
+/* The cot mark stands in for an icon on About; same 16px box as the icons. */
+.vf .set-nav .set-mark { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 16px; height: 16px; font-size: 16px; line-height: 1; white-space: nowrap; }
 /* A tab's content fades in; no movement, since people hop between tabs. */
 .vf .set-body { animation: set-in 150ms var(--v-ease-out) both; }
 @keyframes set-in { from { opacity: 0; } }

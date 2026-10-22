@@ -66,7 +66,7 @@ export const SECTIONS = [
   { id: 'passive', label: 'Passive import', icon: 'clock' },
   { id: 'privacy', label: 'Privacy', icon: 'lock' },
   { id: 'data', label: 'Data & retention', icon: 'database' },
-  { id: 'about', label: 'About', icon: 'question' },
+  { id: 'about', label: 'About', icon: 'cot' },
 ] as const;
 
 export type SettingsTab = (typeof SECTIONS)[number]['id'];
@@ -123,7 +123,7 @@ export function SettingsView({ sidebarOpen, onSidebarOpenChange, navCollapsed, o
               return (
                 <a key={x.id} href={settingsHref(x.id)} className="nav-i" aria-current={on ? 'page' : undefined}>
                   {on && <motion.span layoutId="set-pill" className="pill" transition={pill} />}
-                  <Icon name={x.icon} />
+                  {x.icon === 'cot' ? <span className="wordmark set-mark" aria-hidden="true">c<i>.</i></span> : <Icon name={x.icon} />}
                   <span>{x.label}</span>
                 </a>
               );
