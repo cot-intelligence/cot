@@ -967,6 +967,27 @@ async def _ingest_body(
     return body, None
 
 
+def _ingest_batch(source: str, bodies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Store a batch in order. Attachment bodies fold onto their prompt, as
+    they do sent alone (a replayed spool can carry one); each run of other
+    bodies between them is one write transaction."""
+    results: list[dict[str, Any]] = []
+    run: list[tuple[str, dict[str, Any]]] = []
+    for body in bodies:
+        if not body.get("_attach_to_prompt"):
+            run.append((source, body))
+            continue
+        if run:
+            results.extend(db.record_ingests(run))
+            run = []
+        sid = str(body.get("session_id") or "")
+        attached = db.attach_to_prompt(sid, body.get("text"), body.get("attachments") or [], body.get("timestamp"))
+        results.append({"ok": True, "attached": attached, "session_id": sid})
+    if run:
+        results.extend(db.record_ingests(run))
+    return results
+
+
 @app.post("/v1/ingest/{source}")
 async def ingest(source: str, request: Request) -> dict[str, Any]:
     if source not in AGENTS:
@@ -984,7 +1005,7 @@ async def ingest(source: str, request: Request) -> dict[str, Any]:
         return result
 
     if isinstance(body, list):
-        results = await asyncio.to_thread(db.record_ingests, [(source, b) for b in body])
+        results = await asyncio.to_thread(_ingest_batch, source, body)
         for r in results:
             _bump_revision(r.get("session_id"))
         return {"ok": True, "results": results}
