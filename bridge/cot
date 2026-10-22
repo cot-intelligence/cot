@@ -4638,7 +4638,7 @@ def _reader_text(value: object) -> str:
     return ""
 
 
-def _read_json_file(path: Path) -> object:
+def _read_json_doc(path: Path) -> object:
     try:
         return json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
@@ -4978,13 +4978,13 @@ _register(_Reader(
 
 def _gemini_projects(root: Path) -> dict[str, str]:
     paths: list[str] = []
-    data = _read_json_file(root / "projects.json")
+    data = _read_json_doc(root / "projects.json")
     if isinstance(data, dict) and isinstance(data.get("projects"), dict):
         paths += [str(p) for p in data["projects"]]
         names = {str(v): str(k) for k, v in data["projects"].items() if isinstance(v, str)}
     else:
         names = {}
-    trusted = _read_json_file(root / "trustedFolders.json")
+    trusted = _read_json_doc(root / "trustedFolders.json")
     if isinstance(trusted, dict):
         folders = trusted.get("trustedFolders", trusted)
         paths += [str(p) for p in (folders if isinstance(folders, (list, dict)) else [])]
@@ -5009,7 +5009,7 @@ def _gemini_index(root: Path) -> list[dict]:
 
 def _gemini_records(path: Path) -> tuple[dict, list[dict]]:
     if path.suffix == ".json":
-        doc = _read_json_file(path)
+        doc = _read_json_doc(path)
         if isinstance(doc, dict):
             return doc, [m for m in doc.get("messages") or [] if isinstance(m, dict)]
     header: dict = {}
@@ -5180,7 +5180,7 @@ _register(_Reader("copilot-cli", "Copilot CLI", (".copilot",), env="COPILOT_DIR"
 def _cowork_meta(path: Path) -> dict:
     for parent in path.parents:
         if parent.name.startswith("local_"):
-            data = _read_json_file(parent.with_name(parent.name + ".json"))
+            data = _read_json_doc(parent.with_name(parent.name + ".json"))
             if not isinstance(data, dict):
                 return {}
             folders = data.get("userSelectedFolders")
@@ -5257,7 +5257,7 @@ def _vscode_replay(path: Path) -> dict | None:
 
 def _vscode_folder(storage: Path) -> str | None:
     """The folder a workspaceStorage/<hash> belongs to, from its workspace.json."""
-    workspace = _read_json_file(storage / "workspace.json")
+    workspace = _read_json_doc(storage / "workspace.json")
     folder = workspace.get("folder") if isinstance(workspace, dict) else None
     if isinstance(folder, str) and folder.startswith("file://"):
         return urllib.parse.unquote(folder[len("file://"):])
@@ -5299,7 +5299,7 @@ def _vscode_uri_path(value: object) -> str | None:
 
 def _vscode_items(session: dict, root: Path) -> list[dict]:
     path = session["_path"]
-    doc = _vscode_replay(path) if path.suffix == ".jsonl" else _read_json_file(path)
+    doc = _vscode_replay(path) if path.suffix == ".jsonl" else _read_json_doc(path)
     if not isinstance(doc, dict):
         return []
     session["id"] = doc.get("sessionId") or session["id"]
@@ -5626,7 +5626,7 @@ _register(_Reader("goose", "Goose", (".local/share/goose/sessions", "AppData/Roa
 # text / reasoning / tool_call / tool_result / finish, each {type, data}).
 
 def _crush_index(root: Path) -> list[dict]:
-    registry = _read_json_file(root / "projects.json")
+    registry = _read_json_doc(root / "projects.json")
     projects = registry.get("projects") if isinstance(registry, dict) else None
     out = []
     for proj in projects if isinstance(projects, list) else []:
@@ -5799,12 +5799,12 @@ def _cline_cli_index(root: Path) -> list[dict]:
 
 
 def _cline_cli_items(session: dict, root: Path) -> list[dict]:
-    meta = _read_json_file(session["_meta"])
+    meta = _read_json_doc(session["_meta"])
     meta = meta if isinstance(meta, dict) else {}
     session.update(cwd=meta.get("cwd") or meta.get("workspace_root"), started=meta.get("started_at"),
                    model=meta.get("model"), ended=bool(meta.get("ended_at")),
                    title=(meta.get("metadata") or {}).get("title") if isinstance(meta.get("metadata"), dict) else None)
-    doc = _read_json_file(session["_path"]) if session["_path"].name.endswith(".messages.json") else None
+    doc = _read_json_doc(session["_path"]) if session["_path"].name.endswith(".messages.json") else None
     items: list[dict] = []
     tools: dict = {}
     for n, m in enumerate((doc or {}).get("messages") or [] if isinstance(doc, dict) else []):
@@ -5855,11 +5855,11 @@ def _cline_task_index(root: Path) -> list[dict]:
 
 def _cline_task_items(session: dict, root: Path) -> list[dict]:
     task_dir = session["_path"].parent
-    history = _read_json_file(task_dir / "history_item.json")
+    history = _read_json_doc(task_dir / "history_item.json")
     if isinstance(history, dict):
         session.update(cwd=history.get("workspace"), title=history.get("task"), started=history.get("ts"),
                        parent_id=history.get("parentTaskId") or None, model=history.get("apiConfigName"))
-    msgs = _read_json_file(session["_path"])
+    msgs = _read_json_doc(session["_path"])
     items: list[dict] = []
     pending: dict | None = None  # the command or MCP call whose output is still streaming in
     last_tool: dict | None = None
@@ -5964,7 +5964,7 @@ def _usage_counts(u: object) -> dict:
 # behind a hash is in ~/.kimi/kimi.json.
 
 def _kimi_index(root: Path) -> list[dict]:
-    config = _read_json_file(root / "kimi.json")
+    config = _read_json_doc(root / "kimi.json")
     dirs = config.get("work_dirs") if isinstance(config, dict) else None
     by_hash = {}
     for d in dirs if isinstance(dirs, list) else []:
@@ -6125,7 +6125,7 @@ def _kiro_sqlite_items(session: dict) -> list[dict]:
 def _kiro_items(session: dict, root: Path) -> list[dict]:
     if "_db" in session:
         return _kiro_sqlite_items(session)
-    meta = _read_json_file(session["_path"].with_suffix(".json"))
+    meta = _read_json_doc(session["_path"].with_suffix(".json"))
     if isinstance(meta, dict):
         paths = meta.get("workspacePaths")
         session.update(cwd=meta.get("cwd") or (paths[0] if isinstance(paths, list) and paths else None),
@@ -6183,14 +6183,14 @@ def _openhands_index(root: Path) -> list[dict]:
 
 
 def _openhands_items(session: dict, root: Path) -> list[dict]:
-    base = _read_json_file(session["_dir"] / "base_state.json")
+    base = _read_json_doc(session["_dir"] / "base_state.json")
     base = base if isinstance(base, dict) else {}
     llm = ((base.get("agent") or {}).get("llm") or {}) if isinstance(base.get("agent"), dict) else {}
     model = llm.get("model") if isinstance(llm, dict) else None
     session.update(id=base.get("id") or session["id"], model=model)
     items: list[dict] = []
     tools: dict = {}
-    events = [e for e in (_read_json_file(p) for p in sorted((session["_dir"] / "events").glob("*.json")))
+    events = [e for e in (_read_json_doc(p) for p in sorted((session["_dir"] / "events").glob("*.json")))
               if isinstance(e, dict)]
     events.sort(key=lambda e: str(e.get("timestamp") or ""))
     for n, ev in enumerate(events):
@@ -6237,7 +6237,7 @@ def _amp_index(root: Path) -> list[dict]:
 
 
 def _amp_items(session: dict, root: Path) -> list[dict]:
-    doc = _read_json_file(session["_path"])
+    doc = _read_json_doc(session["_path"])
     if not isinstance(doc, dict):
         return []
     trees = (((doc.get("env") or {}).get("initial") or {}).get("trees") or []) if isinstance(doc.get("env"), dict) else []
@@ -6631,7 +6631,7 @@ def _chat_reader(agent: str, label: str, dirs: tuple[str, ...], pattern: str | t
     def items(session: dict, root: Path) -> list[dict]:
         path = session["_path"]
         if meta_file is not None:
-            meta = _read_json_file(meta_file(path))
+            meta = _read_json_doc(meta_file(path))
             if isinstance(meta, dict):
                 session["cwd"] = _first(meta, "cwd", "working_dir", "workspace", "working_directory", "projectPath",
                                         "environment.working_directory", "workspace_root", "info.cwd",
@@ -6644,7 +6644,7 @@ def _chat_reader(agent: str, label: str, dirs: tuple[str, ...], pattern: str | t
         if path.suffix == ".jsonl":
             records = _read_jsonl_file(path)
         else:
-            doc = _read_json_file(path)
+            doc = _read_json_doc(path)
             if isinstance(doc, dict):
                 session["id"] = _first(doc, "id", "sessionId", "session_id", "metadata.id") or session["id"]
                 session["cwd"] = session.get("cwd") or _first(doc, "cwd", "workspace", "working_directory", "working_dir")
@@ -7071,7 +7071,7 @@ _register(_Reader("forge", "Forge", (".forge",), index=_forge_index, items=_forg
 # beside it and the folder in the workspace's workspace.json.
 
 def _posit_cwd(path: Path, root: Path) -> str | None:
-    ws = _read_json_file(path.parent.parent / "workspace.json")
+    ws = _read_json_doc(path.parent.parent / "workspace.json")
     return ws.get("path") if isinstance(ws, dict) else None
 
 
@@ -7209,11 +7209,11 @@ def _codebuddy_index(root: Path) -> list[dict]:
 
 
 def _codebuddy_items(session: dict, root: Path) -> list[dict]:
-    index = _read_json_file(session["_path"])
+    index = _read_json_doc(session["_path"])
     refs = index.get("messages") if isinstance(index, dict) else None
     records = []
     for ref in refs if isinstance(refs, list) else []:
-        msg = _read_json_file(session["_path"].parent / "messages" / f"{ref.get('id')}.json") if isinstance(ref, dict) else None
+        msg = _read_json_doc(session["_path"].parent / "messages" / f"{ref.get('id')}.json") if isinstance(ref, dict) else None
         if not isinstance(msg, dict):
             continue
         extra = _reader_json(msg.get("extra"))

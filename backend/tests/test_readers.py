@@ -709,3 +709,15 @@ def test_extra_homes_api(fresh_db, tmp_path, monkeypatch):
     assert r.status_code == 400 and "No folder at" in r.json()["detail"]
     r = client.post("/v1/passive/homes", json={"agent": "nope", "path": "~"})
     assert r.status_code == 400
+
+
+def test_bridge_defines_each_top_level_name_once():
+    """The bridge is one long script: a second def of a name silently replaces
+    the first for every caller (a reader helper once shadowed the hook
+    installer's _read_json_file and broke `cot install`)."""
+    import ast
+    import collections
+
+    tree = ast.parse((REPO / "bridge" / "cot").read_text())
+    names = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))]
+    assert [n for n, c in collections.Counter(names).items() if c > 1] == []
