@@ -1582,8 +1582,9 @@ OPENCODE_EVENTS = (
 )
 OPENCODE_PLUGIN_MARKER = 'id: "cot.observability"'
 HERMES_EVENTS = (
-    "SessionStart", "UserPromptSubmit", "PostToolUse", "PostToolUseFailure",
-    "afterAgentResponse", "ModelUsage", "PermissionRequest", "SubagentStart",
+    "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
+    "afterAgentResponse", "ModelUsage", "ApiRequestError", "PermissionRequest",
+    "PermissionGranted", "PermissionDenied", "Notification", "SubagentStart",
     "SubagentStop", "PostCompact", "Stop", "SessionEnd",
 )
 HERMES_PLUGIN_MARKER = "id: cot.observability"

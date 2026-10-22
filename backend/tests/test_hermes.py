@@ -135,6 +135,189 @@ def test_callbacks_swallow_errors(plugin, monkeypatch):
     assert callbacks["post_tool_call"](tool_name="terminal", args={}, session_id="s") is None
 
 
+def test_slash_command_is_recorded_as_the_typed_prompt(plugin, fresh_db):
+    # Kwargs as cli.py's process_command fires them; /context never reaches pre_llm_call.
+    plugin._on_pre_command(surface="cli", command="context", alias_used="context", args_raw="",
+                           session_key="20261022_122034_1a716f", platform="cli")
+    plugin._on_pre_command(surface="cli", command="usage", alias_used="u", args_raw="all",
+                           session_key="20261022_122034_1a716f", platform="cli")
+    assert [p["prompt"] for p in plugin.sent] == ["/context", "/u all"]
+    for payload in plugin.sent:
+        db.record_ingest("hermes", payload)
+    from app import extension_usage, store
+    with store.read() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT category, detail FROM events WHERE session_id='20261022_122034_1a716f' ORDER BY id")]
+    assert [(r["category"], r["detail"]) for r in rows] == [("prompt", "/context"), ("prompt", "/u all")]
+    assert extension_usage._classify_one(rows[0]) == {"kind": "skill", "name": "context", "via": "slash"}
+
+
+def test_gateway_slash_command_uses_the_reported_session(plugin):
+    # The gateway passes a chat key, not a session id; never open a session for it.
+    plugin._on_pre_command(surface="gateway", command="status", alias_used="status", args_raw="",
+                           session_key="agent:main:telegram:dm:42", platform="telegram")
+    assert plugin.sent == []
+    plugin._on_session_start(session_id="s1")
+    plugin._on_pre_command(surface="gateway", command="status", alias_used="status", args_raw="",
+                           session_key="agent:main:telegram:dm:42", platform="telegram")
+    assert (plugin.sent[-1]["session_id"], plugin.sent[-1]["prompt"]) == ("s1", "/status")
+
+
+# hermes_cli/plugins.py VALID_HOOKS in Hermes 0.22.2. Hermes stores an unknown
+# name with a warning and never calls it, so a typo fails silently there.
+HERMES_VALID_HOOKS = {
+    "pre_tool_call", "post_tool_call", "transform_terminal_output", "transform_tool_result",
+    "transform_llm_output", "pre_llm_call", "post_llm_call", "on_stream_start", "on_stream_delta",
+    "on_stream_end", "on_interim_message", "pre_verify", "pre_api_request", "post_api_request",
+    "api_request_error", "pre_auxiliary_call", "post_auxiliary_call",
+    "transform_api_error_classification", "on_session_start", "on_session_end", "on_session_finalize",
+    "on_session_reset", "on_skill_lifecycle", "subagent_start", "subagent_stop", "pre_gateway_dispatch",
+    "post_gateway_admission", "agent_loop_stopped", "pre_approval_request", "post_approval_response",
+    "on_human_input_request", "on_human_input_resolved", "on_room_member_activity", "pre_transcription",
+    "kanban_task_claimed", "kanban_task_completed", "kanban_task_blocked", "on_kanban_worker_spawned",
+    "on_kanban_worker_exited", "on_kanban_worker_stale_claim", "on_kanban_task_updated",
+    "on_kanban_dispatch_tick", "gateway_platform_event", "pre_command",
+}
+
+
+def test_plugin_subscribes_only_to_hooks_hermes_fires(plugin):
+    assert set(plugin.HOOKS) <= HERMES_VALID_HOOKS
+    # Behavior-changing hooks stay out: the plugin only observes.
+    assert not {h for h in plugin.HOOKS if h.startswith("transform_") or h in ("pre_verify", "pre_gateway_dispatch")}
+
+
+def test_tool_start_pairs_with_its_finish(plugin):
+    ids = {"session_id": "s", "tool_call_id": "call_1", "turn_id": "t1", "task_id": "", "api_request_id": ""}
+    plugin._on_pre_tool_call(tool_name="terminal", args={"command": "ls"}, **ids)
+    plugin._on_post_tool_call(tool_name="terminal", args={"command": "ls"}, result='{"output": ""}',
+                              duration_ms=12, status="ok", **ids)
+    start, end = (normalize("hermes", p) for p in plugin.sent)
+    assert [(e["hook"], e["phase"], e["category"], e["target"]) for e in (start, end)] == [
+        ("PreToolUse", "start", "shell", "ls"), ("PostToolUse", "end", "shell", "ls")]
+    assert plugin.sent[0]["_dedup_key"] == "hermes:s:tool:start:call_1"
+
+
+def test_failed_provider_attempts_are_errors(plugin):
+    for attempt in (0, 1):
+        plugin._on_api_request_error(session_id="s", api_request_id="req_1", model="llama3.2-64k",
+                                     provider="ollama", status_code=400, reason="format_error",
+                                     error="reasoning effort not supported", retryable=True,
+                                     retry_count=attempt, max_retries=3, api_duration=0.25, turn_id="t1")
+    events = [normalize("hermes", p) for p in plugin.sent]
+    assert [(e["category"], e["title"], e["target"], e["status"], e["duration_ms"]) for e in events] == [
+        ("lifecycle", "API request failed", "llama3.2-64k", "error", 250)] * 2
+    assert len({p["_dedup_key"] for p in plugin.sent}) == 2
+
+
+def test_auxiliary_usage_is_counted_and_compression_is_a_compaction(plugin):
+    usage = {"input_tokens": 900, "output_tokens": 120, "cache_read_tokens": 0}
+    plugin._on_post_auxiliary_call(aux_task="title_generation", session_id="s", api_request_id="aux-1",
+                                   model="m", usage=usage, api_duration=1.5, error=None)
+    plugin._on_post_auxiliary_call(aux_task="compression", session_id="s", api_request_id="aux-2",
+                                   model="m", usage=usage, error=None)
+    plugin._on_post_auxiliary_call(aux_task="compression", session_id="s", api_request_id="aux-3",
+                                   model="m", usage=None, error="timeout", error_type="TimeoutError")
+    events = [normalize("hermes", p) for p in plugin.sent]
+    assert [(e["hook"], e["category"]) for e in events] == [
+        ("ModelUsage", "lifecycle"), ("ModelUsage", "lifecycle"), ("PostCompact", "compaction")]
+    assert (events[0]["input_tokens"], events[0]["output_tokens"], events[0]["duration_ms"]) == (900, 120, 1500)
+    assert plugin.sent[0]["aux_task"] == "title_generation"
+
+
+def test_post_compaction_hook_is_gone(plugin):
+    assert "post_compaction" not in plugin.HOOKS
+
+
+def test_new_events_land_in_the_session_timeline(plugin, fresh_db):
+    ids = {"session_id": "s", "tool_call_id": "call_1", "turn_id": "t1"}
+    plugin._on_session_start(session_id="s", model="m")
+    plugin._on_pre_tool_call(tool_name="terminal", args={"command": "ls"}, **ids)
+    plugin._on_post_tool_call(tool_name="terminal", args={"command": "ls"}, result="{}", status="ok", **ids)
+    plugin._on_api_request_error(session_id="s", api_request_id="req_1", model="m", retry_count=0)
+    plugin._on_post_auxiliary_call(aux_task="compression", session_id="s", api_request_id="aux-1",
+                                   model="m", usage={"input_tokens": 10}, error=None)
+    plugin._on_post_approval_response(command="ls", choice="deny", session_key="s")
+    for payload in plugin.sent:
+        db.record_ingest("hermes", payload)
+    from app import store
+    with store.read() as conn:
+        rows = [tuple(r) for r in conn.execute(
+            "SELECT category, status FROM events WHERE session_id='s' AND category != 'lifecycle' ORDER BY id")]
+        errors = conn.execute("SELECT count(*) FROM events WHERE session_id='s' AND title='API request failed'"
+                              " AND status='error'").fetchone()[0]
+    assert ("shell", "ok") in rows and ("compaction", "ok") in rows and ("permission", "blocked") in rows
+    assert errors == 1
+
+
+def test_slash_skill_load_is_a_skill_call_and_tool_loads_are_not_repeated(plugin):
+    from app import extension_usage
+
+    plugin._on_session_start(session_id="s")
+    # skill_view already reports itself as a tool call, with a session id.
+    plugin._on_skill_lifecycle(action="loaded", skill_name="pdf", session_id="s", provenance="installed")
+    plugin._on_skill_lifecycle(action="patched", skill_name="pdf", session_id="", provenance="local")
+    plugin._on_skill_lifecycle(action="loaded", skill_name="pdf", session_id="", task_id="t",
+                               provenance="installed")
+    skill = plugin.sent[-1]
+    assert len(plugin.sent) == 2 and skill["session_id"] == "s"
+    event = normalize("hermes", skill)
+    assert (event["tool"], event["target"]) == ("Skill", "pdf")
+    assert extension_usage._classify_one(event) == {"kind": "skill", "name": "pdf", "via": "tool"}
+
+
+@pytest.mark.parametrize("choice,hook,status", [
+    ("once", "PermissionGranted", "ok"), ("always", "PermissionGranted", "ok"),
+    ("smart_approve", "PermissionGranted", "ok"), ("deny", "PermissionDenied", "blocked"),
+    ("timeout", "PermissionDenied", "blocked"), ("smart_deny", "PermissionDenied", "blocked"),
+])
+def test_approval_decision_is_recorded(plugin, choice, hook, status):
+    plugin._on_session_start(session_id="s")
+    plugin._on_post_approval_response(command="rm -rf build", description="recursive delete",
+                                      pattern_key="rm_rf", surface="cli", choice=choice,
+                                      session_key="s", turn_id="t1", tool_call_id="call_9")
+    decision = plugin.sent[-1]
+    assert (decision["session_id"], decision["hook_event_name"], decision["choice"]) == ("s", hook, choice)
+    event = normalize("hermes", decision)
+    assert (event["category"], event["status"], event["target"]) == ("permission", status, "terminal")
+
+
+def test_human_input_wait_is_a_notification_with_its_duration(plugin, monkeypatch):
+    clock = iter([100.0, 104.5])
+    monkeypatch.setattr(plugin.time, "monotonic", lambda: next(clock))
+    base = {"request_id": "r1", "session_id": "s", "session_key": "s", "platform": "cli"}
+    plugin._on_human_input_request(kind="sudo", prompt="[redacted]", **base)
+    plugin._on_human_input_resolved(kind="sudo", outcome="timeout", **base)
+    plugin._on_human_input_request(kind="approval", prompt="[redacted]", request_id="r2", session_id="s")
+    request, resolved = plugin.sent
+    assert [normalize("hermes", p)["category"] for p in plugin.sent] == ["notification", "notification"]
+    assert (request["notification_type"], resolved["outcome"], resolved["duration_ms"]) == (
+        "sudo_request", "timeout", 4500)
+    assert plugin._input_waits == {}
+
+
+def test_interrupt_reason_lands_on_the_interrupted_turn(plugin):
+    plugin._on_session_start(session_id="s")
+    plugin._on_agent_loop_stopped(session_key="agent:main:telegram:dm:42", platform="telegram", reason="/stop")
+    plugin._on_session_end(session_id="s", completed=True, turn_id="t0")
+    plugin._on_session_end(session_id="s", completed=False, interrupted=True, turn_id="t1")
+    finished, interrupted = plugin.sent[1:]
+    assert "stop_reason" not in finished and interrupted["stop_reason"] == "/stop"
+    assert normalize("hermes", interrupted)["status"] == "interrupted"
+
+
+def test_new_session_ends_the_one_it_replaces(plugin):
+    plugin._on_session_start(session_id="old")
+    # CLI: session_id is already the new conversation.
+    plugin._on_session_reset(session_id="new", platform="cli", reason="new_session")
+    assert (plugin.sent[-1]["session_id"], plugin.sent[-1]["hook_event_name"]) == ("old", "SessionEnd")
+    assert plugin._last_session == "new"
+    # Gateway names the replaced session; one this process never reported is left alone.
+    plugin._on_session_reset(session_id="b", old_session_id="never-seen", new_session_id="b",
+                             platform="telegram", reason="new_session")
+    plugin._on_session_reset(session_id="c", platform="tui")
+    assert len(plugin.sent) == 2
+
+
 @pytest.mark.parametrize("tool,canonical", [
     ("terminal", "Bash"), ("read_file", "Read"), ("write_file", "Write"), ("patch", "Edit"),
     ("search_files", "Grep"), ("delegate_task", "Task"), ("clarify", "AskUserQuestion"),

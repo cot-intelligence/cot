@@ -271,13 +271,24 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
             "status": "ok",
             "duration_ms": duration_ms,
         }
-    if hook in ("PermissionRequest", "PermissionDenied"):
+    if hook in ("PermissionRequest", "PermissionDenied", "PermissionGranted"):
         return {
             "category": "permission",
             "title": hook,
             "target": body.get("tool_name"),
             "detail": _json_detail(body),
-            "status": "blocked" if hook == "PermissionDenied" else "pending",
+            "status": {"PermissionDenied": "blocked", "PermissionGranted": "ok"}.get(hook, "pending"),
+            "duration_ms": duration_ms,
+        }
+
+    # --- Provider failures (one per failed attempt) ---
+    if hook == "ApiRequestError":
+        return {
+            "category": "lifecycle",
+            "title": "API request failed",
+            "target": body.get("model"),
+            "detail": _json_detail(body),
+            "status": "error",
             "duration_ms": duration_ms,
         }
 
