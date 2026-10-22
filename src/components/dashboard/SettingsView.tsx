@@ -66,6 +66,7 @@ export const SECTIONS = [
   { id: 'passive', label: 'Passive import', icon: 'clock' },
   { id: 'privacy', label: 'Privacy', icon: 'lock' },
   { id: 'data', label: 'Data & retention', icon: 'database' },
+  { id: 'about', label: 'About', icon: 'question' },
 ] as const;
 
 export type SettingsTab = (typeof SECTIONS)[number]['id'];
@@ -193,6 +194,7 @@ export function SettingsView({ sidebarOpen, onSidebarOpenChange, navCollapsed, o
             {section.id === 'passive' && <PassiveSection />}
             {section.id === 'privacy' && <PrivacySection settings={settings} onSettings={setSettings} />}
             {section.id === 'data' && <DataSection onExport={() => setExportOpen(true)} />}
+            {section.id === 'about' && <AboutSection />}
           </div>
         </div>
       </div>
@@ -308,34 +310,13 @@ function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) 
   const { data: health, error } = usePolling<Health>(['health'], () => getHealth(), 10000);
   const { data: hooks } = usePolling<HookStatus>(['hookStatus'], () => getHookStatus(), 10000);
   const [r, setR] = useState<RetentionStatus | null>(null);
-  const [v, setV] = useState<VersionInfo | null>(null);
-  const [checking, setChecking] = useState(false);
-  const [checkError, setCheckError] = useState<string | null>(null);
   const [direct, setDirect] = useState<HooksInstallStatus | null>(null);
   const [wiring, setWiring] = useState(false);
   const [wireNote, setWireNote] = useState<string | null>(null);
   useEffect(() => {
     getHooksInstall().then(setDirect).catch(() => {});
     getRetention().then(setR).catch(() => {});
-    if (!appIpc) getVersionInfo().then(setV).catch(() => {});
   }, []);
-  const check = async () => {
-    setChecking(true);
-    setCheckError(null);
-    try {
-      if (appIpc) {
-        await appIpc.invoke('check_for_updates');
-        return;
-      }
-      const d = await getVersionInfo(true);
-      setV(d);
-      if (!d.latest) setCheckError('Update check unavailable: offline or disabled.');
-    } catch {
-      setCheckError('Could not reach the collector.');
-    } finally {
-      setChecking(false);
-    }
-  };
   const unwired = (hooks?.agents ?? []).filter((h) => h.health === 'not_installed' || h.health === 'missing_hooks').map((h) => h.source);
   const wire = async () => {
     setWiring(true);
@@ -387,11 +368,53 @@ function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) 
       <Row label="Setup wizard" hint="Re-run onboarding to switch agents or re-verify hooks.">
         <button type="button" className="vbtn vbtn-quiet vbtn-sm" onClick={onRunOnboarding}>Run setup</button>
       </Row>
+    </Section>
+  );
+}
+
+function AboutSection() {
+  const { data: health } = usePolling<Health>(['health'], () => getHealth(), 10000);
+  const [v, setV] = useState<VersionInfo | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!appIpc) getVersionInfo().then(setV).catch(() => {});
+  }, []);
+  const check = async () => {
+    setChecking(true);
+    setCheckError(null);
+    try {
+      if (appIpc) {
+        await appIpc.invoke('check_for_updates');
+        return;
+      }
+      const d = await getVersionInfo(true);
+      setV(d);
+      if (!d.latest) setCheckError('Update check unavailable: offline or disabled.');
+    } catch {
+      setCheckError(appIpc ? 'Could not start the update check.' : 'Could not reach the collector.');
+    } finally {
+      setChecking(false);
+    }
+  };
+  const version = health?.version ?? v?.current;
+  return (
+    <Section id="about" title="About" desc="Self-hosted observability for AI coding agents.">
+      <dl className="set-facts">
+        <div><dt className="label">Version</dt><dd className="mono">{version ?? '—'}</dd></div>
+        <div><dt className="label">Runs as</dt><dd>{appIpc ? 'Mac app' : 'Collector'}</dd></div>
+      </dl>
       <Row
         label="Updates"
-        hint={appIpc ? 'cot checks on launch and every 6 hours, and installs an update only after you confirm.' : checking ? 'Checking…' : checkError ? checkError : v?.latest ? (v.update_available ? `Update available: v${v.latest}.` : `Up to date. Latest is v${v.latest}.`) : 'Check whether a newer release is available.'}>
+        hint={checkError && appIpc ? checkError : appIpc ? 'cot checks on launch and every 6 hours, and installs an update only after you confirm.' : checking ? 'Checking…' : checkError ? checkError : v?.latest ? (v.update_available ? `Update available: v${v.latest}.` : `Up to date. Latest is v${v.latest}.`) : 'Check whether a newer release is available.'}>
         {v?.update_available && v.url && <a className="vbtn vbtn-ghost vbtn-sm" href={v.url} target="_blank" rel="noreferrer">Instructions <Icon name="external" size={14} /></a>}
-        <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={checking || (!appIpc && error)} onClick={check}>Check for updates</button>
+        <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={checking} onClick={check}>Check for updates</button>
+      </Row>
+      <Row label="Release notes" hint="What changed in each version.">
+        <a className="vbtn vbtn-ghost vbtn-sm" href="https://github.com/cot-intelligence/cot/releases" target="_blank" rel="noreferrer">GitHub <Icon name="external" size={14} /></a>
+      </Row>
+      <Row label="Website" hint="Docs, install and updates.">
+        <a className="vbtn vbtn-ghost vbtn-sm" href="https://cot.run" target="_blank" rel="noreferrer">cot.run <Icon name="external" size={14} /></a>
       </Row>
     </Section>
   );
