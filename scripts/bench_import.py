@@ -13,6 +13,7 @@ Never touches the live collector (31337), ~/.cot or the transcripts it copies.
     python3 scripts/bench_import.py --sessions 200 --turns 80
     python3 scripts/bench_import.py --transcripts ~/.claude/projects
     python3 scripts/bench_import.py --bridge /path/to/older/cot   # compare bridges
+    python3 scripts/bench_import.py --in-process   # the collector's passive path
 
 Paste the table into PRs that touch the import path.
 """
@@ -45,7 +46,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _clean_env(home: Path, port: int) -> dict[str, str]:
+def _clean_env(home: Path, port: int, journal: str) -> dict[str, str]:
     """The caller's environment minus any COT_* setting, pointed at the sandbox."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("COT_")}
     env.update(
@@ -53,6 +54,7 @@ def _clean_env(home: Path, port: int) -> dict[str, str]:
         COT_DB_PATH=str(home / ".cot" / "cot.db"),
         COT_PORT=str(port),
         COT_ENDPOINT=f"http://127.0.0.1:{port}",
+        COT_DB_JOURNAL_MODE=journal,
     )
     return env
 
@@ -131,13 +133,23 @@ def _events(home: Path) -> int:
         conn.close()
 
 
-def _run_import(bridge: Path, env: dict[str, str], collector_rss: _PeakRss) -> dict:
+# The passive path: the collector's own importer, writing to the DB directly.
+# It runs in its own process here so its memory is measured on its own, and
+# skips the active-session hold-back so every pass sees the whole archive.
+_IN_PROCESS = (
+    "import sys; from app import passive; passive.ACTIVE_WINDOW_MIN = 0; "
+    "passive.self_url = sys.argv[1]; print(passive._import_agent('claude'))"
+)
+
+
+def _run_import(bridge: Path, env: dict[str, str], collector_rss: _PeakRss, in_process: bool) -> dict:
     before = _events(Path(env["HOME"]))
     collector_rss.peak = 0
     started = time.perf_counter()
+    cmd = ([sys.executable, "-c", _IN_PROCESS, env["COT_ENDPOINT"]] if in_process
+           else [sys.executable, str(bridge), "import", "--agent", "claude"])
     proc = subprocess.Popen(
-        [sys.executable, str(bridge), "import", "--agent", "claude"],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        cmd, cwd=BACKEND, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
     )
     bridge_rss = _PeakRss(proc.pid)
     _, err = proc.communicate()
@@ -159,6 +171,10 @@ def main() -> int:
     ap.add_argument("--turns", type=int, default=60, help="synthetic tool turns per session (default 60)")
     ap.add_argument("--append", type=int, default=200, help="lines appended before the third pass")
     ap.add_argument("--bridge", type=Path, default=BRIDGE, help="bridge script to time (default: this repo's)")
+    ap.add_argument("--in-process", action="store_true",
+                    help="time the collector's in-process import instead of `cot import`")
+    ap.add_argument("--journal", choices=["wal", "delete"], default="wal",
+                    help="SQLite journal mode (default wal, as the desktop app runs)")
     ap.add_argument("--keep", action="store_true", help="keep the sandbox folder for inspection")
     args = ap.parse_args()
 
@@ -175,7 +191,7 @@ def main() -> int:
     source_bytes = sum(p.stat().st_size for p in files)
 
     port = _free_port()
-    env = _clean_env(home, port)
+    env = _clean_env(home, port, args.journal)
     collector = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1",
          "--port", str(port), "--log-level", "warning"],
@@ -193,8 +209,8 @@ def main() -> int:
                 time.sleep(0.25)
         collector_rss = _PeakRss(collector.pid)
 
-        rows = [("full import", _run_import(args.bridge, env, collector_rss)),
-                ("repeat, nothing new", _run_import(args.bridge, env, collector_rss))]
+        rows = [("full import", _run_import(args.bridge, env, collector_rss, args.in_process)),
+                ("repeat, nothing new", _run_import(args.bridge, env, collector_rss, args.in_process))]
 
         # Grow the largest transcript with copies of its own tail, as a live
         # session would. Claude dedups on each line's uuid, so the copies get
@@ -211,7 +227,7 @@ def main() -> int:
             tail.append(json.dumps(obj))
         with target.open("a") as fh:
             fh.write("\n".join(tail) + "\n")
-        rows.append((f"append {len(tail)} lines", _run_import(args.bridge, env, collector_rss)))
+        rows.append((f"append {len(tail)} lines", _run_import(args.bridge, env, collector_rss, args.in_process)))
         collector_rss.stop()
     finally:
         collector.terminate()
@@ -220,8 +236,8 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             collector.kill()
 
-    print(f"bridge: {args.bridge}")
-    print(f"source: {len(files)} transcripts, {source_bytes / 1e6:.1f} MB")
+    print(f"importer: {'in-process (direct DB writes)' if args.in_process else args.bridge}")
+    print(f"source: {len(files)} transcripts, {source_bytes / 1e6:.1f} MB, journal {args.journal}")
     print(f"{'pass':<22} {'wall s':>8} {'events':>9} {'events/s':>9} {'db MB':>8} {'bridge MB':>10} {'collector MB':>13}")
     for label, r in rows:
         print(f"{label:<22} {r['wall']:>8.2f} {r['events']:>9} {r['rate']:>9.0f} "

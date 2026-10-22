@@ -16,8 +16,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
-import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -37,13 +35,8 @@ _GLOB = {
     "cursor": "projects/**/agent-transcripts/**/*.jsonl",
     "codex": "sessions/**/*.jsonl",
 }
-# An import is stopped only when it goes quiet this long: the bridge reports
-# progress per transcript, so a large history can run as long as it needs.
-_IMPORT_IDLE_TIMEOUT_S = 15 * 60
 # Run history behind the Settings import chart.
 RUNS_KEPT_DAYS = 30
-_POSTED_RE = re.compile(r"done\s+\S+\s+(\d+)\s+events posted")
-_HELD_RE = re.compile(r"held back (\d+) in-progress")
 # A transcript written to this recently belongs to a session that's still
 # running; scheduled passes leave it for the next run so it's imported whole.
 ACTIVE_WINDOW_MIN = 10
@@ -117,19 +110,23 @@ def transcript_root(agent: str) -> Path:
 _bridge_module: Any = None
 
 
+def _load_bridge() -> Any:
+    import importlib.machinery
+    import importlib.util
+
+    loader = importlib.machinery.SourceFileLoader("cot_bridge", str(_bridge_path()))
+    spec = importlib.util.spec_from_loader("cot_bridge", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
 def _bridge() -> Any:
     """The bridge script loaded as a module, for the OpenCode store reader it
     shares with ``cot import`` (OpenCode keeps a database, not transcripts)."""
     global _bridge_module
     if _bridge_module is None:
-        import importlib.machinery
-        import importlib.util
-
-        loader = importlib.machinery.SourceFileLoader("cot_bridge", str(_bridge_path()))
-        spec = importlib.util.spec_from_loader("cot_bridge", loader)
-        module = importlib.util.module_from_spec(spec)
-        loader.exec_module(module)
-        _bridge_module = module
+        _bridge_module = _load_bridge()
     return _bridge_module
 
 
@@ -444,52 +441,48 @@ def _bridge_path() -> Path:
     return here.parent.parent.parent / "bridge" / "cot"
 
 
+# Called with a session id after imported events are stored, so the dashboard's
+# live stream picks them up. main.py points it at its revision counter.
+on_ingest: Callable[[str | None], None] = lambda session_id: None
+
+
+def _ingest(url: str, body: dict[str, Any] | list[dict[str, Any]]) -> None:
+    """Where the in-process import's events go instead of an HTTP POST: the
+    same writes ``/v1/ingest/{source}`` makes, one transaction per batch."""
+    source = url.rsplit("/v1/ingest/", 1)[-1]
+    if isinstance(body, dict) and body.get("_attach_to_prompt"):
+        db.attach_to_prompt(str(body.get("session_id") or ""), body.get("text"),
+                            body.get("attachments") or [], body.get("timestamp"))
+        on_ingest(str(body.get("session_id") or ""))
+        return
+    items = body if isinstance(body, list) else [body]
+    for result in db.record_ingests([(source, b) for b in items]):
+        on_ingest(result.get("session_id"))
+
+
 def _import_agent(agent: str) -> dict[str, int]:
-    """Run ``cot import --agent <agent>`` against this collector, holding back
-    transcripts of sessions still in progress. Returns events posted and how
-    many transcripts were held back."""
-    env = {**os.environ, "COT_ENDPOINT": self_url, "COT_IMPORT_PROGRESS": "1", "PYTHONUNBUFFERED": "1"}
-    proc = subprocess.Popen(
-        [sys.executable, str(_bridge_path()), "import", "--agent", agent, "--skip-active", str(ACTIVE_WINDOW_MIN)],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    last_output = time.monotonic()
-    stalled = threading.Event()
-    finished = threading.Event()
+    """Import one agent's transcripts in this process, with the bridge's own
+    parsers, writing events straight to the store. Transcripts of sessions
+    still in progress are held back. Returns events stored and how many
+    transcripts were held back.
 
-    def watchdog() -> None:
-        while not finished.wait(5):
-            if time.monotonic() - last_output > _IMPORT_IDLE_TIMEOUT_S:
-                stalled.set()
-                proc.kill()
-                return
-
-    threading.Thread(target=watchdog, daemon=True).start()
-    lines: list[str] = []
+    The bridge still reaches this collector over HTTP for the few per-pass
+    calls (session origins, completion, question recovery); only the events,
+    which are nearly all the work, skip the round trip."""
+    # A fresh load per run, as the subprocess it replaces was: the bridge reads
+    # HOME (its ~/.cot state) and its config when it loads.
+    bridge = _load_bridge()
+    bridge.COT_ENDPOINT = self_url
+    bridge._INGEST_SINK = _ingest  # noqa: SLF001
+    bridge._PROGRESS_SINK = _set_progress  # noqa: SLF001
     try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            last_output = time.monotonic()
-            parts = line.split()
-            if len(parts) == 6 and parts[0] == "cot-progress" and parts[1] == agent:
-                _set_progress(agent, *(int(x) for x in parts[2:]))
-            else:
-                lines.append(line)
-        proc.wait()
+        posted, held_back = bridge._run_import(  # noqa: SLF001
+            [agent], skip_active_s=ACTIVE_WINDOW_MIN * 60, verbose=False
+        )
     finally:
-        finished.set()
-    out = "".join(lines)
-    if stalled.is_set():
-        raise RuntimeError(f"import stopped: no progress for {_IMPORT_IDLE_TIMEOUT_S // 60} minutes")
-    if proc.returncode != 0:
-        tail = out.strip().splitlines()[-1:] or [f"import failed (exit {proc.returncode})"]
-        raise RuntimeError(tail[0][:300])
-    posted = _POSTED_RE.search(out)
-    held = _HELD_RE.search(out)
-    return {"events": int(posted.group(1)) if posted else 0, "held_back": int(held.group(1)) if held else 0}
+        bridge._INGEST_SINK = None  # noqa: SLF001
+        bridge._PROGRESS_SINK = None  # noqa: SLF001
+    return {"events": posted, "held_back": len(held_back)}
 
 
 def _analyze() -> int:
