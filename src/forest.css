@@ -232,7 +232,7 @@
 @media (hover: hover) and (pointer: fine) { .vf .psv-absent-t:hover { background: color-mix(in srgb, var(--v-fg) 3%, transparent); color: var(--v-fg); } }
 .vf .psv-absent-t > svg { flex: none; color: var(--v-faint); transition: transform 150ms var(--v-ease-out); }
 .vf .psv-absent[data-open] .psv-absent-t > svg { transform: rotate(90deg); }
-.vf .psv-absent[data-open] .psv-absent-h { visibility: hidden; }
+.vf .psv-absent[data-open] .psv-absent-h { display: none; }
 .vf .psv-absent-n { flex: none; font-size: 11px; color: var(--v-faint); font-variant-numeric: tabular-nums; }
 .vf .psv-absent-h { min-width: 0; margin-left: auto; padding-left: 12px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vf .psv-absent-l { list-style: none; margin: 0; padding: 4px 6px 6px; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr)); gap: 2px 8px; border-top: 1px solid var(--v-line); animation: psv-reveal 180ms var(--v-ease-out) both; }

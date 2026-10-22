@@ -19,8 +19,8 @@ const CODEX_PATH =
 
 /** Agent marks used in onboarding and source badges. */
 export function AgentMark({ id, className = '', variant = '2d' }: AgentMarkProps) {
-  // Agents read only from disk (Gemini CLI, Zed, Goose …) use the shared marks.
-  if (id !== 'claude' && id !== 'cursor' && id !== 'codex' && id !== 'opencode' && id !== 'hermes') {
+  // Codex and the agents read only from disk (Gemini CLI, Zed, Goose …) use the shared marks.
+  if (id !== 'claude' && id !== 'cursor' && id !== 'opencode' && id !== 'hermes') {
     return <SharedMark id={id} className={className} size={null} />;
   }
   if (id === 'opencode') {
