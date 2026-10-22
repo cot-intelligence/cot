@@ -37,6 +37,7 @@ import {
 import { sourceLabel } from '../../lib/sourceLabels';
 import { setPref, usePrefs, type Prefs } from '../../lib/prefs';
 import { useTheme } from '../../lib/theme';
+import { checkAppUpdate, inApp, installAppUpdate, mb, useAppUpdate } from '../../lib/appUpdates';
 import { usePolling } from '../../lib/usePolling';
 import { fmt } from '../forest/format';
 import { Icon } from '../forest/icons';
@@ -303,9 +304,6 @@ function AiSection({ settings: s, onSettings }: { settings: Settings | null; onS
   );
 }
 
-/** Set inside cot.app, whose own updater replaces the collector's version check. */
-const appIpc = (window as { __TAURI_INTERNALS__?: { invoke: (cmd: string) => Promise<unknown> } }).__TAURI_INTERNALS__;
-
 function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) {
   const { data: health, error } = usePolling<Health>(['health'], () => getHealth(), 10000);
   const { data: hooks } = usePolling<HookStatus>(['hookStatus'], () => getHookStatus(), 10000);
@@ -373,42 +371,68 @@ function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) 
 }
 
 function AboutSection() {
+  const app = inApp();
   const { data: health } = usePolling<Health>(['health'], () => getHealth(), 10000);
   const [v, setV] = useState<VersionInfo | null>(null);
   const [checking, setChecking] = useState(false);
   const [checkError, setCheckError] = useState<string | null>(null);
+  const { update: u, setUpdate, refresh } = useAppUpdate();
   useEffect(() => {
-    if (!appIpc) getVersionInfo().then(setV).catch(() => {});
-  }, []);
+    if (!app) getVersionInfo().then(setV).catch(() => {});
+  }, [app]);
   const check = async () => {
     setChecking(true);
     setCheckError(null);
     try {
-      if (appIpc) {
-        await appIpc.invoke('check_for_updates');
+      if (app) {
+        setUpdate(await checkAppUpdate());
         return;
       }
       const d = await getVersionInfo(true);
       setV(d);
       if (!d.latest) setCheckError('Update check unavailable: offline or disabled.');
     } catch {
-      setCheckError(appIpc ? 'Could not start the update check.' : 'Could not reach the collector.');
+      setCheckError(app ? 'Could not start the update check.' : 'Could not reach the collector.');
     } finally {
       setChecking(false);
     }
   };
-  const version = health?.version ?? v?.current;
+  const install = async () => {
+    try {
+      await installAppUpdate();
+    } finally {
+      void refresh();
+    }
+  };
+  const appHint = (): string => {
+    if (checkError) return checkError;
+    switch (u?.status) {
+      case 'checking': return 'Checking…';
+      case 'current': return `Up to date. cot ${u.current} is the latest.`;
+      case 'available': return `cot ${u.version} is available. You have ${u.current}.`;
+      case 'downloading': return u.total ? `Downloading ${mb(u.downloaded)} of ${mb(u.total)}…` : `Downloading ${mb(u.downloaded)}…`;
+      case 'installing': return 'Installing. cot will restart.';
+      case 'failed': return u.error ?? 'The update check failed.';
+      default: return 'cot checks on launch and every 6 hours, and installs an update only after you confirm.';
+    }
+  };
+  const moving = checking || u?.status === 'checking' || u?.status === 'downloading' || u?.status === 'installing';
+  const version = health?.version ?? u?.current ?? v?.current;
   return (
     <Section id="about" title="About" desc="Self-hosted observability for AI coding agents.">
       <dl className="set-facts">
         <div><dt className="label">Version</dt><dd className="mono">{version ?? '—'}</dd></div>
-        <div><dt className="label">Runs as</dt><dd>{appIpc ? 'Mac app' : 'Collector'}</dd></div>
+        <div><dt className="label">Runs as</dt><dd>{app ? 'Mac app' : 'Collector'}</dd></div>
       </dl>
       <Row
         label="Updates"
-        hint={checkError && appIpc ? checkError : appIpc ? 'cot checks on launch and every 6 hours, and installs an update only after you confirm.' : checking ? 'Checking…' : checkError ? checkError : v?.latest ? (v.update_available ? `Update available: v${v.latest}.` : `Up to date. Latest is v${v.latest}.`) : 'Check whether a newer release is available.'}>
-        {v?.update_available && v.url && <a className="vbtn vbtn-ghost vbtn-sm" href={v.url} target="_blank" rel="noreferrer">Instructions <Icon name="external" size={14} /></a>}
-        <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={checking} onClick={check}>Check for updates</button>
+        hint={app ? appHint() : checking ? 'Checking…' : checkError ? checkError : v?.latest ? (v.update_available ? `Update available: v${v.latest}.` : `Up to date. Latest is v${v.latest}.`) : 'Check whether a newer release is available.'}>
+        {!app && v?.update_available && v.url && <a className="vbtn vbtn-ghost vbtn-sm" href={v.url} target="_blank" rel="noreferrer">Instructions <Icon name="external" size={14} /></a>}
+        {app && u?.status === 'available' ? (
+          <button type="button" className="vbtn vbtn-primary vbtn-sm" onClick={() => void install()}>Install and restart</button>
+        ) : (
+          <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={moving} onClick={() => void check()}>{moving && u?.status !== 'downloading' && u?.status !== 'installing' ? 'Checking…' : 'Check for updates'}</button>
+        )}
       </Row>
       <Row label="Release notes" hint="What changed in each version.">
         <a className="vbtn vbtn-ghost vbtn-sm" href="https://github.com/cot-intelligence/cot/releases" target="_blank" rel="noreferrer">GitHub <Icon name="external" size={14} /></a>

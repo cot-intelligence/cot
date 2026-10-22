@@ -14,6 +14,7 @@ import { AppSidebar, type NavKey } from './AppSidebar';
 import { CommandPalette, type PaletteCommand, type PaletteScope } from './CommandPalette';
 import { PassiveBanner } from '../passive/PassiveBanner';
 import { TaskTray } from './TaskTray';
+import { AppUpdateCard } from './AppUpdateCard';
 import { FetchBar } from '../ui/FetchBar';
 import { SessionsView } from './SessionsView';
 
@@ -699,6 +700,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
         commands={paletteCommands}
         scope={paletteScope}
       />
+      <AppUpdateCard />
     </div>
   );
 }

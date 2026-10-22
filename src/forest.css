@@ -1127,3 +1127,16 @@
 .vf .sd-sig-i.is-faint { color: var(--v-faint); }
 .vf .fb-bar { position: relative; }
 .vf .fb-pop { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20; width: min(420px, calc(100vw - 32px)); background: var(--v-surface); box-shadow: var(--v-pop); }
+
+/* Mac app update card (AppUpdateCard): bottom-right, above the page, flat surface with the pop ring. */
+.vf .upd { position: fixed; right: 16px; bottom: 16px; z-index: 60; width: min(340px, calc(100vw - 32px)); display: grid; gap: 12px; padding: 16px; border-radius: 12px; background: var(--v-surface); box-shadow: var(--v-pop); }
+.vf .upd-h { display: flex; align-items: center; gap: 12px; }
+.vf .upd-mark { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 32px; height: 32px; border-radius: 8px; background: var(--v-panel); font-size: 18px; line-height: 1; white-space: nowrap; }
+.vf .upd-t { font-weight: 500; font-size: 14px; line-height: 20px; }
+.vf .upd-s { color: var(--v-dim); font-size: 12px; line-height: 18px; }
+.vf .upd-n { margin: 0; color: var(--v-dim); font-size: 13px; line-height: 20px; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.vf .upd-err { color: var(--v-alert); }
+.vf .upd-p { display: grid; gap: 6px; }
+.vf .upd-bar { height: 4px; border-radius: 999px; background: var(--v-panel); overflow: hidden; }
+.vf .upd-bar > span { display: block; height: 100%; background: var(--v-hot); transform-origin: left; transition: transform 200ms var(--v-ease-out); }
+.vf .upd-a { display: flex; justify-content: flex-end; gap: 8px; }

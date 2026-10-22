@@ -291,12 +291,17 @@ fn watch_collector(app: AppHandle) {
     });
 }
 
-/// Settings → Collector, where the collector wires or repairs hooks itself.
-fn show_agent_hooks(app: &AppHandle) {
+/// Opens the window on one Settings tab (`#/settings/<tab>`).
+fn show_settings_tab(app: &AppHandle, tab: &str) {
     if let Some(window) = main_window(app) {
-        let _ = window.eval("location.hash = '#/settings/collector'");
+        let _ = window.eval(format!("location.hash = '#/settings/{tab}'"));
     }
     show_main_window(app);
+}
+
+/// Settings → Collector, where the collector wires or repairs hooks itself.
+fn show_agent_hooks(app: &AppHandle) {
+    show_settings_tab(app, "collector");
 }
 
 /// The menu-bar "cot." pill: filled while the collector serves, outlined
@@ -334,6 +339,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     )?;
 
     let login_item = login.clone();
+    updates::set_tray_item(app, updates.clone());
     TrayIconBuilder::with_id("cot")
         .icon(tray_glyph(false))
         .icon_as_template(true)
@@ -364,7 +370,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 let _ = if want { autolaunch.enable() } else { autolaunch.disable() };
                 let _ = login_item.set_checked(autolaunch.is_enabled().unwrap_or(false));
             }
-            "check-updates" => updates::check(app.clone(), true),
+            "check-updates" => updates::open_and_check(app),
             "quit" => app.exit(0),
             _ => {}
         })
@@ -487,13 +493,6 @@ fn retry_collector(app: AppHandle) {
     restart_collector(&app);
 }
 
-/// Settings → Updates in the dashboard. Same as the tray item: the result,
-/// and any install, goes through the app's own dialogs.
-#[tauri::command]
-fn check_for_updates(app: AppHandle) {
-    updates::check(app, true);
-}
-
 pub fn run() {
     sandbox::initialize();
     let app = tauri::Builder::default()
@@ -504,6 +503,7 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
+        .manage(updates::Updates::default())
         .manage(AppState {
             home: CotHome::from_env(),
             collector: Mutex::new(None),
@@ -512,7 +512,7 @@ pub fn run() {
             local_page: Mutex::new(None),
             tray: Mutex::new(None),
         })
-        .invoke_handler(tauri::generate_handler![retry_collector, check_for_updates])
+        .invoke_handler(tauri::generate_handler![retry_collector, updates::update_state, updates::update_check, updates::update_install])
         .menu(|app| build_app_menu(app))
         .on_menu_event(|app, event| {
             if event.id().as_ref() == "reload" {
