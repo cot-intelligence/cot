@@ -301,6 +301,9 @@ function AiSection({ settings: s, onSettings }: { settings: Settings | null; onS
   );
 }
 
+/** Set inside cot.app, whose own updater replaces the collector's version check. */
+const appIpc = (window as { __TAURI_INTERNALS__?: { invoke: (cmd: string) => Promise<unknown> } }).__TAURI_INTERNALS__;
+
 function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) {
   const { data: health, error } = usePolling<Health>(['health'], () => getHealth(), 10000);
   const { data: hooks } = usePolling<HookStatus>(['hookStatus'], () => getHookStatus(), 10000);
@@ -314,12 +317,16 @@ function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) 
   useEffect(() => {
     getHooksInstall().then(setDirect).catch(() => {});
     getRetention().then(setR).catch(() => {});
-    getVersionInfo().then(setV).catch(() => {});
+    if (!appIpc) getVersionInfo().then(setV).catch(() => {});
   }, []);
   const check = async () => {
     setChecking(true);
     setCheckError(null);
     try {
+      if (appIpc) {
+        await appIpc.invoke('check_for_updates');
+        return;
+      }
       const d = await getVersionInfo(true);
       setV(d);
       if (!d.latest) setCheckError('Update check unavailable: offline or disabled.');
@@ -382,9 +389,9 @@ function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) 
       </Row>
       <Row
         label="Updates"
-        hint={checking ? 'Checking…' : checkError ? checkError : v?.latest ? (v.update_available ? `Update available: v${v.latest}.` : `Up to date. Latest is v${v.latest}.`) : 'Check whether a newer release is available.'}>
+        hint={appIpc ? 'cot checks on launch and every 6 hours, and installs an update only after you confirm.' : checking ? 'Checking…' : checkError ? checkError : v?.latest ? (v.update_available ? `Update available: v${v.latest}.` : `Up to date. Latest is v${v.latest}.`) : 'Check whether a newer release is available.'}>
         {v?.update_available && v.url && <a className="vbtn vbtn-ghost vbtn-sm" href={v.url} target="_blank" rel="noreferrer">Instructions <Icon name="external" size={14} /></a>}
-        <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={checking || error} onClick={check}>Check for updates</button>
+        <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={checking || (!appIpc && error)} onClick={check}>Check for updates</button>
       </Row>
     </Section>
   );

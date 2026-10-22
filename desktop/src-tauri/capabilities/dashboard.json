@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/remote-schema.json",
   "identifier": "dashboard",
-  "description": "The dashboard served by the local collector may only drag the window by its header and double-click it to zoom.",
+  "description": "The dashboard served by the local collector may only drag the window by its header, double-click it to zoom, and ask the app to check for updates.",
   "windows": ["main"],
   "remote": { "urls": ["http://127.0.0.1:*"] },
-  "permissions": ["core:window:allow-start-dragging", "core:window:allow-internal-toggle-maximize"]
+  "permissions": ["core:window:allow-start-dragging", "core:window:allow-internal-toggle-maximize", "allow-check-for-updates"]
 }

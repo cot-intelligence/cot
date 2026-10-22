@@ -487,6 +487,13 @@ fn retry_collector(app: AppHandle) {
     restart_collector(&app);
 }
 
+/// Settings → Updates in the dashboard. Same as the tray item: the result,
+/// and any install, goes through the app's own dialogs.
+#[tauri::command]
+fn check_for_updates(app: AppHandle) {
+    updates::check(app, true);
+}
+
 pub fn run() {
     sandbox::initialize();
     let app = tauri::Builder::default()
@@ -505,7 +512,7 @@ pub fn run() {
             local_page: Mutex::new(None),
             tray: Mutex::new(None),
         })
-        .invoke_handler(tauri::generate_handler![retry_collector])
+        .invoke_handler(tauri::generate_handler![retry_collector, check_for_updates])
         .menu(|app| build_app_menu(app))
         .on_menu_event(|app, event| {
             if event.id().as_ref() == "reload" {
