@@ -482,6 +482,11 @@ def _import_agent(agent: str, *, hold_back: bool = True, progress: bool = True) 
             [agent], skip_active_s=ACTIVE_WINDOW_MIN * 60 if hold_back else 0, verbose=False,
             complete_quiet_s=ACTIVE_WINDOW_MIN * 60,
         )
+        # Other machines' copied or mounted session folders (`cot sources`).
+        posted += bridge._import_sources(  # noqa: SLF001
+            [agent], skip_active_s=ACTIVE_WINDOW_MIN * 60 if hold_back else 0, verbose=False,
+            complete_quiet_s=ACTIVE_WINDOW_MIN * 60,
+        )
     finally:
         bridge._INGEST_SINK = None  # noqa: SLF001
         bridge._PROGRESS_SINK = None  # noqa: SLF001

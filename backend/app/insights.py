@@ -80,6 +80,7 @@ _SEVERITY_RANK = {"critical": 0, "warn": 1, "info": 2}
 CONSTANTS: dict[str, dict[str, Any]] = {
     "usability.automate_command": {"min_repeats": 5, "min_len": 10},
     "usability.retry_loops": {"warn_run": 3, "critical_run": 5},
+    "usability.unfixed_failures": {"min_failures": 5, "warn_fixed": 0.7, "critical_fixed": 0.4},
     "usability.permission_friction": {"min_events": 5, "ratio": 0.10},
     "usability.slow_commands": {"min_ms": 30_000, "min_occurrences": 2},
     "usability.reread_churn": {"min_reads": 5},
@@ -105,6 +106,7 @@ _EVIDENCE_CAP = 8
 GROUP_TITLES: dict[str, str] = {
     "usability.automate_command": "Repeated commands you could automate",
     "usability.retry_loops": "Tools stuck in retry loops",
+    "usability.unfixed_failures": "Tool failures agents work around",
     "usability.permission_friction": "Permission-prompt friction",
     "usability.stalled_clarifications": "Unanswered questions at session end",
     "usability.slow_commands": "Slow commands",
@@ -287,6 +289,58 @@ def _retry_loops(snap: Snapshot) -> list[dict[str, Any]]:
                 "and document the workaround in your project rules.",
                 metric={"value": n, "unit": "errors", "label": "consecutive failures"},
                 evidence=[_ev(r, target, r["status"]) for r in streak],
+            )
+        )
+    return out
+
+
+@rule(id="usability.unfixed_failures", pillar="usability", tier=2, aggregate_only=True)
+def _unfixed_failures(snap: Snapshot) -> list[dict[str, Any]]:
+    """A tool whose failures agents mostly don't fix: they work around it with other
+    tools or give up, so the same failure comes back in the next session."""
+    from .recovery import chains_from
+
+    c = CONSTANTS["usability.unfixed_failures"]
+    by_session: dict[str, list[dict[str, Any]]] = {}
+    for e in snap.events:
+        if e.tool is None or e.status is None or _is_tool_start(e):
+            continue
+        by_session.setdefault(e.session_id, []).append(
+            {"id": e.id, "session_id": e.session_id, "ts": e.ts, "tool": e.tool, "target": e.target,
+             "category": e.category, "status": e.status}
+        )
+    per_tool: dict[str, dict[str, Any]] = {}
+    for sid, rows in by_session.items():
+        for chain in chains_from(rows):
+            t = per_tool.setdefault(chain["tool"], {"n": 0, "fixed": 0, "moved_on": 0, "abandoned": 0, "unfixed": []})
+            t["n"] += 1
+            if chain["outcome"] == "recovered":
+                t["fixed"] += 1
+            else:
+                t[chain["outcome"]] += 1
+                t["unfixed"].append({"session_id": sid, "id": chain["event_id"], "ts": chain["ts"], "target": chain["target"]})
+    out = []
+    for tool, t in per_tool.items():
+        rate = t["fixed"] / t["n"]
+        if t["n"] < c["min_failures"] or rate >= c["warn_fixed"]:
+            continue
+        unfixed = t["n"] - t["fixed"]
+        latest = sorted(t["unfixed"], key=lambda r: str(r["ts"] or ""), reverse=True)
+        out.append(
+            _finding(
+                "usability.unfixed_failures",
+                tool,
+                "critical" if rate < c["critical_fixed"] else "warn",
+                f"{tool} failures usually aren't fixed",
+                f"{unfixed} of {t['n']} failed {tool} calls were never made to work: "
+                + " and ".join(x for x in (
+                    f"the agent worked around {t['moved_on']} with other tools" if t["moved_on"] else "",
+                    f"gave up on {t['abandoned']}" if t["abandoned"] else "",
+                ) if x) + ".",
+                "Open a few examples. A repeated cause (a wrong path, a missing permission, a flaky server) "
+                "is worth fixing once in the tool's setup or a project rule, so agents stop paying for it.",
+                metric={"value": round(rate * 100), "unit": "%", "label": "failures fixed"},
+                evidence=[_ev(r, str(r["target"] or tool), "not fixed") for r in latest],
             )
         )
     return out

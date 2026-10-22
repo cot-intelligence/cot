@@ -104,8 +104,8 @@ def _ensure_loaded() -> dict[str, dict[str, float]]:
 # No catalog (bundled or remote) will have a model the moment it ships. Rather
 # than report a brand-new point release as unpriced, fall back to the newest
 # priced model in the same family/tier (e.g. an unknown claude-opus-4-9 borrows
-# the latest claude-opus rate). This is the same call AgentsView made by hand
-# when it slotted opus-4-7 into the opus tier.
+# the latest claude-opus rate), the same call a person would make by hand when
+# slotting a new point release into its tier.
 
 _TIER_OF_RES = (
     (re.compile(r"^claude-(opus|sonnet|haiku|fable)-"), lambda m: f"claude-{m.group(1)}"),

@@ -41,8 +41,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import (
-    __version__, activity, ai_insights, context_cost, cron, db, extension_usage, insights, otlp,
-    passive, rule_drafts, session_markdown, store, timeutil, user_rules, watch,
+    __version__, activity, ai_insights, context_cost, cron, db, edits, extension_usage, insights, otlp,
+    outcomes, passive, recovery, rule_drafts, semantic, session_markdown, session_shape, store, timeutil, usage_line,
+    user_rules, watch,
 )
 
 app = FastAPI(title="cot collector", version=__version__)
@@ -326,6 +327,7 @@ async def _startup() -> None:
     # Watching sets up an FSEvents/inotify stream per transcript folder (inotify
     # walks the tree), so it starts off the startup path too.
     threading.Thread(target=watch.start, name="transcript-watch-start", daemon=True).start()
+    semantic.start()
 
 
 @app.get("/health")
@@ -1219,7 +1221,15 @@ def get_stats() -> dict[str, Any]:
 def get_projects(days: int = 0) -> dict[str, Any]:
     """Every project in the window with its totals and folder details; 0 days = all time."""
     days = max(0, days)
-    return {"days": days, "projects": _cached_aggregate("projects", (days,), lambda: db.project_list(days))}
+    projects = _cached_aggregate("projects", (days,), lambda: db.project_list(days))
+    shipped = _cached_aggregate("outcomes", (days, True), lambda: outcomes.summary(days, True))
+    by_name: dict[str, dict[str, int]] = {}
+    for o in shipped["projects"]:
+        acc = by_name.setdefault(o["project_name"] or "", outcomes.blank())
+        for k in acc:
+            acc[k] += o[k]
+    # Shipped counts ride along on a copy: the cached project list is shared.
+    return {"days": days, "projects": [{**p, "shipped": by_name.get(p["name"])} for p in projects]}
 
 
 @app.get("/v1/projects/{name}")
@@ -1274,10 +1284,19 @@ def get_sessions(
     ids: str | None = None,
     sort: str = "recent",
     order: str = "desc",
+    kind: str | None = None,
 ) -> dict[str, Any]:
-    """A page of sessions plus ``total`` matching. ``ids`` is comma-separated."""
+    """A page of sessions plus ``total`` matching. ``ids`` is comma-separated;
+    ``kind`` narrows to one session kind (quick, standard, deep, marathon, automation)."""
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
+    wanted = [x for x in ids.split(",") if x] if ids is not None else None
+    shapes = _cached_aggregate("session-kinds", (), session_shape.kinds)
+    if kind:
+        of_kind = {sid for sid, k in shapes.items() if k["kind"] == kind}
+        wanted = [x for x in wanted if x in of_kind] if wanted is not None else sorted(of_kind)
+        if not wanted:
+            return {"sessions": [], "total": 0, "has_more": False}
     sessions, total = db.list_sessions_page(
         limit,
         offset=offset,
@@ -1287,11 +1306,25 @@ def get_sessions(
         archived=archived,
         bookmarked=bookmarked,
         project=project or None,
-        ids=[x for x in ids.split(",") if x] if ids is not None else None,
+        ids=wanted,
         sort=sort,
         desc=order != "asc",
     )
+    for sess in sessions:
+        shape = shapes.get(sess["id"])
+        if shape:
+            sess["kind"], sess["active_seconds"] = shape["kind"], shape["active_s"]
     return {"sessions": sessions, "total": total, "has_more": offset + len(sessions) < total}
+
+
+@app.get("/v1/sessions/kinds")
+def get_session_kinds() -> dict[str, Any]:
+    """How many listed sessions are of each kind, and the active-time cut points."""
+    shapes = _cached_aggregate("session-kinds", (), session_shape.kinds)
+    counts: dict[str, int] = {k: 0 for k in session_shape.ARCHETYPES}
+    for v in shapes.values():
+        counts[v["kind"]] += 1
+    return {"counts": counts}
 
 
 @app.post("/v1/sessions/{session_id}/archive")
@@ -1766,6 +1799,78 @@ def get_activity(
     return _json_payload(request, activity.summarize(category, max(0, days), project or None, source or None, plugin or None))
 
 
+@app.get("/v1/edits")
+def get_edits(
+    request: Request,
+    days: int = Query(7),
+    project: str | None = None,
+    source: str | None = None,
+    limit: int = Query(200, ge=1, le=1000),
+) -> Response:
+    """Files agents changed, newest first, grouped by project and path."""
+    return _json_payload(request, _cached_aggregate(
+        "edits", (days, project, source, limit), lambda: edits.recent(max(0, days), project or None, source or None, limit)
+    ))
+
+
+@app.get("/v1/outcomes")
+def get_outcomes(request: Request, days: int = Query(30), git: bool = True) -> Response:
+    """Commits, pushes and PRs sessions made; lines and files from git when the repo is readable."""
+    return _json_payload(request, _cached_aggregate("outcomes", (days, git), lambda: outcomes.summary(max(0, days), git)))
+
+
+@app.get("/v1/shipped")
+def get_shipped(
+    request: Request,
+    days: int = Query(30),
+    project: str | None = None,
+    session_id: str | None = None,
+    kind: str | None = None,
+) -> Response:
+    """Every PR, merge, commit and push agents made, newest first, with a link when one was
+    found and always the session event that did it."""
+    if kind and kind not in ("pr", "merge", "commit", "push"):
+        raise HTTPException(status_code=400, detail="kind must be pr, merge, commit or push")
+    data = _cached_aggregate(
+        "shipped", (days, session_id), lambda: outcomes.items(max(0, days), session_id=session_id or None)
+    )
+    if project or kind:
+        rows = [it for it in data["items"] if not project or it["project"] == project or it["project_name"] == project]
+        counts = {k: sum(1 for it in rows if it["kind"] == k) for k in ("pr", "merge", "commit", "push")}
+        data = {**data, "counts": counts, "items": [it for it in rows if not kind or it["kind"] == kind]}
+    return _json_payload(request, data)
+
+
+@app.get("/v1/sessions/{session_id}/outcomes")
+def get_session_outcomes(session_id: str, git: bool = True) -> dict[str, Any]:
+    return outcomes.per_session(0, git, session_id).get(session_id) or outcomes.blank()
+
+
+@app.get("/v1/session-shape")
+def get_session_shape(request: Request, days: int = Query(30), tz: str | None = None) -> Response:
+    """Session archetypes, distributions and concurrency over the window."""
+    return _json_payload(request, _cached_aggregate("session-shape", (days, tz), lambda: session_shape.report(days, tz)))
+
+
+@app.get("/v1/recovery")
+def get_recovery(request: Request, days: int = Query(7), project: str | None = None, source: str | None = None) -> Response:
+    """What agents did after tool calls failed: retries, switches, recoveries."""
+    return _json_payload(request, _cached_aggregate(
+        "recovery", (days, project, source), lambda: recovery.summary(max(0, days), project or None, source or None)
+    ))
+
+
+@app.get("/v1/sessions/{session_id}/recovery")
+def get_session_recovery(session_id: str) -> dict[str, Any]:
+    return recovery.for_session(session_id)
+
+
+@app.get("/v1/statusline")
+def get_statusline(session_id: str | None = None, tz: str | None = None) -> dict[str, Any]:
+    """Today's spend and the current session's cost and context, for a shell or agent status line."""
+    return usage_line.summary(session_id or None, tz)
+
+
 @app.get("/v1/activity/log")
 def get_activity_log(
     category: str = "shell",
@@ -2089,11 +2194,24 @@ def get_session_insights(session_id: str) -> dict[str, Any]:
 
 
 @app.get("/v1/search")
-def search(q: str = "", limit: int = 40, session_id: str | None = None) -> dict[str, Any]:
+def search(q: str = "", limit: int = 40, session_id: str | None = None, mode: str = "keyword") -> dict[str, Any]:
+    """``mode`` is keyword (default), semantic or hybrid; the last two need embeddings configured."""
     q = q.strip()
     if len(q) < 2:
         return {"results": []}
-    return {"results": db.search(q, max(1, min(limit, 100)), session_id=session_id or None)}
+    limit = max(1, min(limit, 100))
+    if mode in ("semantic", "hybrid"):
+        try:
+            return {**semantic.search(q, limit, session_id or None, mode), "mode": mode}
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError) as exc:
+            raise HTTPException(status_code=502, detail=f"Embeddings endpoint failed: {exc}") from exc
+    return {"results": db.search(q, limit, session_id=session_id or None)}
+
+
+@app.get("/v1/search/semantic")
+def semantic_status() -> dict[str, Any]:
+    """Whether semantic search is on, and how much of the conversation is indexed."""
+    return semantic.status()
 
 
 class ExportRequest(BaseModel):

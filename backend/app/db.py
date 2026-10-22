@@ -395,6 +395,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("import_root_id", "TEXT"),
         # Context the person typed when importing: why this trace is here.
         ("import_note", "TEXT"),
+        # The machine an imported session ran on, when it came from another
+        # machine's copied or mounted session folders (`cot import --from`).
+        ("machine", "TEXT"),
     ):
         _add_column_if_missing(conn, "sessions", name, col_def, session_cols)
     if "parent_session_id" in session_cols:
@@ -2414,9 +2417,9 @@ def _record_event(
     if row is None or boundary == "session_start":
         if row is None:
             conn.execute(
-                "INSERT INTO sessions (id, source, cwd, started_at, status, created_at)"
-                " VALUES (?, ?, ?, ?, 'active', ?)",
-                (sid, norm["source"], norm["cwd"], ts, timeutil.now()),
+                "INSERT INTO sessions (id, source, cwd, started_at, status, created_at, machine)"
+                " VALUES (?, ?, ?, ?, 'active', ?, ?)",
+                (sid, norm["source"], norm["cwd"], ts, timeutil.now(), _machine_of(raw)),
             )
         elif boundary == "session_start":
             conn.execute(
@@ -2707,6 +2710,11 @@ def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any
     }
 
 
+def _machine_of(raw: dict) -> str | None:
+    machine = raw.get("_machine")
+    return str(machine)[:64] if isinstance(machine, str) and machine.strip() else None
+
+
 def _session_ratings(conn: sqlite3.Connection, session_ids: list[str]) -> dict[str, int]:
     """Session-level thumbs (``annotations`` with event_id 0), by session."""
     if not session_ids:
@@ -2723,10 +2731,14 @@ def _session_ratings(conn: sqlite3.Connection, session_ids: list[str]) -> dict[s
 
 
 def _import_fields(row: sqlite3.Row) -> dict[str, Any]:
-    """Provenance of a Session Replay copy; nothing for a traced session."""
-    if "imported_from" not in row.keys() or not row["imported_from"]:
-        return {}
+    """Provenance: the machine of a session imported from another one, and the
+    origin of a Session Replay copy; nothing for a session traced here."""
+    keys = row.keys()
+    machine = {"machine": row["machine"]} if "machine" in keys and row["machine"] else {}
+    if "imported_from" not in keys or not row["imported_from"]:
+        return machine
     return {
+        **machine,
         "imported_from": row["imported_from"],
         "imported_at": timeutil.format_ts(row["imported_at"]),
         "import_note": row["import_note"] if "import_note" in row.keys() else None,
@@ -2811,6 +2823,9 @@ def _resolve_tz(tz: str | None) -> ZoneInfo | None:
         return ZoneInfo(tz.strip())
     except ZoneInfoNotFoundError:
         return None
+
+
+resolve_tz = _resolve_tz
 
 
 # Timestamps already in canonical UTC text form (``...Z`` or ``...+00:00``), whose
@@ -3519,7 +3534,7 @@ def export_sessions(
         rows = conn.execute(
             f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
             f" s.status, s.archived, s.bookmarked, s.created_at,"
-            f" s.imported_from, s.imported_at, s.import_note,"
+            f" s.imported_from, s.imported_at, s.import_note, s.machine,"
             f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
             f" e.input_tokens AS i, e.output_tokens AS o,"
             f" e.cache_read_tokens AS cr, e.cache_write_tokens AS cw,"
@@ -3896,7 +3911,7 @@ def list_sessions_page(
     select = (
         "SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
         " s.status, s.archived, s.bookmarked, s.created_at,"
-        " s.imported_from, s.imported_at, s.import_note,"
+        " s.imported_from, s.imported_at, s.import_note, s.machine,"
         " e.event_count, e.tool_count, e.first_ts, e.last_ts,"
         " e.input_tokens AS i, e.output_tokens AS o,"
         " e.cache_read_tokens AS cr, e.cache_write_tokens AS cw,"

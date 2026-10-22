@@ -78,8 +78,8 @@ type DashboardRoute =
   | { view: 'projects' }
   | { view: 'extension'; key: string };
 
-type MetricsHistoryTab = 'shell' | 'web' | 'mcp' | 'skill' | 'plugin';
-const ACTIVITY_LABEL: Record<MetricsHistoryTab, string> = { shell: 'Shell', web: 'Web', mcp: 'MCP', skill: 'Skills', plugin: 'Plugins' };
+type MetricsHistoryTab = 'shell' | 'web' | 'edits' | 'shipped' | 'mcp' | 'skill' | 'plugin';
+const ACTIVITY_LABEL: Record<MetricsHistoryTab, string> = { shell: 'Shell', web: 'Web', edits: 'Files', shipped: 'Shipped', mcp: 'MCP', skill: 'Skills', plugin: 'Plugins' };
 const ACTIVITY_TABS = Object.keys(ACTIVITY_LABEL) as MetricsHistoryTab[];
 
 /** The Activity page that lists an extension kind (MCP, Skills, Plugins). */
@@ -352,6 +352,22 @@ export function Dashboard({ onSetup }: DashboardProps) {
         keywords: 'overview metrics charts analytics usage insights findings recommendations security cost usability',
         active: onOverview,
         run: goOverview,
+      },
+      {
+        id: 'nav-shipped',
+        label: 'Go to what agents shipped',
+        icon: 'chart',
+        keywords: 'shipped pull requests prs commits pushes merges outcomes github',
+        active: onMetricsHistory && route.view === 'metrics-history' && route.tab === 'shipped',
+        run: () => goMetricsHistory('shipped'),
+      },
+      {
+        id: 'nav-files',
+        label: 'Go to recently edited files',
+        icon: 'file',
+        keywords: 'files edits recent changed written diff lines',
+        active: onMetricsHistory && route.view === 'metrics-history' && route.tab === 'edits',
+        run: () => goMetricsHistory('edits'),
       },
       {
         id: 'nav-metrics-history',

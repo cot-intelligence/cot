@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { search, type SearchResult, type Store } from '../../lib/api';
+import { useQuery } from '@tanstack/react-query';
+import { getSemanticStatus, search, type SearchResult, type Store } from '../../lib/api';
 import { formatRelative, getCategoryMeta } from '../../lib/categoryMeta';
 import { formatModel } from '../../lib/modelMeta';
 import { highlight } from '../ui/Highlight';
@@ -61,6 +62,8 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
     }
   }, [open, scope]);
 
+  const { data: semantic } = useQuery({ queryKey: ['semantic-status'], queryFn: getSemanticStatus, staleTime: 5 * 60_000, enabled: open });
+  const semanticOn = !!semantic?.enabled;
   const activeScope = scoped && scope ? scope : null;
   const term = q.trim();
 
@@ -79,7 +82,12 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
     let live = true;
     const t = window.setTimeout(async () => {
       try {
-        const r = await search(term, 60, scopeId, scopeStore);
+        // With embeddings configured, main-store search matches meaning as well as
+        // words; if the embeddings endpoint is down, keyword search still answers.
+        const hybrid = semanticOn && scopeStore === 'main';
+        const r = await (hybrid
+          ? search(term, 60, scopeId, scopeStore, 'hybrid').catch(() => search(term, 60, scopeId, scopeStore))
+          : search(term, 60, scopeId, scopeStore));
         if (live) setResults(r);
       } catch {
         if (live) setResults([]);
@@ -91,7 +99,7 @@ export function CommandPalette({ open, onClose, onSelect, commands, scope }: Com
       live = false;
       window.clearTimeout(t);
     };
-  }, [term, open, scopeId, scopeStore]);
+  }, [term, open, scopeId, scopeStore, semanticOn]);
 
   // Commands matching the query (all of them when the box is empty).
   const cmdMatches = useMemo(() => {

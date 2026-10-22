@@ -4,7 +4,9 @@ import {
   deleteSession,
   getInsights,
   getSessionProjects,
+  getSessionKinds,
   getSessionsPage,
+  type Archetype,
   setSessionArchived,
   setSessionBookmarked,
   type InsightsResponse,
@@ -24,6 +26,9 @@ type SortKey = 'recent' | 'events' | 'duration' | 'cost';
 const SEV_RANK: Record<Severity, number> = { critical: 0, warn: 1, info: 2 };
 /** Sessions per page; the collector filters, sorts and counts across all of them. */
 const PAGE = 20;
+const KIND_ORDER: Archetype[] = ['quick', 'standard', 'deep', 'marathon', 'automation'];
+// Kinds are judged on active time against this user's own history (session_shape.py).
+const KIND_LABEL: Record<Archetype, string> = { quick: 'Quick', standard: 'Standard', deep: 'Deep', marathon: 'Marathon', automation: 'Automation' };
 
 interface SessionsViewProps {
   onSelect: (id: string, eventId?: number) => void;
@@ -38,13 +43,23 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
     const t = window.setTimeout(() => setQ(qInput.trim()), 250);
     return () => window.clearTimeout(t);
   }, [qInput]);
-  const [proj, setProj] = useState('');
-  const [agent, setAgent] = useState('');
-  const [status, setStatus] = useState('');
-  const [onlyFlagged, setOnlyFlagged] = useState(false);
+  // #/sessions?agent=cursor&kind=deep&project=cot&status=active&sort=cost&flagged=1 opens pre-filtered
+  // (the Overview links here from its numbers).
+  const [init] = useState(() => new URLSearchParams(window.location.hash.split('?')[1] ?? ''));
+  const [proj, setProj] = useState(init.get('project') ?? '');
+  const [agent, setAgent] = useState(init.get('agent') ?? '');
+  const [status, setStatus] = useState(init.get('status') ?? '');
+  const [onlyFlagged, setOnlyFlagged] = useState(init.get('flagged') === '1');
   const [onlyBookmarked, setOnlyBookmarked] = useState(false);
   const [archived, setArchived] = useState(false);
-  const [sort, setSort] = useState<SortKey>('recent');
+  const [kind, setKind] = useState<Archetype | ''>(() => {
+    const k = init.get('kind') as Archetype | null;
+    return k && KIND_ORDER.includes(k) ? k : '';
+  });
+  const [sort, setSort] = useState<SortKey>(() => {
+    const k = init.get('sort');
+    return k === 'events' || k === 'duration' || k === 'cost' ? k : 'recent';
+  });
   const [dir, setDir] = useState<'asc' | 'desc'>('desc');
   const [menu, setMenu] = useState<{ s: SessionSummary; x: number; y: number } | null>(null);
   const [toDelete, setToDelete] = useState<SessionSummary | null>(null);
@@ -72,9 +87,9 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
   const flaggedIds = useMemo(() => (onlyFlagged ? [...flagged.keys()].sort() : undefined), [onlyFlagged, flagged]);
 
   // Any filter or sort change starts again at the first page.
-  useEffect(() => setPage(0), [q, proj, agent, status, onlyFlagged, onlyBookmarked, archived, sort, dir]);
+  useEffect(() => setPage(0), [q, proj, agent, status, onlyFlagged, onlyBookmarked, archived, kind, sort, dir]);
 
-  const queryKey = ['sessionsTable', status, agent, q, proj, flaggedIds?.join(','), archived, onlyBookmarked, sort, dir, page];
+  const queryKey = ['sessionsTable', status, agent, q, proj, flaggedIds?.join(','), archived, onlyBookmarked, kind, sort, dir, page];
   // The live stream keeps the visible page fresh; the poll is the fallback.
   const { data } = usePolling<SessionPage>(
     queryKey,
@@ -91,9 +106,11 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
         order: dir,
         archived,
         bookmarked: onlyBookmarked,
+        kind: kind || undefined,
       }),
     3000,
   );
+  const { data: kinds } = usePolling(['sessionKinds'], getSessionKinds, 60000);
   const { data: projectList } = usePolling(['sessionProjects', archived], () => getSessionProjects(archived), 60000);
   const rows = data?.sessions ?? [];
   const total = data?.total ?? 0;
@@ -178,7 +195,7 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
     setMenu({ s, x: r.right - 232, y: r.bottom + 4 });
   };
 
-  const any = q || proj || agent || status || onlyFlagged || onlyBookmarked || archived;
+  const any = q || proj || agent || status || onlyFlagged || onlyBookmarked || archived || kind;
   const clear = () => {
     setQInput('');
     setQ('');
@@ -188,6 +205,7 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
     setOnlyFlagged(false);
     setOnlyBookmarked(false);
     setArchived(false);
+    setKind('');
   };
   const now = new Date().toISOString();
 
@@ -202,6 +220,12 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
           <Dropdown label="Project" value={proj} onChange={setProj} options={[{ value: '', label: 'All projects' }, ...(projectList ?? []).map((p) => ({ value: p.project, label: p.project, meta: p.sessions }))]} />
           <Dropdown label="Agent" value={agent} onChange={setAgent} options={[{ value: '', label: 'All agents' }, ...agents.map((a) => ({ value: a, label: agentLabel(a) }))]} />
           <Dropdown label="Status" value={status} onChange={setStatus} options={[{ value: '', label: 'Any status' }, { value: 'active', label: 'Live' }, { value: 'completed', label: 'Completed' }]} />
+          <Dropdown
+            label="Kind"
+            value={kind}
+            onChange={(v) => setKind(v as Archetype | '')}
+            options={[{ value: '', label: 'Any kind' }, ...KIND_ORDER.filter((k) => !kinds || kinds.counts[k] > 0).map((k) => ({ value: k, label: KIND_LABEL[k], meta: kinds?.counts[k] }))]}
+          />
           <button type="button" className="tgl" aria-pressed={onlyFlagged} onClick={() => setOnlyFlagged((x) => !x)}><Icon name="findings" size={14} />With findings</button>
           <Dropdown
             label="View"
@@ -276,9 +300,12 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
                         </div>
                         <span className="mono faint" style={{ fontSize: 11 }}>{project(s.cwd)} · {shortId(s.id)}</span>
                       </td>
-                      <td><Agent id={s.source} /></td>
+                      <td><span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><Agent id={s.source} />{s.machine && <span className="mono faint" style={{ fontSize: 11 }} title="Imported from another machine">@{s.machine}</span>}</span></td>
                       <td className="num">{s.event_count}</td>
-                      <td className="num">{fmt.dur(s.duration_seconds ?? 0)}</td>
+                      <td className="num" title={s.active_seconds != null ? `${fmt.dur(s.active_seconds)} active of ${fmt.dur(s.duration_seconds ?? 0)} open` : undefined}>
+                        {fmt.dur(s.active_seconds ?? s.duration_seconds ?? 0)}
+                        {s.kind && s.kind !== 'standard' && <span className="faint" style={{ fontSize: 11, marginLeft: 6 }}>{KIND_LABEL[s.kind].toLowerCase()}</span>}
+                      </td>
                       <td className="num">{s.has_cost ? fmt.usd(s.cost_usd) : '—'}</td>
                       <td className="mono dim" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{fmt.ago(s.last_activity ?? s.started_at, now)}</td>
                       <td style={{ paddingLeft: 0 }}>

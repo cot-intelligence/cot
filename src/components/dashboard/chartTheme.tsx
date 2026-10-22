@@ -139,7 +139,7 @@ export function HourBars({ data, peak }: { data: { hour: number; events: number 
   );
 }
 
-export function HBars({ data, height = 200 }: { data: Datum[]; height?: number }) {
+export function HBars({ data, height = 200, onPick }: { data: Datum[]; height?: number; onPick?: (d: Datum) => void }) {
   return (
     <ResponsiveContainer width="100%" height={height}>
       <BarChart data={data} layout="vertical" margin={{ top: 0, right: 12, bottom: 0, left: 4 }}>
@@ -148,12 +148,20 @@ export function HBars({ data, height = 200 }: { data: Datum[]; height?: number }
           type="category"
           dataKey="name"
           width={96}
+          // Label every bar: recharts otherwise drops alternate labels when rows are tight.
+          interval={0}
           tick={{ fill: AXIS, fontSize: 10, fontFamily: MONO }}
           axisLine={false}
           tickLine={false}
         />
         <Tooltip content={<ChartTooltip />} cursor={CURSOR} />
-        <Bar dataKey="value" name="events" radius={[0, 3, 3, 0]}>
+        <Bar
+          dataKey="value"
+          name="events"
+          radius={[0, 3, 3, 0]}
+          cursor={onPick ? 'pointer' : undefined}
+          onClick={onPick ? (entry: { payload?: Datum }) => entry?.payload && onPick(entry.payload) : undefined}
+        >
           {data.map((d, i) => (
             <Cell key={d.name} fill={d.color ?? CHART_COLORS[i % CHART_COLORS.length]} />
           ))}

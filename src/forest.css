@@ -759,3 +759,89 @@
 .vf .qa-note { display: flex; gap: 6px; align-items: flex-start; margin: 0; font-size: 12px; color: var(--v-dim); }
 .vf .qa-note svg { flex: none; margin-top: 3px; }
 .vf .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* Files feed. Rows rise in once when a list first mounts (short
+   stagger, capped), never on refetch; numbers are tabular so polling never jitters. */
+.vf { --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1); }
+.vf .rise { animation: vf-rise 220ms var(--ease-out-strong) both; animation-delay: calc(min(var(--i, 0), 8) * 35ms); }
+@keyframes vf-rise { from { opacity: 0; transform: translateY(4px); } }
+@media (prefers-reduced-motion: reduce) { .vf .rise { animation: onb-fade 160ms ease both; } }
+.vf .num-t { font-family: 'Geist Mono', monospace; font-variant-numeric: tabular-nums; }
+.vf .d-add { color: var(--v-olive); } .vf .d-rm { color: var(--v-alert); }
+.vf .oc-split-r { display: grid; grid-template-columns: 1fr 1.7fr; gap: 16px; margin-top: 16px; }
+@media (max-width: 1000px) { .vf .oc-split-r { grid-template-columns: 1fr; } }
+.vf .oc-legend { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 2px 16px; margin-top: 14px; }
+.vf .oc-legend button { display: grid; grid-template-columns: 8px 1fr auto; align-items: center; gap: 8px; height: 30px; padding: 0 8px; margin: 0 -8px; border: 0; border-radius: 8px; background: none; text-align: left; font-size: 13px; color: var(--v-fg); transition: background-color 150ms ease; }
+@media (hover: hover) and (pointer: fine) { .vf .oc-legend button:hover { background: var(--v-wash); } }
+.vf .oc-legend button[aria-pressed='true'] { background: var(--v-wash); box-shadow: inset 0 0 0 1px var(--v-line); }
+.vf .oc-legend button:active { transform: scale(0.98); }
+.vf .oc-legend i { width: 8px; height: 8px; border-radius: 2px; }
+.vf .oc-empty { display: grid; gap: 6px; padding: 28px 20px; text-align: left; }
+.vf .oc-empty b { font-size: 14px; font-weight: 600; }
+.vf .oc-empty p { margin: 0; font-size: 13px; color: var(--v-dim); max-width: 60ch; text-wrap: pretty; }
+.vf .oc-empty code { font-size: 12px; }
+.vf .fe-row { cursor: pointer; }
+.vf .fe-path { display: grid; gap: 1px; min-width: 0; }
+.vf .fe-path b { font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vf .fe-path span { font-size: 11px; color: var(--v-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+/* Shipped list: one row per PR, merge, commit or push; the row opens the session,
+   the trailing button opens the PR or commit. */
+.vf .sh-list { list-style: none; margin: 0; padding: 0 8px 8px; display: grid; }
+.vf .sh-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; border-top: 1px solid var(--v-line); padding: 2px 0; }
+.vf .sh-row:first-child { border-top: 0; }
+.vf .sh-main { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-width: 0; padding: 8px 10px; border: 0; border-radius: 10px; background: none; text-align: left; color: var(--v-fg); transition: background-color 150ms ease, transform 120ms ease; }
+@media (hover: hover) and (pointer: fine) { .vf .sh-main:hover { background: var(--v-wash); } }
+.vf .sh-main:active { transform: scale(0.99); }
+.vf .sh-ic { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: var(--v-wash); }
+.vf .sh-txt { display: grid; gap: 2px; min-width: 0; }
+.vf .sh-txt b { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vf .sh-txt span { font-size: 11px; color: var(--v-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vf .sh-when { font-size: 11px; color: var(--v-faint); white-space: nowrap; }
+.vf .sh-row > .vbtn { margin-right: 6px; gap: 6px; }
+.vf .sh-kpi { text-align: left; border: 0; border-right: 1px solid var(--v-line); background: none; color: inherit; font: inherit; cursor: pointer; transition: background-color 150ms ease; }
+.vf .sh-kpi:last-child { border-right: 0; }
+@media (hover: hover) and (pointer: fine) { .vf .sh-kpi:hover { background: var(--v-wash); } }
+.vf .sh-kpi[aria-pressed='true'] { background: var(--v-wash); box-shadow: inset 0 0 0 1px var(--v-line); }
+@media (max-width: 640px) { .vf .sh-when { display: none; } .vf .sh-row > .vbtn { padding: 0 8px; } }
+/* Overview → Outcomes: four counts as a 2×2 grid, a one-line summary, then the
+   projects that shipped most, each opening its Shipped list. */
+.vf .oc-card { display: grid; gap: 16px; align-content: start; }
+.vf .oc-counts { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--v-line); border: 1px solid var(--v-line); border-radius: 12px; overflow: hidden; }
+.vf .oc-count { display: grid; gap: 2px; padding: 12px 14px; background: var(--v-surface); color: inherit; text-decoration: none; transition: background-color 150ms ease; }
+@media (hover: hover) and (pointer: fine) { .vf .oc-count:hover { background: var(--v-bg); } }
+.vf .oc-count:active { transform: scale(0.99); }
+.vf .oc-count b { font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.02em; }
+.vf .oc-count span { font-size: 12px; color: var(--v-dim); }
+.vf .oc-proj { list-style: none; margin: 6px 0 0; padding: 0; display: grid; }
+.vf .oc-proj a { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; padding: 6px 8px; margin: 0 -8px; border-radius: 8px; color: inherit; text-decoration: none; font-size: 13px; transition: background-color 150ms ease; }
+.vf .oc-proj a .mono { font-size: 12px; min-width: 0; }
+.vf .oc-proj a .dim { white-space: nowrap; font-size: 12px; }
+@media (hover: hover) and (pointer: fine) { .vf .oc-proj a:hover { background: var(--v-wash); } }
+/* Overview → Next up: the first call to action. A flat tint of its tone with a
+   hairline ring (no side bar); the primary button is the only filled control. */
+.vf .nextup { --tone: var(--v-hot); display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px 14px; margin: 0 0 16px; padding: 14px 16px; border-radius: 14px; background: color-mix(in srgb, var(--tone) 6%, var(--v-surface)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone) 22%, transparent); }
+.vf .nextup[data-tone='critical'] { --tone: var(--v-alert); }
+.vf .nextup[data-tone='warn'] { --tone: var(--v-amber); }
+.vf .nextup[data-tone='ok'] { --tone: var(--v-olive); }
+.vf .nextup-ic { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; color: var(--tone); background: color-mix(in srgb, var(--tone) 12%, transparent); }
+.vf .nextup-txt { display: grid; gap: 2px; min-width: 0; }
+.vf .nextup-txt b { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vf .nextup-txt span { font-size: 12px; color: var(--v-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vf .nextup .vbtn svg { transition: transform 160ms var(--ease-out-strong); }
+@media (hover: hover) and (pointer: fine) { .vf .nextup .vbtn:hover svg { transform: translateX(2px); } }
+.vf .nextup-more { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding-top: 10px; border-top: 1px solid color-mix(in srgb, var(--tone) 18%, transparent); }
+.vf .nextup-link { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; font-size: 12px; color: var(--v-fg); text-decoration: none; padding: 3px 6px; margin: 0 -6px; border-radius: 6px; transition: background-color 150ms ease; }
+@media (hover: hover) and (pointer: fine) { .vf .nextup-link:hover { background: var(--v-wash); } }
+.vf .nextup-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--v-amber); }
+.vf .nextup-dot[data-tone='critical'] { background: var(--v-alert); }
+@media (max-width: 640px) { .vf .nextup { grid-template-columns: auto minmax(0, 1fr); } .vf .nextup > .vbtn { grid-column: 1 / -1; justify-content: center; } .vf .nextup-more { grid-column: 1 / -1; } .vf .nextup-txt b, .vf .nextup-txt span { white-space: normal; } }
+/* Overview: KPI tiles and agent tiles are links to the list behind the number. */
+.vf a.kpi-link { color: inherit; text-decoration: none; transition: background-color 150ms ease; }
+@media (hover: hover) and (pointer: fine) { .vf a.kpi-link:hover { background: var(--v-bg); } }
+.vf a.kpi-link:active { transform: scale(0.995); }
+.vf .agent-grid { display: grid; grid-template-columns: repeat(var(--cols, 3), minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 900px) { .vf .agent-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .vf .agent-grid { grid-template-columns: 1fr; } }
+.vf .agent-tile { display: grid; gap: 6px; padding: 14px; border-radius: 12px; background: var(--v-bg); border: 1px solid var(--v-line); color: inherit; text-decoration: none; transition: border-color 150ms ease, background-color 150ms ease; }
+@media (hover: hover) and (pointer: fine) { .vf .agent-tile:hover { border-color: var(--v-mute); background: var(--v-surface); } }
+.vf .agent-tile:active { transform: scale(0.99); }

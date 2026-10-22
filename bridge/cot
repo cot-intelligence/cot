@@ -422,6 +422,11 @@ _INGEST_SINK = None
 # Set alongside it: called with (agent, files_done, files_total, bytes_done,
 # bytes_total) instead of printing cot-progress lines.
 _PROGRESS_SINK = None
+# Set while importing another machine's session folders (`cot import --from`):
+# the home to read transcripts from, and the machine name stamped on each event.
+_IMPORT_HOME_OVERRIDE: Path | None = None
+_IMPORT_MACHINE: str | None = None
+SESSION_SOURCES_PATH = Path.home() / ".cot" / "session_sources.json"
 
 
 def _import_progress(agent: str, files_done: int, files_total: int, bytes_done: int, bytes_total: int) -> None:
@@ -464,6 +469,8 @@ class _ImportPoster:
         self.batched = _collector_accepts_batches(endpoint)
 
     def add(self, payload: dict) -> None:
+        if _IMPORT_MACHINE:
+            payload.setdefault("_machine", _IMPORT_MACHINE)
         if not self.batched or payload.get("_attach_to_prompt"):
             self._ship()
             self._submit([payload])
@@ -2944,6 +2951,8 @@ def _import_read_new_lines(path: Path, offsets: dict[str, int]) -> tuple[list[st
 
 
 def _import_home() -> Path | None:
+    if _IMPORT_HOME_OVERRIDE is not None:
+        return _IMPORT_HOME_OVERRIDE
     # Sandbox desktop builds run with an empty HOME but import transcripts
     # (read only) from the real one.
     env = os.environ.get("COT_IMPORT_HOME")
@@ -4774,6 +4783,77 @@ def _run_import(agents: list[str], *, since: str | None = None, skip_active_s: f
     return total, held_back
 
 
+def _session_sources() -> list[dict]:
+    """Other machines' session folders to import: ``[{"path": …, "machine": …}]``
+    in ~/.cot/session_sources.json. Each path is a home directory as copied or
+    mounted from that machine (it holds .claude, .codex, .cursor …)."""
+    try:
+        data = json.loads(SESSION_SOURCES_PATH.read_text())
+    except (OSError, ValueError):
+        return []
+    items = data.get("sources") if isinstance(data, dict) else data
+    out = []
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict) and item.get("path") and item.get("machine"):
+            out.append({"path": os.path.expanduser(str(item["path"])), "machine": str(item["machine"])})
+    return out
+
+
+def _save_session_sources(sources: list[dict]) -> None:
+    _write_json_atomic(SESSION_SOURCES_PATH, {"sources": sources})
+
+
+def _run_import_from(home: str, machine: str, agents: list[str], **kwargs) -> tuple[int, list[str]]:
+    """One import pass over a copied or mounted home from ``machine``."""
+    global _IMPORT_HOME_OVERRIDE, _IMPORT_MACHINE
+    root = Path(home)
+    if not root.is_dir():
+        return 0, []
+    _IMPORT_HOME_OVERRIDE, _IMPORT_MACHINE = root, machine
+    try:
+        return _run_import(agents, **kwargs)
+    finally:
+        _IMPORT_HOME_OVERRIDE = _IMPORT_MACHINE = None
+
+
+def _import_sources(agents: list[str], **kwargs) -> int:
+    total = 0
+    for src in _session_sources():
+        posted, _ = _run_import_from(src["path"], src["machine"], agents, **kwargs)
+        total += posted
+    return total
+
+
+def _cmd_sources(args: list[str]) -> int:
+    """`cot sources [list | add PATH --machine NAME | remove NAME]`."""
+    action = args[0] if args else "list"
+    sources = _session_sources()
+    if action == "list":
+        if not sources:
+            print("cot sources: none. Add one with `cot sources add PATH --machine NAME`.")
+        for src in sources:
+            state = "ok" if Path(src["path"]).is_dir() else "missing"
+            print(f"  {src['machine']:16s} {src['path']}  ({state})")
+        return 0
+    if action == "add" and len(args) >= 2:
+        machine = args[args.index("--machine") + 1] if "--machine" in args and args.index("--machine") + 1 < len(args) else None
+        if not machine:
+            print("cot sources add: --machine NAME is required", file=sys.stderr)
+            return 2
+        path = os.path.abspath(os.path.expanduser(args[1]))
+        sources = [s for s in sources if s["machine"] != machine] + [{"path": path, "machine": machine}]
+        _save_session_sources(sources)
+        print(f"cot sources: {machine} → {path}. The next import (or `cot import --sources`) reads it.")
+        return 0
+    if action == "remove" and len(args) >= 2:
+        kept = [s for s in sources if s["machine"] != args[1]]
+        _save_session_sources(kept)
+        print(f"cot sources: removed {len(sources) - len(kept)}")
+        return 0
+    print("Usage: cot sources [list | add PATH --machine NAME | remove NAME]", file=sys.stderr)
+    return 2
+
+
 def _cmd_import(args: list[str]) -> int:
     import argparse
     parser = argparse.ArgumentParser(prog="cot import",
@@ -4786,10 +4866,23 @@ def _cmd_import(args: list[str]) -> int:
     parser.add_argument("--skip-active", type=float, default=0, metavar="MINUTES",
                         help="Leave transcripts written to in the last MINUTES for a later run "
                              "(sessions still in progress)")
+    parser.add_argument("--from", dest="from_home", metavar="DIR",
+                        help="Import a home directory copied or mounted from another machine")
+    parser.add_argument("--machine", help="Name for the machine --from reads (shown on its sessions)")
+    parser.add_argument("--sources", action="store_true",
+                        help="Also import every folder in ~/.cot/session_sources.json (see `cot sources`)")
     parsed = parser.parse_args(args)
 
     agents = parsed.agent or ["claude", "cursor", "codex", "opencode", "hermes"]
-    total, _ = _run_import(agents, since=parsed.since, skip_active_s=max(0.0, parsed.skip_active) * 60)
+    skip = max(0.0, parsed.skip_active) * 60
+    if parsed.from_home:
+        if not parsed.machine:
+            parser.error("--from needs --machine NAME")
+        total, _ = _run_import_from(parsed.from_home, parsed.machine, agents, since=parsed.since, skip_active_s=skip)
+    else:
+        total, _ = _run_import(agents, since=parsed.since, skip_active_s=skip)
+        if parsed.sources:
+            total += _import_sources(agents, since=parsed.since, skip_active_s=skip)
     print(f"cot import: done — {total} events posted")
     if parsed.report:
         _print_import_report()
@@ -5176,6 +5269,7 @@ def _mcp_search(args: dict) -> dict:
         raise ValueError("query needs at least 2 characters")
     data = _mcp_get("/v1/search", {
         "q": q, "limit": max(1, min(int(args.get("limit") or 20), 100)), "session_id": args.get("session_id"),
+        "mode": args.get("mode") if args.get("mode") in ("semantic", "hybrid") else None,
     })
     return {"results": [
         {k: (_mcp_short(v, 240) if k in ("snippet", "target") else v) for k, v in r.items()}
@@ -5270,6 +5364,8 @@ _MCP_TOOLS: dict[str, tuple[dict, object]] = {
         "inputSchema": {"type": "object", "required": ["query"], "properties": {
             "query": _MCP_STR, "session_id": {**_MCP_STR, "description": "Search within one session."},
             "limit": {**_MCP_INT, "description": "Default 20, at most 100."},
+            "mode": {"type": "string", "enum": ["keyword", "semantic", "hybrid"],
+                     "description": "keyword (default) matches words; semantic and hybrid match meaning, when the collector has embeddings configured."},
         }},
     }, _mcp_search),
     "context_overhead": ({
@@ -5385,6 +5481,177 @@ def _cmd_mcp(args: list[str]) -> int:
     return 0
 
 
+def _cmd_statusline(args: list[str]) -> int:
+    """One line for a shell prompt or an agent status line: session and today's spend.
+
+    Claude Code pipes a JSON status object on stdin; its ``session_id`` picks the
+    session. Prints a short offline note instead of failing, since a status line
+    runs on every redraw.
+    """
+    as_json = "--json" in args
+    session_id = None
+    for i, a in enumerate(args):
+        if a == "--session" and i + 1 < len(args):
+            session_id = args[i + 1]
+    if session_id is None and not sys.stdin.isatty():
+        try:
+            body = json.loads(sys.stdin.read() or "{}")
+            session_id = body.get("session_id") if isinstance(body, dict) else None
+        except (json.JSONDecodeError, OSError):
+            session_id = None
+    query = urllib.parse.urlencode({k: v for k, v in (("session_id", session_id), ("tz", _local_tz_name())) if v})
+    try:
+        with urllib.request.urlopen(f"{COT_ENDPOINT}/v1/statusline?{query}", timeout=1) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        print(json.dumps({"line": "cot · offline"}) if as_json else "cot · offline")
+        return 0
+    print(json.dumps(data) if as_json else data.get("line", "cot"))
+    return 0
+
+
+def _local_tz_name() -> str | None:
+    tz = os.environ.get("TZ")
+    if tz:
+        return tz
+    try:
+        link = os.readlink("/etc/localtime")
+    except OSError:
+        return None
+    return link.split("zoneinfo/", 1)[1] if "zoneinfo/" in link else None
+
+
+def _capture_parse(agent: str, stdout: str) -> dict:
+    """Usage and the final answer from a `claude -p --output-format json|stream-json`
+    or `codex exec --json` run's stdout."""
+    out: dict = {"session_id": None, "model": None, "cost_usd": None, "turns": None, "result": None,
+                 "usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}}
+    usage = out["usage"]
+    docs: list = []
+    text = stdout.strip()
+    try:
+        whole = json.loads(text) if text.startswith("{") or text.startswith("[") else None
+    except json.JSONDecodeError:
+        whole = None
+    if isinstance(whole, list):
+        docs = whole
+    elif isinstance(whole, dict):
+        docs = [whole]
+    else:
+        for line in text.splitlines():
+            try:
+                docs.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    for d in docs:
+        if not isinstance(d, dict):
+            continue
+        if agent == "claude":
+            if d.get("type") == "system" and d.get("model"):
+                out["model"] = d.get("model")
+            if d.get("type") == "result":
+                u = d.get("usage") or {}
+                usage["input_tokens"] = int(u.get("input_tokens") or 0)
+                usage["output_tokens"] = int(u.get("output_tokens") or 0)
+                usage["cache_read_tokens"] = int(u.get("cache_read_input_tokens") or 0)
+                usage["cache_write_tokens"] = int(u.get("cache_creation_input_tokens") or 0)
+                out["cost_usd"] = d.get("total_cost_usd")
+                out["turns"] = d.get("num_turns")
+                out["session_id"] = d.get("session_id") or out["session_id"]
+                out["result"] = d.get("result")
+                models = d.get("modelUsage") or {}
+                if models and not out["model"]:
+                    out["model"] = max(models, key=lambda m: (models[m] or {}).get("outputTokens", 0))
+        else:
+            kind = d.get("type")
+            if kind == "thread.started":
+                out["session_id"] = d.get("thread_id")
+            elif kind == "turn.completed":
+                u = d.get("usage") or {}
+                usage["input_tokens"] += int(u.get("input_tokens") or 0)
+                usage["output_tokens"] += int(u.get("output_tokens") or 0)
+                usage["cache_read_tokens"] += int(u.get("cached_input_tokens") or 0)
+                out["turns"] = (out["turns"] or 0) + 1
+            elif kind == "item.completed" and (d.get("item") or {}).get("type") == "agent_message":
+                out["result"] = d["item"].get("text")
+    return out
+
+
+def _cmd_capture(args: list[str]) -> int:
+    """Run one non-interactive agent call and save what it used, no collector needed.
+
+    ``cot capture [--out FILE] -- claude -p "…"`` (or ``codex exec "…"``). JSON
+    output is switched on when the command doesn't ask for it, and the agent's
+    answer still goes to stdout. The result lands in FILE (default
+    ``cot-capture.json``) and, on GitHub Actions, as a line in the job summary.
+    """
+    if "--" not in args:
+        print("Usage: cot capture [--out FILE] -- claude -p \"…\" | codex exec \"…\"", file=sys.stderr)
+        return 2
+    split = args.index("--")
+    opts, cmd = args[:split], args[split + 1:]
+    out_path = os.environ.get("COT_CAPTURE_OUT") or "cot-capture.json"
+    for i, a in enumerate(opts):
+        if a == "--out" and i + 1 < len(opts):
+            out_path = opts[i + 1]
+    if not cmd:
+        print("cot capture: no command after --", file=sys.stderr)
+        return 2
+    prog = os.path.basename(cmd[0])
+    agent = "claude" if prog == "claude" else "codex" if prog == "codex" else None
+    if agent is None:
+        print("cot capture: only `claude -p` and `codex exec` runs can be captured", file=sys.stderr)
+        return 2
+    run = list(cmd)
+    passthrough = False
+    if agent == "claude" and "--output-format" not in run:
+        run += ["--output-format", "json"]
+    elif agent == "claude":
+        passthrough = True
+    if agent == "codex" and "--json" not in run:
+        run.insert(2 if len(run) > 1 and run[1] == "exec" else 1, "--json")
+    elif agent == "codex":
+        passthrough = True
+    import subprocess
+    started = datetime.now(timezone.utc)
+    t0 = time.monotonic()
+    try:
+        proc = subprocess.run(run, stdout=subprocess.PIPE, text=True, check=False)
+    except OSError as exc:
+        print(f"cot capture: could not run {cmd[0]}: {exc}", file=sys.stderr)
+        return 127
+    parsed = _capture_parse(agent, proc.stdout or "")
+    if passthrough:
+        sys.stdout.write(proc.stdout or "")
+    elif parsed["result"]:
+        print(parsed["result"])
+    record = {
+        "agent": agent,
+        "started_at": started.isoformat().replace("+00:00", "Z"),
+        "duration_ms": int((time.monotonic() - t0) * 1000),
+        "exit_code": proc.returncode,
+        **{k: v for k, v in parsed.items() if k != "result"},
+        "ci": {k.lower(): os.environ[k] for k in ("GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_SHA", "GITHUB_REF_NAME", "CI_PIPELINE_ID", "CI_COMMIT_SHA") if os.environ.get(k)},
+    }
+    try:
+        Path(out_path).write_text(json.dumps(record, indent=2) + "\n")
+    except OSError as exc:
+        print(f"cot capture: could not write {out_path}: {exc}", file=sys.stderr)
+    u = record["usage"]
+    cost = f"${record['cost_usd']:.4f}" if isinstance(record["cost_usd"], (int, float)) else "cost n/a"
+    summary = (f"cot capture · {agent} · {cost} · in {u['input_tokens']:,} · out {u['output_tokens']:,}"
+               f" · cache read {u['cache_read_tokens']:,} · {record['duration_ms'] / 1000:.1f}s")
+    print(summary, file=sys.stderr)
+    step = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step:
+        try:
+            with open(step, "a") as fh:
+                fh.write(f"- {summary}\n")
+        except OSError:
+            pass
+    return proc.returncode
+
+
 def main() -> int:
     if len(sys.argv) >= 2 and sys.argv[1] == "install":
         return _cmd_install(sys.argv[2:])
@@ -5410,6 +5677,12 @@ def main() -> int:
         return _cmd_watch(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "mcp":
         return _cmd_mcp(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "sources":
+        return _cmd_sources(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "statusline":
+        return _cmd_statusline(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "capture":
+        return _cmd_capture(sys.argv[2:])
     if len(sys.argv) < 3 or sys.argv[1] != "hook":
         print(
             "Usage:\n"
@@ -5424,7 +5697,10 @@ def main() -> int:
             "  cot down                           # stop collector container\n"
             "  cot purge [--yes]                  # remove container, hooks, and ~/.cot\n"
             "  cot retention [status|dry-run]     # manage local cleanup policy\n"
-            "  cot audit [limit]                  # show cot self-audit events",
+            "  cot audit [limit]                  # show cot self-audit events\n"
+            "  cot sources [list|add|remove]      # import other machines' copied session folders\n"
+            "  cot statusline [--json]            # one-line spend summary (Claude status line)\n"
+            "  cot capture [--out F] -- <cmd>     # record usage of one `claude -p` / `codex exec` run",
             file=sys.stderr,
         )
         return 1

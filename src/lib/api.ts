@@ -53,6 +53,11 @@ export interface SessionSummary {
   imported_at?: string | null;
   /** Context typed at import time: why this trace was brought in. */
   import_note?: string | null;
+  /** The machine a session imported from another machine's folders ran on (`cot import --from`). */
+  machine?: string | null;
+  /** Session list only: its kind and active time (events less than five minutes apart). */
+  kind?: Archetype;
+  active_seconds?: number;
 }
 
 export interface TimelineItem {
@@ -499,6 +504,8 @@ export interface ProjectListItem {
   first_seen: string | null;
   last_active: string | null;
   location: ProjectLocation;
+  /** Commits, pushes and PRs agents made in the window; null when none. */
+  shipped?: OutcomeCounts | null;
 }
 
 export async function getProjects(days: number): Promise<{ days: number; projects: ProjectListItem[] }> {
@@ -1008,6 +1015,8 @@ export interface SessionPageQuery extends SessionFilters {
   ids?: string[];
   sort?: SessionSort;
   order?: 'asc' | 'desc';
+  /** One session kind, judged on active time against the user's own history. */
+  kind?: Archetype;
 }
 
 export interface SessionPage {
@@ -1032,6 +1041,7 @@ export async function getSessionsPage(f: SessionPageQuery): Promise<SessionPage>
   if (f.order === 'asc') params.set('order', 'asc');
   if (f.archived) params.set('archived', 'true');
   if (f.bookmarked) params.set('bookmarked', 'true');
+  if (f.kind) params.set('kind', f.kind);
   const page = await json<Partial<SessionPage> & { sessions: SessionSummary[] }>(await fetch(`/v1/sessions?${params.toString()}`));
   if (typeof page.total === 'number') return page as SessionPage;
   return legacySessionsPage(f);
@@ -1203,14 +1213,18 @@ export interface SearchResult {
   snippet: string;
 }
 
+export type SearchMode = 'keyword' | 'semantic' | 'hybrid';
+
 export async function search(
   q: string,
   limit = 40,
   sessionId?: string,
   store: Store = 'main',
+  mode: SearchMode = 'keyword',
 ): Promise<SearchResult[]> {
   const params = new URLSearchParams({ q, limit: String(limit) });
   if (sessionId) params.set('session_id', sessionId);
+  if (mode !== 'keyword') params.set('mode', mode);
   const data = await json<{ results: SearchResult[] }>(
     await fetch(inStore(`/v1/search?${params.toString()}`, store)),
   );
@@ -2127,4 +2141,173 @@ export async function draftRuleFromText(text: string): Promise<RuleSpec> {
     throw new RuleSpecError('', res.status === 409 ? 'Add an AI key in Settings to describe rules in plain English.' : msg);
   }
   return (await ruleJson<{ spec: RuleSpec }>(res)).spec;
+}
+
+// --- Recent edits, outcomes, session shape, recovery ----------------------------
+
+export interface EditedFile {
+  project: string | null;
+  project_name: string | null;
+  path: string;
+  relative: string;
+  edits: number;
+  failed: number;
+  added: number;
+  removed: number;
+  agents: AgentId[];
+  sessions: number;
+  last: { session_id: string; event_id: number; ts: string; tool: string | null; source: AgentId };
+}
+
+export interface EditsFeed {
+  days: number;
+  totals: { files: number; edits: number; added: number; removed: number; projects: number; truncated: boolean };
+  projects: { project: string | null; project_name: string | null; files: number; edits: number; added: number; removed: number; last_ts: string }[];
+  items: EditedFile[];
+}
+
+export async function getEdits(days: number, f: { project?: string; source?: string } = {}): Promise<EditsFeed> {
+  const params = new URLSearchParams({ days: String(days), limit: '400' });
+  if (f.project) params.set('project', f.project);
+  if (f.source) params.set('source', f.source);
+  return json(await fetch(`/v1/edits?${params.toString()}`));
+}
+
+export interface OutcomeCounts {
+  commits: number;
+  pushes: number;
+  prs_opened: number;
+  prs_merged: number;
+  /** From git log, when the collector can read the repository. */
+  git_commits: number;
+  added: number;
+  removed: number;
+  files: number;
+}
+
+export async function getSessionOutcomes(id: string): Promise<OutcomeCounts> {
+  return json(await fetch(`/v1/sessions/${encodeURIComponent(id)}/outcomes`));
+}
+
+export type Archetype = 'automation' | 'quick' | 'standard' | 'deep' | 'marathon';
+
+export interface SessionShape {
+  days: number;
+  sessions: number;
+  baseline_sessions: number;
+  thresholds: { quick: number; deep: number; marathon: number };
+  archetypes: { kind: Archetype; count: number; examples: { session_id: string; active_s: number; prompts: number; source: AgentId }[] }[];
+  distributions: Record<'duration' | 'prompts' | 'tools_per_turn', { label: string; count: number }[]>;
+  medians: { active_s: number; prompts: number; tools_per_turn: number };
+  start_hours: number[];
+  concurrency: {
+    bucket_s: number;
+    peak: number;
+    active_hours: number;
+    agent_hours: number;
+    overlap_share: number;
+    buckets: { t: string; peak: number; agent_minutes: number }[];
+  };
+}
+
+export async function getSessionShape(days: number, tz?: string): Promise<SessionShape> {
+  const params = new URLSearchParams({ days: String(days) });
+  if (tz) params.set('tz', tz);
+  return json(await fetch(`/v1/session-shape?${params.toString()}`));
+}
+
+export interface RecoveryRollup {
+  failures: number;
+  recovered: number;
+  /** Only other tools succeeded afterwards: worked around, not fixed. */
+  moved_on: number;
+  abandoned: number;
+  recovery_rate: number | null;
+  avg_steps: number | null;
+  recovered_by: Partial<Record<'retry' | 'tweak', number>>;
+}
+
+export interface RecoveryChain {
+  event_id: number;
+  ts: string;
+  tool: string | null;
+  target: string | null;
+  category: string | null;
+  error: string | null;
+  outcome: 'recovered' | 'moved_on' | 'abandoned';
+  recovered_by?: 'retry' | 'tweak';
+  steps: { event_id: number; tool: string | null; target: string | null; kind: 'retry' | 'tweak' | 'switch'; ok: boolean }[];
+}
+
+export async function getSessionRecovery(id: string): Promise<RecoveryRollup & { session_id: string; tool_calls: number; chains: RecoveryChain[] }> {
+  return json(await fetch(`/v1/sessions/${encodeURIComponent(id)}/recovery`));
+}
+
+export interface SemanticStatus {
+  enabled: boolean;
+  model?: string;
+  dim?: number;
+  indexed?: number;
+  total?: number;
+  running?: boolean;
+  error?: string | null;
+}
+
+export async function getSemanticStatus(): Promise<SemanticStatus> {
+  return json(await fetch('/v1/search/semantic'));
+}
+
+export async function getSessionKinds(): Promise<{ counts: Record<Archetype, number> }> {
+  return json(await fetch('/v1/sessions/kinds'));
+}
+
+export type ShippedKind = 'pr' | 'merge' | 'commit' | 'push';
+
+/** One thing an agent shipped. `url` is the PR, commit or compare page when the
+ *  command's output (or the repo's remote) named one; `event_id` is always the
+ *  call that did it, so there is somewhere to look either way. */
+export interface ShippedItem {
+  kind: ShippedKind;
+  session_id: string;
+  event_id: number | null;
+  ts: string;
+  project: string | null;
+  project_name: string | null;
+  title: string | null;
+  url: string | null;
+  /** command: parsed from what the agent ran; git: found in the repo's history. */
+  from: 'command' | 'git';
+  number?: number | null;
+  sha?: string | null;
+  branch?: string | null;
+  base?: string | null;
+  range?: string | null;
+  added?: number;
+  removed?: number;
+  files?: number;
+}
+
+export interface ShippedList {
+  days: number;
+  counts: Record<ShippedKind, number>;
+  items: ShippedItem[];
+}
+
+export async function getShipped(days: number, f: { project?: string; sessionId?: string; kind?: ShippedKind } = {}): Promise<ShippedList> {
+  const params = new URLSearchParams({ days: String(days) });
+  if (f.project) params.set('project', f.project);
+  if (f.sessionId) params.set('session_id', f.sessionId);
+  if (f.kind) params.set('kind', f.kind);
+  return json(await fetch(`/v1/shipped?${params.toString()}`));
+}
+
+/** Window totals of what sessions shipped (commits counted from commands and from git). */
+export interface OutcomesSummaryLite {
+  days: number;
+  totals: OutcomeCounts & { sessions_shipped: number };
+  projects: (OutcomeCounts & { project: string | null; project_name: string | null; sessions: number })[];
+}
+
+export async function getOutcomeTotals(days: number): Promise<OutcomesSummaryLite> {
+  return json(await fetch(`/v1/outcomes?days=${days}`));
 }

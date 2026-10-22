@@ -17,6 +17,7 @@ import { SessionTrace } from './session/SessionTrace';
 import { AttachmentTags } from './session/AttachmentTags';
 import { EventDetailPanel } from './session/EventDetailPanel';
 import { Feedback, RatingMark, useAnnotations } from './session/Feedback';
+import { SessionOutcomes } from './session/SessionOutcomes';
 
 // The findings tab draws charts (recharts); load it when the tab is opened, not
 // with every session.
@@ -209,6 +210,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10, alignItems: 'center' }}>
                 {s.status === 'active' ? <span className="vchip c-ok"><span className="dot" />live</span> : <span className="vchip c-dim">completed</span>}
                 <Agent id={s.source} />
+                {s.machine && <span className="vchip c-info" title="Imported from this machine's session folders">{s.machine}</span>}
                 {s.models.map((m) => <span key={m} className="vchip c-dim">{modelLabel(m)}</span>)}
                 <span className="mono faint" style={{ fontSize: 12 }}>started {fmt.dayTime(s.started_at)}</span>
               </div>
@@ -236,6 +238,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
                   ))}
                 </div>
               )}
+              {store === 'main' && <SessionOutcomes sessionId={sessionId} onSelect={(sid, eventId) => { window.location.hash = `#/session/${encodeURIComponent(sid)}${eventId ? `?e=${eventId}` : ''}`; }} />}
               {store === 'main' && <div style={{ marginTop: 12 }}><Feedback sessionId={sessionId} /></div>}
             </div>
             <div style={{ display: 'flex', gap: 8 }}>

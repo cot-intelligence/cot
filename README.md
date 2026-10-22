@@ -74,6 +74,47 @@ Codex takes the same command (`codex mcp add cot -- ~/.cot/bin/cot mcp`). For Cu
 `~/.cursor/mcp.json`, with the full path. Every tool reads the local collector; nothing
 leaves the machine.
 
+### Spend in your status line
+
+`cot statusline` prints one line, `cot · session $0.53 · today $34.18`. Claude Code pipes
+its status JSON on stdin, so the session is picked up on its own. Add this to
+`~/.claude/settings.json`:
+
+```json
+"statusLine": { "type": "command", "command": "~/.cot/bin/cot statusline" }
+```
+
+### Usage of one CI run
+
+`cot capture` wraps a headless `claude -p` or `codex exec` run. It saves tokens, cost
+and turns to `cot-capture.json` (or `--out FILE`), and on GitHub Actions it also adds a
+line to the job summary. No collector is needed:
+
+```bash
+cot capture -- claude -p "review this diff"
+```
+
+### Sessions from other machines
+
+Copy or mount another machine's home folder, then register it. Its sessions are imported
+with the scheduled import, labelled with the machine name:
+
+```bash
+cot sources add /Volumes/devbox-home --machine devbox
+```
+
+### Semantic search (opt-in)
+
+Point the collector at any OpenAI-compatible embeddings endpoint and ⌘K matches
+meaning as well as words. Secrets are masked before any text is sent, and a local model
+keeps everything on the machine:
+
+```bash
+export COT_EMBEDDINGS_URL=http://127.0.0.1:11434/v1   # Ollama, LM Studio, vLLM, OpenAI
+export COT_EMBEDDINGS_MODEL=nomic-embed-text
+# optional: COT_EMBEDDINGS_KEY, COT_EMBEDDINGS_DIM (default 256)
+```
+
 ### Other agents over OpenTelemetry
 
 Agents without a cot hook can export OpenTelemetry instead. Point their OTLP/HTTP exporter
