@@ -439,12 +439,13 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
 
         <section className="card" style={{ marginTop: 16 }} aria-labelledby="vf-agents">
           <div className="card-h"><span className="card-t" id="vf-agents">Agents</span><a href="#/governance" className="vbtn vbtn-ghost vbtn-sm">Coverage <FIcon name="arrow" size={14} /></a></div>
-          <div className="card-b agent-grid" style={{ ['--cols' as string]: agentCols(connections?.length ?? m.by_source.length) }}>
+          <div className="card-b agent-list">
             {(connections ?? m.by_source.map((x) => ({ source: x.source, sessions: x.sessions, events: x.events, last_event: null, connected: true }))).map((c) => (
-              <a key={c.source} href={`#/sessions?agent=${encodeURIComponent(c.source)}`} className="agent-tile" title={`${sourceLabel(c.source)} sessions`}>
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}><Agent id={c.source} /><CaptureChip health={hookHealth.get(c.source)} /></div>
-                <span className="mono" style={{ fontSize: 12 }}>{c.sessions} sessions · {fmt.n(c.events)} events</span>
-                <span className="faint" style={{ fontSize: 12 }}>{c.last_event ? `Last event ${fmt.ago(c.last_event, now)}` : 'No events yet'}</span>
+              <a key={c.source} href={`#/sessions?agent=${encodeURIComponent(c.source)}`} className="agent-row" title={`${sourceLabel(c.source)} sessions`}>
+                <Agent id={c.source} />
+                <span className="mono num-t agent-n">{fmt.n(c.sessions)} sessions · {fmt.n(c.events)} events</span>
+                <span className="faint agent-last">{c.last_event ? `Last event ${fmt.ago(c.last_event, now)}` : 'No events yet'}</span>
+                <CaptureChip health={hookHealth.get(c.source)} />
               </a>
             ))}
           </div>
@@ -824,11 +825,6 @@ const CATEGORY_HREF: Record<string, string> = {
 };
 
 /** Agent tiles per row: a full row when it fits, else two even rows (6 → 3 + 3, not 4 + 2). */
-function agentCols(n: number): number {
-  if (n <= 4) return Math.max(1, n);
-  return Math.ceil(n / Math.ceil(n / 4));
-}
-
 /** One quiet word per agent tile on how its sessions reach cot. Only missing hooks
  *  are a warning; agents read from disk are simply imported. */
 function CaptureChip({ health }: { health: HookHealthState | undefined }) {
