@@ -38,7 +38,7 @@ def home(tmp_path, monkeypatch):
 
 def _write(path: Path, data) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(data, list) and data and isinstance(data[0], dict) and path.suffix == ".jsonl":
+    if isinstance(data, list) and data and isinstance(data[0], dict) and path.suffix in (".jsonl", ".ndjson"):
         path.write_text("".join(json.dumps(x) + "\n" for x in data))
     else:
         path.write_text(json.dumps(data) if not isinstance(data, str) else data)
@@ -462,3 +462,250 @@ def test_passive_scan_counts_a_store(fresh_db, home, monkeypatch):
     test_copilot_cli(home)
     info = passive.scan("copilot-cli")
     assert info["readable"] and info["transcripts"] == 1 and info["projects"] == 0
+
+
+# ------------------------------------------------- more agents, same shapes
+
+def _sqlite(path: Path, *statements: tuple) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    for st in statements:
+        conn.execute(*st) if isinstance(st, tuple) else conn.execute(st)
+    conn.commit()
+    conn.close()
+
+
+def test_chat_log_shapes_pi_openai_responses_and_ai_sdk(home):
+    # Pi-style typed records with a session header.
+    _write(home / ".omp" / "agent" / "sessions" / "--w--" / "a.jsonl", [
+        {"type": "session", "id": "omp-1", "cwd": "/work/omp", "timestamp": "2026-01-01T10:00:00Z"},
+        {"type": "message", "id": "m1", "timestamp": "2026-01-01T10:00:01Z",
+         "message": {"role": "user", "content": [{"type": "text", "text": "list files"}]}},
+        {"type": "message", "id": "m2", "timestamp": "2026-01-01T10:00:02Z",
+         "message": {"role": "assistant", "model": "gpt-5", "content": [
+             {"type": "toolCall", "id": "c1", "name": "bash", "arguments": {"command": "ls"}}],
+             "usage": {"input": 40, "output": 3, "cacheRead": 10}}},
+        {"type": "message", "id": "m3", "timestamp": "2026-01-01T10:00:03Z",
+         "message": {"role": "toolResult", "toolCallId": "c1", "content": [{"type": "text", "text": "a.py"}]}},
+    ])
+    p = _payloads("ohmypi")
+    _common(p, "ohmypi")
+    assert p[0]["session_id"] == "omp-1" and p[0]["cwd"] == "/work/omp"
+    assert _tool(p, "Bash")["tool_input"]["command"] == "ls"
+    assert any(x["hook_event_name"] == "PostToolUse" and x["tool_response"] == "a.py" for x in p)
+    assert _usage(p) == {"input_tokens": 40, "output_tokens": 3, "cache_read_tokens": 10}
+    # OpenAI chat messages with role "tool" results (Reasonix).
+    _write(home / ".reasonix" / "sessions" / "r1.jsonl", [
+        {"role": "user", "content": "grep TODO", "created_at": "2026-01-01T10:00:00Z"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "t1", "function": {"name": "grep", "arguments": "{\"pattern\": \"TODO\"}"}}]},
+        {"role": "tool", "tool_call_id": "t1", "content": "x.go:1"},
+        {"role": "assistant", "content": "One TODO.", "reasoning_content": "count them"},
+    ])
+    p = _payloads("reasonix")
+    assert _tool(p, "Grep")["tool_input"]["pattern"] == "TODO"
+    assert "afterAgentThought" in _hooks(p) and "afterAgentResponse" in _hooks(p)
+    # Responses-API items (WorkBuddy) and AI-SDK parts (Posit Assistant).
+    _write(home / ".workbuddy" / "projects" / "p" / "11111111-aaaa-bbbb-cccc-000000000001.jsonl", [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "run tests"}]},
+        {"type": "function_call", "callId": "f1", "name": "shell", "arguments": "{\"command\": \"pytest\"}"},
+        {"type": "function_call_output", "callId": "f1", "output": "ok"},
+    ])
+    p = _payloads("workbuddy")
+    assert _tool(p, "Bash")["tool_input"]["command"] == "pytest"
+    ws = home / ".posit" / "assistant" / "workspaces" / "w1"
+    _write(ws / "workspace.json", {"path": "/work/r"})
+    _write(ws / "c1" / "conversation.json", {"root": {"title": "Plot sales"}})
+    _write(ws / "c1" / "lm-messages.jsonl", [
+        {"id": 0, "message": {"role": "user", "content": "plot it"}},
+        {"id": 1, "message": {"role": "assistant", "content": [
+            {"type": "tool-call", "toolCallId": "k1", "toolName": "read_file", "input": {"path": "sales.csv"}}]}},
+        {"id": 2, "message": {"role": "tool", "content": [{"type": "tool-result", "toolCallId": "k1", "output": "a,b"}]}},
+    ])
+    p = _payloads("posit-assistant")
+    assert p[0]["cwd"] == "/work/r" and p[0]["session_title"] == "Plot sales"
+    assert any(x["hook_event_name"] == "PostToolUse" and x["tool_name"] == "Read" for x in p)
+
+
+def test_file_patterns_skip_sidecars_and_subagents(home):
+    base = home / ".commandcode" / "projects" / "p"
+    for name in ("s1.jsonl", "s1.checkpoints.jsonl", "s1.prompts.jsonl"):
+        _write(base / name, [{"role": "user", "content": "hi"}])
+    assert [s["_path"].name for s in bridge.READERS["command-code"].sessions()] == ["s1.jsonl"]
+    q = home / ".qoder" / "projects" / "proj"
+    _write(q / "s2.jsonl", [{"role": "user", "content": "hi"}])
+    _write(q / "agent-x.jsonl", [{"role": "user", "content": "sub"}])
+    assert [s["_path"].name for s in bridge.READERS["qoder"].sessions()] == ["s2.jsonl"]
+    _write(home / ".openclaw" / "agents" / "main" / "sessions" / "s3.jsonl", [{"role": "user", "content": "hi"}])
+    _write(home / ".openclaw" / "agents" / "main" / "notes.jsonl", [{"role": "user", "content": "not a session"}])
+    assert [s["_path"].name for s in bridge.READERS["openclaw"].sessions()] == ["s3.jsonl"]
+
+
+def test_cortex_reads_the_companion_history(home):
+    conv = home / ".snowflake" / "cortex" / "conversations"
+    _write(conv / "c-1.json", {"session_id": "c-1", "title": "Query", "working_directory": "/work/sf"})
+    _write(conv / "c-1.history.jsonl", [
+        {"role": "user", "content": [{"type": "text", "text": "count rows"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "42"}]},
+    ])
+    p = _payloads("cortex-code")
+    assert p[0]["cwd"] == "/work/sf" and "afterAgentResponse" in _hooks(p)
+
+
+def test_sqlite_stores(home):
+    # ZCode: OpenCode's message / part JSON in its own tables.
+    _sqlite(home / ".zcode" / "cli" / "db" / "db.sqlite",
+            "CREATE TABLE session (id TEXT, project_id TEXT, workspace_id TEXT, directory TEXT, title TEXT,"
+            " time_created TEXT, time_updated TEXT)",
+            "CREATE TABLE message (id TEXT, session_id TEXT, data TEXT, time_created TEXT)",
+            "CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, data TEXT)",
+            "INSERT INTO session VALUES ('z1', 'p', 'w', '/work/z', 'Fix', '2026-01-01T10:00:00Z', '2026-01-01T10:01:00Z')",
+            ("INSERT INTO message VALUES ('m1', 'z1', ?, '2026-01-01T10:00:01Z')", (json.dumps({"role": "user"}),)),
+            ("INSERT INTO part VALUES ('p1', 'm1', 'z1', ?)", (json.dumps({"type": "text", "text": "fix it"}),)))
+    p = _payloads("zcode")
+    assert p[0]["cwd"] == "/work/z" and "UserPromptSubmit" in _hooks(p)
+    # Shelley: Go llm.Message JSON with numeric content types.
+    _sqlite(home / ".config" / "shelley" / "shelley.db",
+            "CREATE TABLE conversations (conversation_id TEXT, slug TEXT, created_at TEXT, updated_at TEXT, cwd TEXT,"
+            " parent_conversation_id TEXT, model TEXT)",
+            "CREATE TABLE messages (conversation_id TEXT, sequence_id INT, type TEXT, llm_data TEXT, user_data TEXT,"
+            " usage_data TEXT, created_at TEXT)",
+            "INSERT INTO conversations VALUES ('s1', 'tidy', '2026-01-01', '2026-01-01', '/work/s', '', 'claude')",
+            ("INSERT INTO messages VALUES ('s1', 1, 'user', ?, '', '', '2026-01-01T10:00:00Z')",
+             (json.dumps({"Role": 0, "Content": [{"Type": 2, "Text": "tidy up"}]}),)),
+            ("INSERT INTO messages VALUES ('s1', 2, 'agent', ?, '', ?, '2026-01-01T10:00:01Z')",
+             (json.dumps({"Role": 1, "Content": [{"Type": 5, "ID": "t1", "ToolName": "bash", "ToolInput": {"command": "ls"}}]}),
+              json.dumps({"input_tokens": 9, "output_tokens": 2}))),
+            ("INSERT INTO messages VALUES ('s1', 3, 'tool', ?, '', '', '2026-01-01T10:00:02Z')",
+             (json.dumps({"Role": 0, "Content": [{"Type": 6, "ToolUseID": "t1", "ToolResult": [{"Type": 2, "Text": "a"}]}]}),)))
+    p = _payloads("shelley")
+    assert _tool(p, "Bash")["tool_input"]["command"] == "ls"
+    assert any(x["hook_event_name"] == "PostToolUse" and x["tool_response"] == "a" for x in p)
+    # Omnigent: Responses-style items with integer types.
+    _sqlite(home / ".omnigent" / "chat.db",
+            "CREATE TABLE conversations (id TEXT, workspace_id TEXT, title TEXT, updated_at INT)",
+            "CREATE TABLE conversation_items (id INTEGER PRIMARY KEY, workspace_id TEXT, conversation_id TEXT,"
+            " position INT, type INT, data TEXT)",
+            "INSERT INTO conversations VALUES ('o1', 'w', 'Shell', 1767261600)",
+            ("INSERT INTO conversation_items (workspace_id, conversation_id, position, type, data) VALUES ('w', 'o1', 0, 1, ?)",
+             (json.dumps({"role": "user", "content": [{"type": "input_text", "text": "where am i"}]}),)),
+            ("INSERT INTO conversation_items (workspace_id, conversation_id, position, type, data) VALUES ('w', 'o1', 1, 2, ?)",
+             (json.dumps({"name": "sys_os_shell", "arguments": "{\"command\": \"pwd\"}", "call_id": "c1"}),)),
+            ("INSERT INTO conversation_items (workspace_id, conversation_id, position, type, data) VALUES ('w', 'o1', 2, 3, ?)",
+             (json.dumps({"call_id": "c1", "output": "/w"}),)))
+    p = _payloads("omnigent")
+    assert _tool(p, "Bash")["tool_input"]["command"] == "pwd"
+    # Devin: OpenAI-style messages in message_nodes.
+    _sqlite(home / ".local" / "share" / "devin" / "cli" / "sessions.db",
+            "CREATE TABLE sessions (id TEXT, title TEXT, working_directory TEXT, model TEXT, created_at INT,"
+            " last_activity_at INT, hidden INT)",
+            "CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY, session_id TEXT, node_id TEXT, parent_node_id TEXT,"
+            " chat_message TEXT, created_at INT)",
+            "INSERT INTO sessions VALUES ('d1', 'Ship', '/work/d', 'swe-1', 1767261600, 1767261660, 0)",
+            ("INSERT INTO message_nodes (session_id, chat_message, created_at) VALUES ('d1', ?, 1767261601)",
+             (json.dumps({"role": "user", "content": "ship it"}),)))
+    p = _payloads("devin")
+    assert p[0]["cwd"] == "/work/d" and "UserPromptSubmit" in _hooks(p)
+
+
+def test_event_logs_junie_poolside_muse(home):
+    _write(home / ".junie" / "sessions" / "index.jsonl", [{"sessionId": "j1", "projectDir": "/work/j"}])
+    _write(home / ".junie" / "sessions" / "j1" / "events.jsonl", [
+        {"kind": "UserPromptEvent", "timestampMs": 1767261600000, "prompt": "add docs"},
+        {"kind": "SessionA2uxEvent", "timestampMs": 1767261601000,
+         "event": {"agentEvent": {"kind": "MarkdownBlockUpdatedEvent", "stepId": "s", "text": "Draft"}}},
+        {"kind": "SessionA2uxEvent", "timestampMs": 1767261602000,
+         "event": {"agentEvent": {"kind": "MarkdownBlockUpdatedEvent", "stepId": "s", "text": "Done"}}},
+    ])
+    p = _payloads("junie")
+    assert p[0]["cwd"] == "/work/j"
+    assert [x["response"] for x in p if x["hook_event_name"] == "afterAgentResponse"] == ["Done"]
+    _write(home / ".local" / "state" / "poolside" / "trajectories" / "trajectory-1.ndjson", [
+        {"type": "session_start", "timestamp": "2026-01-01T10:00:00Z", "session_start": {"workspace": "/work/p", "prompt": "lint"}},
+        {"type": "tool_call_parsed", "timestamp": "2026-01-01T10:00:01Z", "tool_call_parsed": {"id": "t", "name": "shell_run", "args": {"cmd": "ruff"}}},
+        {"type": "tool_call_result", "timestamp": "2026-01-01T10:00:02Z", "tool_call_result": {"id": "t", "observation": "ok"}},
+    ])
+    p = _payloads("poolside")
+    assert p[0]["cwd"] == "/work/p" and _tool(p, "Bash")["tool_input"]["command"] == "ruff"
+    _write(home / ".local" / "share" / "muse" / "sessions" / "2026" / "01" / "01" / "mu-1" / "session.jsonl", [
+        {"payload_type": "runtime.session", "recorded_at": 1767261600000000,
+         "payload": {"kind": "run", "event": {"kind": "started", "prompt": "hello"}}},
+        {"payload_type": "runtime.session", "recorded_at": 1767261601000000,
+         "payload": {"kind": "run", "event": {"kind": "assistant_message_committed", "text": "hi", "response_id": "r"}}},
+    ])
+    p = _payloads("muse-code")
+    assert p[0]["session_id"] == "mu-1" and "afterAgentResponse" in _hooks(p)
+
+
+def test_cursor_ide_skips_chats_cot_already_has(home, monkeypatch):
+    db_path = home / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    doc = {"name": "Rename", "createdAt": 1767261600000, "lastUpdatedAt": 1767261660000,
+           "workspaceIdentifier": {"uri": {"fsPath": "/work/cur"}},
+           "fullConversationHeadersOnly": [{"bubbleId": "b1", "type": 1}, {"bubbleId": "b2", "type": 2}]}
+    _sqlite(db_path, "CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)",
+            ("INSERT INTO cursorDiskKV VALUES ('composerData:cid', ?)", (json.dumps(doc),)),
+            ("INSERT INTO cursorDiskKV VALUES ('bubbleId:cid:b1', ?)",
+             (json.dumps({"type": 1, "text": "rename foo", "createdAt": "2026-01-01T10:00:00Z"}),)),
+            ("INSERT INTO cursorDiskKV VALUES ('bubbleId:cid:b2', ?)",
+             (json.dumps({"type": 2, "text": "", "createdAt": "2026-01-01T10:00:01Z", "toolFormerData": {
+                 "toolCallId": "t1", "name": "edit_file_v2", "rawArgs": "{\"relativeWorkspacePath\": \"a.ts\"}",
+                 "status": "completed", "result": "ok"}}),)))
+    p = _payloads("cursor-ide")
+    assert p[0]["cwd"] == "/work/cur" and _tool(p, "Edit")["tool_input"]["file_path"] == "a.ts"
+    posted: list[dict] = []
+    monkeypatch.setattr(bridge, "_INGEST_SINK", lambda url, body: posted.extend(body if isinstance(body, list) else [body]))
+    monkeypatch.setattr(bridge, "_fetch_session_origins", lambda: {"cid": "import"})
+    offsets: dict = {}
+    assert bridge._import_store(bridge.READERS["cursor-ide"], offsets, {}, verbose=False) == 0
+    assert "cursor-ide:cid" in offsets and not posted
+
+
+def test_kiro_cli_sqlite_store(home):
+    value = {"history": [
+        {"user": {"content": {"Prompt": {"prompt": "read main"}}, "timestamp": "2026-01-01T10:00:00Z",
+                  "env_context": {"env_state": {"current_working_directory": "/work/k"}}},
+         "assistant": {"ToolUse": {"message_id": "a1", "content": "", "tool_uses": [
+             {"id": "t1", "name": "fs_read", "args": {"path": "main.rs"}}]}}},
+        {"user": {"content": {"ToolUseResults": {"tool_use_results": [
+            {"tool_use_id": "t1", "content": [{"Text": "fn main"}], "status": "Success"}]}}},
+         "assistant": {"Response": {"message_id": "a2", "content": "It prints."}}},
+    ]}
+    _sqlite(home / ".local" / "share" / "kiro-cli" / "data.sqlite3",
+            "CREATE TABLE conversations_v2 (key TEXT, conversation_id TEXT, value TEXT, created_at INT, updated_at INT)",
+            ("INSERT INTO conversations_v2 VALUES ('k', 'kc1', ?, 1767261600000, 1767261660000)", (json.dumps(value),)))
+    p = _payloads("kiro-cli")
+    assert p[0]["cwd"] == "/work/k"
+    assert any(x["hook_event_name"] == "PostToolUse" and x["tool_response"] == "fn main" for x in p)
+
+
+def test_extra_homes_codex_archive_and_hermes_profiles(home, tmp_path, monkeypatch):
+    monkeypatch.setattr(bridge, "AGENT_HOMES_PATH", tmp_path / "agent_homes.json")
+    monkeypatch.setattr(bridge, "_import_home", lambda: None)
+    monkeypatch.setenv("HOME", str(home))
+    work = home / ".claude-work"
+    _write(work / "projects" / "-w" / "11111111-2222-3333-4444-555555555555.jsonl", [{"type": "user"}])
+    assert bridge._add_agent_home("claude", "~/.claude-work") == str(work.resolve())
+    assert work.resolve() in bridge.READERS["claude"].roots()
+    assert any(p.parent.parent.parent == work.resolve() for p in bridge.READERS["claude"].discover())
+    with pytest.raises(ValueError):
+        bridge._add_agent_home("claude", str(tmp_path.parent))  # outside home
+    assert bridge._remove_agent_home("claude", str(work.resolve())) == 1
+    _write(home / ".codex" / "archived_sessions" / "rollout-2026-x.jsonl", [{"type": "session_meta"}])
+    assert any("archived_sessions" in str(p) for p in bridge.READERS["codex"].discover())
+    (home / ".hermes" / "profiles" / "work").mkdir(parents=True)
+    sqlite3.connect(home / ".hermes" / "profiles" / "work" / "state.db").close()
+    assert any(r.name == "work" for r in bridge.READERS["hermes"].roots())
+
+
+def test_extra_homes_api(fresh_db, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app import main
+
+    monkeypatch.setattr(passive._bridge(), "AGENT_HOMES_PATH", tmp_path / "agent_homes.json")
+    folder = Path.home() / ".cot-test-home-does-not-exist"
+    client = TestClient(main.app, base_url="http://127.0.0.1")
+    r = client.post("/v1/passive/homes", json={"agent": "claude", "path": str(folder)})
+    assert r.status_code == 400 and "No folder at" in r.json()["detail"]
+    r = client.post("/v1/passive/homes", json={"agent": "nope", "path": "~"})
+    assert r.status_code == 400

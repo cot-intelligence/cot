@@ -233,6 +233,7 @@
 .vf .psv-absent-t > svg { flex: none; color: var(--v-faint); transition: transform 150ms var(--v-ease-out); }
 .vf .psv-absent[data-open] .psv-absent-t > svg { transform: rotate(90deg); }
 .vf .psv-absent[data-open] .psv-absent-h { display: none; }
+.vf .psv-absent-t > span:first-of-type { flex: none; white-space: nowrap; }
 .vf .psv-absent-n { flex: none; font-size: 11px; color: var(--v-faint); font-variant-numeric: tabular-nums; }
 .vf .psv-absent-h { min-width: 0; margin-left: auto; padding-left: 12px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vf .psv-absent-l { list-style: none; margin: 0; padding: 4px 6px 6px; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr)); gap: 2px 8px; border-top: 1px solid var(--v-line); animation: psv-reveal 180ms var(--v-ease-out) both; }
@@ -243,6 +244,14 @@
 @media (prefers-reduced-motion: reduce) { .vf .psv-absent-l { animation: psv-fade 150ms ease both; } .vf .psv-absent-t > svg { transition: none; } }
 @keyframes psv-fade { from { opacity: 0; } }
 @media (max-width: 560px) { .vf .psv-absent-h { display: none; } }
+.vf .psv-homes { display: grid; gap: 10px; min-width: 0; }
+.vf .psv-homes-l { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.vf .psv-home { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 4px 4px 4px 12px; border-radius: 10px; border: 1px solid var(--v-line); background: var(--v-surface); }
+.vf .psv-home-p { flex: 1; min-width: 0; font-size: 12px; color: var(--v-dim); }
+.vf .psv-homes-add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.vf .psv-homes-in { flex: 1 1 220px; }
+.vf .psv-homes-in input { width: 100%; }
+.vf .psv-homes-err { margin: 0; font-size: 12px; color: var(--v-alert); }
 .vf .psv-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .vf .psv-chip { height: 30px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--v-line); background: var(--v-surface); font-size: 12px; color: var(--v-dim); transition: border-color 150ms ease, color 150ms ease, background-color 150ms ease; }
 @media (hover: hover) and (pointer: fine) { .vf .psv-chip:hover { border-color: var(--v-mute); color: var(--v-fg); } }

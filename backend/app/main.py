@@ -1585,6 +1585,30 @@ async def update_passive(request: Request) -> dict[str, Any]:
     return _passive_payload()
 
 
+@app.post("/v1/passive/homes")
+async def add_passive_home(request: Request) -> dict[str, Any]:
+    """Add an extra data folder for an agent (a custom CLAUDE_CONFIG_DIR, CODEX_HOME …)."""
+    body = await _json_body(request)
+    agent, path = str(body.get("agent") or ""), str(body.get("path") or "")
+    if agent not in passive.AGENTS or not path.strip():
+        raise HTTPException(status_code=400, detail="agent and path are required")
+    try:
+        await asyncio.to_thread(passive.add_home, agent, path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return _passive_payload()
+
+
+@app.delete("/v1/passive/homes")
+async def remove_passive_home(request: Request) -> dict[str, Any]:
+    body = await _json_body(request)
+    agent, path = str(body.get("agent") or ""), str(body.get("path") or "")
+    if agent not in passive.AGENTS:
+        raise HTTPException(status_code=400, detail="unknown agent")
+    await asyncio.to_thread(passive.remove_home, agent, path)
+    return _passive_payload()
+
+
 @app.post("/v1/passive/schedule/preview")
 async def preview_passive_schedule(request: Request) -> dict[str, Any]:
     """Plain-English reading and next runs for a cron expression, without saving it."""

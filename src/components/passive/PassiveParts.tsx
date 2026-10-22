@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import {
+  addPassiveHome,
   previewSchedule,
+  removePassiveHome,
   type PassiveAgent,
   type PassiveAgentDetail,
   type PassiveHistoryRun,
@@ -11,6 +13,8 @@ import { agentLabel } from '../forest/AgentMark';
 import { fmt } from '../forest/format';
 import { Icon } from '../forest/icons';
 import { Agent, Switch } from '../forest/ui';
+import { Dropdown } from '../forest/Dropdown';
+import { AgentMark } from '../forest/AgentMark';
 import { homePath } from '../dashboard/GovernanceView';
 
 /** Matches ACTIVE_WINDOW_MIN in backend/app/passive.py. */
@@ -353,6 +357,72 @@ export function ImportHistory({ runs, now = new Date() }: { runs: PassiveHistory
         )}
         <span>Today</span>
       </div>
+    </div>
+  );
+}
+
+/** Extra data folders per agent: a custom CLAUDE_CONFIG_DIR, CODEX_HOME or a
+ *  second install, read as well as the agent's default folder. */
+export function ExtraHomes({ status, onChange }: { status: PassiveStatus; onChange: (s: PassiveStatus) => void }) {
+  const [agent, setAgent] = useState<PassiveAgent>('claude');
+  const [path, setPath] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const homes = status.agents_detail.flatMap((d) =>
+    (d.extra_homes ?? []).map((h) => ({ agent: d.agent, path: h, found: (d.roots ?? []).includes(h) })),
+  );
+  const run = async (fn: () => Promise<PassiveStatus>) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      onChange(await fn());
+      return true;
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not save');
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  const add = async () => {
+    if (!path.trim()) return;
+    if (await run(() => addPassiveHome(agent, path.trim()))) setPath('');
+  };
+  return (
+    <div className="psv-homes">
+      {homes.length > 0 && (
+        <ul className="psv-homes-l">
+          {homes.map((h) => (
+            <li key={`${h.agent}:${h.path}`} className="psv-home">
+              <Agent id={h.agent} />
+              <span className="mono truncate psv-home-p" title={h.path}>{homePath(h.path)}</span>
+              {!h.found && <span className="vchip c-warn">missing</span>}
+              <button type="button" className="iconbtn" aria-label={`Stop reading ${h.path}`} disabled={busy}
+                onClick={() => void run(() => removePassiveHome(h.agent, h.path))}>
+                <Icon name="close" size={14} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <form className="psv-homes-add" onSubmit={(e) => { e.preventDefault(); void add(); }}>
+        <Dropdown
+          label="Agent"
+          value={agent}
+          onChange={(v) => setAgent(v)}
+          searchable
+          width={200}
+          options={status.agents_detail.map((d) => ({ value: d.agent, label: agentLabel(d.agent), icon: <AgentMark id={d.agent} size={14} /> }))}
+        />
+        <label className="vfield psv-homes-in">
+          <Icon name="folder" size={15} />
+          <input className="mono" value={path} onChange={(e) => setPath(e.target.value)} placeholder="~/.claude-work" aria-label="Folder" spellCheck={false} />
+        </label>
+        <button type="submit" className="vbtn vbtn-quiet vbtn-sm" disabled={busy || !path.trim()}>
+          <Icon name="plus" size={14} />Add folder
+        </button>
+      </form>
+      {err && <p role="alert" className="psv-homes-err">{err}</p>}
     </div>
   );
 }

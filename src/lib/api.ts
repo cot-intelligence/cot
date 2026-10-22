@@ -1574,6 +1574,10 @@ export interface PassiveAgentDetail {
   /** Transcripts written to in the last few minutes: sessions still running, left for the next run. */
   active: number;
   sessions: number;
+  /** Every folder read for this agent: its default ones and any extra homes. */
+  roots?: string[];
+  /** Extra data folders added for this agent, as stored (``~/…``). */
+  extra_homes?: string[];
 }
 
 export interface PassiveRunAgent {
@@ -1656,6 +1660,23 @@ export async function updatePassive(patch: { enabled?: boolean; agents?: Passive
   }
   return (await res.json()) as PassiveStatus;
 }
+
+async function passiveHome(method: 'POST' | 'DELETE', agent: PassiveAgent, path: string): Promise<PassiveStatus> {
+  const res = await fetch('/v1/passive/homes', {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent, path }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { detail?: string } | null;
+    throw new Error(body?.detail || `Couldn't save (${res.status})`);
+  }
+  return (await res.json()) as PassiveStatus;
+}
+
+/** Read another data folder for an agent too (a custom CLAUDE_CONFIG_DIR, CODEX_HOME …). */
+export const addPassiveHome = (agent: PassiveAgent, path: string) => passiveHome('POST', agent, path);
+export const removePassiveHome = (agent: PassiveAgent, path: string) => passiveHome('DELETE', agent, path);
 
 export async function previewSchedule(cron: string): Promise<({ valid: true } & PassiveSchedule) | { valid: false; error: string }> {
   return json(

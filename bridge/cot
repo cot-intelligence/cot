@@ -427,6 +427,9 @@ _PROGRESS_SINK = None
 _IMPORT_HOME_OVERRIDE: Path | None = None
 _IMPORT_MACHINE: str | None = None
 SESSION_SOURCES_PATH = Path.home() / ".cot" / "session_sources.json"
+# Extra data folders per agent ({"claude": ["~/.claude-work"]}): a custom
+# CLAUDE_CONFIG_DIR, CODEX_HOME and the like, read as well as the default one.
+AGENT_HOMES_PATH = Path.home() / ".cot" / "agent_homes.json"
 
 
 def _import_progress(agent: str, files_done: int, files_total: int, bytes_done: int, bytes_total: int) -> None:
@@ -2989,22 +2992,8 @@ def _codex_transcript_root() -> Path:
 
 
 def _discover_transcripts(agent: str) -> list[Path]:
-    if agent == "claude":
-        root = _safe_transcript_root(_claude_transcript_root())
-        if not root:
-            return []
-        return sorted(root.glob("projects/**/*.jsonl"))
-    if agent == "cursor":
-        root = _safe_transcript_root(_cursor_transcript_root())
-        if not root:
-            return []
-        return sorted(root.glob("projects/**/agent-transcripts/**/*.jsonl"))
-    if agent == "codex":
-        root = _safe_transcript_root(_codex_transcript_root())
-        if not root:
-            return []
-        return sorted(root.glob("sessions/**/*.jsonl"))
-    return []
+    reader = READERS.get(agent)
+    return reader.discover() if reader and reader.glob else []
 
 
 _SUBAGENT_UUID_RE = re.compile(
@@ -4467,7 +4456,8 @@ class _Reader:
                  kind: str = "store", hooks: bool = False, index=None, items=None, payloads=None,
                  mark=None, opt_in: bool = False, tools: dict[str, str] | None = None,
                  locate=None, otel: bool = False, parse_as: str | None = None,
-                 glob: str | None = None, meta=None) -> None:
+                 glob: str | tuple[str, ...] | None = None, meta=None, expand=None,
+                 skip_known: bool = False) -> None:
         self.id = agent
         self.label = label
         # Folders relative to home, first that exists wins; platform variants
@@ -4486,27 +4476,38 @@ class _Reader:
         self.locate = locate  # () -> Path, for agents with their own home variable
         # Transcript readers for agents that write another agent's format.
         self.parse_as = parse_as
-        self.glob = glob  # their transcripts, under each root
+        self.glob = (glob,) if isinstance(glob, str) else glob  # transcripts, under each root
         self.meta = meta  # (transcript path) -> {"cwd", "title"} kept beside it
+        # (root) -> more roots inside it, for agents with per-profile stores.
+        self.expand = expand
+        # Import only sessions cot doesn't hold yet from any source: for a
+        # second view of an agent (Cursor's editor history) whose sessions the
+        # transcript reader or hooks may already have.
+        self.skip_known = skip_known
 
     def _candidates(self) -> list[Path]:
         home = _import_home()
+        env = None if home else os.environ.get(self.env)
         if home:
-            return [home / d for d in self.dirs]
-        env = os.environ.get(self.env)
-        if env:
-            return [Path(env).expanduser()]
-        if self.locate is not None:
-            return [self.locate()]
-        return [Path.home() / d for d in self.dirs]
+            base = [home / d for d in self.dirs]
+        elif env:
+            base = [Path(env).expanduser()]
+        elif self.locate is not None:
+            base = [self.locate()]
+        else:
+            base = [Path.home() / d for d in self.dirs]
+        # Extra folders are absolute paths on this machine (none for another
+        # machine's copied home), so they hold under COT_IMPORT_HOME too.
+        return base + [Path(h) for h in _agent_homes().get(self.id, [])]
 
     def roots(self) -> list[Path]:
         """Every existing data folder for this agent, inside the import home."""
         out: list[Path] = []
         for c in self._candidates():
             safe = _safe_transcript_root(c)
-            if safe and safe not in out:
-                out.append(safe)
+            for r in ([safe, *self.expand(safe)] if safe and self.expand else [safe]):
+                if r and r not in out:
+                    out.append(r)
         return out
 
     def root(self) -> Path:
@@ -4517,10 +4518,17 @@ class _Reader:
         candidates = self._candidates()
         return candidates[0] if candidates else Path.home()
 
+    def discover_in(self) -> list[tuple[Path, Path]]:
+        """(root, transcript) for every transcript under every root."""
+        found: dict[Path, Path] = {}
+        for root in self.roots():
+            for pattern in self.glob or ():
+                for p in root.glob(pattern):
+                    found.setdefault(p, root)
+        return sorted(((r, p) for p, r in found.items()), key=lambda x: x[1])
+
     def discover(self) -> list[Path]:
-        if not self.glob:
-            return []
-        return sorted({p for root in self.roots() for p in root.glob(self.glob)})
+        return [p for _, p in self.discover_in()]
 
     def sessions(self) -> list[dict]:
         if self.index is None:
@@ -4539,11 +4547,32 @@ class _Reader:
         return sorted(out, key=lambda s: s.get("updated") or 0)
 
     def describe(self) -> dict:
-        return {"id": self.id, "label": self.label, "kind": self.kind, "hooks": self.hooks, "glob": self.glob,
+        return {"id": self.id, "label": self.label, "kind": self.kind, "hooks": self.hooks,
+                "extra_homes": _agent_homes().get(self.id, []), "roots": [str(r) for r in self.roots()],
                 "opt_in": self.opt_in, "root": str(self.root())}
 
 
 READERS: dict[str, _Reader] = {}
+
+
+def _agent_homes() -> dict[str, list[str]]:
+    """Extra data folders per agent from AGENT_HOMES_PATH. Another machine's
+    home (``cot import --from``) has no extras of this machine's."""
+    if _IMPORT_HOME_OVERRIDE is not None:
+        return {}
+    try:
+        data = json.loads(AGENT_HOMES_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+    homes = data.get("homes") if isinstance(data, dict) else None
+    if not isinstance(homes, dict):
+        return {}
+    return {str(k): [str(p) for p in v if isinstance(p, str) and p.strip()]
+            for k, v in homes.items() if isinstance(v, list)}
+
+
+def _save_agent_homes(homes: dict[str, list[str]]) -> None:
+    _write_json_atomic(AGENT_HOMES_PATH, {"homes": {k: v for k, v in homes.items() if v}})
 
 
 def _register(reader: _Reader) -> _Reader:
@@ -4728,6 +4757,7 @@ _READER_INPUT_KEYS = {
     "regex": "pattern", "query": "query", "search": "pattern", "glob": "pattern",
     "old_str": "old_string", "new_str": "new_string", "oldStr": "old_string", "newStr": "new_string",
     "file_text": "content", "text": "content", "contents": "content",
+    "relativeWorkspacePath": "file_path", "globPattern": "pattern", "searchTerm": "query",
 }
 
 
@@ -4749,6 +4779,8 @@ def _reader_tool_input(canonical: str, value: object) -> dict:
 
 def _reader_tool(reader: _Reader, name: object, value: object) -> tuple[str, dict]:
     raw = str(name or "tool")
+    if raw.startswith("mcp-") and raw not in reader.tools:
+        return "MCP:" + raw[4:], _reader_tool_input("MCP", value)  # Cursor's "mcp-<server>-<tool>"
     # MCP tools keep their name: ``server__tool`` / ``mcp_server_tool``.
     canonical = reader.tools.get(raw) or _READER_TOOLS.get(raw) or _READER_TOOLS.get(raw.lower()) or raw
     return canonical, _reader_tool_input(canonical, value)
@@ -4854,7 +4886,7 @@ def _import_store(reader: _Reader, offsets: dict[str, int], origins: dict[str, s
     sessions = reader.sessions()
     # ``origins`` was read when the whole import began; a session a hook
     # started capturing since then must not be imported over its live events.
-    if reader.hooks or reader.otel:
+    if reader.hooks or reader.otel or reader.skip_known:
         origins = {**origins, **_fetch_session_origins()}
     cutoff = _reader_epoch(since) if since else 0
     progress = _PROGRESS_SINK is not None or bool(os.environ.get("COT_IMPORT_PROGRESS"))
@@ -4869,6 +4901,9 @@ def _import_store(reader: _Reader, offsets: dict[str, int], origins: dict[str, s
         key = f"{reader.id}:{s['id']}"
         mark = reader.mark(s)
         if origins.get(str(s["id"])) == "hook" or offsets.get(key) == mark:
+            continue
+        if reader.skip_known and str(s["id"]) in origins and key not in offsets:
+            offsets[key] = mark  # another reader brought this one in; leave it be
             continue
         updated = s.get("updated") or 0
         if cutoff and updated and updated < cutoff:
@@ -4909,9 +4944,12 @@ def _hermes_index(root: Path) -> list[dict]:
             for s in _hermes_session_index(root)]
 
 
-_register(_Reader("claude", "Claude Code", (".claude",), env="COT_CLAUDE_HOME", kind="transcript", hooks=True))
-_register(_Reader("cursor", "Cursor", (".cursor",), env="COT_CURSOR_HOME", kind="transcript", hooks=True))
-_register(_Reader("codex", "Codex", (".codex",), env="COT_CODEX_HOME", kind="transcript", hooks=True))
+_register(_Reader("claude", "Claude Code", (".claude",), env="COT_CLAUDE_HOME", kind="transcript", hooks=True,
+                  glob="projects/**/*.jsonl"))
+_register(_Reader("cursor", "Cursor", (".cursor",), env="COT_CURSOR_HOME", kind="transcript", hooks=True,
+                  glob="projects/**/agent-transcripts/**/*.jsonl"))
+_register(_Reader("codex", "Codex", (".codex",), env="COT_CODEX_HOME", kind="transcript", hooks=True,
+                  glob=("sessions/**/*.jsonl", "archived_sessions/**/*.jsonl")))
 _register(_Reader(
     "opencode", "OpenCode", (".local/share/opencode",), env="COT_OPENCODE_HOME", hooks=True,
     locate=_opencode_data_root,
@@ -4923,6 +4961,8 @@ _register(_Reader(
 _register(_Reader(
     "hermes", "Hermes Agent", (".hermes",), env="COT_HERMES_HOME", hooks=True,
     locate=_hermes_home,
+    # Each Hermes profile keeps its own state.db under profiles/<name>/.
+    expand=lambda root: sorted(p for p in root.glob("profiles/*") if (p / "state.db").is_file()),
     index=_hermes_index,
     payloads=lambda s, root: _hermes_session_payloads(
         s["_raw"], _hermes_messages(root, s["id"]), _hermes_model_usage(root, s["id"])),
@@ -5149,7 +5189,10 @@ def _cowork_meta(path: Path) -> dict:
     return {}
 
 
-_register(_Reader("claude-cowork", "Claude Cowork", ("Library/Application Support/Claude/local-agent-mode-sessions",),
+_register(_Reader("claude-cowork", "Claude Cowork", (
+    "Library/Application Support/Claude/local-agent-mode-sessions", ".config/Claude/local-agent-mode-sessions",
+    "AppData/Roaming/Claude/local-agent-mode-sessions",
+    "AppData/Local/Packages/Claude_pzs8sxrjxfjjc/LocalCache/Roaming/Claude/local-agent-mode-sessions"),
                   kind="transcript", parse_as="claude", meta=_cowork_meta,
                   glob="*/*/local_*/.claude/projects/*/*.jsonl"))
 
@@ -5160,8 +5203,13 @@ _register(_Reader("claude-cowork", "Claude Cowork", ("Library/Application Suppor
 # it), with the workspace folder in the sibling workspace.json. Chats opened
 # without a folder live in globalStorage/emptyWindowChatSessions.
 
-_VSCODE_DIRS = ("Library/Application Support/Code/User", "Library/Application Support/Code - Insiders/User",
-                ".config/Code/User", ".config/Code - Insiders/User")
+def _app_dirs(*apps: str, sub: str = "User") -> tuple[str, ...]:
+    """An editor's user folder on macOS, Linux and Windows, for each app name."""
+    return tuple(f"{base}/{app}/{sub}" for app in apps
+                 for base in ("Library/Application Support", ".config", "AppData/Roaming"))
+
+
+_VSCODE_DIRS = _app_dirs("Code", "Code - Insiders", "VSCodium")
 _VSCODE_TOOLS = {
     "copilot_readFile": "Read", "copilot_replaceString": "Edit", "copilot_multiReplaceString": "MultiEdit",
     "copilot_insertEdit": "Edit", "copilot_applyPatch": "apply_patch", "copilot_editNotebook": "Edit",
@@ -5418,7 +5466,8 @@ def _zed_items(session: dict, root: Path) -> list[dict]:
     return items
 
 
-_register(_Reader("zed", "Zed", ("Library/Application Support/Zed", ".local/share/zed"), env="COT_ZED_HOME",
+_register(_Reader("zed", "Zed", ("Library/Application Support/Zed", ".local/share/zed", "AppData/Local/Zed"),
+                  env="COT_ZED_HOME",
                   index=_zed_index, items=_zed_items,
                   tools={"terminal": "Bash", "read_file": "Read", "edit_file": "Edit", "find_path": "Glob",
                          "grep": "Grep", "list_directory": "Search", "fetch": "WebFetch", "web_search": "WebSearch",
@@ -5476,8 +5525,7 @@ def _trae_items(session: dict, root: Path) -> list[dict]:
     return items
 
 
-_TRAE_DIRS = ("Library/Application Support/Trae/User", ".config/Trae/User",
-              "Library/Application Support/Trae CN/User", ".config/Trae CN/User")
+_TRAE_DIRS = _app_dirs("Trae", "Trae CN", "TRAE SOLO CN")
 _register(_Reader("trae", "Trae", _TRAE_DIRS, env="COT_TRAE_USER_DIR", index=_trae_index, items=_trae_items))
 _register(_Reader("trae-cli", "TRAE CLI", (".trae/cli",), env="COT_TRAE_CLI_HOME", kind="transcript",
                   parse_as="codex", glob="*sessions/**/*.jsonl"))
@@ -5876,29 +5924,8 @@ for _id, _label, _ext in (("cline", "Cline", "saoudrizwan.claude-dev"),
 
 
 # -------------------------------------------------------------------- Kilo
-# The Kilo CLI is an OpenCode fork and keeps OpenCode's store, in its own
-# folder; its tool names are OpenCode's, mapped here since the collector
-# only maps them for the "opencode" source.
-
-def _kilo_payloads(session: dict, root: Path) -> list[dict]:
-    reader = READERS["kilo"]
-    out = []
-    for p in _opencode_session_payloads(session["_raw"], _opencode_messages(root, session["_raw"])):
-        p = {**p, "_reader": "kilo", "_dedup_key": "kilo:" + str(p.get("_dedup_key") or "").split(":", 1)[-1]}
-        if p.get("tool_name"):
-            raw = p["tool_name"]
-            p["tool_name"], p["tool_input"] = _reader_tool(reader, raw, p.get("tool_input"))
-            if raw != p["tool_name"]:
-                p["raw_tool_name"] = raw
-        if p.get("hook_event_name") == "OpenCodeUsage":
-            p["hook_event_name"] = "ModelUsage"
-        out.append(p)
-    return out
-
-
-_register(_Reader("kilo", "Kilo CLI", (".local/share/kilo",), env="KILO_DIR", index=_opencode_index,
-                  payloads=_kilo_payloads, mark=lambda s: int(s["_raw"].get("updated") or 0),
-                  tools={"list": "Search"}))
+# The Kilo CLI is an OpenCode fork and keeps OpenCode's store in its own
+# folder (see _opencode_family, defined further down).
 
 
 def _usage_counts(u: object) -> dict:
@@ -5915,8 +5942,9 @@ def _usage_counts(u: object) -> dict:
         return 0
 
     read = pick("cache_read_tokens", "cache_read_input_tokens", "cacheReadTokens", "input_cache_read",
-                "cached_tokens", "cachedInputTokens")
-    write = pick("cache_write_tokens", "cache_creation_input_tokens", "cacheWriteTokens", "input_cache_creation")
+                "cached_tokens", "cachedInputTokens", "cacheRead", "cachedReadTokens", "cached_input_tokens")
+    write = pick("cache_write_tokens", "cache_creation_input_tokens", "cacheWriteTokens", "input_cache_creation",
+                 "cacheWrite", "cache_creation_tokens", "cacheCreation")
     fresh = pick("input_other")
     if not fresh:
         total_in = pick("input_tokens", "inputTokens", "prompt_tokens", "promptTokens", "input")
@@ -6026,7 +6054,12 @@ def _kimi_items(session: dict, root: Path) -> list[dict]:
     return items
 
 
-_register(_Reader("kimi", "Kimi CLI", (".kimi",), env="KIMI_DIR", index=_kimi_index, items=_kimi_items))
+_register(_Reader("kimi", "Kimi CLI", (".kimi", ".kimi-code"), env="KIMI_DIR", index=_kimi_index, items=_kimi_items))
+# The Kimi desktop app runs the same CLI in its own home.
+_register(_Reader("kimi-work", "Kimi Work", tuple(
+    f"{base}/kimi-desktop/daimon-share/daimon/runtime/kimi-code/home"
+    for base in ("Library/Application Support", ".config", ".local/share", "AppData/Roaming")),
+    index=_kimi_index, items=_kimi_items))
 
 
 # ---------------------------------------------------------------- Kiro CLI
@@ -6035,10 +6068,63 @@ _register(_Reader("kimi", "Kimi CLI", (".kimi",), env="KIMI_DIR", index=_kimi_in
 # data: {content: [{kind: text | toolUse | toolResult, data}]}}.
 
 def _kiro_index(root: Path) -> list[dict]:
-    return [s for s in (_file_session(p) for p in sorted(root.glob("sessions/cli/*.jsonl"))) if s]
+    out = [s for s in (_file_session(p) for p in sorted(root.glob("sessions/cli/*.jsonl"))) if s]
+    # Newer releases (and Amazon Q Developer CLI, which Kiro CLI grew from)
+    # keep conversations in data.sqlite3: conversations_v2, a JSON value per
+    # save, newest wins.
+    db_path = root / "data.sqlite3"
+    rows = _sqlite_rows(db_path, "SELECT conversation_id, MAX(updated_at) AS updated, MIN(created_at) AS created,"
+                                 " length(value) AS n FROM conversations_v2 GROUP BY conversation_id")
+    for r in rows:
+        out.append({"id": r["conversation_id"], "updated": _reader_epoch(r["updated"]), "started": r["created"],
+                    "bytes": r["n"] or 0, "_db": db_path})
+    return out
+
+
+def _kiro_sqlite_items(session: dict) -> list[dict]:
+    rows = _sqlite_rows(session["_db"], "SELECT value FROM conversations_v2 WHERE conversation_id = ?"
+                                        " ORDER BY updated_at DESC, created_at DESC LIMIT 1", (session["id"],))
+    doc = _reader_json(rows[0]["value"]) if rows else None
+    items: list[dict] = []
+    tools: dict = {}
+    for n, turn in enumerate((doc or {}).get("history") or [] if isinstance(doc, dict) else []):
+        if not isinstance(turn, dict):
+            continue
+        user = turn.get("user") if isinstance(turn.get("user"), dict) else {}
+        env = ((user.get("env_context") or {}).get("env_state") or {}) if isinstance(user.get("env_context"), dict) else {}
+        session["cwd"] = session.get("cwd") or env.get("current_working_directory")
+        content = user.get("content") if isinstance(user.get("content"), dict) else {}
+        ts = user.get("timestamp")
+        prompt = (content.get("Prompt") or {}).get("prompt") if isinstance(content.get("Prompt"), dict) else None
+        if prompt:
+            items.append({"kind": "prompt", "id": f"p{n}", "ts": ts, "text": prompt})
+        results = content.get("ToolUseResults") if isinstance(content.get("ToolUseResults"), dict) else {}
+        for res in results.get("tool_use_results") or []:
+            call = tools.get(res.get("tool_use_id")) if isinstance(res, dict) else None
+            if call is not None:
+                blocks = res.get("content") or []
+                text = "\n".join(str(b.get("Text") or b.get("Json") or "") for b in blocks if isinstance(b, dict))
+                call.update(output=text, end_ts=ts, failed=str(res.get("status") or "").lower() == "error")
+        assistant = turn.get("assistant") if isinstance(turn.get("assistant"), dict) else {}
+        end = (turn.get("request_metadata") or {}).get("stream_end_timestamp_ms") if isinstance(turn.get("request_metadata"), dict) else None
+        reply = assistant.get("Response") or assistant.get("ToolUse") or {}
+        if isinstance(reply, dict):
+            items.append({"kind": "response", "id": reply.get("message_id") or f"r{n}", "ts": end or ts,
+                          "text": reply.get("content") or ""})
+            for use in reply.get("tool_uses") or []:
+                if isinstance(use, dict) and use.get("name"):
+                    name, args = use["name"], use.get("args") if isinstance(use.get("args"), dict) else {}
+                    if name in ("write", "fs_write"):
+                        name = "Edit" if args.get("command") in ("strReplace", "str_replace") else "Write"
+                    tid = use.get("id") or f"t{n}"
+                    tools[tid] = {"kind": "tool", "id": tid, "ts": end or ts, "name": name, "input": args}
+                    items.append(tools[tid])
+    return items
 
 
 def _kiro_items(session: dict, root: Path) -> list[dict]:
+    if "_db" in session:
+        return _kiro_sqlite_items(session)
     meta = _read_json_file(session["_path"].with_suffix(".json"))
     if isinstance(meta, dict):
         paths = meta.get("workspacePaths")
@@ -6074,7 +6160,8 @@ def _kiro_items(session: dict, root: Path) -> list[dict]:
     return items
 
 
-_register(_Reader("kiro-cli", "Kiro CLI", (".kiro",), env="KIRO_DIR", index=_kiro_index, items=_kiro_items,
+_register(_Reader("kiro-cli", "Kiro CLI", (".kiro", ".local/share/kiro-cli", "Library/Application Support/kiro-cli"),
+                  env="KIRO_DIR", index=_kiro_index, items=_kiro_items,
                   tools={"fs_read": "Read", "execute_bash": "Bash", "shell": "Bash", "glob": "Glob", "grep": "Grep"}))
 
 
@@ -6295,10 +6382,923 @@ def _windsurf_items(session: dict, root: Path) -> list[dict]:
     return items
 
 
-_register(_Reader("windsurf", "Windsurf", ("Library/Application Support/Windsurf/User", ".config/Windsurf/User"),
+_register(_Reader("windsurf", "Windsurf", _app_dirs("Windsurf", "Windsurf - Next"),
                   env="COT_WINDSURF_USER_DIR", index=_windsurf_index, items=_windsurf_items,
                   # Its chats carry no timestamps; the workspace store's mtime moves with any change.
                   mark=lambda s: f"{s.get('weight')}"))
+
+
+# -------------------------------------------------------------- Cursor IDE
+# The Cursor editor's own chat history, beside the agent transcripts in
+# ~/.cursor: <User>/globalStorage/state.vscdb, table cursorDiskKV. Each
+# "composerData:<id>" row is a chat (name, workspace, timestamps, and its
+# bubbles in order in fullConversationHeadersOnly); each
+# "bubbleId:<composer>:<bubble>" row is one turn: type 1 the person, type 2
+# the model, with a tool call inline in toolFormerData. Chats the transcript
+# reader or the hooks already brought in are left alone.
+
+def _cursor_ide_index(root: Path) -> list[dict]:
+    db_path = root / "globalStorage" / "state.vscdb"
+    rows = _sqlite_rows(db_path,
+                        "SELECT substr(key, 14) AS id, json_extract(value, '$.name') AS name,"
+                        " json_extract(value, '$.createdAt') AS created,"
+                        " json_extract(value, '$.lastUpdatedAt') AS updated,"
+                        " json_array_length(value, '$.fullConversationHeadersOnly') AS n, length(value) AS size"
+                        " FROM cursorDiskKV WHERE key >= 'composerData:' AND key < 'composerData;'")
+    return [{"id": r["id"], "title": r["name"], "started": r["created"],
+             "updated": _reader_epoch(r["updated"] or r["created"]), "weight": r["n"] or 0,
+             "bytes": r["size"] or 0, "_db": db_path} for r in rows if r["n"]]
+
+
+def _cursor_ide_items(session: dict, root: Path) -> list[dict]:
+    cid = session["id"]
+    doc_rows = _sqlite_rows(session["_db"], "SELECT value FROM cursorDiskKV WHERE key = ?", (f"composerData:{cid}",))
+    doc = _reader_json(doc_rows[0]["value"]) if doc_rows else None
+    if not isinstance(doc, dict):
+        return []
+    ws = ((doc.get("workspaceIdentifier") or {}).get("uri") or {}) if isinstance(doc.get("workspaceIdentifier"), dict) else {}
+    repos = doc.get("trackedGitRepos") if isinstance(doc.get("trackedGitRepos"), list) else []
+    session["cwd"] = ws.get("fsPath") or (repos[0].get("repoPath") if repos and isinstance(repos[0], dict) else None)
+    lo, hi = f"bubbleId:{cid}:", f"bubbleId:{cid};"
+    bubbles = {r["key"][len(lo):]: _reader_json(r["value"]) for r in _sqlite_rows(
+        session["_db"], "SELECT key, value FROM cursorDiskKV WHERE key >= ? AND key < ?", (lo, hi))}
+    items: list[dict] = []
+    for h in doc.get("fullConversationHeadersOnly") or []:
+        b = bubbles.get(h.get("bubbleId")) if isinstance(h, dict) else None
+        if not isinstance(b, dict):
+            continue
+        bid, ts, text = h["bubbleId"], b.get("createdAt"), b.get("text") or ""
+        model = (b.get("modelInfo") or {}).get("modelName") if isinstance(b.get("modelInfo"), dict) else None
+        if b.get("type") == 1:
+            items.append({"kind": "prompt", "id": bid, "ts": ts, "text": text})
+            continue
+        if b.get("type") != 2:
+            continue
+        thinking = b.get("thinking")
+        thought = thinking.get("text") if isinstance(thinking, dict) else thinking if isinstance(thinking, str) else None
+        if thought:
+            items.append({"kind": "thought", "id": f"{bid}:t", "ts": ts, "text": thought})
+        tool = b.get("toolFormerData") if isinstance(b.get("toolFormerData"), dict) else None
+        if tool and tool.get("name"):
+            result = _reader_json(tool.get("result"))
+            status = str(tool.get("status") or "")
+            items.append({"kind": "tool", "id": tool.get("toolCallId") or bid, "ts": ts, "name": tool["name"],
+                          "input": tool.get("rawArgs") or tool.get("params"),
+                          **({"output": result if isinstance(result, str) else _reader_text(result) or result,
+                              "failed": status in ("error", "cancelled")} if status not in ("", "loading", "pending") else {})})
+        items.append({"kind": "response", "id": bid, "ts": ts, "text": text, "model": model})
+        tokens = b.get("tokenCount") if isinstance(b.get("tokenCount"), dict) else None
+        if tokens and (tokens.get("inputTokens") or tokens.get("outputTokens")):
+            items.append({"kind": "usage", "id": bid, "ts": ts, "model": model, "usage": {
+                "input_tokens": int(tokens.get("inputTokens") or 0), "output_tokens": int(tokens.get("outputTokens") or 0)}})
+    return items
+
+
+_register(_Reader("cursor-ide", "Cursor IDE", _app_dirs("Cursor"), env="COT_CURSOR_USER_DIR",
+                  index=_cursor_ide_index, items=_cursor_ide_items, skip_known=True,
+                  tools={"run_terminal_cmd": "Bash", "run_terminal_command_v2": "Bash", "edit_file": "Edit",
+                         "edit_file_v2": "Edit", "search_replace": "Edit", "read_file": "Read", "read_file_v2": "Read",
+                         "list_dir": "Search", "list_dir_v2": "Search", "delete_file": "Bash",
+                         "ripgrep_raw_search": "Grep", "glob_file_search": "Glob", "read_lints": "ReadLints",
+                         "await": "AwaitShell", "get_mcp_tools": "CallMcpTool", "ask_question": "AskUserQuestion"}))
+
+
+# ------------------------------------------------------ chat-log JSONL / JSON
+# Many agents write a session as JSON lines of chat messages in one of a few
+# shapes: Claude-style ({type, message: {role, content: blocks}}), Pi-style
+# ({type: "message", message: {role, content: [text | thinking | toolCall]}}),
+# OpenAI chat ({role, content, tool_calls} with role "tool" results) and the
+# Responses API ({type: message | function_call | function_call_output}).
+# _chat_items reads all of them, so a reader for such an agent only says where
+# its files are and how to find the session's id and folder.
+
+_ROLE = {"user": "user", "human": "user", "assistant": "assistant", "ai": "assistant", "model": "assistant",
+         "agent": "assistant", "bot": "assistant", "tool": "tool", "toolresult": "tool", "tool_result": "tool",
+         "function": "tool", "system": "system", "developer": "system"}
+_HEADER_TYPES = ("session", "session_info", "session_start", "session_meta", "metadata", "meta", "header")
+
+
+def _first(d: object, *keys: str) -> object:
+    for k in keys:
+        cur = d
+        for part in k.split("."):
+            cur = cur.get(part) if isinstance(cur, dict) else None
+        if cur not in (None, ""):
+            return cur
+    return None
+
+
+def _chat_items(records: list[dict], session: dict, model: str | None = None) -> list[dict]:
+    items: list[dict] = []
+    tools: dict = {}
+
+    def tool_call(tid: object, name: object, args: object, ts: object) -> None:
+        tid = str(tid or f"t{len(items)}")
+        tools[tid] = {"kind": "tool", "id": tid, "ts": ts, "name": name, "input": args}
+        items.append(tools[tid])
+
+    def tool_result(tid: object, output: object, failed: bool, ts: object) -> None:
+        call = tools.get(str(tid)) if tid is not None else None
+        if call is None:
+            call = next((t for t in reversed(list(tools.values())) if "output" not in t), None)
+        if call is not None:
+            text = _reader_text(output) if not isinstance(output, str) else output
+            call.update(output=text or output, end_ts=ts, failed=failed)
+
+    for n, rec in enumerate(records):
+        if not isinstance(rec, dict):
+            continue
+        rtype = str(rec.get("type") or "").lower()
+        ts = _first(rec, "timestamp", "created_at", "createdAt", "ts", "time", "message.timestamp")
+        if rtype in _HEADER_TYPES or (n == 0 and not any(k in rec for k in ("role", "message", "content"))):
+            session["id"] = _first(rec, "id", "sessionId", "session_id") or session["id"]
+            session["cwd"] = session.get("cwd") or _first(rec, "cwd", "working_dir", "workdir", "workspace",
+                                                          "project_path", "projectPath", "working_directory")
+            session["started"] = session.get("started") or ts
+            session["title"] = session.get("title") or _first(rec, "title", "name", "summary")
+            model = _first(rec, "model", "model_id") or model
+            continue
+        if rtype in ("model_change", "config", "config.update"):
+            model = _first(rec, "model", "new_model", "modelAlias") or model
+            continue
+        session["id"] = session["id"] if session.get("_id_set") else (_first(rec, "sessionId", "session_id") or session["id"])
+        session["cwd"] = session.get("cwd") or _first(rec, "cwd", "working_dir")
+        if isinstance(rec.get("messages"), list):  # a record carrying a whole exchange
+            items += _chat_items([m for m in rec["messages"] if isinstance(m, dict)], {**session, "_id_set": True}, model)
+            continue
+        # Responses-API items.
+        if rtype in ("function_call", "custom_tool_call"):
+            tool_call(_first(rec, "call_id", "callId", "id"), rec.get("name"), rec.get("arguments") or rec.get("input"), ts)
+            continue
+        if rtype in ("function_call_output", "custom_tool_call_output"):
+            tool_result(_first(rec, "call_id", "callId"), rec.get("output"), False, ts)
+            continue
+        if rtype == "reasoning":
+            text = _reader_text(rec.get("summary") or rec.get("content"))
+            if text:
+                items.append({"kind": "thought", "id": f"r{n}", "ts": ts, "text": text})
+            continue
+        m = rec.get("message") if isinstance(rec.get("message"), dict) else rec.get("msg") if isinstance(rec.get("msg"), dict) else rec
+        role = _ROLE.get(str(m.get("role") or rec.get("role") or rtype).lower().replace("-", "_"))
+        if role is None:
+            continue
+        mid = _first(rec, "id", "uuid", "message_id") or _first(m, "id") or n
+        # Posit Assistant (Vercel AI SDK messages) keeps its own stamps in providerOptions.
+        posit = _first(m, "providerOptions.providerMetadata.positai") or {}
+        mts = ts or _first(m, "timestamp", "created_at") or _first(posit, "timestamp")
+        mmodel = (_first(m, "model", "modelId") or _first(rec, "model", "metadata.model", "metadata.generation_model")
+                  or _first(posit, "modelId") or model)
+        content = m.get("content")
+        if content is None and "text" in m:
+            content = m.get("text")
+        text: list[str] = []
+        if role == "tool" and not (isinstance(content, list) and any(
+                isinstance(b, dict) and str(b.get("type") or "").replace("-", "_") == "tool_result" for b in content)):
+            tool_result(_first(m, "tool_call_id", "toolCallId", "tool_use_id", "call_id") or _first(rec, "tool_call_id", "toolCallId"),
+                        content if content is not None else m.get("output"),
+                        bool(_first(m, "is_error", "isError") or _first(rec, "is_error", "isError")), mts)
+            continue
+        for i, b in enumerate(content if isinstance(content, list) else [content] if content is not None else []):
+            if isinstance(b, str):
+                text.append(b)
+                continue
+            if not isinstance(b, dict):
+                continue
+            btype = str(b.get("type") or "").lower().replace("-", "_")
+            if btype in ("text", "input_text", "output_text", "") and isinstance(b.get("text"), str):
+                text.append(b["text"])
+            elif btype in ("thinking", "reasoning", "redacted_thinking") and (b.get("thinking") or b.get("text")):
+                items.append({"kind": "thought", "id": f"{mid}:{i}", "ts": mts, "text": b.get("thinking") or b.get("text")})
+            elif role == "system":
+                if btype in ("tool_result", "toolresult"):  # QwenPaw hands results back as system turns
+                    tool_result(_first(b, "id", "tool_use_id"), _first(b, "output", "content"), bool(b.get("is_error")), mts)
+            elif btype in ("tool_use", "toolcall", "tool_call", "function_call", "server_tool_use"):
+                tool_call(_first(b, "id", "toolCallId", "tool_call_id", "call_id", "toolUseId"),
+                          _first(b, "name", "toolName", "tool_name"),
+                          _first(b, "input", "arguments", "args", "params", "parameters"), mts)
+            elif btype in ("tool_result", "toolresult", "function_call_output", "tool_output"):
+                tool_result(_first(b, "tool_use_id", "toolCallId", "tool_call_id", "call_id", "id"),
+                            _first(b, "content", "output", "result"), bool(_first(b, "is_error", "isError")), mts)
+        for call in m.get("tool_calls") or [] if isinstance(m.get("tool_calls"), list) else []:
+            fn = call.get("function") if isinstance(call, dict) and isinstance(call.get("function"), dict) else call
+            if isinstance(fn, dict):
+                tool_call(call.get("id"), fn.get("name"), fn.get("arguments") or fn.get("input"), mts)
+        thought = _first(m, "reasoning_content", "reasoning", "thinking")
+        if isinstance(thought, str) and thought.strip():
+            items.append({"kind": "thought", "id": f"{mid}:r", "ts": mts, "text": thought})
+        if text and role != "system":
+            kind = "prompt" if role == "user" else "response"
+            items.append({"kind": kind, "id": mid, "ts": mts, "text": "\n".join(text),
+                          **({"model": mmodel} if kind == "response" else {})})
+        usage = (_first(m, "usage", "usageMetadata", "metadata.metrics") or _first(rec, "usage", "metadata.usage")
+                 or _first(posit, "usage"))
+        if role == "assistant" and isinstance(usage, dict):
+            counts = _usage_counts(usage)
+            if any(counts.values()):
+                items.append({"kind": "usage", "id": f"{mid}:u", "ts": mts, "model": mmodel, "usage": counts})
+        session["model"] = session.get("model") or mmodel
+    return items
+
+
+def _chat_reader(agent: str, label: str, dirs: tuple[str, ...], pattern: str | tuple[str, ...], *,
+                 skip: tuple[str, ...] = (), id_from=None, meta_file=None, doc_key: str | tuple[str, ...] | None = None,
+                 tools: dict[str, str] | None = None, env: str | None = None, cwd_from=None,
+                 skip_suffix: tuple[str, ...] = (), skip_prefix: tuple[str, ...] = (), companion=None) -> _Reader:
+    """A reader for an agent whose sessions are chat-log files under its folder.
+    ``pattern``: globs for session files; ``skip``: file names that aren't
+    sessions; ``id_from``: (path) -> session id when the file name isn't it;
+    ``meta_file``: (path) -> a JSON file beside it with cwd and title;
+    ``doc_key``: the files are one JSON document whose messages sit under it;
+    ``cwd_from``: (path, root) -> the project folder when the file doesn't say;
+    ``skip_suffix`` / ``skip_prefix``: file-name ends and starts that aren't
+    sessions (sidecars, subagents); ``companion``: (path) -> a JSONL file
+    holding the messages when the document itself has none."""
+    globs = (pattern,) if isinstance(pattern, str) else pattern
+
+    def index(root: Path) -> list[dict]:
+        out, seen = [], set()
+        for g in globs:
+            for path in sorted(root.glob(g)):
+                if (path in seen or path.name in skip or not path.is_file()
+                        or path.name.endswith(skip_suffix or ("\0",)) or path.name.startswith(skip_prefix or ("\0",))):
+                    continue
+                seen.add(path)
+                s = _file_session(path, id_from(path) if id_from else None)
+                if s:
+                    out.append(s)
+        return out
+
+    def items(session: dict, root: Path) -> list[dict]:
+        path = session["_path"]
+        if meta_file is not None:
+            meta = _read_json_file(meta_file(path))
+            if isinstance(meta, dict):
+                session["cwd"] = _first(meta, "cwd", "working_dir", "workspace", "working_directory", "projectPath",
+                                        "environment.working_directory", "workspace_root", "info.cwd",
+                                        "source_workspace_dir", "git_root_dir")
+                session["title"] = _first(meta, "title", "name", "summary", "root.title")
+                session["started"] = _first(meta, "created_at", "createdAt", "start_time", "startTime")
+                session["id"] = _first(meta, "session_id", "sessionId", "id") or session["id"]
+        if cwd_from is not None and not session.get("cwd"):
+            session["cwd"] = cwd_from(path, root)
+        if path.suffix == ".jsonl":
+            records = _read_jsonl_file(path)
+        else:
+            doc = _read_json_file(path)
+            if isinstance(doc, dict):
+                session["id"] = _first(doc, "id", "sessionId", "session_id", "metadata.id") or session["id"]
+                session["cwd"] = session.get("cwd") or _first(doc, "cwd", "workspace", "working_directory", "working_dir")
+                session["title"] = session.get("title") or _first(doc, "title", "name")
+                found = _first(doc, *((doc_key,) if isinstance(doc_key, str) else doc_key or ("messages",)))
+                # QwenPaw keeps [message, marks] pairs.
+                records = [r[0] if isinstance(r, list) and r and isinstance(r[0], dict) else r
+                           for r in found] if isinstance(found, list) else []
+                if not records and companion is not None:
+                    records = _read_jsonl_file(companion(path))
+            else:
+                records = doc if isinstance(doc, list) else []
+        session["_id_set"] = True
+        return _chat_items(records, session)
+
+    return _Reader(agent, label, dirs, env=env, index=index, items=items, tools=tools)
+
+
+_PI_TOOLS = {"read": "Read", "write": "Write", "edit": "Edit", "bash": "Bash", "grep": "Grep", "find": "Glob", "ls": "Search"}
+for _id, _label, _dir in (("pi", "Pi", ".pi/agent/sessions"), ("ohmypi", "OhMyPi", ".omp/agent/sessions"),
+                          ("omo", "OMO", ".omo/agent/sessions"), ("prime-agent", "Prime Agent", ".prime/agent/sessions"),
+                          ("stepcode", "StepCode", ".stepcode/agent/sessions")):
+    _register(_chat_reader(_id, _label, (_dir,), "**/*.jsonl", tools=_PI_TOOLS))
+_register(_chat_reader("tau", "Tau", (".tau/sessions",), "**/*.jsonl", skip=("index.jsonl",), tools=_PI_TOOLS))
+# <agent>/sessions/<id>.jsonl, rotated logs as <id>.jsonl.<n>.
+for _id, _label, _dirs in (("openclaw", "OpenClaw", (".openclaw/agents", ".kimi_openclaw/agents")),
+                           ("qclaw", "QClaw", (".qclaw/agents",))):
+    _register(_chat_reader(_id, _label, _dirs, ("*/sessions/*.jsonl", "*/sessions/*.jsonl.*"), tools=_PI_TOOLS))
+_register(_chat_reader("gptme", "gptme", (".local/share/gptme/logs",), "*/conversation.jsonl",
+                       id_from=lambda p: p.parent.name,
+                       tools={"shell": "Bash", "ipython": "Python", "save": "Write", "patch": "Edit", "browser": "WebFetch"}))
+_register(_chat_reader("workbuddy", "WorkBuddy", (".workbuddy/projects",), "**/*.jsonl"))
+_register(_chat_reader("zencoder", "Zencoder", (".zencoder/sessions",), "**/*.jsonl"))
+_register(_chat_reader("reasonix", "Reasonix", (".reasonix", "AppData/Roaming/reasonix"),
+                       ("projects/*/sessions/*.jsonl", "projects/*/sessions/*/*.jsonl", "sessions/*.jsonl",
+                        "sessions/*/*.jsonl")))
+_register(_chat_reader("command-code", "Command Code", (".commandcode/projects",), "**/*.jsonl",
+                       skip_suffix=(".checkpoints.jsonl", ".prompts.jsonl"),
+                       meta_file=lambda p: p.with_name(p.name.replace(".jsonl", ".meta.json"))))
+_register(_chat_reader("open-code-review", "Open Code Review", (".opencodereview/sessions",), "**/*.jsonl"))
+_register(_chat_reader("qoder", "Qoder", (".qoder/projects", ".qoderwork/projects", ".qoder-cn/projects",
+                                          *(f"{b}/Qoder/SharedClientCache/cli/projects" for b in
+                                            ("Library/Application Support", ".config", "AppData/Roaming"))),
+                       # <project>/<id>.jsonl (or flat in SharedClientCache); agent-*.jsonl are subagents.
+                       ("*.jsonl", "*/*.jsonl"), skip_prefix=("agent-",)))
+_register(_chat_reader("mistral-vibe", "Mistral Vibe", (".vibe/logs/session",), "*/messages.jsonl",
+                       id_from=lambda p: p.parent.name, meta_file=lambda p: p.with_name("meta.json")))
+# <id>.json holds the session, with its history inline or, in newer builds,
+# in a <id>.history.jsonl beside it.
+_register(_chat_reader("cortex-code", "Cortex Code", (".snowflake/cortex/conversations",), "*.json",
+                       skip_suffix=(".bak.json", ".backup.json"), doc_key="history",
+                       companion=lambda p: p.with_name(p.name[: -len(".json")] + ".history.jsonl")))
+_register(_chat_reader("grok", "Grok", (".grok/sessions",), "*/*/chat_history.jsonl", id_from=lambda p: p.parent.name,
+                       meta_file=lambda p: p.with_name("summary.json")))
+_register(_chat_reader("deepseek-tui", "DeepSeek TUI", (".deepseek/sessions", ".codewhale/sessions"), "*.json",
+                       skip=("latest.json", "offline_queue.json")))
+_register(_chat_reader("qwenpaw", "QwenPaw", (".qwenpaw/workspaces", ".copaw/workspaces"), "*/sessions/**/*.json",
+                       doc_key="agent.memory.content"))
+_register(_chat_reader("evener", "Evener", (".local/state/evener",),
+                       ("projects/*/sessions/*.transcript.jsonl", "sessions/*.transcript.jsonl"),
+                       id_from=lambda p: p.name[: -len(".transcript.jsonl")],
+                       meta_file=lambda p: p.with_name(p.name.replace(".transcript.jsonl", ".meta.json"))))
+
+# Agents that write Claude Code or Codex transcripts in their own folders.
+_register(_Reader("openclaude", "OpenClaude", (".openclaude",), kind="transcript", parse_as="claude",
+                  glob="projects/**/*.jsonl"))
+_register(_Reader("iflow", "iFlow", (".iflow",), kind="transcript", parse_as="claude",
+                  glob="projects/*/session-*.jsonl"))
+_register(_Reader("augure-code", "Augure Code", (".augure",), kind="transcript", parse_as="codex",
+                  glob=("sessions/**/*.jsonl", "archived_sessions/**/*.jsonl")))
+
+
+# Agents built on OpenCode's or Hermes's store, in their own folders.
+def _opencode_family(agent: str, label: str, dirs: tuple[str, ...]) -> _Reader:
+    def payloads(session: dict, root: Path) -> list[dict]:
+        reader = READERS[agent]
+        out = []
+        for p in _opencode_session_payloads(session["_raw"], _opencode_messages(root, session["_raw"])):
+            p = {**p, "_reader": agent, "_dedup_key": f"{agent}:" + str(p.get("_dedup_key") or "").split(":", 1)[-1]}
+            if p.get("tool_name"):
+                raw = p["tool_name"]
+                p["tool_name"], p["tool_input"] = _reader_tool(reader, raw, p.get("tool_input"))
+                if raw != p["tool_name"]:
+                    p["raw_tool_name"] = raw
+            if p.get("hook_event_name") == "OpenCodeUsage":
+                p["hook_event_name"] = "ModelUsage"
+            out.append(p)
+        return out
+    return _Reader(agent, label, dirs, index=_opencode_index, payloads=payloads,
+                   mark=lambda s: int(s["_raw"].get("updated") or 0), tools={"list": "Search"})
+
+
+_register(_opencode_family("mimocode", "MiMoCode", (".local/share/mimocode",)))
+_register(_opencode_family("icodemate", "IcodeMate", (".local/share/icodemate",)))
+
+
+def _hermes_family_payloads(agent: str):
+    def payloads(session: dict, root: Path) -> list[dict]:
+        return [{**p, "_reader": agent, "_dedup_key": f"{agent}:" + str(p.get("_dedup_key") or "").split(":", 1)[-1]}
+                for p in _hermes_session_payloads(session["_raw"], _hermes_messages(root, session["id"]),
+                                                  _hermes_model_usage(root, session["id"]))]
+    return payloads
+
+
+_register(_Reader("augure-desktop", "Augure Desktop", (".augure-desktop", "AppData/Local/augure-desktop"),
+                  index=_hermes_index, payloads=_hermes_family_payloads("augure-desktop"),
+                  mark=lambda s: int(s.get("last_message") or 0) * 2 + (1 if s.get("ended_at") else 0)))
+
+
+# Positron (Posit's VS Code fork) keeps its assistant chats like VS Code.
+_register(_Reader("positron", "Positron Assistant", _app_dirs("Positron"), index=_vscode_index, items=_vscode_items,
+                  tools=_VSCODE_TOOLS))
+
+_register(_opencode_family("kilo", "Kilo CLI", (".local/share/kilo",)))
+
+
+# --------------------------------------------------------- SQLite stores
+# Agents that keep every session in one SQLite file. Each reader lists the
+# sessions with one query and turns a session's rows into the chat-log
+# records _chat_items reads, or into items directly.
+
+def _zcode_index(root: Path) -> list[dict]:
+    db_path = root / "db" / "db.sqlite"
+    if not db_path.is_file():
+        db_path = root / "db.sqlite"  # ZCODE_DIR pointed at the db folder itself
+    return [{"id": r["id"], "cwd": r["directory"] or None, "title": r["title"], "started": r["time_created"],
+             "updated": _reader_epoch(r["time_updated"] or r["time_created"]), "_db": db_path}
+            for r in _sqlite_rows(db_path, "SELECT id, directory, title, time_created, time_updated FROM session")]
+
+
+def _zcode_payloads(session: dict, root: Path) -> list[dict]:
+    """ZCode is an OpenCode fork: the same message / part JSON, in its own tables."""
+    db = session["_db"]
+    parts: dict[str, list[dict]] = {}
+    for r in _sqlite_rows(db, "SELECT id, message_id, data FROM part WHERE session_id = ? ORDER BY message_id, id",
+                          (session["id"],)):
+        data = _reader_json(r["data"])
+        if isinstance(data, dict):
+            parts.setdefault(r["message_id"], []).append({**data, "id": r["id"], "messageID": r["message_id"]})
+    messages = []
+    for r in _sqlite_rows(db, "SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created, id",
+                          (session["id"],)):
+        info = _reader_json(r["data"])
+        if isinstance(info, dict):
+            info = {**info, "id": r["id"], "sessionID": session["id"]}
+            info.setdefault("time", {}).setdefault("created", _reader_epoch(r["time_created"]) * 1000)
+            messages.append((info, parts.get(r["id"], [])))
+    raw = {"id": session["id"], "directory": session.get("cwd"), "title": session.get("title"),
+           "created": _reader_epoch(session.get("started")) * 1000}
+    reader = READERS["zcode"]
+    out = []
+    for p in _opencode_session_payloads(raw, messages):
+        p = {**p, "_reader": "zcode", "_dedup_key": "zcode:" + str(p.get("_dedup_key") or "").split(":", 1)[-1]}
+        if p.get("tool_name"):
+            raw_name = p["tool_name"]
+            p["tool_name"], p["tool_input"] = _reader_tool(reader, raw_name, p.get("tool_input"))
+            if raw_name != p["tool_name"]:
+                p["raw_tool_name"] = raw_name
+        if p.get("hook_event_name") == "OpenCodeUsage":
+            p["hook_event_name"] = "ModelUsage"
+        out.append(p)
+    for u in _sqlite_rows(db, "SELECT * FROM model_usage WHERE session_id = ?", (session["id"],)):
+        out.append({"session_id": session["id"], "hook_event_name": "ModelUsage", "origin": "import", "_import": True,
+                    "_reader": "zcode", "cwd": session.get("cwd"),
+                    "timestamp": _reader_ts(u.get("completed_at") or u.get("started_at")) or _reader_ts(session.get("updated")),
+                    "_dedup_key": f"zcode:{session['id']}:usage:{u.get('turn_id')}:{u.get('model_id')}",
+                    "model": u.get("model_id"), "usage": _usage_counts(u)})
+    return out
+
+
+_register(_Reader("zcode", "ZCode", (".zcode/cli",), index=_zcode_index, payloads=_zcode_payloads,
+                  tools={"list": "Search"}))
+
+
+# Shelley: shelley.db, conversations (cwd, model, parent) and messages, whose
+# llm_data is a serialized Go llm.Message: {Role, Content: [{Type, Text,
+# Thinking, ToolName, ToolInput, ToolUseID, ToolResult, ToolError}]} with
+# Type 2 text, 3 thinking, 5 tool use, 6 tool result.
+
+def _shelley_index(root: Path) -> list[dict]:
+    db_path = root / "shelley.db"
+    return [{"id": r["conversation_id"], "title": r.get("slug"), "cwd": r.get("cwd") or None, "started": r.get("created_at"),
+             "updated": _reader_epoch(r.get("updated_at") or r.get("created_at")), "model": r.get("model"),
+             "parent_id": r.get("parent_conversation_id") or None, "_db": db_path}
+            for r in _sqlite_rows(db_path, "SELECT * FROM conversations")]
+
+
+def _shelley_items(session: dict, root: Path) -> list[dict]:
+    items: list[dict] = []
+    tools: dict = {}
+    for r in _sqlite_rows(session["_db"], "SELECT * FROM messages WHERE conversation_id = ? ORDER BY sequence_id",
+                          (session["id"],)):
+        kind, ts, seq = r.get("type"), r.get("created_at"), r.get("sequence_id")
+        llm = _reader_json(r.get("llm_data"))
+        blocks = llm.get("Content") if isinstance(llm, dict) and isinstance(llm.get("Content"), list) else []
+        text: list[str] = []
+        for i, b in enumerate(blocks):
+            if not isinstance(b, dict):
+                continue
+            btype = b.get("Type")
+            if btype == 2 and b.get("Text"):
+                text.append(b["Text"])
+            elif btype == 3 and b.get("Thinking"):
+                items.append({"kind": "thought", "id": f"{seq}:{i}", "ts": ts, "text": b["Thinking"]})
+            elif btype in (5, 7) and b.get("ToolName"):
+                tid = b.get("ID") or f"{seq}:{i}"
+                tools[tid] = {"kind": "tool", "id": tid, "ts": ts, "name": b["ToolName"], "input": b.get("ToolInput")}
+                items.append(tools[tid])
+            elif btype == 6 and tools.get(b.get("ToolUseID")) is not None:
+                tools[b["ToolUseID"]].update(output="\n".join(str(x.get("Text") or "") for x in b.get("ToolResult") or []
+                                                             if isinstance(x, dict)),
+                                             end_ts=ts, failed=bool(b.get("ToolError")))
+        if kind == "user" and text:
+            items.append({"kind": "prompt", "id": seq, "ts": ts, "text": "\n".join(text)})
+        elif kind == "agent" and text:
+            items.append({"kind": "response", "id": seq, "ts": ts, "text": "\n".join(text), "model": session.get("model")})
+        usage = _reader_json(r.get("usage_data"))
+        if kind == "agent" and isinstance(usage, dict) and any(_usage_counts(usage).values()):
+            items.append({"kind": "usage", "id": f"{seq}:u", "ts": ts, "model": session.get("model"), "usage": _usage_counts(usage)})
+    return items
+
+
+_register(_Reader("shelley", "Shelley", (".config/shelley",), index=_shelley_index, items=_shelley_items,
+                  tools={"bash": "Bash", "patch": "Edit", "think": "Think", "keyword_search": "Grep"}))
+
+
+# Omnigent: ~/.omnigent/chat.db, conversations and conversation_items (one
+# Responses-API-style item per row: message, function_call,
+# function_call_output, reasoning …; ``type`` is a name or, in newer
+# databases, a small integer).
+_OMNIGENT_TYPES = {1: "message", 2: "function_call", 3: "function_call_output", 4: "reasoning"}
+
+
+def _omnigent_index(root: Path) -> list[dict]:
+    db_path = root / "chat.db"
+    out = []
+    for r in _sqlite_rows(db_path, "SELECT * FROM conversations"):
+        cid = r.get("id") or r.get("conversation_id")
+        if cid is None:
+            continue
+        out.append({"id": str(cid), "title": r.get("title") or r.get("name"),
+                    "cwd": r.get("cwd") or r.get("working_directory") or r.get("workspace_path"),
+                    "started": r.get("created_at"), "updated": _reader_epoch(r.get("updated_at") or r.get("created_at")),
+                    "_db": db_path, "_ws": r.get("workspace_id")})
+    return out
+
+
+def _omnigent_items(session: dict, root: Path) -> list[dict]:
+    rows = _sqlite_rows(session["_db"], "SELECT position, type, data FROM conversation_items"
+                                        " WHERE workspace_id IS ? AND conversation_id = ? ORDER BY position",
+                        (session.get("_ws"), session["id"]))
+    records = []
+    for r in rows:
+        data = _reader_json(r["data"])
+        if isinstance(data, dict):
+            rtype = _OMNIGENT_TYPES.get(r["type"], r["type"]) if isinstance(r["type"], int) else r["type"]
+            records.append({**data, "type": rtype if rtype != "message" else data.get("role") or "message",
+                            "id": r["position"]})
+    session["_id_set"] = True
+    return _chat_items(records, session)
+
+
+_register(_Reader("omnigent", "Omnigent", (".omnigent",), index=_omnigent_index, items=_omnigent_items,
+                  tools={"sys_os_shell": "Bash", "sys_os_read": "Read", "sys_os_write": "Write"}))
+
+
+# Piebald: app.db, chats and messages, each message split into parts: text
+# parts (content in message_content_nodes / message_node_text) and tool-call
+# parts (message_part_tool_call: tool name, input, result, error).
+
+def _piebald_index(root: Path) -> list[dict]:
+    db_path = root / "app.db"
+    return [{"id": str(r["id"]), "title": r.get("title"), "started": r.get("created_at"),
+             "updated": _reader_epoch(r.get("updated_at") or r.get("created_at")),
+             "weight": r.get("message_count"), "cwd": r.get("working_directory") or r.get("cwd"), "_db": db_path}
+            for r in _sqlite_rows(db_path, "SELECT * FROM chats WHERE COALESCE(is_deleted, 0) = 0 AND message_count > 0")]
+
+
+def _piebald_items(session: dict, root: Path) -> list[dict]:
+    db = session["_db"]
+    items: list[dict] = []
+    for m in _sqlite_rows(db, "SELECT * FROM messages WHERE parent_chat_id = ? ORDER BY created_at, id", (session["id"],)):
+        ts, mid, role, model = m.get("created_at"), m.get("id"), m.get("role"), m.get("model") or None
+        text: list[str] = []
+        for part in _sqlite_rows(db, "SELECT id, part_type FROM message_parts WHERE parent_chat_message_id = ?"
+                                     " ORDER BY part_index, id", (mid,)):
+            if part["part_type"] == "text":
+                thinking = _sqlite_rows(db, "SELECT is_thinking FROM message_part_text WHERE message_part_id = ?", (part["id"],))
+                body = "".join(r["content"] or "" for r in _sqlite_rows(
+                    db, "SELECT mnt.content FROM message_content_nodes mcn JOIN message_node_text mnt"
+                        " ON mnt.node_id = mcn.id WHERE mcn.parent_text_part_id = ? AND mcn.node_type = 'text'"
+                        " ORDER BY mcn.node_index, mcn.id", (part["id"],)))
+                if thinking and thinking[0]["is_thinking"]:
+                    items.append({"kind": "thought", "id": f"{mid}:{part['id']}", "ts": ts, "text": body})
+                else:
+                    text.append(body)
+            elif part["part_type"] in ("tool_call", "toolCall", "tool"):
+                for t in _sqlite_rows(db, "SELECT * FROM message_part_tool_call WHERE message_part_id = ?", (part["id"],)):
+                    items.append({"kind": "tool", "id": t.get("provider_tool_use_id") or f"{mid}:{part['id']}", "ts": ts,
+                                  "name": t.get("tool_name"), "input": t.get("tool_input"),
+                                  **({"output": t.get("tool_error") or t.get("tool_result"), "failed": bool(t.get("tool_error"))}
+                                     if t.get("tool_result") is not None or t.get("tool_error") else {})})
+        if text and role in ("user", "assistant"):
+            items.append({"kind": "prompt" if role == "user" else "response", "id": mid, "ts": ts,
+                          "text": "\n".join(text), "model": model})
+        if role == "assistant" and (m.get("input_tokens") or m.get("output_tokens")):
+            items.append({"kind": "usage", "id": f"{mid}:u", "ts": ts, "model": model, "usage": _usage_counts(m)})
+    return items
+
+
+_register(_Reader("piebald", "Piebald", (".local/share/piebald", "Library/Application Support/piebald",
+                                         "AppData/Roaming/piebald"), index=_piebald_index, items=_piebald_items))
+
+
+# Devin CLI: <root>/cli/sessions.db, sessions (title, working_directory,
+# model) and message_nodes, one OpenAI-style chat message per row.
+
+def _devin_index(root: Path) -> list[dict]:
+    out = []
+    for db_path in (root / "cli" / "sessions.db", root / "sessions.db"):
+        for r in _sqlite_rows(db_path, "SELECT * FROM sessions WHERE COALESCE(hidden, 0) <> 1"):
+            out.append({"id": str(r["id"]), "title": r.get("title"), "cwd": r.get("working_directory") or None,
+                        "model": r.get("model"), "started": r.get("created_at"),
+                        "updated": _reader_epoch(r.get("last_activity_at") or r.get("created_at")), "_db": db_path})
+    return out
+
+
+def _devin_items(session: dict, root: Path) -> list[dict]:
+    rows = _sqlite_rows(session["_db"], "SELECT row_id, chat_message, created_at FROM message_nodes WHERE session_id = ?"
+                                        " ORDER BY created_at, row_id", (session["id"],))
+    records = []
+    for r in rows:
+        msg = _reader_json(r["chat_message"])
+        if isinstance(msg, dict):
+            records.append({**msg, "id": r["row_id"], "timestamp": msg.get("timestamp") or r["created_at"]})
+    session["_id_set"] = True
+    return _chat_items(records, session, session.get("model"))
+
+
+_register(_Reader("devin", "Devin", (".local/share/devin", "Library/Application Support/devin"), env="DEVIN_DIR",
+                  index=_devin_index, items=_devin_items))
+
+
+# Warp: warp.sqlite, agent_conversations (usage in conversation_data) and
+# ai_queries (the person's queries per exchange, with model and folder).
+# Agent replies aren't stored, so Warp sessions hold prompts and tokens only.
+
+def _warp_index(root: Path) -> list[dict]:
+    out = []
+    for db_path in sorted({*root.glob("warp.sqlite"), *root.glob("*/warp.sqlite")}):
+        for r in _sqlite_rows(db_path, "SELECT conversation_id, last_modified_at FROM agent_conversations"):
+            out.append({"id": r["conversation_id"], "updated": _reader_epoch(r["last_modified_at"]), "_db": db_path})
+    return out
+
+
+def _warp_items(session: dict, root: Path) -> list[dict]:
+    items: list[dict] = []
+    for q in _sqlite_rows(session["_db"], "SELECT exchange_id, start_ts, input, model_id, working_directory, output_status"
+                                          " FROM ai_queries WHERE conversation_id = ? ORDER BY start_ts", (session["id"],)):
+        session["cwd"] = session.get("cwd") or q.get("working_directory") or None
+        inputs = _reader_json(q.get("input"))
+        texts = [_first(i, "Query.text", "query.text", "text") for i in inputs if isinstance(i, dict)] if isinstance(inputs, list) else []
+        prompt = "\n".join(str(t) for t in texts if t)
+        if prompt:
+            items.append({"kind": "prompt", "id": q["exchange_id"], "ts": q["start_ts"], "text": prompt, "model": q.get("model_id")})
+    conv = _sqlite_rows(session["_db"], "SELECT conversation_data FROM agent_conversations WHERE conversation_id = ?",
+                        (session["id"],))
+    data = _reader_json(conv[0]["conversation_data"]) if conv else None
+    usage = _first(data, "conversation_usage_metadata.token_usage") if isinstance(data, dict) else None
+    for i, u in enumerate(usage if isinstance(usage, list) else [usage] if isinstance(usage, dict) else []):
+        if isinstance(u, dict):
+            items.append({"kind": "total", "ts": session.get("updated"), "model": u.get("model_id") or u.get("model"),
+                          "usage": _usage_counts(u) or {"output_tokens": int(u.get("warp_tokens") or 0)}})
+    return items
+
+
+_register(_Reader("warp", "Warp", ("Library/Group Containers/2BBY89MBSN.dev.warp/Library/Application Support",
+                                   ".local/state/warp-terminal", "AppData/Local/warp/Warp/data"),
+                  index=_warp_index, items=_warp_items))
+
+
+# Forge: ~/.forge/.forge.db, conversations with the whole context as JSON:
+# {messages: [{message: {text: {role, content, tool_calls, model}} |
+#                        {tool: {name, call_id, output: {values: [...]}}}}]}.
+
+def _forge_index(root: Path) -> list[dict]:
+    db_path = root / ".forge.db"
+    return [{"id": r["conversation_id"], "title": r.get("title"), "started": r.get("created_at"),
+             "updated": _reader_epoch(r.get("updated_at") or r.get("created_at")), "_db": db_path}
+            for r in _sqlite_rows(db_path, "SELECT conversation_id, title, created_at, updated_at FROM conversations"
+                                           " WHERE context IS NOT NULL")]
+
+
+def _forge_items(session: dict, root: Path) -> list[dict]:
+    rows = _sqlite_rows(session["_db"], "SELECT context FROM conversations WHERE conversation_id = ?", (session["id"],))
+    ctx = _reader_json(rows[0]["context"]) if rows else None
+    records = []
+    for e in (ctx.get("messages") or []) if isinstance(ctx, dict) else []:
+        m = e.get("message", e) if isinstance(e, dict) else {}
+        if isinstance(m.get("text"), dict):
+            t = m["text"]
+            content = t.get("content") or _first(t, "raw_content.Text") or ""
+            records.append({"role": t.get("role"), "content": content, "model": t.get("model"),
+                            "tool_calls": [{"id": c.get("call_id"), "function": {"name": c.get("name"), "arguments": c.get("arguments")}}
+                                           for c in t.get("tool_calls") or [] if isinstance(c, dict)],
+                            "timestamp": e.get("timestamp"), "usage": e.get("usage")})
+        elif isinstance(m.get("tool"), dict):
+            t = m["tool"]
+            out = t.get("output") if isinstance(t.get("output"), dict) else {}
+            values = out.get("values") if isinstance(out.get("values"), list) else []
+            records.append({"role": "tool", "tool_call_id": t.get("call_id"),
+                            "content": "\n".join(str(_first(v, "text", "Text") or v) for v in values),
+                            "is_error": bool(out.get("is_error"))})
+    session["_id_set"] = True
+    return _chat_items(records, session)
+
+
+_register(_Reader("forge", "Forge", (".forge",), index=_forge_index, items=_forge_items,
+                  tools={"shell": "Bash", "fs_read": "Read", "fs_create": "Write", "fs_patch": "Edit", "fs_search": "Grep"}))
+
+
+# Posit Assistant: ~/.posit/assistant/workspaces/<workspace>/<conversation>/
+# lm-messages.jsonl (Vercel AI SDK messages) with conversation.json (title)
+# beside it and the folder in the workspace's workspace.json.
+
+def _posit_cwd(path: Path, root: Path) -> str | None:
+    ws = _read_json_file(path.parent.parent / "workspace.json")
+    return ws.get("path") if isinstance(ws, dict) else None
+
+
+_register(_chat_reader("posit-assistant", "Posit Assistant", (".posit/assistant/workspaces",), "*/*/lm-messages.jsonl",
+                       id_from=lambda p: p.parent.name, cwd_from=_posit_cwd,
+                       meta_file=lambda p: p.with_name("conversation.json")))
+
+
+# Kiro IDE: <User>/globalStorage/kiro.kiroagent, either <workspace>/<file>.chat
+# ({chat: [{role, content}], metadata: {modelId, startTime}}) or, in newer
+# builds, workspace-sessions/<workspace>/<id>.json ({sessionId, title,
+# workspaceDirectory, history: [{message: {role, content, id}}]}).
+_register(_chat_reader("kiro-ide", "Kiro IDE", _app_dirs("Kiro", sub="User/globalStorage/kiro.kiroagent"),
+                       ("*/*.chat", "workspace-sessions/*/*.json"), skip=("sessions.json",),
+                       doc_key=("history", "chat")))
+
+
+# Junie CLI: ~/.junie/sessions/<id>/events.jsonl, one event per line
+# ({timestampMs, kind, …}): UserPromptEvent (presentablePrompt / prompt),
+# SessionA2uxEvent wrapping the agent's events (MarkdownBlockUpdatedEvent
+# text, ResultBlockUpdatedEvent result, LlmResponseMetadataEvent modelUsage),
+# SessionTitleSetEvent. sessions/index.jsonl names each session's project.
+
+def _junie_index(root: Path) -> list[dict]:
+    projects = {}
+    for rec in _read_jsonl_file(root / "sessions" / "index.jsonl"):
+        sid = rec.get("sessionId") or rec.get("id")
+        if sid:
+            projects[str(sid)] = rec
+    out = []
+    for path in sorted(root.glob("sessions/*/events.jsonl")):
+        s = _file_session(path, path.parent.name)
+        if s:
+            meta = projects.get(s["id"], {})
+            s.update(cwd=meta.get("projectDir"), title=meta.get("taskName"))
+            out.append(s)
+    return out
+
+
+def _junie_items(session: dict, root: Path) -> list[dict]:
+    items: list[dict] = []
+    steps: dict[str, dict] = {}
+    for n, ev in enumerate(_read_jsonl_file(session["_path"])):
+        kind, ts = ev.get("kind"), ev.get("timestampMs")
+        if kind in ("UserPromptEvent", "UserResponseEvent"):
+            items.append({"kind": "prompt", "id": ev.get("requestId") or n, "ts": ts,
+                          "text": ev.get("presentablePrompt") or ev.get("prompt") or ""})
+        elif kind == "SessionTitleSetEvent":
+            session["title"] = ev.get("name") or session.get("title")
+        elif kind == "SessionA2uxEvent":
+            agent = _first(ev, "event.agentEvent") or {}
+            akind = agent.get("kind")
+            if akind in ("MarkdownBlockUpdatedEvent", "ResultBlockUpdatedEvent"):
+                text = agent.get("text") if akind == "MarkdownBlockUpdatedEvent" else \
+                    str(agent.get("result") or "").replace("<!-- ANSWER -->", "").strip()
+                step = agent.get("stepId")
+                if step and step in steps:
+                    steps[step].update(text=text, ts=ts)  # a block is rewritten as it streams
+                else:
+                    items.append({"kind": "response", "id": step or n, "ts": ts, "text": text})
+                    if step:
+                        steps[step] = items[-1]
+            elif akind == "LlmResponseMetadataEvent":
+                for i, u in enumerate(agent.get("modelUsage") or []):
+                    if isinstance(u, dict):
+                        items.append({"kind": "usage", "id": f"{n}:{i}", "ts": ts, "model": u.get("model"), "usage": {
+                            "input_tokens": int(u.get("inputTokens") or 0), "output_tokens": int(u.get("outputTokens") or 0),
+                            "cache_read_tokens": int(u.get("cacheInputTokens") or 0),
+                            "cache_write_tokens": int(u.get("cacheCreateTokens") or 0)}})
+    return items
+
+
+_register(_Reader("junie", "Junie", (".junie",), env="JUNIE_DIR", index=_junie_index, items=_junie_items))
+
+
+# Poolside Agent CLI: <root>/trajectories/*.ndjson|jsonl, one event per line,
+# {id, timestamp, type, <type>: {...}}: session_start (workspace, prompt),
+# session_input (prompt), assistant_message_end, thought_end,
+# tool_call_parsed (id, name, args), tool_call_result (id, observation,
+# is_error), tool_call_inference_start/end (model, tokens), session_exit.
+
+def _poolside_index(root: Path) -> list[dict]:
+    return [s for s in (_file_session(p) for p in sorted(root.glob("trajectories/**/*"))
+                        if p.suffix in (".ndjson", ".jsonl", ".json")) if s]
+
+
+def _poolside_items(session: dict, root: Path) -> list[dict]:
+    items: list[dict] = []
+    tools: dict = {}
+    model = None
+    for n, ev in enumerate(_read_jsonl_file(session["_path"])):
+        etype, ts = ev.get("type"), ev.get("timestamp")
+        body = ev.get(etype) if isinstance(ev.get(etype), dict) else {}
+        if etype == "session_start":
+            dirs = body.get("working_directories")
+            session["cwd"] = body.get("workspace") or (dirs[0] if isinstance(dirs, list) and dirs else None)
+            session["started"] = ts
+            if body.get("prompt"):
+                items.append({"kind": "prompt", "id": f"start:{n}", "ts": ts, "text": body["prompt"]})
+        elif etype == "session_input" and body.get("prompt"):
+            items.append({"kind": "prompt", "id": body.get("id") or n, "ts": ts, "text": body["prompt"]})
+        elif etype == "assistant_message_end":
+            items.append({"kind": "response", "id": ev.get("id") or n, "ts": ts, "text": body.get("assistant_message") or "",
+                          "model": model})
+        elif etype == "thought_end" and body.get("thought"):
+            items.append({"kind": "thought", "id": ev.get("id") or n, "ts": ts, "text": body["thought"]})
+        elif etype == "tool_call_parsed":
+            tid = body.get("id") or f"t{n}"
+            tools[tid] = {"kind": "tool", "id": tid, "ts": ts, "name": body.get("name"), "input": body.get("args")}
+            items.append(tools[tid])
+        elif etype == "tool_call_result" and tools.get(body.get("id")) is not None:
+            tools[body["id"]].update(output=body.get("observation"), end_ts=ts, failed=bool(body.get("is_error")))
+        elif etype == "tool_call_inference_start":
+            model = _first(body, "chat_completion_request.model") or model
+        elif etype == "tool_call_inference_end":
+            items.append({"kind": "usage", "id": ev.get("id") or n, "ts": ts, "model": model, "usage": _usage_counts(body)})
+        elif etype in ("session_exit", "session_error"):
+            items.append({"kind": "end", "id": "end", "ts": ts,
+                          "reason": body.get("reason") or body.get("error")})
+    return items
+
+
+_register(_Reader("poolside", "Poolside", ("Library/Application Support/poolside", ".local/state/poolside",
+                                           "AppData/Roaming/poolside"), index=_poolside_index, items=_poolside_items,
+                  tools={"shell_run": "Bash", "read_file": "Read", "edit_file": "Edit", "write_file": "Write"}))
+
+
+# CodeBuddy (Tencent's IDE extension): <Data>/**/history/<workspace>/<id>/
+# index.json lists the messages in order; each is messages/<id>.json, {role,
+# createdAt, message (the chat message, often as a JSON string), extra
+# (model, as JSON)}.
+
+def _codebuddy_index(root: Path) -> list[dict]:
+    return [s for s in (_file_session(p, p.parent.name) for p in sorted(root.glob("**/history/*/*/index.json"))) if s]
+
+
+def _codebuddy_items(session: dict, root: Path) -> list[dict]:
+    index = _read_json_file(session["_path"])
+    refs = index.get("messages") if isinstance(index, dict) else None
+    records = []
+    for ref in refs if isinstance(refs, list) else []:
+        msg = _read_json_file(session["_path"].parent / "messages" / f"{ref.get('id')}.json") if isinstance(ref, dict) else None
+        if not isinstance(msg, dict):
+            continue
+        extra = _reader_json(msg.get("extra"))
+        inner = _reader_json(msg.get("message"))
+        content = inner.get("content") if isinstance(inner, dict) else inner
+        cwd = _first(extra, "cwd", "workspace") if isinstance(extra, dict) else None
+        session["cwd"] = session.get("cwd") or cwd
+        records.append({"role": msg.get("role"), "content": content, "timestamp": msg.get("createdAt"), "id": ref.get("id"),
+                        "model": _first(extra, "modelId", "modelName") if isinstance(extra, dict) else None})
+    session["_id_set"] = True
+    return _chat_items(records, session)
+
+
+_register(_Reader("codebuddy", "CodeBuddy", tuple(f"{b}/CodeBuddyExtension/Data" for b in
+                                                  ("Library/Application Support", ".config", "AppData/Local")),
+                  index=_codebuddy_index, items=_codebuddy_items))
+
+
+# Muse Code: <root>/YYYY/MM/DD/<id>/session.jsonl, an append-only event log.
+# Each record has payload_type and recorded_at (microseconds); conversation
+# events are payload_type "runtime.session" with payload {kind: "run", event:
+# {kind: started (prompt) | assistant_message_committed (text) |
+# assistant_tool_calls_committed (tool_calls) | tool_result_batch_committed
+# (results) | reasoning_summary_committed | model_completed (usage)}}.
+
+def _muse_items(session: dict, root: Path) -> list[dict]:
+    items: list[dict] = []
+    tools: dict = {}
+    model = None
+    for n, rec in enumerate(_read_jsonl_file(session["_path"])):
+        ptype, payload = rec.get("payload_type"), rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+        us = rec.get("recorded_at")
+        ts = us / 1_000_000 if isinstance(us, (int, float)) and us > 1e14 else us
+        if ptype in ("runtime.session.metadata", "run.model.configured"):
+            model = _first(payload, "record.model_id") or model
+            session["cwd"] = session.get("cwd") or _first(payload, "record.cwd", "record.workspace_root")
+            continue
+        if ptype == "runtime.model_reconfigure.completed":
+            model = _first(payload, "record.effective.model_id") or model
+            continue
+        if ptype != "runtime.session" or payload.get("kind") != "run":
+            continue
+        ev = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+        kind, rid = ev.get("kind"), ev.get("response_id") or n
+        if kind == "started" and ev.get("prompt"):
+            items.append({"kind": "prompt", "id": rec.get("id") or n, "ts": ts, "text": ev["prompt"]})
+        elif kind == "reasoning_summary_committed" and ev.get("text"):
+            items.append({"kind": "thought", "id": f"{rid}:t{n}", "ts": ts, "text": ev["text"]})
+        elif kind == "assistant_message_committed" and ev.get("text"):
+            items.append({"kind": "response", "id": f"{rid}:{n}", "ts": ts, "text": ev["text"], "model": model})
+        elif kind == "assistant_tool_calls_committed":
+            for c in ev.get("tool_calls") or []:
+                if isinstance(c, dict):
+                    tid = c.get("call_id") or c.get("id") or f"c{n}"
+                    tools[tid] = {"kind": "tool", "id": tid, "ts": ts, "name": c.get("name"), "input": c.get("args")}
+                    items.append(tools[tid])
+        elif kind == "tool_result_batch_committed":
+            for r in ev.get("results") or []:
+                if isinstance(r, dict) and tools.get(r.get("tool_call_id")) is not None:
+                    tools[r["tool_call_id"]].update(output=r.get("text") or r.get("output") or r.get("content"),
+                                                    end_ts=ts, failed=bool(r.get("is_error")))
+        elif kind == "model_completed" and isinstance(ev.get("usage"), dict):
+            items.append({"kind": "usage", "id": f"u{n}", "ts": ts, "model": ev.get("model") or model,
+                          "usage": _usage_counts(ev["usage"])})
+    session["model"] = model
+    return items
+
+
+def _muse_index(root: Path) -> list[dict]:
+    return [s for s in (_file_session(p, p.parent.name) for p in sorted(root.glob("*/*/*/*/session.jsonl"))) if s]
+
+
+_register(_Reader("muse-code", "Muse Code", (".local/share/muse/sessions",), env="MUSE_SESSIONS_DIR",
+                  index=_muse_index, items=_muse_items))
+
+
+# IcodeMate's terminal CLI writes Claude Code's project transcripts.
+_register(_Reader("icodemate-cli", "IcodeMate CLI", (".icodemate/cli",), kind="transcript", parse_as="claude",
+                  glob="projects/**/*.jsonl"))
+
+
+# Codebuff (and Freebuff): ~/.config/manicode/projects/<project>/chats/
+# <timestamp>/chat-messages.json, the chat as a JSON list of messages.
+_register(_chat_reader("codebuff", "Codebuff", (".config/manicode/projects",), "*/chats/*/chat-messages.json",
+                       id_from=lambda p: f"{p.parent.parent.parent.name}-{p.parent.name}"))
 
 def _fetch_session_origins() -> dict[str, str]:
     """Session id -> "hook"/"import", so the import skips hooked sessions. An
@@ -6335,7 +7335,7 @@ def _import_agent(agent: str, since: str | None, offsets: dict[str, int],
     # Agents that write another agent's transcript format (Claude Cowork keeps
     # Claude Code transcripts) reuse its parser under their own source.
     parse_as = reader.parse_as or agent
-    transcripts = reader.discover() if reader.glob else _discover_transcripts(agent)
+    transcripts = reader.discover()
     now_ts = time.time()
     if verbose and not transcripts:
         print(f"cot import: no {agent} transcripts found", file=sys.stderr)
@@ -6601,6 +7601,61 @@ def _import_sources(agents: list[str], **kwargs) -> int:
         posted, _ = _run_import_from(src["path"], src["machine"], agents, **kwargs)
         total += posted
     return total
+
+
+def _add_agent_home(agent: str, path: str) -> str:
+    """Add an extra data folder for ``agent``; returns the stored path. Raises
+    ValueError for an unknown agent or a folder outside the home directory."""
+    if agent not in READERS:
+        raise ValueError(f"Unknown agent: {agent}")
+    raw = path.strip()
+    if raw.startswith("~"):
+        raw = str(_import_home() or Path.home()) + raw[1:]
+    full = Path(raw).resolve()
+    if not full.is_dir():
+        raise ValueError(f"No folder at {path}")
+    if not _safe_transcript_root(full):
+        raise ValueError("Pick a folder inside your home folder")
+    stored = str(full)
+    homes = _agent_homes()
+    if stored not in homes.setdefault(agent, []):
+        homes[agent].append(stored)
+    _save_agent_homes(homes)
+    return stored
+
+
+def _remove_agent_home(agent: str, path: str) -> int:
+    homes = _agent_homes()
+    before = homes.get(agent, [])
+    homes[agent] = [h for h in before if h != path]
+    _save_agent_homes(homes)
+    return len(before) - len(homes[agent])
+
+
+def _cmd_homes(args: list[str]) -> int:
+    """`cot homes [list | add AGENT PATH | remove AGENT PATH]`: extra data
+    folders per agent, such as a custom CLAUDE_CONFIG_DIR or CODEX_HOME."""
+    action = args[0] if args else "list"
+    if action == "list":
+        homes = _agent_homes()
+        if not any(homes.values()):
+            print("cot homes: none. Add one with `cot homes add AGENT PATH` (e.g. claude ~/.claude-work).")
+        for agent, paths in homes.items():
+            for path in paths:
+                print(f"  {agent:16s} {path}  ({'ok' if Path(os.path.expanduser(path)).is_dir() else 'missing'})")
+        return 0
+    if action in ("add", "remove") and len(args) >= 3:
+        try:
+            if action == "add":
+                print(f"cot homes: {args[1]} also reads {_add_agent_home(args[1], args[2])}")
+            else:
+                print(f"cot homes: removed {_remove_agent_home(args[1], args[2])}")
+        except ValueError as exc:
+            print(f"cot homes: {exc}", file=sys.stderr)
+            return 2
+        return 0
+    print("Usage: cot homes [list | add AGENT PATH | remove AGENT PATH]", file=sys.stderr)
+    return 2
 
 
 def _cmd_sources(args: list[str]) -> int:
@@ -7463,6 +8518,8 @@ def main() -> int:
         return _cmd_mcp(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "sources":
         return _cmd_sources(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "homes":
+        return _cmd_homes(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "statusline":
         return _cmd_statusline(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "capture":
@@ -7483,6 +8540,7 @@ def main() -> int:
             "  cot retention [status|dry-run]     # manage local cleanup policy\n"
             "  cot audit [limit]                  # show cot self-audit events\n"
             "  cot sources [list|add|remove]      # import other machines' copied session folders\n"
+            "  cot homes [list|add|remove]        # extra folders per agent (e.g. a custom CLAUDE_CONFIG_DIR)\n"
             "  cot statusline [--json]            # one-line spend summary (Claude status line)\n"
             "  cot capture [--out F] -- <cmd>     # record usage of one `claude -p` / `codex exec` run",
             file=sys.stderr,

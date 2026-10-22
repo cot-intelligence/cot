@@ -24,12 +24,6 @@ from typing import Any, Callable
 
 from . import cron, db, store, timeutil
 
-# Same globs as the bridge's ``_discover_transcripts``.
-_GLOB = {
-    "claude": "projects/**/*.jsonl",
-    "cursor": "projects/**/agent-transcripts/**/*.jsonl",
-    "codex": "sessions/**/*.jsonl",
-}
 # The agents passive mode offered before the bridge's reader registry; a saved
 # agent list without ``passive_agents_known`` was chosen from these.
 _LEGACY_AGENTS = ("claude", "cursor", "codex", "opencode", "hermes")
@@ -133,6 +127,18 @@ def readers() -> dict[str, Any]:
     return _bridge().READERS
 
 
+def add_home(agent: str, path: str) -> str:
+    """Add an extra data folder for ``agent`` (ValueError when it can't be read)."""
+    stored = _bridge()._add_agent_home(agent, path)  # noqa: SLF001
+    db.record_audit_event("settings.passive.home_added", target=agent, detail={"path": stored})
+    return stored
+
+
+def remove_home(agent: str, path: str) -> None:
+    _bridge()._remove_agent_home(agent, path)  # noqa: SLF001
+    db.record_audit_event("settings.passive.home_removed", target=agent, detail={"path": path})
+
+
 def reader_info() -> list[dict[str, Any]]:
     return [r.describe() for r in readers().values()]
 
@@ -164,10 +170,6 @@ def _opencode_store_bytes(root: Path) -> int:
     return total
 
 
-def _glob(agent: str) -> str | None:
-    return _GLOB.get(agent) or readers()[agent].glob
-
-
 def _project_of(agent: str, root: Path, path: Path) -> str | None:
     """Project folder name for Claude/Cursor (``projects/<encoded cwd>/``)."""
     reader = readers()[agent]
@@ -184,12 +186,16 @@ def _project_of(agent: str, root: Path, path: Path) -> str | None:
 
 def scan(agent: str) -> dict[str, Any]:
     """What's on disk for one agent, without importing anything: the metadata
-    onboarding shows straight away."""
-    root = transcript_root(agent)
+    onboarding shows straight away. Covers every folder the agent has: the
+    default ones and any extra homes added in Settings."""
+    reader = readers()[agent]
+    roots = [r for r in reader.roots() if os.access(r, os.R_OK | os.X_OK)]
     out: dict[str, Any] = {
         "agent": agent,
-        "root": str(root),
-        "readable": False,
+        "root": str(roots[0] if roots else transcript_root(agent)),
+        "roots": [str(r) for r in roots],
+        "extra_homes": reader.describe()["extra_homes"],
+        "readable": bool(roots),
         "transcripts": 0,
         "bytes": 0,
         "projects": 0,
@@ -197,19 +203,13 @@ def scan(agent: str) -> dict[str, Any]:
         "newest": None,
         "active": 0,
     }
-    try:
-        resolved = root.resolve(strict=True)
-        resolved.relative_to(_import_home().resolve(strict=True))
-    except (OSError, ValueError):
-        # Missing, or outside the home folder (the bridge refuses those too).
+    # Missing, or outside the home folder (the bridge refuses those too).
+    if not roots:
         return out
-    if not os.access(resolved, os.R_OK | os.X_OK):
-        return out
-    out["readable"] = True
     projects: set[str] = set()
     oldest = newest = None
     active_after = time.time() - ACTIVE_WINDOW_MIN * 60
-    if readers()[agent].kind == "store":
+    if reader.kind == "store":
         for sess in _store_sessions(agent):
             if sess.get("parent_id"):
                 continue  # subagent and compression children fold into their parent
@@ -223,11 +223,10 @@ def scan(agent: str) -> dict[str, Any]:
                 projects.add(sess["cwd"])
             out["bytes"] += int(sess.get("bytes") or 0)
         if agent == "opencode":
-            out["bytes"] = _opencode_store_bytes(resolved)
+            out["bytes"] = sum(_opencode_store_bytes(r) for r in roots)
         elif agent == "hermes":
-            out["bytes"] = _hermes_store_bytes(resolved)
-    glob = _glob(agent)
-    for path in (resolved.glob(glob) if glob else ()):
+            out["bytes"] = sum(_hermes_store_bytes(r) for r in roots)
+    for root, path in reader.discover_in() if reader.kind == "transcript" else ():
         try:
             st = path.stat()
         except OSError:
@@ -238,7 +237,7 @@ def scan(agent: str) -> dict[str, Any]:
         newest = st.st_mtime if newest is None else max(newest, st.st_mtime)
         if st.st_mtime >= active_after:
             out["active"] += 1
-        p = _project_of(agent, resolved, path)
+        p = _project_of(agent, root, path)
         if p:
             projects.add(p)
     out["projects"] = len(projects)
@@ -277,21 +276,16 @@ def _on_disk(agent: str) -> list[tuple[str, str, float]]:
     """(session id, offsets key, last written) for each quiet session on disk.
     Sessions written to in the last ACTIVE_WINDOW_MIN are left out: an import
     holds them back anyway."""
-    root = transcript_root(agent)
-    try:
-        resolved = root.resolve(strict=True)
-        resolved.relative_to(_import_home().resolve(strict=True))
-    except (OSError, ValueError):
-        return []
+    reader = readers()[agent]
     quiet_before = time.time() - ACTIVE_WINDOW_MIN * 60
     out: list[tuple[str, str, float]] = []
-    if readers()[agent].kind == "store":
+    if reader.kind == "store":
         for sess in _store_sessions(agent):
             updated = sess.get("updated") or 0
             if not sess.get("parent_id") and updated < quiet_before:
                 out.append((str(sess["id"]), f"{agent}:{sess['id']}", updated))
         return out
-    for path in resolved.glob(_glob(agent) or "-"):
+    for path in reader.discover():
         if path.parent.name == "subagents":
             continue
         m = _UUID_RE.search(path.stem)

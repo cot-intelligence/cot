@@ -35,7 +35,7 @@ import { Icon } from '../forest/icons';
 import { Agent, Seg, Switch } from '../forest/ui';
 import { MarkPicker } from '../forest/MarkPicker';
 import { ExportModal } from './ExportModal';
-import { AgentSources, HooksGap, ImportHistory, RunStatus, SchedulePicker } from '../passive/PassiveParts';
+import { AgentSources, ExtraHomes, HooksGap, ImportHistory, RunStatus, SchedulePicker } from '../passive/PassiveParts';
 import { homePath } from './GovernanceView';
 
 interface SettingsViewProps {
@@ -445,6 +445,9 @@ function PassiveSection() {
       </Row>
       <Row label="Agents" hint="Transcripts found on this machine. Only switched-on agents are imported." stack>
         {p && <AgentSources detail={p.agents_detail} enabled={p.agents} onToggle={toggleAgent} />}
+      </Row>
+      <Row label="Extra folders" hint="Read another data folder for an agent too, such as a custom CLAUDE_CONFIG_DIR, CODEX_HOME or a second install." stack>
+        {p && <ExtraHomes status={p} onChange={setP} />}
       </Row>
       <Row label="Schedule" hint="Pick a plain-English schedule or write your own cron." stack>
         {p && <SchedulePicker value={p.cron} presets={p.presets} onChange={(c) => void save({ cron: c })} />}
