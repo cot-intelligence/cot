@@ -90,7 +90,6 @@ CONSTANTS: dict[str, dict[str, Any]] = {
         "min_total_usd": 0.5,
         "min_session_usd": 1.0,
     },
-    "cost.unpriced_tokens": {"min_tokens": 50_000, "warn_tokens": 1_000_000},
     "cost.cache_write_waste": {"min_cache_write": 100_000, "max_ratio": 0.3},
     "cost.model_mismatch": {"opus_share": 0.6, "min_total_usd": 1.0, "median_tool_calls": 15},
     "cost.trend_anomaly": {"multiple": 2.0, "min_usd": 1.0},
@@ -112,7 +111,6 @@ GROUP_TITLES: dict[str, str] = {
     "usability.slow_commands": "Slow commands",
     "usability.reread_churn": "Files re-read repeatedly",
     "cost.expensive_project": "Expensive projects & sessions",
-    "cost.unpriced_tokens": "Unpriced model usage",
     "cost.cache_write_waste": "Cache written but not reused",
     "cost.model_mismatch": "Model choice vs. workload",
     "cost.trend_anomaly": "Spend trend spikes",
@@ -584,43 +582,6 @@ def _expensive_project(snap: Snapshot) -> list[dict[str, Any]]:
                         ],
                     )
                 )
-    return out
-
-
-@rule(id="cost.unpriced_tokens", pillar="cost", tier=1)
-def _unpriced_tokens(snap: Snapshot) -> list[dict[str, Any]]:
-    c = CONSTANTS["cost.unpriced_tokens"]
-    totals: dict[str, int] = {}
-    for e in snap.events:
-        if not e.model:
-            continue
-        totals[e.model] = totals.get(e.model, 0) + (
-            e.input_tokens + e.output_tokens + e.cache_read_tokens + e.cache_write_tokens
-        )
-    rows = [{"m": m, "t": t} for m, t in totals.items()]
-    unpriced: dict[str, int] = {}
-    for r in rows:
-        if cost_for(r["m"], 1, 1) is None:
-            key = normalize_model(r["m"]) or r["m"]
-            unpriced[key] = unpriced.get(key, 0) + (r["t"] or 0)
-    out = []
-    for model, tokens in unpriced.items():
-        if tokens < c["min_tokens"]:
-            continue
-        severity = "warn" if tokens >= c["warn_tokens"] else "info"
-        out.append(
-            _finding(
-                "cost.unpriced_tokens",
-                model,
-                severity,
-                f"{tokens:,} tokens on '{model}' have no price",
-                f"Cost for model '{model}' can't be computed, so every cost insight and "
-                "metric silently undercounts.",
-                "Add a rate for it in ~/.cot/pricing.overrides.json (or fix the model-id "
-                "alias) so spend becomes visible.",
-                metric={"value": tokens, "unit": "tokens", "label": "unpriced tokens"},
-            )
-        )
     return out
 
 
@@ -1149,6 +1110,11 @@ def _reconcile(store: FindingsStore, findings: list[dict[str, Any]]) -> list[dic
         out.append(f)
     for fp, r in stored.items():
         if fp in current:
+            continue
+        # A finding from a rule since retired (cost.unpriced_tokens: a gap in
+        # cot's price list, not something to act on) is dropped, rather than
+        # left to auto-resolve and show as "fixed".
+        if r["rule_id"] not in RULES and not str(r["rule_id"]).startswith(user_rules.ID_PREFIX):
             continue
         if r["status"] == "active":
             last = db.parse_ts(r["last_seen"])

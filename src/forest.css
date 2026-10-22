@@ -374,6 +374,17 @@
 .vf .onb-src { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
 .vf .onb-src li { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .vf .onb-src li .mono { margin-left: auto; font-size: 11px; white-space: nowrap; }
+/* Findings list (dashboard/FindingsView.tsx): rows, and rules that fired many times folded into a group. */
+.vf .fnd-row { width: 100%; text-align: left; border: 0; background: none; border-radius: 10px; padding: 10px 12px; display: grid; gap: 4px; color: inherit; transition: background-color 150ms ease; }
+@media (hover: hover) and (pointer: fine) { .vf .fnd-row:hover { background: color-mix(in srgb, var(--v-fg) 3%, transparent); } }
+.vf .fnd-row[aria-current='true'] { background: var(--v-bg); box-shadow: 0 0 0 1px var(--v-mute); }
+.vf .fnd-top { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.vf .fnd-n { margin-left: auto; flex: none; min-width: 22px; height: 18px; padding: 0 6px; border-radius: 999px; display: inline-grid; place-items: center; font-size: 11px; color: var(--v-dim); background: var(--v-wash); font-variant-numeric: tabular-nums; }
+.vf .fnd-chev { flex: none; color: var(--v-faint); transition: transform 150ms var(--v-ease-out); }
+.vf .fnd-g[data-open] .fnd-chev { transform: rotate(180deg); }
+.vf .fnd-kids { list-style: none; margin: 2px 0 6px 18px; padding: 0 0 0 0; display: grid; gap: 1px; animation: onb-rise 180ms var(--v-ease-out) both; }
+.vf .fnd-row[data-nested] { padding: 8px 10px; gap: 2px; }
+@media (prefers-reduced-motion: reduce) { .vf .fnd-chev { transition: none; } .vf .fnd-kids { animation: onb-fade 150ms ease both; } }
 .vf .onb-f { padding: 16px 28px; font-size: 11px; border-top: 1px solid var(--v-line); }
 @media (max-width: 640px) { .vf .onb-h { padding: 14px 16px; } .vf .onb-l { display: none; } .vf .onb-t { font-size: 24px; line-height: 30px; } .vf .onb-m { padding-top: 28px; } }
 .vf .psv-banner { display: flex; align-items: center; gap: 10px; padding: 8px 20px; font-size: 13px; border-bottom: 1px solid color-mix(in srgb, var(--v-hot) 22%, transparent); background: color-mix(in srgb, var(--v-hot) 6%, var(--v-bg)); flex: none; }
