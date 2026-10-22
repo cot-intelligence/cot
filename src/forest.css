@@ -293,20 +293,6 @@
 .vf .onb-t { margin: 8px 0 0; font-size: 30px; line-height: 36px; font-weight: 600; letter-spacing: -0.025em; text-wrap: balance; }
 .vf .onb-lead { margin: 8px 0 0; font-size: 15px; line-height: 23px; max-width: 58ch; text-wrap: pretty; }
 .vf .onb-body { margin-top: 24px; display: grid; gap: 16px; }
-.vf .onb-modes { margin-top: 24px; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
-.vf .onb-mode { display: flex; flex-direction: column; gap: 10px; padding: 18px; border-radius: 16px; border: 1px solid var(--v-line); background: var(--v-surface); text-align: left; color: inherit; transition: border-color 150ms ease, background-color 150ms ease; }
-@media (hover: hover) and (pointer: fine) { .vf .onb-mode:hover { border-color: var(--v-mute); } }
-.vf .onb-mode[aria-checked='true'] { border-color: var(--v-hot); background: color-mix(in srgb, var(--v-hot) 5%, var(--v-surface)); }
-.vf .onb-mode-h { display: flex; align-items: center; gap: 10px; }
-.vf .onb-mode-h b { font-size: 15px; font-weight: 600; }
-.vf .onb-mode-ic { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; border: 1px solid var(--v-line); color: var(--v-dim); }
-.vf .onb-mode[aria-checked='true'] .onb-mode-ic { background: var(--v-hot); border-color: var(--v-hot); color: var(--v-onHot); }
-.vf .onb-radio { position: relative; margin-left: auto; width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--v-mute); background: var(--v-surface); transition: border-color 150ms ease; flex: none; }
-.vf .onb-mode[aria-checked='true'] .onb-radio { border-color: var(--v-hot); }
-.vf .onb-mode-lead { font-size: 13px; line-height: 20px; color: var(--v-dim); }
-.vf .onb-mode ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
-.vf .onb-mode li { display: flex; align-items: center; gap: 8px; }
-.vf .onb-mode li svg { color: var(--v-olive); }
 .vf .onb-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 28px; }
 .vf .onb-note { display: flex; align-items: flex-start; gap: 8px; margin: 0; font-size: 13px; line-height: 19px; color: var(--v-dim); }
 .vf .onb-note svg { margin-top: 2px; flex: none; }
@@ -325,22 +311,12 @@
 .vf .onb-next[data-auto]::before { content: ''; position: absolute; inset: 0; z-index: -1; background: color-mix(in srgb, var(--v-onHot) 16%, transparent); transform-origin: left center; animation: onb-fill var(--onb-auto, 6s) linear forwards; }
 @keyframes onb-fill { from { transform: scaleX(0); } }
 /* Agent checklist: a row per agent, the whole row is the checkbox. */
-.vf .onb-agents { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.vf .onb-agent { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 14px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--v-line); background: var(--v-surface); color: inherit; text-align: left; transition: border-color 150ms ease, background-color 150ms ease, transform 150ms var(--v-ease-out); }
-@media (hover: hover) and (pointer: fine) { .vf .onb-agent:hover { border-color: var(--v-mute); } }
-.vf .onb-agent:active { transform: scale(0.99); }
-.vf .onb-agent[aria-checked='true'] { border-color: var(--v-hot); background: color-mix(in srgb, var(--v-hot) 5%, var(--v-surface)); }
-.vf .onb-agent-mark { width: 36px; height: 36px; border-radius: 9px; display: grid; place-items: center; border: 1px solid var(--v-line); background: var(--v-bg); }
-.vf .onb-agent-t { display: grid; gap: 2px; min-width: 0; }
-.vf .onb-agent-t b { font-size: 14px; font-weight: 600; }
-.vf .onb-agent-t .dim { font-size: 13px; line-height: 19px; }
-.vf .onb-agent-m { font-size: 11px; color: var(--v-faint); white-space: nowrap; }
-.vf .onb-check { width: 18px; height: 18px; border-radius: 5px; display: grid; place-items: center; border: 1.5px solid var(--v-mute); background: var(--v-surface); transition: background-color 150ms ease, border-color 150ms ease; }
-.vf .onb-check svg { fill: none; stroke: var(--v-onHot); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 14; stroke-dashoffset: 14; transition: stroke-dashoffset 180ms var(--v-ease-out); }
-.vf .onb-agent[aria-checked='true'] .onb-check { background: var(--v-hot); border-color: var(--v-hot); }
-.vf .onb-agent[aria-checked='true'] .onb-check svg { stroke-dashoffset: 0; }
-@media (max-width: 560px) { .vf .onb-agent { grid-template-columns: auto minmax(0, 1fr) auto; } .vf .onb-agent-m { grid-column: 2; grid-row: 2; } }
 /* Connect: the install command, then each agent's live state. */
+/* Setup's first step: agents grouped by how cot gets their sessions. */
+.vf .onb-grp { display: grid; gap: 8px; }
+.vf .onb-grp-h { display: grid; gap: 2px; }
+.vf .onb-grp-h .dim { font-size: 13px; line-height: 19px; }
+.vf .onb-st[data-off] .onb-st-t, .vf .onb-st[data-off] .onb-st-mark { opacity: 0.6; transition: opacity 150ms ease; }
 .vf .onb-cmd { display: grid; gap: 8px; }
 .vf .onb-status { list-style: none; margin: 0; padding: 0; display: grid; border: 1px solid var(--v-line); border-radius: 12px; background: var(--v-surface); }
 .vf .onb-st { padding: 12px 14px; }
@@ -412,25 +388,20 @@
 /* ---- Onboarding motion. First-run only, so it can afford a little choreography; every value
    comes from the shared tokens. Step swaps are Framer (direction-aware, in Onboarding.tsx);
    everything here is CSS so it stays smooth while the scan and import requests are in flight. */
-.vf .onb-radio::after { content: ''; position: absolute; inset: 3.5px; border-radius: 50%; background: var(--v-hot); opacity: 0; transform: scale(0.4); transition: opacity 160ms var(--v-ease-out), transform 160ms var(--v-ease-out); }
-.vf .onb-mode[aria-checked='true'] .onb-radio::after { opacity: 1; transform: scale(1); }
-.vf .onb-mode { transition: border-color 150ms ease, background-color 150ms ease, transform 150ms var(--v-ease-out); }
-.vf .onb-mode:active { transform: scale(0.99); }
-.vf .onb-mode-ic { transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease; }
 /* Stepper: the circle fills as a step completes and the check settles in. */
 .vf .onb-n { transition: background-color 200ms ease, border-color 200ms ease, color 200ms ease; }
 .vf .onb-steps li[data-state='done'] .onb-n svg { animation: onb-check 240ms var(--v-ease-out) both; }
 @keyframes onb-check { from { opacity: 0; transform: scale(0.6); } }
 /* Content arrives in reading order, 45ms apart, rather than all at once. */
 @keyframes onb-rise { from { opacity: 0; transform: translateY(8px); } }
-.vf.onb .onb-modes > *, .vf.onb .psv-list > *, .vf.onb .onb-sum > *, .vf.onb .psv-gap-l > *, .vf.onb .psv-chips > *, .vf.onb .onb-agents > *, .vf.onb .onb-status > * {
+.vf.onb .psv-list > *, .vf.onb .onb-sum > *, .vf.onb .psv-gap-l > *, .vf.onb .psv-chips > *, .vf.onb .onb-status > * {
   animation: onb-rise 320ms var(--v-ease-out) both;
 }
-.vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-agents, .onb-status) > :nth-child(2) { animation-delay: 45ms; }
-.vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-agents, .onb-status) > :nth-child(3) { animation-delay: 90ms; }
-.vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-agents, .onb-status) > :nth-child(4) { animation-delay: 135ms; }
-.vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-agents, .onb-status) > :nth-child(5) { animation-delay: 180ms; }
-.vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-agents, .onb-status) > :nth-child(n+6) { animation-delay: 220ms; }
+.vf.onb :is(.psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-status) > :nth-child(2) { animation-delay: 45ms; }
+.vf.onb :is(.psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-status) > :nth-child(3) { animation-delay: 90ms; }
+.vf.onb :is(.psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-status) > :nth-child(4) { animation-delay: 135ms; }
+.vf.onb :is(.psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-status) > :nth-child(5) { animation-delay: 180ms; }
+.vf.onb :is(.psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-status) > :nth-child(n+6) { animation-delay: 220ms; }
 /* The import's progress card mounts when you press Start: it rises in to say "this began". */
 .vf.onb .onb-gap { animation: onb-rise 280ms var(--v-ease-out) both; }
 /* Phase steps fill rather than snap as the run moves from metadata to analysis. */
@@ -440,11 +411,9 @@
 .vf .onb-actions .vbtn-primary svg { transition: transform 160ms var(--v-ease-out); }
 @media (hover: hover) and (pointer: fine) { .vf .onb-actions .vbtn-primary:not(:disabled):hover svg:last-child { transform: translateX(2px); } }
 @media (prefers-reduced-motion: reduce) {
-  .vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-agents, .onb-status) > *, .vf.onb .onb-gap { animation: onb-fade 200ms ease both; }
+  .vf.onb :is(.psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-status) > *, .vf.onb .onb-gap { animation: onb-fade 200ms ease both; }
   .vf .onb-steps li[data-state='done'] .onb-n svg { animation: onb-fade 200ms ease both; }
-  .vf .onb-radio::after { transform: none; }
-  .vf .onb-mode:active, .vf .onb-agent:active { transform: none; }
-  .vf .onb-check svg, .vf .onb-chev { transition: none; }
+    .vf .onb-chev { transition: none; }
   .vf .onb-st[data-tone='wait'] .onb-dot { animation: none; }
   .vf .onb-manual { animation: onb-fade 200ms ease both; }
 }

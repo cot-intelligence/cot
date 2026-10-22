@@ -87,7 +87,7 @@ export function ConnectHooks({ agents: agentIds, onBack, onContinue, autoSkip }:
 
   return (
     <Shell
-      eyebrow="Live hooks · step 2 of 3"
+      eyebrow="Set up cot · step 2"
       title={allConnected ? 'Hooks connected' : 'Connect your agents'}
       lead={
         allConnected
