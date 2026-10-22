@@ -29,9 +29,9 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       signature: ${{ steps.artifacts.outputs.signature }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -39,7 +39,7 @@ jobs:
             package-lock.json
             desktop/package-lock.json
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
