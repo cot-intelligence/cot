@@ -59,10 +59,12 @@ Docker users still see it.
 
 ## Releasing
 
-`.github/workflows/desktop-release.yml` runs on `v*` tags. It builds on
-`macos-14` (Apple Silicon), runs `verify-bundle.sh`, uploads the DMG,
-`cot.app.tar.gz` and `.sig` to the GitHub Release, and opens a PR on the site
-repo that updates `public/version.json`. Merging that PR ships the update.
+`.github/workflows/release.yml` runs on `v*` tags: CI and the Collector checks
+first, then the Docker image and `desktop-release.yml` side by side. The
+desktop build runs on `macos-14` (Apple Silicon), runs `verify-bundle.sh` and
+uploads the DMG, `cot.app.tar.gz` and `.sig` to a draft GitHub Release. The
+release is published once both builds pass, and then a PR on the site repo
+updates `public/version.json`. Merging that PR ships the update.
 
 One-time setup:
 

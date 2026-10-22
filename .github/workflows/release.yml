@@ -1,0 +1,97 @@
+name: Release
+
+# Pushing a v* tag is the release. CI and the Collector checks run on the
+# tagged commit first; only when both pass do the Docker image and cot.app
+# build, side by side. The desktop build attaches its files to a draft
+# GitHub Release, which is published once both builds are in, so a failed
+# build never leaves a public, half-filled release. "Re-run failed jobs"
+# picks up from wherever it stopped.
+#
+# Secrets and variables: see docker-publish.yml and desktop-release.yml, plus
+#   SITE_REPO (variable)        e.g. cot-intelligence/website; the site PR is skipped when unset
+#   SITE_REPO_TOKEN (secret)    token that can push branches and open PRs on the site repo
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  checks:
+    uses: ./.github/workflows/checks.yml
+
+  docker:
+    needs: [ci, checks]
+    uses: ./.github/workflows/docker-publish.yml
+    permissions:
+      contents: read
+      packages: write
+
+  desktop:
+    needs: [ci, checks]
+    uses: ./.github/workflows/desktop-release.yml
+    secrets: inherit
+    permissions:
+      contents: write
+
+  publish:
+    needs: [docker, desktop]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "${GITHUB_REF_NAME}" --draft=false --latest
+
+  site-pr:
+    needs: [desktop, publish]
+    if: vars.SITE_REPO != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SITE_REPO }}
+          token: ${{ secrets.SITE_REPO_TOKEN }}
+
+      - name: Point version.json at the new build
+        env:
+          VERSION: ${{ needs.desktop.outputs.version }}
+          SIGNATURE: ${{ needs.desktop.outputs.signature }}
+          URL: https://github.com/${{ github.repository }}/releases/download/v${{ needs.desktop.outputs.version }}/cot.app.tar.gz
+        run: |
+          file=public/version.json
+          jq --arg v "${VERSION}" --arg url "${URL}" --arg sig "${SIGNATURE}" \
+             --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+             '.version = $v | .pub_date = $date
+              | .platforms["darwin-aarch64"] = {url: $url, signature: $sig}' \
+             "${file}" > "${file}.tmp"
+          mv "${file}.tmp" "${file}"
+          cat "${file}"
+
+      - name: Open PR
+        env:
+          GH_TOKEN: ${{ secrets.SITE_REPO_TOKEN }}
+          VERSION: ${{ needs.desktop.outputs.version }}
+        run: |
+          branch="release/desktop-v${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "${branch}"
+          git commit -am "release: cot ${VERSION} desktop update"
+          git push --force origin "${branch}"
+          gh pr create --repo "${{ vars.SITE_REPO }}" --head "${branch}" \
+            --title "release: cot ${VERSION} desktop update" \
+            --body "Points \`version.json\` at the cot.app ${VERSION} build from ${{ github.server_url }}/${{ github.repository }}/releases/tag/v${VERSION}. Merging ships the update to installed apps. Check \`notes\` before merging." \
+            || echo "PR already exists"

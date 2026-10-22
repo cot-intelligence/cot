@@ -4,9 +4,9 @@
 #   scripts/release.sh 1.11.0 "One-line summary for the tag"
 #   SKIP_TESTS=1 scripts/release.sh 1.11.0 "…"     skip `just test`
 #
-# Pushing the tag is the release: docker-publish builds ghcr.io/…/cot:v<version>
-# (and :latest), and desktop-release builds, signs and publishes the DMG and
-# opens the site PR that ships the update to installed apps. So this stops
+# Pushing the tag is the release: release.yml runs CI, then builds
+# ghcr.io/…/cot:v<version> (and :latest) and the signed DMG, publishes the
+# GitHub Release, and opens the site PR that ships the update to installed apps. So this stops
 # before any push and prints the commands instead.
 set -euo pipefail
 
@@ -51,7 +51,7 @@ cat <<EOF
 To publish, push main and then the tag (over SSH):
   git push origin main
   git push origin v${VERSION}
-That runs docker-publish (image v${VERSION} + latest) and desktop-release (DMG + site PR).
+That runs release.yml: CI, then the image (v${VERSION} + latest) and the DMG, then the release and site PR.
 Then update cot.run: public/version.json, public/install fallback, src/content.ts badge.
 
 To undo before pushing:
