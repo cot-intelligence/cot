@@ -1,4 +1,5 @@
 import type { AgentId } from './agents';
+import { AGENT_LABELS } from '../components/forest/AgentMark';
 
 /** Display label for a session source / type. Falls back to a humanized
  *  version of any custom source string (API, custom apps, etc.). */
@@ -26,6 +27,7 @@ export function sourceLabel(source: string): string {
     case 'otel':
       return 'OpenTelemetry';
     default:
+      if (AGENT_LABELS[source]) return AGENT_LABELS[source];
       return source
         .replace(/[_-]+/g, ' ')
         .replace(/\b\w/g, (c) => c.toUpperCase());

@@ -1557,7 +1557,9 @@ export async function sendTestEvent(source: AgentId): Promise<string> {
 
 // ---------------------------------------------------------------- passive mode
 
-export type PassiveAgent = 'claude' | 'cursor' | 'codex' | 'opencode' | 'hermes';
+/** An agent passive import can read: the bridge's reader registry, so the
+ *  hook agents plus every agent read from its files on disk. */
+export type PassiveAgent = 'claude' | 'cursor' | 'codex' | 'opencode' | 'hermes' | (string & {});
 
 /** What's on disk for one agent (a scan, nothing imported) plus sessions already in cot. */
 export interface PassiveAgentDetail {

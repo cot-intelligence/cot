@@ -992,7 +992,7 @@ def _ingest_batch(source: str, bodies: list[dict[str, Any]]) -> list[dict[str, A
 
 @app.post("/v1/ingest/{source}")
 async def ingest(source: str, request: Request) -> dict[str, Any]:
-    if source not in AGENTS:
+    if source not in AGENTS and source not in passive.AGENTS:
         raise HTTPException(status_code=404, detail=f"Unknown source: {source}")
     body, malformed_error = await _ingest_body(request)
     # The writes below are synchronous SQLite calls (and may wait on the write
@@ -1556,6 +1556,7 @@ def _passive_payload() -> dict[str, Any]:
         "next_scheduled": passive.next_scheduled(),
         "running": passive.running(),
         "agents_detail": [{**passive.scan(a), "sessions": counts.get(a, 0)} for a in passive.AGENTS],
+        "readers": passive.reader_info(),
         "runs": passive.runs(10),
         "presets": cron.PRESETS,
     }

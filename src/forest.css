@@ -220,11 +220,29 @@
 .vf .dd-ic-initial { display: grid; place-items: center; width: 100%; height: 100%; background: var(--v-hot); color: var(--v-onHot); font-size: 11px; font-weight: 600; }
 .vf .dd-none { padding: 14px 10px; font-size: 13px; color: var(--v-faint); text-align: center; }
 /* Passive (transcripts-only) mode: components/passive/PassiveParts.tsx */
-.vf .psv-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.vf .psv-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .vf .psv-src { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--v-line); background: var(--v-surface); transition: opacity 150ms ease; }
 .vf .psv-src[data-off] .psv-meta, .vf .psv-src[data-off] .psv-path { opacity: 0.6; }
 .vf .psv-meta { margin: 6px 0 0; font-size: 12px; color: var(--v-dim); }
 .vf .psv-path { margin: 2px 0 0; font-size: 11px; max-width: 46ch; }
+.vf .psv-sources { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.vf .psv-absent { border-radius: 12px; border: 1px solid var(--v-line); }
+.vf .psv-absent-t { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 10px 14px; border-radius: 11px; font-size: 13px; color: var(--v-dim); text-align: left; transition: background-color 150ms ease, transform 150ms var(--v-ease-out); }
+.vf .psv-absent-t:active { transform: scale(0.99); }
+@media (hover: hover) and (pointer: fine) { .vf .psv-absent-t:hover { background: color-mix(in srgb, var(--v-fg) 3%, transparent); color: var(--v-fg); } }
+.vf .psv-absent-t > svg { flex: none; color: var(--v-faint); transition: transform 150ms var(--v-ease-out); }
+.vf .psv-absent[data-open] .psv-absent-t > svg { transform: rotate(90deg); }
+.vf .psv-absent[data-open] .psv-absent-h { visibility: hidden; }
+.vf .psv-absent-n { flex: none; font-size: 11px; color: var(--v-faint); font-variant-numeric: tabular-nums; }
+.vf .psv-absent-h { min-width: 0; margin-left: auto; padding-left: 12px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vf .psv-absent-l { list-style: none; margin: 0; padding: 4px 6px 6px; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr)); gap: 2px 8px; border-top: 1px solid var(--v-line); animation: psv-reveal 180ms var(--v-ease-out) both; }
+.vf .psv-absent-r { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px; border-radius: 8px; }
+.vf .psv-absent-r .psv-path { max-width: 30ch; }
+.vf .psv-absent-r[data-off] .psv-path { opacity: 0.6; }
+@keyframes psv-reveal { from { opacity: 0; transform: translateY(-4px); } }
+@media (prefers-reduced-motion: reduce) { .vf .psv-absent-l { animation: psv-fade 150ms ease both; } .vf .psv-absent-t > svg { transition: none; } }
+@keyframes psv-fade { from { opacity: 0; } }
+@media (max-width: 560px) { .vf .psv-absent-h { display: none; } }
 .vf .psv-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .vf .psv-chip { height: 30px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--v-line); background: var(--v-surface); font-size: 12px; color: var(--v-dim); transition: border-color 150ms ease, color 150ms ease, background-color 150ms ease; }
 @media (hover: hover) and (pointer: fine) { .vf .psv-chip:hover { border-color: var(--v-mute); color: var(--v-fg); } }

@@ -24,17 +24,15 @@ from typing import Any, Callable
 
 from . import cron, db, store, timeutil
 
-AGENTS = ("claude", "cursor", "codex", "opencode", "hermes")
-_HOME_ENV = {"claude": "COT_CLAUDE_HOME", "cursor": "COT_CURSOR_HOME", "codex": "COT_CODEX_HOME",
-             "opencode": "COT_OPENCODE_HOME", "hermes": "COT_HERMES_HOME"}
-_HOME_DIR = {"claude": ".claude", "cursor": ".cursor", "codex": ".codex",
-             "opencode": ".local/share/opencode", "hermes": ".hermes"}
 # Same globs as the bridge's ``_discover_transcripts``.
 _GLOB = {
     "claude": "projects/**/*.jsonl",
     "cursor": "projects/**/agent-transcripts/**/*.jsonl",
     "codex": "sessions/**/*.jsonl",
 }
+# The agents passive mode offered before the bridge's reader registry; a saved
+# agent list without ``passive_agents_known`` was chosen from these.
+_LEGACY_AGENTS = ("claude", "cursor", "codex", "opencode", "hermes")
 # Run history behind the Settings import chart.
 RUNS_KEPT_DAYS = 30
 # A transcript written to this recently belongs to a session that's still
@@ -53,12 +51,20 @@ def config() -> dict[str, Any]:
         agents = json.loads(db.get_setting("passive_agents") or "null")
     except ValueError:
         agents = None
+    try:
+        known = json.loads(db.get_setting("passive_agents_known") or "null")
+    except ValueError:
+        known = None
     if not isinstance(agents, list):
-        agents = list(AGENTS)
+        chosen = {a for a in AGENTS if not readers()[a].opt_in}
+    else:
+        # Agents added since the list was saved start on, unless opt-in.
+        seen = set(known) if isinstance(known, list) else set(_LEGACY_AGENTS)
+        chosen = set(agents) | {a for a in AGENTS if a not in seen and not readers()[a].opt_in}
     expr = db.get_setting("passive_cron") or cron.DEFAULT_CRON
     return {
         "enabled": db.get_setting("passive_enabled") == "1",
-        "agents": [a for a in AGENTS if a in agents],
+        "agents": [a for a in AGENTS if a in chosen],
         "cron": expr,
     }
 
@@ -70,6 +76,7 @@ def update_config(*, enabled: bool | None = None, agents: list[str] | None = Non
         db.set_setting("passive_next_run", "")
     if agents is not None:
         db.set_setting("passive_agents", json.dumps([a for a in AGENTS if a in agents]))
+        db.set_setting("passive_agents_known", json.dumps(list(AGENTS)))
     if enabled is not None:
         db.set_setting("passive_enabled", "1" if enabled else "0")
         if enabled:
@@ -95,16 +102,7 @@ def _import_home() -> Path:
 
 
 def transcript_root(agent: str) -> Path:
-    if os.environ.get("COT_IMPORT_HOME"):
-        return _import_home() / _HOME_DIR[agent]
-    env = os.environ.get(_HOME_ENV[agent])
-    if env:
-        return Path(env)
-    if agent == "opencode" and os.environ.get("XDG_DATA_HOME"):
-        return Path(os.environ["XDG_DATA_HOME"]) / "opencode"
-    if agent == "hermes" and os.environ.get("HERMES_HOME"):
-        return Path(os.environ["HERMES_HOME"])
-    return Path.home() / _HOME_DIR[agent]
+    return readers()[agent].root()
 
 
 _bridge_module: Any = None
@@ -130,16 +128,18 @@ def _bridge() -> Any:
     return _bridge_module
 
 
-def _opencode_sessions(root: Path) -> list[dict[str, Any]]:
-    try:
-        return _bridge()._opencode_session_index(root)  # noqa: SLF001
-    except Exception:  # noqa: BLE001 - an unreadable store reads as empty
-        return []
+def readers() -> dict[str, Any]:
+    """The bridge's reader registry: every agent passive mode can import."""
+    return _bridge().READERS
 
 
-def _hermes_sessions(root: Path) -> list[dict[str, Any]]:
+def reader_info() -> list[dict[str, Any]]:
+    return [r.describe() for r in readers().values()]
+
+
+def _store_sessions(agent: str) -> list[dict[str, Any]]:
     try:
-        return _bridge()._hermes_session_index(root)  # noqa: SLF001
+        return readers()[agent].sessions()
     except Exception:  # noqa: BLE001 - an unreadable store reads as empty
         return []
 
@@ -164,8 +164,15 @@ def _opencode_store_bytes(root: Path) -> int:
     return total
 
 
+def _glob(agent: str) -> str | None:
+    return _GLOB.get(agent) or readers()[agent].glob
+
+
 def _project_of(agent: str, root: Path, path: Path) -> str | None:
     """Project folder name for Claude/Cursor (``projects/<encoded cwd>/``)."""
+    reader = readers()[agent]
+    if reader.meta is not None:
+        return (reader.meta(path) or {}).get("cwd")
     if agent == "codex":
         return None
     try:
@@ -202,20 +209,9 @@ def scan(agent: str) -> dict[str, Any]:
     projects: set[str] = set()
     oldest = newest = None
     active_after = time.time() - ACTIVE_WINDOW_MIN * 60
-    if agent == "opencode":
-        for sess in _opencode_sessions(resolved):
-            updated = (sess.get("updated") or 0) / 1000
-            out["transcripts"] += 1
-            oldest = updated if oldest is None else min(oldest, updated)
-            newest = updated if newest is None else max(newest, updated)
-            if updated >= active_after:
-                out["active"] += 1
-            if sess.get("directory"):
-                projects.add(sess["directory"])
-        out["bytes"] = _opencode_store_bytes(resolved)
-    if agent == "hermes":
-        for sess in _hermes_sessions(resolved):
-            if sess.get("parent_session_id"):
+    if readers()[agent].kind == "store":
+        for sess in _store_sessions(agent):
+            if sess.get("parent_id"):
                 continue  # subagent and compression children fold into their parent
             updated = sess.get("updated") or 0
             out["transcripts"] += 1
@@ -225,8 +221,13 @@ def scan(agent: str) -> dict[str, Any]:
                 out["active"] += 1
             if sess.get("cwd"):
                 projects.add(sess["cwd"])
-        out["bytes"] = _hermes_store_bytes(resolved)
-    for path in (resolved.glob(_GLOB[agent]) if agent in _GLOB else ()):
+            out["bytes"] += int(sess.get("bytes") or 0)
+        if agent == "opencode":
+            out["bytes"] = _opencode_store_bytes(resolved)
+        elif agent == "hermes":
+            out["bytes"] = _hermes_store_bytes(resolved)
+    glob = _glob(agent)
+    for path in (resolved.glob(glob) if glob else ()):
         try:
             st = path.stat()
         except OSError:
@@ -284,19 +285,13 @@ def _on_disk(agent: str) -> list[tuple[str, str, float]]:
         return []
     quiet_before = time.time() - ACTIVE_WINDOW_MIN * 60
     out: list[tuple[str, str, float]] = []
-    if agent == "opencode":
-        for sess in _opencode_sessions(resolved):
-            updated = (sess.get("updated") or 0) / 1000
-            if updated < quiet_before:
-                out.append((sess["id"], f"opencode:{sess['id']}", updated))
-        return out
-    if agent == "hermes":
-        for sess in _hermes_sessions(resolved):
+    if readers()[agent].kind == "store":
+        for sess in _store_sessions(agent):
             updated = sess.get("updated") or 0
-            if not sess.get("parent_session_id") and updated < quiet_before:
-                out.append((sess["id"], f"hermes:{sess['id']}", updated))
+            if not sess.get("parent_id") and updated < quiet_before:
+                out.append((str(sess["id"]), f"{agent}:{sess['id']}", updated))
         return out
-    for path in resolved.glob(_GLOB[agent]):
+    for path in resolved.glob(_glob(agent) or "-"):
         if path.parent.name == "subagents":
             continue
         m = _UUID_RE.search(path.stem)
@@ -648,3 +643,7 @@ def start_scheduler(interval_s: float = 20.0) -> threading.Thread | None:
     t = threading.Thread(target=loop, daemon=True, name="cot-passive-scheduler")
     t.start()
     return t
+
+
+# Every agent the bridge can import, in its registry order.
+AGENTS: tuple[str, ...] = tuple(readers())

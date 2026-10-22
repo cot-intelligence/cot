@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import type { AgentId } from '../../lib/agents';
 import { getHookStatus } from '../../lib/api';
+import { isKnownAgent } from '../../lib/sourceLabels';
 import { useTheme } from '../../lib/theme';
 import { Icon } from '../forest/icons';
 import { EASE_OUT } from '../forest/motion';
@@ -121,8 +122,10 @@ export function Onboarding({ onComplete }: OnboardingProps) {
       step={step}
       onStep={setStep}
       onFinish={(chosen, origin) => {
-        saveAgents(chosen);
-        onComplete(chosen, origin);
+        // The saved list is of hook agents; ones read only from disk have nothing to install.
+        const hookAgents = chosen.filter(isKnownAgent);
+        saveAgents(hookAgents);
+        onComplete(hookAgents, origin);
       }}
     />
   ) : step === 1 ? (

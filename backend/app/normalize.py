@@ -424,8 +424,9 @@ def normalize(source: Source, body: dict[str, Any] | None) -> dict[str, Any]:
         tool = _cursor_tool(hook, body)
     else:
         # Claude Code, Codex, OpenCode, and Hermes use the same bridge payload shape.
-        # OpenTelemetry records keep the agent otlp.py named from service.name.
-        if source not in ("codex", "opencode", "hermes") and not body.get("_otel"):
+        # OpenTelemetry records keep the agent otlp.py named from service.name,
+        # and the bridge's passive readers the agent they read.
+        if source not in ("codex", "opencode", "hermes") and not body.get("_otel") and not body.get("_reader"):
             source = "claude"
         session_id = body.get("session_id") or "unknown"
         cwd = body.get("cwd")

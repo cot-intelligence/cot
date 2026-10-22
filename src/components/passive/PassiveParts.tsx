@@ -33,7 +33,15 @@ export function scanLine(d: PassiveAgentDetail): string {
     .join(' · ');
 }
 
-/** Per-agent on/off with what was found on disk for each. */
+/** Agents that never show up on their own: Aider writes its history inside
+ *  each repo, so the collector only searches folders named in AIDER_DIR. */
+const NEEDS_SETUP: Record<string, { short: string; long: string }> = {
+  aider: { short: 'Needs AIDER_DIR', long: 'Set AIDER_DIR to the folders that hold your repos (":"-separated)' },
+};
+
+/** Per-agent on/off with what was found on disk for each. Agents with nothing
+ *  on this machine fold into one row, so a long registry doesn't bury the few
+ *  that matter here; their switches still decide what a later run picks up. */
 export function AgentSources({
   detail,
   enabled,
@@ -45,30 +53,70 @@ export function AgentSources({
   onToggle: (agent: PassiveAgent, on: boolean) => void;
   disabled?: boolean;
 }) {
+  const found = detail.filter((d) => d.readable || d.sessions > 0);
+  const absent = detail.filter((d) => !d.readable && d.sessions === 0);
+  // Open by default only when there's nothing else to look at.
+  const [open, setOpen] = useState(found.length === 0);
   return (
-    <ul className="psv-list">
-      {detail.map((d) => {
-        const on = enabled.includes(d.agent);
-        return (
-          <li key={d.agent} className="psv-src" data-off={!on || undefined}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <Agent id={d.agent} />
-                {d.sessions > 0 && <span className="vchip c-dim">{fmt.n(d.sessions)} in cot</span>}
-                {d.active > 0 && (
-                  <span className="vchip c-info" title={`Written to in the last ${ACTIVE_WINDOW_MIN} minutes`}>
-                    {d.active} running now
-                  </span>
-                )}
-              </div>
-              <p className="psv-meta mono">{scanLine(d)}</p>
-              <p className="psv-path mono faint truncate" title={d.root}>{homePath(d.root)}</p>
-            </div>
-            <Switch on={on} onChange={(v) => onToggle(d.agent, v)} label={`Import ${agentLabel(d.agent)} transcripts`} disabled={disabled} />
-          </li>
-        );
-      })}
-    </ul>
+    <div className="psv-sources">
+      {found.length > 0 && (
+        <ul className="psv-list">
+          {found.map((d) => {
+            const on = enabled.includes(d.agent);
+            return (
+              <li key={d.agent} className="psv-src" data-off={!on || undefined}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <Agent id={d.agent} />
+                    {d.sessions > 0 && <span className="vchip c-dim">{fmt.n(d.sessions)} in cot</span>}
+                    {d.active > 0 && (
+                      <span className="vchip c-info" title={`Written to in the last ${ACTIVE_WINDOW_MIN} minutes`}>
+                        {d.active} running now
+                      </span>
+                    )}
+                  </div>
+                  <p className="psv-meta mono">{scanLine(d)}</p>
+                  <p className="psv-path mono faint truncate" title={d.root}>{homePath(d.root)}</p>
+                </div>
+                <Switch on={on} onChange={(v) => onToggle(d.agent, v)} label={`Import ${agentLabel(d.agent)} transcripts`} disabled={disabled} />
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {absent.length > 0 && (
+        <div className="psv-absent" data-open={open || undefined}>
+          <button type="button" className="psv-absent-t" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+            <Icon name="chevron" size={14} />
+            <span>Not found on this machine</span>
+            <span className="psv-absent-n mono">{absent.length}</span>
+            <span className="psv-absent-h faint">
+              {absent.slice(0, 4).map((d) => agentLabel(d.agent)).join(', ')}
+              {absent.length > 4 ? ` and ${absent.length - 4} more` : ''}
+            </span>
+          </button>
+          {open && (
+            <ul className="psv-absent-l">
+              {absent.map((d) => {
+                const on = enabled.includes(d.agent);
+                const hint = NEEDS_SETUP[d.agent];
+                return (
+                  <li key={d.agent} className="psv-absent-r" data-off={!on || undefined}>
+                    <div style={{ minWidth: 0 }}>
+                      <Agent id={d.agent} />
+                      <p className="psv-path mono faint truncate" title={hint ? hint.long : d.root}>
+                        {hint ? hint.short : homePath(d.root)}
+                      </p>
+                    </div>
+                    <Switch on={on} onChange={(v) => onToggle(d.agent, v)} label={`Import ${agentLabel(d.agent)} transcripts when it appears`} disabled={disabled} />
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

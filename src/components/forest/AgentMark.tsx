@@ -16,16 +16,36 @@ export const AGENT_LABELS: Record<string, string> = {
   opencode: 'OpenCode',
   hermes: 'Hermes',
   cowork: 'Cowork',
-  // Agents that arrive over OpenTelemetry, named from their service.name.
+  // Agents that arrive over OpenTelemetry, named from their service.name,
+  // and the ones passive import reads from disk (the bridge's READERS).
   'gemini-cli': 'Gemini CLI',
   'github-copilot': 'GitHub Copilot',
   otel: 'OpenTelemetry',
+  'copilot-cli': 'Copilot CLI',
+  'claude-cowork': 'Claude Cowork',
+  zed: 'Zed',
+  trae: 'Trae',
+  'trae-cli': 'TRAE CLI',
+  goose: 'Goose',
+  crush: 'Crush',
+  'qwen-code': 'Qwen Code',
+  'cline-cli': 'Cline CLI',
+  cline: 'Cline',
+  'roo-code': 'Roo Code',
+  'kilo-code': 'Kilo Code',
+  kilo: 'Kilo CLI',
+  kimi: 'Kimi CLI',
+  'kiro-cli': 'Kiro CLI',
+  openhands: 'OpenHands',
+  amp: 'Amp',
+  aider: 'Aider',
+  windsurf: 'Windsurf',
 };
 export const agentLabel = (id: string) => AGENT_LABELS[id] ?? id[0].toUpperCase() + id.slice(1);
 
 export function AgentMark({ id, className = '', size = 14 }: { id: AgentId | string; className?: string; size?: number }) {
   const st = { width: size, height: size, flex: 'none' as const };
-  if (id === 'claude' || id === 'cowork') {
+  if (id === 'claude' || id === 'cowork' || id === 'claude-cowork') {
     return (
       <svg viewBox="0 -.01 39.5 39.53" fill="none" className={className} style={st} aria-hidden="true">
         <path d={CLAUDE_PATH} fill="#d97757" />
@@ -57,9 +77,13 @@ export function AgentMark({ id, className = '', size = 14 }: { id: AgentId | str
     );
   }
   if (id !== 'cursor') {
+    // No official mark to use: the agent's initial in a hairline square, so a
+    // list of many agents still scans by letter instead of identical circles.
+    const initial = (AGENT_LABELS[id] ?? id).replace(/[^A-Za-z0-9]/g, '')[0]?.toUpperCase() ?? '?';
     return (
       <svg viewBox="0 0 16 16" className={className} style={st} aria-hidden="true">
-        <circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+        <rect x="1.25" y="1.25" width="13.5" height="13.5" rx="3.5" fill="none" stroke="currentColor" strokeWidth="1.2" opacity="0.55" />
+        <text x="8" y="11.4" textAnchor="middle" fontSize="9" fontWeight="600" fontFamily="var(--v-mono, ui-monospace)" fill="currentColor">{initial}</text>
       </svg>
     );
   }

@@ -235,12 +235,12 @@ def test_import_is_incremental(hermes_home, monkeypatch):
     live: dict = {}
     monkeypatch.setattr(bridge, "_fetch_session_origins", lambda: dict(live))
     offsets: dict = {}
-    assert bridge._import_hermes(offsets, {}, verbose=False) == 10
-    assert bridge._import_hermes(offsets, {}, verbose=False) == 0
-    assert bridge._import_hermes({}, {"cli1": "hook"}, verbose=False) == 0  # live capture wins
+    assert bridge._import_store(bridge.READERS["hermes"], offsets, {}, verbose=False) == 10
+    assert bridge._import_store(bridge.READERS["hermes"], offsets, {}, verbose=False) == 0
+    assert bridge._import_store(bridge.READERS["hermes"], {}, {"cli1": "hook"}, verbose=False) == 0  # live capture wins
     # A session the plugin began capturing after the import's origin snapshot.
     live["cli1"] = "hook"
-    assert bridge._import_hermes({}, {}, verbose=False) == 0
+    assert bridge._import_store(bridge.READERS["hermes"], {}, {}, verbose=False) == 0
 
 
 def test_unreadable_store_reads_as_empty(tmp_path):
