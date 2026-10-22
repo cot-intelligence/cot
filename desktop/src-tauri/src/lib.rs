@@ -134,8 +134,7 @@ impl Status {
 struct TrayItems {
     status: MenuItem<tauri::Wry>,
     copy_endpoint: MenuItem<tauri::Wry>,
-    install_hooks: MenuItem<tauri::Wry>,
-    repair_hooks: MenuItem<tauri::Wry>,
+    agent_hooks: MenuItem<tauri::Wry>,
 }
 
 struct AppState {
@@ -216,8 +215,7 @@ fn refresh_tray(app: &AppHandle) {
     if let Some(items) = state.tray.lock().unwrap().as_ref() {
         let _ = items.status.set_text(status.summary());
         let _ = items.copy_endpoint.set_enabled(serving);
-        let _ = items.install_hooks.set_enabled(serving);
-        let _ = items.repair_hooks.set_enabled(serving);
+        let _ = items.agent_hooks.set_enabled(serving);
     }
     sync_tray_glyph(app);
 }
@@ -293,16 +291,12 @@ fn watch_collector(app: AppHandle) {
     });
 }
 
-/// Runs the same install.sh the curl path uses, served by our collector.
-/// Interactive prompts need a terminal, so it opens in Terminal.app.
-fn run_hook_installer(port: u16, repair: bool) {
-    let mut command = format!("COT_ENDPOINT=http://127.0.0.1:{port} curl -fsSL http://127.0.0.1:{port}/install.sh | sh");
-    if repair {
-        command.push_str(" -s -- --repair");
+/// Settings → Collector, where the collector wires or repairs hooks itself.
+fn show_agent_hooks(app: &AppHandle) {
+    if let Some(window) = main_window(app) {
+        let _ = window.eval("location.hash = '#/settings/collector'");
     }
-    let escaped = command.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!("tell application \"Terminal\"\n  activate\n  do script \"{escaped}\"\nend tell");
-    let _ = std::process::Command::new("/usr/bin/osascript").arg("-e").arg(script).spawn();
+    show_main_window(app);
 }
 
 /// The menu-bar "cot." pill: filled while the collector serves, outlined
@@ -322,8 +316,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)?;
     let copy_endpoint = MenuItem::with_id(app, "copy-endpoint", "Copy Endpoint", false, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "Restart Collector", true, None::<&str>)?;
-    let install_hooks = MenuItem::with_id(app, "install-hooks", "Install Agent Hooks…", false, None::<&str>)?;
-    let repair_hooks = MenuItem::with_id(app, "repair-hooks", "Repair Agent Hooks…", false, None::<&str>)?;
+    let agent_hooks = MenuItem::with_id(app, "agent-hooks", "Agent Hooks…", false, None::<&str>)?;
     let reveal = MenuItem::with_id(app, "reveal-data", "Reveal Data Folder", true, None::<&str>)?;
     let open_log = MenuItem::with_id(app, "open-log", "Open Collector Log", true, None::<&str>)?;
     let at_login = app.autolaunch().is_enabled().unwrap_or(false);
@@ -335,8 +328,8 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(
         app,
         &[
-            &status, &sep()?, &open, &copy_endpoint, &sep()?, &restart, &sep()?, &install_hooks,
-            &repair_hooks, &reveal, &open_log, &login, &sep()?, &updates, &quit,
+            &status, &sep()?, &open, &copy_endpoint, &sep()?, &restart, &sep()?, &agent_hooks,
+            &reveal, &open_log, &login, &sep()?, &updates, &quit,
         ],
     )?;
 
@@ -354,11 +347,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 }
             }
             "restart" => restart_collector(app),
-            "install-hooks" | "repair-hooks" => {
-                if let Some(port) = app.state::<AppState>().status().port() {
-                    run_hook_installer(port, event.id().as_ref() == "repair-hooks");
-                }
-            }
+            "agent-hooks" => show_agent_hooks(app),
             "reveal-data" => {
                 let state = app.state::<AppState>();
                 let db = state.home.database_file();
@@ -382,7 +371,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .build(app)?;
 
     *app.state::<AppState>().tray.lock().unwrap() =
-        Some(TrayItems { status, copy_endpoint, install_hooks, repair_hooks });
+        Some(TrayItems { status, copy_endpoint, agent_hooks });
     Ok(())
 }
 

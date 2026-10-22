@@ -30,7 +30,11 @@ import {
   getMcpInstall,
   setMcpInstalled,
   type McpInstallAgent,
+  getHooksInstall,
+  installHooks,
+  type HooksInstallStatus,
 } from '../../lib/api';
+import { sourceLabel } from '../../lib/sourceLabels';
 import { setPref, usePrefs, type Prefs } from '../../lib/prefs';
 import { useTheme } from '../../lib/theme';
 import { usePolling } from '../../lib/usePolling';
@@ -304,7 +308,11 @@ function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) 
   const [v, setV] = useState<VersionInfo | null>(null);
   const [checking, setChecking] = useState(false);
   const [checkError, setCheckError] = useState<string | null>(null);
+  const [direct, setDirect] = useState<HooksInstallStatus | null>(null);
+  const [wiring, setWiring] = useState(false);
+  const [wireNote, setWireNote] = useState<string | null>(null);
   useEffect(() => {
+    getHooksInstall().then(setDirect).catch(() => {});
     getRetention().then(setR).catch(() => {});
     getVersionInfo().then(setV).catch(() => {});
   }, []);
@@ -319,6 +327,24 @@ function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) 
       setCheckError('Could not reach the collector.');
     } finally {
       setChecking(false);
+    }
+  };
+  const unwired = (hooks?.agents ?? []).filter((h) => h.health === 'not_installed' || h.health === 'missing_hooks').map((h) => h.source);
+  const wire = async () => {
+    setWiring(true);
+    setWireNote(null);
+    try {
+      const res = await installHooks(unwired);
+      const done = res.agents.filter((a) => !res.skipped.includes(a));
+      setWireNote([
+        done.length ? `Connected ${done.map(sourceLabel).join(', ')}.` : '',
+        res.skipped.length ? `Not on this machine: ${res.skipped.map(sourceLabel).join(', ')}.` : '',
+        done.includes('codex') ? 'In Codex, run /hooks and trust cot.' : '',
+      ].filter(Boolean).join(' '));
+    } catch (e) {
+      setWireNote(e instanceof Error ? e.message : 'Could not connect the agents.');
+    } finally {
+      setWiring(false);
     }
   };
   const now = new Date().toISOString();
@@ -344,6 +370,13 @@ function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) 
         ))}
         {!hooks && <li className="dim" style={{ fontSize: 13 }}>Checking hook status…</li>}
       </ul>
+      {direct?.available && (unwired.length > 0 || wireNote) && (
+        <Row label="Agent hooks" hint={wireNote ?? `${unwired.map(sourceLabel).join(', ')} ${unwired.length === 1 ? 'isn\'t' : 'aren\'t'} connected. cot backs up each config before changing it.`}>
+          {unwired.length > 0 && (
+            <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={wiring} onClick={() => void wire()}>{wiring ? 'Connecting…' : 'Connect'}</button>
+          )}
+        </Row>
+      )}
       <Row label="Setup wizard" hint="Re-run onboarding to switch agents or re-verify hooks.">
         <button type="button" className="vbtn vbtn-quiet vbtn-sm" onClick={onRunOnboarding}>Run setup</button>
       </Row>

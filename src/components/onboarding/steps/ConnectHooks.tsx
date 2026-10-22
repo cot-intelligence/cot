@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { getAgent, type AgentId } from '../../../lib/agents';
-import { getHookStatus, type HookStatusAgent } from '../../../lib/api';
+import { getHooksInstall, getHookStatus, installHooks, type HookStatusAgent, type HooksInstallStatus } from '../../../lib/api';
 import { ShellCommand } from '../../ui/ShellCommand';
 import { CodeBlock } from '../../ui/CodeBlock';
 import { Icon } from '../../forest/icons';
@@ -38,6 +38,17 @@ export function ConnectHooks({ agents: agentIds, onBack, onContinue, autoSkip }:
   const [expanded, setExpanded] = useState<AgentId | null>(null);
   const [advancing, setAdvancing] = useState(false);
   const skippedRef = useRef(false);
+  // The collector wires hooks itself when it runs on this machine; the
+  // terminal command stays as the fallback (Docker, no Python, or an error).
+  const [direct, setDirect] = useState<HooksInstallStatus | null>(null);
+  const [installing, setInstalling] = useState(false);
+  const [installError, setInstallError] = useState<string | null>(null);
+  const [showCmd, setShowCmd] = useState(false);
+  const [codexTrust, setCodexTrust] = useState(false);
+
+  useEffect(() => {
+    getHooksInstall().then(setDirect).catch(() => setDirect({ available: false, reason: null, python: null }));
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -84,6 +95,32 @@ export function ConnectHooks({ agents: agentIds, onBack, onContinue, autoSkip }:
   const connectedCount = agentStates.filter((a) => a.state === 'installed').length;
 
   const installCmd = getAgent(agentIds[0]).steps.find((s) => s.kind === 'shell')?.command;
+  const canInstall = !!direct?.available;
+  const pending = agentStates.filter((a) => a.state !== 'installed').map((a) => a.id);
+
+  const connect = async () => {
+    setInstalling(true);
+    setInstallError(null);
+    try {
+      const res = await installHooks(pending);
+      if (res.agents.includes('codex')) setCodexTrust(true);
+      // Show the result right away rather than on the next poll.
+      const hooks = await getHookStatus().catch(() => null);
+      if (hooks) {
+        const states = agentIds.map((id) => {
+          const found = hooks.agents.find((a) => a.source === id) ?? null;
+          return { id, state: deriveState(found), status: found };
+        });
+        setAgentStates(states);
+        if (states.every((st) => st.state === 'installed')) setAdvancing(true);
+      }
+    } catch (e) {
+      setInstallError(e instanceof Error ? e.message : 'Could not connect the agents.');
+      setShowCmd(true);
+    } finally {
+      setInstalling(false);
+    }
+  };
 
   return (
     <Shell
@@ -92,13 +129,21 @@ export function ConnectHooks({ agents: agentIds, onBack, onContinue, autoSkip }:
       lead={
         allConnected
           ? 'Every agent you picked is wired to the local collector.'
-          : 'Run one command and the installer adds the hooks to every agent you picked. This page updates as each one connects.'
+          : canInstall
+            ? 'cot adds its hooks to each agent you picked and keeps a backup of every config it changes. Nothing leaves this machine.'
+            : 'Run one command and the installer adds the hooks to every agent you picked. This page updates as each one connects.'
       }>
-      {!allConnected && installCmd && (
+      {!allConnected && installError && (
+        <p className="onb-note" role="alert" style={{ color: 'var(--v-alert)' }}><Icon name="bolt" size={14} />{installError}</p>
+      )}
+      {!allConnected && installCmd && direct && (!canInstall || showCmd) && (
         <div className="onb-cmd">
           <span className="label">Run once in a terminal</span>
           <ShellCommand command={installCmd} />
         </div>
+      )}
+      {codexTrust && (
+        <p className="onb-note"><Icon name="lock" size={14} />Codex asks before it runs new hooks: open Codex, run /hooks and trust cot.</p>
       )}
       <ul className="onb-status" aria-live="polite">
         {agentStates.map((info) => {
@@ -135,9 +180,18 @@ export function ConnectHooks({ agents: agentIds, onBack, onContinue, autoSkip }:
         onBack={onBack}
         backLabel="Change agents"
         extra={!advancing && !allConnected && (
-          <span className="mono faint onb-count">{connectedCount} of {agentIds.length} connected</span>
+          <>
+            {canInstall && !showCmd && (
+              <button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={() => setShowCmd(true)}>Use a terminal</button>
+            )}
+            <span className="mono faint onb-count">{connectedCount} of {agentIds.length} connected</span>
+          </>
         )}
-        next={{ label: advancing ? 'Continuing' : 'Continue', autoMs: advancing ? AUTO_ADVANCE_MS : undefined, onClick: onContinue }}
+        next={
+          canInstall && !allConnected && !advancing
+            ? { label: installing ? 'Connecting' : pending.length === 1 ? `Connect ${getAgent(pending[0]).product}` : `Connect ${pending.length} agents`, icon: 'plug', disabled: installing, onClick: () => void connect() }
+            : { label: advancing ? 'Continuing' : 'Continue', autoMs: advancing ? AUTO_ADVANCE_MS : undefined, onClick: onContinue }
+        }
       />
     </Shell>
   );

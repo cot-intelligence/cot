@@ -994,6 +994,33 @@ export async function getHookStatus(): Promise<HookStatus> {
   return json<HookStatus>(await fetch('/v1/hooks/status'));
 }
 
+/** Whether the collector can wire hooks itself (backend/app/hooks_install.py). */
+export interface HooksInstallStatus {
+  available: boolean;
+  reason: 'container' | 'no_python' | null;
+  python: string | null;
+}
+
+export interface HooksInstallResult {
+  ok: boolean;
+  agents: string[];
+  /** Agents whose app isn't installed, so there was no config to wire. */
+  skipped: string[];
+  output: string[];
+}
+
+export async function getHooksInstall(): Promise<HooksInstallStatus> {
+  return json<HooksInstallStatus>(await fetch('/v1/hooks/install'));
+}
+
+export async function installHooks(agents: string[]): Promise<HooksInstallResult> {
+  return detailOrStatus<HooksInstallResult>(await fetch('/v1/hooks/install', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agents }),
+  }));
+}
+
 export async function getSessions(filters: SessionFilters = {}): Promise<SessionSummary[]> {
   const params = new URLSearchParams();
   if (filters.limit) params.set('limit', String(filters.limit));

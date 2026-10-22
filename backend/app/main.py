@@ -44,7 +44,7 @@ from pydantic import BaseModel, Field
 
 from . import (
     __version__, activity, ai_insights, analysis, analysis_personas, analysis_tools, context_cost, cron, db, edits,
-    extension_usage, folders, insights, mcp_install, otlp, outcomes, passive, recovery, rule_drafts, semantic,
+    extension_usage, folders, hooks_install, insights, mcp_install, otlp, outcomes, passive, recovery, rule_drafts, semantic,
     session_html, session_markdown, session_shape, store, timeutil, usage_line, user_rules, watch,
 )
 
@@ -1767,6 +1767,31 @@ def get_tasks() -> dict[str, Any]:
             "error": r.get("error"),
         })
     return {"running": running, "recent": recent}
+
+
+@app.get("/v1/hooks/install")
+def get_hooks_install() -> dict[str, Any]:
+    """Whether this collector can wire hooks itself (it runs on the host and
+    found a Python for the bridge), so setup can skip the terminal."""
+    return hooks_install.status()
+
+
+@app.post("/v1/hooks/install")
+async def post_hooks_install(request: Request) -> dict[str, Any]:
+    body = await _json_body(request)
+    agents = body.get("agents")
+    if not isinstance(agents, list) or not all(isinstance(a, str) for a in agents):
+        raise HTTPException(status_code=400, detail="agents must be a list of agent ids")
+    endpoint = str(request.base_url).rstrip("/")
+    try:
+        # Off the event loop: the bridge calls back into this collector.
+        return await asyncio.to_thread(
+            hooks_install.install, agents, endpoint=endpoint, bridge_source=_BRIDGE_DIR / "cot",
+        )
+    except hooks_install.InstallError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Could not write {exc.filename or 'the bridge'}: {exc.strerror or exc}")
 
 
 @app.get("/v1/hooks/status")
