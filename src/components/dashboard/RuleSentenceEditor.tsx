@@ -291,7 +291,7 @@ function DescribeBox({ onDraft }: { onDraft: (spec: RuleSpec) => void }) {
             {error ? <p className="rule-err">{error}</p> : <span className="faint" style={{ fontSize: 11 }}>Sends only your sentence to your AI provider, never your traces. You review the rule before it's saved.</span>}
           </>
         ) : (
-          <span className="dim" style={{ fontSize: 13 }}>Add an AI key in <a href="#/settings">Settings</a> to write rules in plain English. Or fill in the sentence below.</span>
+          <span className="dim" style={{ fontSize: 13 }}>Add an AI key in <a href="#/settings/ai">Settings</a> to write rules in plain English. Or fill in the sentence below.</span>
         )}
       </div>
     </section>

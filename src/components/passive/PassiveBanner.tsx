@@ -246,7 +246,7 @@ export function PassiveBanner() {
         </>
       ) : null}
       {!offer && (
-        <a className="psv-banner-a" href="#/settings" onClick={() => window.setTimeout(() => document.getElementById('set-passive')?.scrollIntoView({ block: 'start' }), 60)}>
+        <a className="psv-banner-a" href="#/settings/passive">
           Passive import <Icon name="arrow" size={13} />
         </a>
       )}

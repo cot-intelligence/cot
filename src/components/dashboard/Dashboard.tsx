@@ -70,7 +70,7 @@ type DashboardRoute =
   | { view: 'metrics-history'; tab?: MetricsHistoryTab; group?: string }
   | { view: 'replay' }
   | { view: 'replay-session'; sessionId: string; focusEventId?: number; focusQuery?: string; focusNonce?: number }
-  | { view: 'settings' }
+  | { view: 'settings'; tab?: string }
   | { view: 'findings'; pillar?: InsightPillar; finding?: string; focusNonce?: number }
   | { view: 'governance' }
   | { view: 'rules'; fromEvent?: number }
@@ -89,7 +89,8 @@ function installedHref(kind: string): string {
 
 function parseHash(): DashboardRoute {
   const hash = window.location.hash.replace(/^#\/?/, '');
-  if (hash === 'settings') return { view: 'settings' };
+  const settingsTab = hash.match(/^settings(?:\/([a-z-]+))?$/);
+  if (settingsTab) return { view: 'settings', tab: settingsTab[1] };
   if (hash === 'governance') return { view: 'governance' };
   if (hash === 'projects') return { view: 'projects' };
   const rulesMatch = hash.match(/^rules(?:\?from=(\d+))?$/);
@@ -551,6 +552,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
                   navCollapsed={navCollapsed}
                   onNavCollapsedChange={(c) => c !== navCollapsed && toggleNav()}
                   onRunOnboarding={onSetup}
+                  tab={route.view === 'settings' ? route.tab : undefined}
                 />
               </Suspense>
             </main>

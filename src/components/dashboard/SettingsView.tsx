@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { motion, useReducedMotion } from 'framer-motion';
 import {
   cleanupRetention,
   getHealth,
@@ -43,9 +44,12 @@ interface SettingsViewProps {
   navCollapsed: boolean;
   onNavCollapsedChange: (collapsed: boolean) => void;
   onRunOnboarding: () => void;
+  /** The tab in the address (``#/settings/<tab>``); the first one when absent or unknown. */
+  tab?: string;
 }
 
-const SECTIONS = [
+/** One tab per group; each opens at ``#/settings/<id>`` so other screens can link to it. */
+export const SECTIONS = [
   { id: 'appearance', label: 'Appearance', icon: 'sun' },
   { id: 'defaults', label: 'Defaults', icon: 'overview' },
   { id: 'ai', label: 'AI insights', icon: 'sparkle' },
@@ -53,7 +57,14 @@ const SECTIONS = [
   { id: 'passive', label: 'Passive import', icon: 'clock' },
   { id: 'privacy', label: 'Privacy', icon: 'lock' },
   { id: 'data', label: 'Data & retention', icon: 'database' },
-];
+] as const;
+
+export type SettingsTab = (typeof SECTIONS)[number]['id'];
+export const settingsHref = (tab: SettingsTab) => `#/settings/${tab}`;
+
+// The sidebar's highlight timing: a short spring, no bounce.
+const PILL = { type: 'spring', duration: 0.22, bounce: 0 } as const;
+const PILL_INSTANT = { duration: 0 } as const;
 
 const HOOK_HEALTH: Record<HookHealthState, { label: string; c: string }> = {
   healthy: { label: 'healthy', c: 'c-ok' },
@@ -64,16 +75,28 @@ const HOOK_HEALTH: Record<HookHealthState, { label: string; c: string }> = {
 };
 
 /** Markup mirrors the demo's Settings page (demo-variants/src/variants/forest/settings.tsx); every control writes for real. */
-export function SettingsView({ sidebarOpen, onSidebarOpenChange, navCollapsed, onNavCollapsedChange, onRunOnboarding }: SettingsViewProps) {
+export function SettingsView({ sidebarOpen, onSidebarOpenChange, navCollapsed, onNavCollapsedChange, onRunOnboarding, tab }: SettingsViewProps) {
   const prefs = usePrefs();
   const { preference, setPreference } = useTheme();
-  const [section, setSection] = useScrollSpy();
+  const pill = useReducedMotion() ? PILL_INSTANT : PILL;
+  const section = SECTIONS.find((x) => x.id === tab) ?? SECTIONS[0];
   const [settings, setSettings] = useState<Settings | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
 
   useEffect(() => {
     getSettings().then(setSettings).catch(() => {});
   }, []);
+  // A new tab starts at the top, not wherever the last one was scrolled to.
+  const nav = useRef<HTMLElement>(null);
+  useEffect(() => {
+    document.getElementById('vf-scroll')?.scrollTo({ top: 0 });
+    // On narrow screens the tabs are a sideways strip: keep the open one in view.
+    const strip = nav.current;
+    const on = strip?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (strip && on && strip.scrollWidth > strip.clientWidth) {
+      strip.scrollLeft = on.offsetLeft - (strip.clientWidth - on.offsetWidth) / 2;
+    }
+  }, [section.id]);
 
   const pref = <K extends keyof Prefs>(k: K) => (v: Prefs[K]) => setPref(k, v);
 
@@ -84,82 +107,82 @@ export function SettingsView({ sidebarOpen, onSidebarOpenChange, navCollapsed, o
           <div><span className="label">Workspace</span><h1>Settings</h1><p>Display, AI, collector and data. Your traces stay on your machine.</p></div>
         </div>
         <div className="set">
-          <nav className="set-nav" aria-label="Settings sections">
-            {SECTIONS.map((x) => (
-              <a
-                key={x.id}
-                href="#/settings"
-                className="nav-i"
-                aria-current={section === x.id ? 'true' : undefined}
-                onClick={(e) => {
-                  e.preventDefault();
-                  setSection(x.id);
-                  document.getElementById(`set-${x.id}`)?.scrollIntoView({ block: 'start' });
-                }}>
-                <Icon name={x.icon} />
-                <span>{x.label}</span>
-              </a>
-            ))}
+          <nav className="set-nav" aria-label="Settings" ref={nav}>
+            {SECTIONS.map((x) => {
+              const on = x.id === section.id;
+              return (
+                <a key={x.id} href={settingsHref(x.id)} className="nav-i" aria-current={on ? 'page' : undefined}>
+                  {on && <motion.span layoutId="set-pill" className="pill" transition={pill} />}
+                  <Icon name={x.icon} />
+                  <span>{x.label}</span>
+                </a>
+              );
+            })}
           </nav>
 
-          <div className="set-body">
-            <Section id="appearance" title="Appearance" desc="How the dashboard looks on this browser.">
-              <Row label="Theme" hint="Light is the default. System follows your OS setting.">
-                <Seg
-                  id="set-theme"
-                  label="Theme"
-                  value={preference}
-                  onChange={setPreference}
-                  options={[
-                    { k: 'light', l: <Icon name="sun" size={16} />, name: 'Light' },
-                    { k: 'dark', l: <Icon name="moon" size={16} />, name: 'Dark' },
-                    { k: 'system', l: <Icon name="monitor" size={16} />, name: 'System' },
-                  ]}
-                />
-              </Row>
-              <Row label="Density" hint="Compact fits more rows into tables and traces.">
-                <Seg id="set-density" value={prefs.density} onChange={pref('density')} options={[{ k: 'comfortable', l: 'Comfortable' }, { k: 'compact', l: 'Compact' }]} />
-              </Row>
-              <Row label="Sidebar" hint="The rail keeps icons only, with names on hover.">
-                <Seg id="set-rail" value={navCollapsed ? 'rail' : 'full'} onChange={(v) => onNavCollapsedChange(v === 'rail')} options={[{ k: 'full', l: 'Expanded' }, { k: 'rail', l: 'Rail' }]} />
-              </Row>
-              <Row label="Session list" hint="Whether the session list stays open beside a session's trace.">
-                <Seg id="set-sesslist" value={sidebarOpen ? 'open' : 'closed'} onChange={(v) => onSidebarOpenChange(v === 'open')} options={[{ k: 'open', l: 'Open' }, { k: 'closed', l: 'Collapsed' }]} />
-              </Row>
-              <Row label="Workspace mark" hint="The image beside the workspace name in the sidebar. Saved on this browser.">
-                <MarkPicker value={prefs.avatar} initial="L" onChange={(v) => setPref('avatar', v)} />
-              </Row>
-              <Row label="Motion" hint="Reduced keeps fades and drops movement, whatever the OS says.">
-                <Seg id="set-motion" value={prefs.motion} onChange={pref('motion')} options={[{ k: 'system', l: 'System' }, { k: 'reduced', l: 'Reduced' }]} />
-              </Row>
-            </Section>
+          {/* Keyed so each tab mounts fresh and fades in; only this one group is on the page. */}
+          <div className="set-body" key={section.id}>
+            {section.id === 'appearance' && (
+              <Section id="appearance" title="Appearance" desc="How the dashboard looks on this browser.">
+                <Row label="Theme" hint="Light is the default. System follows your OS setting.">
+                  <Seg
+                    id="set-theme"
+                    label="Theme"
+                    value={preference}
+                    onChange={setPreference}
+                    options={[
+                      { k: 'light', l: <Icon name="sun" size={16} />, name: 'Light' },
+                      { k: 'dark', l: <Icon name="moon" size={16} />, name: 'Dark' },
+                      { k: 'system', l: <Icon name="monitor" size={16} />, name: 'System' },
+                    ]}
+                  />
+                </Row>
+                <Row label="Density" hint="Compact fits more rows into tables and traces.">
+                  <Seg id="set-density" value={prefs.density} onChange={pref('density')} options={[{ k: 'comfortable', l: 'Comfortable' }, { k: 'compact', l: 'Compact' }]} />
+                </Row>
+                <Row label="Sidebar" hint="The rail keeps icons only, with names on hover.">
+                  <Seg id="set-rail" value={navCollapsed ? 'rail' : 'full'} onChange={(v) => onNavCollapsedChange(v === 'rail')} options={[{ k: 'full', l: 'Expanded' }, { k: 'rail', l: 'Rail' }]} />
+                </Row>
+                <Row label="Session list" hint="Whether the session list stays open beside a session's trace.">
+                  <Seg id="set-sesslist" value={sidebarOpen ? 'open' : 'closed'} onChange={(v) => onSidebarOpenChange(v === 'open')} options={[{ k: 'open', l: 'Open' }, { k: 'closed', l: 'Collapsed' }]} />
+                </Row>
+                <Row label="Workspace mark" hint="The image beside the workspace name in the sidebar. Saved on this browser.">
+                  <MarkPicker value={prefs.avatar} initial="L" onChange={(v) => setPref('avatar', v)} />
+                </Row>
+                <Row label="Motion" hint="Reduced keeps fades and drops movement, whatever the OS says.">
+                  <Seg id="set-motion" value={prefs.motion} onChange={pref('motion')} options={[{ k: 'system', l: 'System' }, { k: 'reduced', l: 'Reduced' }]} />
+                </Row>
+              </Section>
+            )}
 
-            <Section id="defaults" title="Defaults" desc="Where the dashboard opens and what it shows first.">
-              <Row label="Start page" hint="Opened when you visit the dashboard root.">
-                <Seg id="set-start" value={prefs.start} onChange={pref('start')} options={[{ k: 'overview', l: 'Overview' }, { k: 'sessions', l: 'Sessions' }, { k: 'findings', l: 'Findings' }]} />
-              </Row>
-              <Row label="Overview range" hint="Used until you pick another range on the page.">
-                <Seg id="set-range" value={prefs.range} onChange={pref('range')} options={[{ k: 1, l: '1d' }, { k: 7, l: '7d' }, { k: 30, l: '30d' }, { k: 90, l: '90d' }]} />
-              </Row>
-              <Row label="macOS notifications" hint="In the Mac app, new findings and rule matches also arrive as macOS notifications. They always appear in the bell's inbox.">
-                <Switch
-                  on={settings?.notify_desktop ?? true}
-                  disabled={!settings}
-                  label="macOS notifications"
-                  onChange={(on) => {
-                    if (!settings) return;
-                    setSettings({ ...settings, notify_desktop: on });
-                    updateSettings({ notify_desktop: on }).then(setSettings).catch(() => setSettings({ ...settings, notify_desktop: !on }));
-                  }}
-                />
-              </Row>
-            </Section>
+            {section.id === 'defaults' && (
+              <Section id="defaults" title="Defaults" desc="Where the dashboard opens and what it shows first.">
+                <Row label="Start page" hint="Opened when you visit the dashboard root.">
+                  <Seg id="set-start" value={prefs.start} onChange={pref('start')} options={[{ k: 'overview', l: 'Overview' }, { k: 'sessions', l: 'Sessions' }, { k: 'findings', l: 'Findings' }]} />
+                </Row>
+                <Row label="Overview range" hint="Used until you pick another range on the page.">
+                  <Seg id="set-range" value={prefs.range} onChange={pref('range')} options={[{ k: 1, l: '1d' }, { k: 7, l: '7d' }, { k: 30, l: '30d' }, { k: 90, l: '90d' }]} />
+                </Row>
+                <Row label="macOS notifications" hint="In the Mac app, new findings and rule matches also arrive as macOS notifications. They always appear in the bell's inbox.">
+                  <Switch
+                    on={settings?.notify_desktop ?? true}
+                    disabled={!settings}
+                    label="macOS notifications"
+                    onChange={(on) => {
+                      if (!settings) return;
+                      setSettings({ ...settings, notify_desktop: on });
+                      updateSettings({ notify_desktop: on }).then(setSettings).catch(() => setSettings({ ...settings, notify_desktop: !on }));
+                    }}
+                  />
+                </Row>
+              </Section>
+            )}
 
-            <AiSection settings={settings} onSettings={setSettings} />
-            <CollectorSection onRunOnboarding={onRunOnboarding} />
-            <PassiveSection />
-            <PrivacySection settings={settings} onSettings={setSettings} />
-            <DataSection onExport={() => setExportOpen(true)} />
+            {section.id === 'ai' && <AiSection settings={settings} onSettings={setSettings} />}
+            {section.id === 'collector' && <CollectorSection onRunOnboarding={onRunOnboarding} />}
+            {section.id === 'passive' && <PassiveSection />}
+            {section.id === 'privacy' && <PrivacySection settings={settings} onSettings={setSettings} />}
+            {section.id === 'data' && <DataSection onExport={() => setExportOpen(true)} />}
           </div>
         </div>
       </div>
@@ -347,7 +370,7 @@ function PrivacySection({ settings: s, onSettings }: { settings: Settings | null
         <Switch on={!!s?.telemetry_enabled} disabled={locked} label="Usage metrics" onChange={(v) => void setOn(v)} />
       </Row>
       <Row label="AI analysis" hint="Sends findings and masked excerpts to your provider, only when you run it.">
-        <a href="#/settings" className="vbtn vbtn-ghost vbtn-sm" onClick={(e) => { e.preventDefault(); document.getElementById('set-ai')?.scrollIntoView({ block: 'start' }); }}>
+        <a href={settingsHref('ai')} className="vbtn vbtn-ghost vbtn-sm">
           {s?.ai_configured ? 'Configured' : 'Off'} <Icon name="arrow" size={14} />
         </a>
       </Row>
@@ -506,7 +529,7 @@ function DataSection({ onExport }: { onExport: () => void }) {
 
 function Section({ id, title, desc, children }: { id: string; title: string; desc: string; children: ReactNode }) {
   return (
-    <section className="card set-sec" id={`set-${id}`} aria-labelledby={`set-${id}-t`} data-spy={id}>
+    <section className="card set-sec" id={`set-${id}`} aria-labelledby={`set-${id}-t`}>
       <div className="set-h"><h2 id={`set-${id}-t`}>{title}</h2><p className="dim">{desc}</p></div>
       {children}
     </section>
@@ -520,49 +543,4 @@ function Row({ label, hint, children, wide, stack }: { label: string; hint?: str
       <div className="set-c" style={{ gap: 8 }}>{children}</div>
     </div>
   );
-}
-
-/** Highlights the last section whose heading has reached the top of the scroll area (or the final one at the bottom).
- *  A click sets it directly and holds it until the jump settles, so the spy never flickers through sections in between. */
-function useScrollSpy(): [string, (id: string) => void] {
-  const [cur, setCur] = useState(SECTIONS[0].id);
-  // A nav click pins its section until the reader scrolls on their own: the
-  // short sections near the bottom can't reach the top, so position alone
-  // would hand the click to the last section.
-  const pinned = useRef(false);
-  useEffect(() => {
-    const root = document.getElementById('vf-scroll');
-    if (!root) return;
-    let raf = 0;
-    const tick = () => {
-      raf = 0;
-      if (pinned.current) return;
-      const els = [...root.querySelectorAll<HTMLElement>('[data-spy]')];
-      const top = root.getBoundingClientRect().top;
-      // The reading line sits near the top, then slides down over the last
-      // screen of scroll so every section, however short, takes a turn.
-      const left = root.scrollHeight - root.clientHeight - root.scrollTop;
-      const reach = Math.min(root.clientHeight * 0.6, 360);
-      const line = 96 + Math.max(0, 1 - left / reach) * (root.clientHeight - 96 - 48);
-      const pick = els.filter((el) => el.getBoundingClientRect().top - top <= line).pop() ?? els[0];
-      if (pick?.dataset.spy) setCur(pick.dataset.spy);
-    };
-    const on = () => { if (!raf) raf = requestAnimationFrame(tick); };
-    const unpin = () => { pinned.current = false; };
-    root.addEventListener('scroll', on, { passive: true });
-    root.addEventListener('wheel', unpin, { passive: true });
-    root.addEventListener('touchmove', unpin, { passive: true });
-    root.addEventListener('keydown', unpin);
-    root.addEventListener('pointerdown', unpin);
-    tick();
-    return () => {
-      root.removeEventListener('scroll', on);
-      root.removeEventListener('wheel', unpin);
-      root.removeEventListener('touchmove', unpin);
-      root.removeEventListener('keydown', unpin);
-      root.removeEventListener('pointerdown', unpin);
-      cancelAnimationFrame(raf);
-    };
-  }, []);
-  return [cur, (id) => { pinned.current = true; setCur(id); }];
 }
