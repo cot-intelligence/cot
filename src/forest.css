@@ -317,6 +317,63 @@
 .vf .onb-sum dd { margin: 4px 0 0; font-size: 14px; font-weight: 500; }
 .vf .onb-skel { display: grid; gap: 8px; }
 .vf .onb-skel span { height: 74px; border-radius: 12px; background: var(--v-wash); }
+/* Steps share one layout (onboarding/steps/Shell.tsx): eyebrow, heading, lead, content, actions. */
+.vf .onb-actions-r { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.vf .onb-count { font-size: 12px; margin-right: 4px; }
+.vf .onb-next { position: relative; overflow: hidden; isolation: isolate; }
+/* Auto-continue: the button fills left to right over the wait, so the move never comes as a surprise. */
+.vf .onb-next[data-auto]::before { content: ''; position: absolute; inset: 0; z-index: -1; background: color-mix(in srgb, var(--v-onHot) 16%, transparent); transform-origin: left center; animation: onb-fill var(--onb-auto, 6s) linear forwards; }
+@keyframes onb-fill { from { transform: scaleX(0); } }
+/* Agent checklist: a row per agent, the whole row is the checkbox. */
+.vf .onb-agents { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.vf .onb-agent { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 14px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--v-line); background: var(--v-surface); color: inherit; text-align: left; transition: border-color 150ms ease, background-color 150ms ease, transform 150ms var(--v-ease-out); }
+@media (hover: hover) and (pointer: fine) { .vf .onb-agent:hover { border-color: var(--v-mute); } }
+.vf .onb-agent:active { transform: scale(0.99); }
+.vf .onb-agent[aria-checked='true'] { border-color: var(--v-hot); background: color-mix(in srgb, var(--v-hot) 5%, var(--v-surface)); }
+.vf .onb-agent-mark { width: 36px; height: 36px; border-radius: 9px; display: grid; place-items: center; border: 1px solid var(--v-line); background: var(--v-bg); }
+.vf .onb-agent-t { display: grid; gap: 2px; min-width: 0; }
+.vf .onb-agent-t b { font-size: 14px; font-weight: 600; }
+.vf .onb-agent-t .dim { font-size: 13px; line-height: 19px; }
+.vf .onb-agent-m { font-size: 11px; color: var(--v-faint); white-space: nowrap; }
+.vf .onb-check { width: 18px; height: 18px; border-radius: 5px; display: grid; place-items: center; border: 1.5px solid var(--v-mute); background: var(--v-surface); transition: background-color 150ms ease, border-color 150ms ease; }
+.vf .onb-check svg { fill: none; stroke: var(--v-onHot); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 14; stroke-dashoffset: 14; transition: stroke-dashoffset 180ms var(--v-ease-out); }
+.vf .onb-agent[aria-checked='true'] .onb-check { background: var(--v-hot); border-color: var(--v-hot); }
+.vf .onb-agent[aria-checked='true'] .onb-check svg { stroke-dashoffset: 0; }
+@media (max-width: 560px) { .vf .onb-agent { grid-template-columns: auto minmax(0, 1fr) auto; } .vf .onb-agent-m { grid-column: 2; grid-row: 2; } }
+/* Connect: the install command, then each agent's live state. */
+.vf .onb-cmd { display: grid; gap: 8px; }
+.vf .onb-status { list-style: none; margin: 0; padding: 0; display: grid; border: 1px solid var(--v-line); border-radius: 12px; background: var(--v-surface); }
+.vf .onb-st { padding: 12px 14px; }
+.vf .onb-st + .onb-st { border-top: 1px solid var(--v-line); }
+.vf .onb-st-h { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.vf .onb-st-mark { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; border: 1px solid var(--v-line); background: var(--v-bg); flex: none; }
+.vf .onb-st-t { display: grid; gap: 1px; min-width: 0; flex: 1; }
+.vf .onb-st-t b { font-size: 14px; font-weight: 600; }
+.vf .onb-st-t .dim { font-size: 12px; }
+.vf .onb-st-s { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--v-dim); white-space: nowrap; }
+.vf .onb-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--v-mute); flex: none; }
+.vf .onb-st[data-tone='ok'] .onb-st-s { color: var(--v-olive); }
+.vf .onb-st[data-tone='ok'] .onb-dot { background: var(--v-olive); }
+.vf .onb-st[data-tone='warn'] .onb-st-s { color: var(--v-amber); }
+.vf .onb-st[data-tone='warn'] .onb-dot { background: var(--v-amber); }
+.vf .onb-st[data-tone='wait'] .onb-dot { background: var(--v-cobalt); animation: psv-pulse 1.4s ease-in-out infinite; }
+.vf .onb-chev { transition: transform 150ms var(--v-ease-out); }
+.vf [aria-expanded='true'] > .onb-chev { transform: rotate(180deg); }
+.vf .onb-manual { display: grid; gap: 14px; margin: 12px 0 2px 40px; padding-top: 12px; border-top: 1px dashed var(--v-line); animation: onb-rise 220ms var(--v-ease-out) both; }
+.vf .onb-manual .space-y-1 { display: grid; gap: 6px; min-width: 0; }
+.vf .onb-manual .space-y-1 > :is(a, span) { justify-self: start; }
+/* Config files can be wider than the card: they scroll inside their own box. */
+.vf .onb-manual pre, .vf .onb-manual .space-y-1 > div { max-width: 100%; min-width: 0; overflow-x: auto; }
+.vf .onb-st, .vf .onb-manual { min-width: 0; }
+@media (max-width: 560px) { .vf .onb-manual { margin-left: 0; } }
+/* History: four facts, then a line per agent; a skeleton of the same shape while it scans. */
+.vf .onb-hist { display: grid; gap: 12px; }
+.vf .onb-sk { display: grid; gap: 8px; }
+.vf .onb-sk span { display: block; height: 10px; width: 50%; border-radius: 4px; background: var(--v-wash); }
+.vf .onb-sk span + span { height: 14px; width: 70%; }
+.vf .onb-src { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.vf .onb-src li { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.vf .onb-src li .mono { margin-left: auto; font-size: 11px; white-space: nowrap; }
 .vf .onb-f { padding: 16px 28px; font-size: 11px; border-top: 1px solid var(--v-line); }
 @media (max-width: 640px) { .vf .onb-h { padding: 14px 16px; } .vf .onb-l { display: none; } .vf .onb-t { font-size: 24px; line-height: 30px; } .vf .onb-m { padding-top: 28px; } }
 .vf .psv-banner { display: flex; align-items: center; gap: 10px; padding: 8px 20px; font-size: 13px; border-bottom: 1px solid color-mix(in srgb, var(--v-hot) 22%, transparent); background: color-mix(in srgb, var(--v-hot) 6%, var(--v-bg)); flex: none; }
@@ -355,14 +412,14 @@
 @keyframes onb-check { from { opacity: 0; transform: scale(0.6); } }
 /* Content arrives in reading order, 45ms apart, rather than all at once. */
 @keyframes onb-rise { from { opacity: 0; transform: translateY(8px); } }
-.vf.onb .onb-modes > *, .vf.onb .psv-list > *, .vf.onb .onb-sum > *, .vf.onb .psv-gap-l > *, .vf.onb .psv-chips > * {
+.vf.onb .onb-modes > *, .vf.onb .psv-list > *, .vf.onb .onb-sum > *, .vf.onb .psv-gap-l > *, .vf.onb .psv-chips > *, .vf.onb .onb-agents > *, .vf.onb .onb-status > * {
   animation: onb-rise 320ms var(--v-ease-out) both;
 }
-.vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips) > :nth-child(2) { animation-delay: 45ms; }
-.vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips) > :nth-child(3) { animation-delay: 90ms; }
-.vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips) > :nth-child(4) { animation-delay: 135ms; }
-.vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips) > :nth-child(5) { animation-delay: 180ms; }
-.vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips) > :nth-child(n+6) { animation-delay: 220ms; }
+.vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-agents, .onb-status) > :nth-child(2) { animation-delay: 45ms; }
+.vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-agents, .onb-status) > :nth-child(3) { animation-delay: 90ms; }
+.vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-agents, .onb-status) > :nth-child(4) { animation-delay: 135ms; }
+.vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-agents, .onb-status) > :nth-child(5) { animation-delay: 180ms; }
+.vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-agents, .onb-status) > :nth-child(n+6) { animation-delay: 220ms; }
 /* The import's progress card mounts when you press Start: it rises in to say "this began". */
 .vf.onb .onb-gap { animation: onb-rise 280ms var(--v-ease-out) both; }
 /* Phase steps fill rather than snap as the run moves from metadata to analysis. */
@@ -372,10 +429,13 @@
 .vf .onb-actions .vbtn-primary svg { transition: transform 160ms var(--v-ease-out); }
 @media (hover: hover) and (pointer: fine) { .vf .onb-actions .vbtn-primary:not(:disabled):hover svg:last-child { transform: translateX(2px); } }
 @media (prefers-reduced-motion: reduce) {
-  .vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips) > *, .vf.onb .onb-gap { animation: onb-fade 200ms ease both; }
+  .vf.onb :is(.onb-modes, .psv-list, .onb-sum, .psv-gap-l, .psv-chips, .onb-agents, .onb-status) > *, .vf.onb .onb-gap { animation: onb-fade 200ms ease both; }
   .vf .onb-steps li[data-state='done'] .onb-n svg { animation: onb-fade 200ms ease both; }
   .vf .onb-radio::after { transform: none; }
-  .vf .onb-mode:active { transform: none; }
+  .vf .onb-mode:active, .vf .onb-agent:active { transform: none; }
+  .vf .onb-check svg, .vf .onb-chev { transition: none; }
+  .vf .onb-st[data-tone='wait'] .onb-dot { animation: none; }
+  .vf .onb-manual { animation: onb-fade 200ms ease both; }
 }
 @keyframes onb-fade { from { opacity: 0; } }
 /* Activity tray (components/dashboard/TaskTray.tsx): opened tens of times a day, so the popover

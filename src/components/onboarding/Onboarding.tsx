@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import type { AgentId } from '../../lib/agents';
-import { getHookStatus } from '../../lib/api';
+import { getHookStatus, getPassive, runPassiveNow, updatePassive } from '../../lib/api';
 import { isKnownAgent } from '../../lib/sourceLabels';
 import { useTheme } from '../../lib/theme';
 import { Icon } from '../forest/icons';
@@ -54,6 +54,18 @@ function saveAgents(agents: AgentId[]) {
   } catch {
     /* ignore */
   }
+}
+
+/** Choosing hooks turns transcript import on as well: hooks capture what
+ *  happens from now on, and the import brings in agents that have no hook and
+ *  anything hooks never saw. Sessions a hook captures are skipped by the
+ *  import, so nothing is counted twice. (Choosing transcripts only never
+ *  installs hooks.) Best effort: an older collector without passive mode just
+ *  keeps its hooks. */
+function turnOnPassiveImport() {
+  getPassive()
+    .then((p) => (p.enabled ? null : updatePassive({ enabled: true }).then(() => runPassiveNow())))
+    .catch(() => {});
 }
 
 interface OnboardingProps {
@@ -109,7 +121,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
 
   const steps = STEPS[mode ?? 'hooks'];
   const body = scriptInstalled ? (
-    <PostInstall agents={scriptInstalled} onFinish={(origin) => onComplete(scriptInstalled, origin)} />
+    <PostInstall agents={scriptInstalled} onFinish={(origin) => { turnOnPassiveImport(); onComplete(scriptInstalled, origin); }} />
   ) : step === 0 || !mode ? (
     <ChooseMode
       mode={mode}
@@ -129,7 +141,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
       }}
     />
   ) : step === 1 ? (
-    <ChooseAgent selected={agents} onToggle={toggleAgent} onContinue={() => agents.length > 0 && setStep(2)} />
+    <ChooseAgent selected={agents} onToggle={toggleAgent} onBack={() => setStep(0)} onContinue={() => agents.length > 0 && setStep(2)} />
   ) : step === 2 && agents.length > 0 ? (
     <ConnectHooks agents={agents} onBack={() => setStep(1)} onContinue={() => setStep(3)} autoSkip={!manualConnect} />
   ) : (
@@ -140,7 +152,10 @@ export function Onboarding({ onComplete }: OnboardingProps) {
         setManualConnect(true);
         setStep(2);
       }}
-      onFinish={(origin) => onComplete(agents, origin)}
+      onFinish={(origin) => {
+        turnOnPassiveImport();
+        onComplete(agents, origin);
+      }}
     />
   );
 
@@ -189,8 +204,8 @@ const MODES: { id: Mode; title: string; tag?: string; lead: string; points: stri
     title: 'Live hooks',
     tag: 'Recommended',
     icon: 'bolt',
-    lead: 'Adds a small hook to each agent so every event reaches cot as it happens.',
-    points: ['Live traces and running sessions', 'Permission prompts and exact timings', 'Every finding, as soon as it happens'],
+    lead: 'Adds a small hook to each agent so every event reaches cot as it happens. Transcript import stays on for everything else.',
+    points: ['Live traces and running sessions', 'Permission prompts and exact timings', 'Agents without hooks imported too'],
   },
   {
     id: 'passive',
@@ -207,7 +222,7 @@ function ChooseMode({ mode, onPick, onContinue }: { mode: Mode | null; onPick: (
     <div>
       <span className="label">Get started</span>
       <h1 className="onb-t">How should cot collect your sessions?</h1>
-      <p className="onb-lead dim">You can change this later, or use both, in Settings.</p>
+      <p className="onb-lead dim">You can change this later in Settings.</p>
       <div className="onb-modes" role="radiogroup" aria-label="Collection mode">
         {MODES.map((m) => (
           <button key={m.id} type="button" role="radio" aria-checked={mode === m.id} className="onb-mode" onClick={() => onPick(m.id)}>

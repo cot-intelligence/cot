@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Actions, Shell } from './Shell';
 import { getPassive, PassiveUnsupportedError, previewSchedule, runPassiveNow, updatePassive, type PassiveAgent, type PassiveStatus } from '../../../lib/api';
 import { agentLabel } from '../../forest/AgentMark';
 import { fmt } from '../../forest/format';
@@ -175,48 +176,5 @@ export function PassiveSetup({
         }
       />
     </Shell>
-  );
-}
-
-function Shell({ eyebrow, title, lead, children }: { eyebrow: string; title: string; lead: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <span className="label">{eyebrow}</span>
-      <h1 className="onb-t">{title}</h1>
-      <p className="onb-lead dim">{lead}</p>
-      <div className="onb-body">{children}</div>
-    </div>
-  );
-}
-
-function Actions({
-  onBack,
-  next,
-}: {
-  onBack?: () => void;
-  next?: { label: string; icon?: string; disabled?: boolean; onClick: (origin: { x: number; y: number }) => void };
-}) {
-  return (
-    <div className="onb-actions">
-      {onBack ? (
-        <button type="button" className="vbtn vbtn-ghost" onClick={onBack}><Icon name="back" size={15} />Back</button>
-      ) : (
-        <span />
-      )}
-      {next && (
-        <button
-          type="button"
-          className="vbtn vbtn-primary"
-          disabled={next.disabled}
-          onClick={(e) => {
-            const r = e.currentTarget.getBoundingClientRect();
-            next.onClick({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
-          }}>
-          {next.icon && <Icon name={next.icon} size={15} />}
-          {next.label}
-          {!next.icon && <Icon name="arrow" size={15} />}
-        </button>
-      )}
-    </div>
   );
 }
