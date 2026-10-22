@@ -2174,12 +2174,45 @@ def _mark_raw_ingest(
     *,
     event_id: int | None = None,
     projection_error: str | None = None,
+    drop_payload: bool = False,
 ) -> None:
     conn.execute(
         "UPDATE raw_ingest_events SET status = ?, event_id = ?, projection_error = ?"
-        " WHERE id = ?",
+        + (", raw_payload = NULL" if drop_payload else "")
+        + " WHERE id = ?",
         (status, event_id, projection_error, raw_ingest_id),
     )
+
+
+# Batch size for clearing the raw copy of already-projected imports.
+_PRUNE_BATCH = 2000
+
+
+def prune_import_raw_payloads() -> int:
+    """Clear ``raw_payload`` on imported rows that projected cleanly, a batch
+    per write so ingest gets in between. Their event row holds the full body
+    (``events.payload`` is uncapped; the raw copy is cut at 64 KB) and the
+    transcript on disk is the source, so the copy only took space: about a
+    third of an import-heavy DB. Hook rows, failures and duplicates keep
+    theirs. The freed pages are reused by later writes; reclaiming them on
+    disk needs a VACUUM, which is left to the user. Returns rows cleared."""
+    if get_setting("raw_import_pruned") == "1":
+        return 0
+    cleared = 0
+    while True:
+        with store.write() as conn:
+            n = conn.execute(
+                "UPDATE raw_ingest_events SET raw_payload = NULL WHERE id IN ("
+                " SELECT id FROM raw_ingest_events"
+                " WHERE status = 'projected' AND origin = 'import' AND raw_payload IS NOT NULL"
+                " LIMIT ?)",
+                (_PRUNE_BATCH,),
+            ).rowcount
+        cleared += n
+        if n < _PRUNE_BATCH:
+            break
+    set_setting("raw_import_pruned", "1")
+    return cleared
 
 
 def raw_ingest_events(limit: int = 100) -> list[dict[str, Any]]:
@@ -2308,7 +2341,10 @@ def _record_ingest(conn: sqlite3.Connection, source: str, raw: dict[str, Any]) -
         }
 
     raw_status = "projected" if inserted else "duplicate"
-    _mark_raw_ingest(conn, raw_id, raw_status, event_id=event_id)
+    # An imported body that projected lives on in its event row (uncapped) and
+    # in the transcript; the raw copy would only double it.
+    _mark_raw_ingest(conn, raw_id, raw_status, event_id=event_id,
+                     drop_payload=inserted and bool(raw.get("_import")))
     return {
         "ok": True,
         "raw_ingest_id": raw_id,

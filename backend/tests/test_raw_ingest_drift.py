@@ -352,3 +352,34 @@ def test_drift_report_groups_weekly_unknown_rates_and_raw_status_counts():
     ][0]
     assert cursor["total_events"] == 0, cursor
     assert cursor["raw_status_counts"]["ignored"] == 1, cursor
+
+
+def test_projected_import_keeps_no_raw_copy_but_hooks_and_failures_do(monkeypatch):
+    body = {"session_id": "prune-s1", "hook_event_name": "UserPromptSubmit", "prompt": "hi",
+            "timestamp": "2026-07-06T09:00:00Z"}
+    db.record_ingest("claude", {**body, "_import": True, "_dedup_key": "t:0:prompt"})
+    db.record_ingest("claude", {**body, "_import": True, "_dedup_key": "t:0:prompt"})  # duplicate
+    db.record_ingest("claude", {**body, "prompt": "live", "session_id": "prune-s2"})
+    with store.read() as conn:
+        rows = conn.execute(
+            "SELECT origin, status, raw_payload IS NULL AS dropped, raw_hash FROM raw_ingest_events ORDER BY id"
+        ).fetchall()
+        payload = conn.execute("SELECT payload FROM events WHERE session_id = 'prune-s1'").fetchone()[0]
+    assert [(r["origin"], r["status"], r["dropped"]) for r in rows] == [
+        ("import", "projected", 1), ("import", "duplicate", 0), ("hook", "projected", 0),
+    ]
+    assert all(r["raw_hash"] for r in rows)
+    assert '"prompt": "hi"' in payload  # the event row still holds the body
+
+
+def test_prune_clears_existing_projected_import_copies_once(monkeypatch):
+    monkeypatch.setattr(db, "_PRUNE_BATCH", 2)
+    for i in range(5):
+        db.record_ingest("claude", {"session_id": f"old-{i}", "hook_event_name": "UserPromptSubmit",
+                                    "prompt": "x", "timestamp": "2026-07-06T09:00:00Z", "_import": True})
+    with store.write() as conn:  # as an older collector left them
+        conn.execute("UPDATE raw_ingest_events SET raw_payload = '{}'")
+    assert db.prune_import_raw_payloads() == 5
+    assert db.prune_import_raw_payloads() == 0
+    with store.read() as conn:
+        assert conn.execute("SELECT count(*) FROM raw_ingest_events WHERE raw_payload IS NOT NULL").fetchone()[0] == 0
