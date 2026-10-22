@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { getAgent, type AgentId } from '../../../lib/agents';
-import { getHookStatus, type HookStatusAgent } from '../../../lib/api';
-import { AgentMark } from '../../ui/AgentMark';
+import { getHooksInstall, getHookStatus, installHooks, type HookStatusAgent, type HooksInstallStatus } from '../../../lib/api';
 import { ShellCommand } from '../../ui/ShellCommand';
 import { CodeBlock } from '../../ui/CodeBlock';
-import { FadeIn } from '../../ui/FadeIn';
+import { Icon } from '../../forest/icons';
+import { Actions, Shell, StatusRow } from './Shell';
 
 interface ConnectHooksProps {
   agents: AgentId[];
@@ -38,6 +38,17 @@ export function ConnectHooks({ agents: agentIds, onBack, onContinue, autoSkip }:
   const [expanded, setExpanded] = useState<AgentId | null>(null);
   const [advancing, setAdvancing] = useState(false);
   const skippedRef = useRef(false);
+  // The collector wires hooks itself when it runs on this machine; the
+  // terminal command stays as the fallback (Docker, no Python, or an error).
+  const [direct, setDirect] = useState<HooksInstallStatus | null>(null);
+  const [installing, setInstalling] = useState(false);
+  const [installError, setInstallError] = useState<string | null>(null);
+  const [showCmd, setShowCmd] = useState(false);
+  const [codexTrust, setCodexTrust] = useState(false);
+
+  useEffect(() => {
+    getHooksInstall().then(setDirect).catch(() => setDirect({ available: false, reason: null, python: null }));
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -84,181 +95,108 @@ export function ConnectHooks({ agents: agentIds, onBack, onContinue, autoSkip }:
   const connectedCount = agentStates.filter((a) => a.state === 'installed').length;
 
   const installCmd = getAgent(agentIds[0]).steps.find((s) => s.kind === 'shell')?.command;
+  const canInstall = !!direct?.available;
+  const pending = agentStates.filter((a) => a.state !== 'installed').map((a) => a.id);
+
+  const connect = async () => {
+    setInstalling(true);
+    setInstallError(null);
+    try {
+      const res = await installHooks(pending);
+      if (res.agents.includes('codex')) setCodexTrust(true);
+      // Show the result right away rather than on the next poll.
+      const hooks = await getHookStatus().catch(() => null);
+      if (hooks) {
+        const states = agentIds.map((id) => {
+          const found = hooks.agents.find((a) => a.source === id) ?? null;
+          return { id, state: deriveState(found), status: found };
+        });
+        setAgentStates(states);
+        if (states.every((st) => st.state === 'installed')) setAdvancing(true);
+      }
+    } catch (e) {
+      setInstallError(e instanceof Error ? e.message : 'Could not connect the agents.');
+      setShowCmd(true);
+    } finally {
+      setInstalling(false);
+    }
+  };
 
   return (
-    <FadeIn className="space-y-10">
-      <header className="space-y-3">
-        <div className="flex items-center justify-between gap-4">
-          <span className="font-mono text-small text-hot">
-            hook setup
-          </span>
-          <button
-            type="button"
-            onClick={onBack}
-            className="inline-flex items-center gap-2 font-mono text-data font-semibold uppercase tracking-label text-fg/60 transition-colors hover:text-cobalt">
-            <span>←</span>
-            Change agents
-          </button>
-        </div>
-        <h1 className="text-[2.25rem] font-semibold leading-[1.05] tracking-display text-fg sm:text-[2.75rem]">
-          {allConnected ? (
-            <>
-              All{' '}
-              <span className="text-olive">connected</span>
-            </>
-          ) : (
-            <>
-              Wire up{' '}
-              <span className="text-hot">hooks</span>
-            </>
-          )}
-        </h1>
-        <p className="max-w-md text-lead text-fg/60">
-          {allConnected
-            ? 'All your agents are configured and sending events.'
-            : 'One command connects your agents to the local collector — the installer wires up the hooks for you.'}
-        </p>
-      </header>
-
-      {/* Agent pills */}
-      <div className="flex flex-wrap gap-2">
-        {agentStates.map((info) => {
-          const agent = getAgent(info.id);
-          const isExpanded = expanded === info.id;
-          return (
-            <button
-              key={info.id}
-              type="button"
-              onClick={() => setExpanded(isExpanded ? null : info.id)}
-              className={`inline-flex items-center gap-2 border px-3 py-1.5 transition-colors ${
-                isExpanded
-                  ? 'border-line/40 bg-fg/5'
-                  : info.state === 'installed'
-                    ? 'border-olive/40 bg-olive/5 hover:border-olive/60'
-                    : info.state === 'checking'
-                      ? 'border-line/[0.16] bg-fg/3 hover:border-line/30'
-                      : 'border-hot/30 bg-hot/5 hover:border-hot/50'
-              }`}>
-              <AgentMark id={info.id} className="h-4 w-4 shrink-0" variant="25d" />
-              <span className="font-mono text-data font-semibold text-fg">
-                {agent.product}
-              </span>
-              <AgentBadge state={info.state} />
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Expanded detail panel */}
-      {expanded && (
-        <div className="overflow-hidden rounded-card border border-line/10 bg-surface">
-          <div className="px-5 py-4 space-y-4">
-            <StatusDetail
-              info={agentStates.find((a) => a.id === expanded)!}
-              product={getAgent(expanded).product}
-            />
-            <ManualSteps agentId={expanded} status={agentStates.find((a) => a.id === expanded)?.status ?? null} />
-          </div>
-        </div>
+    <Shell
+      eyebrow="Set up cot · step 2"
+      title={allConnected ? 'Hooks connected' : 'Connect your agents'}
+      lead={
+        allConnected
+          ? 'Every agent you picked is wired to the local collector.'
+          : canInstall
+            ? 'cot adds its hooks to each agent you picked and keeps a backup of every config it changes. Nothing leaves this machine.'
+            : 'Run one command and the installer adds the hooks to every agent you picked. This page updates as each one connects.'
+      }>
+      {!allConnected && installError && (
+        <p className="onb-note" role="alert" style={{ color: 'var(--v-alert)' }}><Icon name="bolt" size={14} />{installError}</p>
       )}
-
-      {!allConnected && installCmd && (
-        <div className="space-y-3">
-          <div className="space-y-1">
-            <span className="font-mono text-label font-semibold uppercase tracking-label text-hot">
-              INSTALL
-            </span>
-            <p className="font-mono text-data leading-relaxed text-fg/60">
-              Run this once — it configures hooks for all selected agents.
-            </p>
-          </div>
+      {!allConnected && installCmd && direct && (!canInstall || showCmd) && (
+        <div className="onb-cmd">
+          <span className="label">Run once in a terminal</span>
           <ShellCommand command={installCmd} />
         </div>
       )}
-
-      <div className="flex items-center justify-between gap-4 border-t border-line/10 pt-6">
-        <span className="font-mono text-data uppercase tracking-label text-fg/40">
-          {advancing
-            ? 'All hooks verified'
-            : allConnected
-              ? 'Setup complete'
-              : `${connectedCount}/${agentIds.length} connected · updates live`}
-        </span>
-        <button
-          type="button"
-          onClick={onContinue}
-          className="group btn-primary relative overflow-hidden px-5 py-2.5 text-body">
-          {advancing && (
-            <>
-              <span
-                className="absolute inset-0 origin-left bg-on-hot/15"
-                style={{ animation: `btn-reveal ${AUTO_ADVANCE_MS}ms linear forwards` }}
-              />
-              <style>{`@keyframes btn-reveal { from { transform: scaleX(0) } to { transform: scaleX(1) } }`}</style>
-            </>
-          )}
-          <span className="relative z-10">
-            {advancing ? 'Continuing' : 'Continue'}
-          </span>
-          <span className={`relative z-10 ${advancing ? '' : 'transition-transform group-hover:translate-x-1'}`}>→</span>
-        </button>
-      </div>
-    </FadeIn>
+      {codexTrust && (
+        <p className="onb-note"><Icon name="lock" size={14} />Codex asks before it runs new hooks: open Codex, run /hooks and trust cot.</p>
+      )}
+      <ul className="onb-status" aria-live="polite">
+        {agentStates.map((info) => {
+          const agent = getAgent(info.id);
+          const open = expanded === info.id;
+          const missing = info.status?.missing_labels ?? [];
+          return (
+            <StatusRow
+              key={info.id}
+              id={info.id}
+              name={agent.product}
+              tone={info.state === 'installed' ? 'ok' : info.state === 'checking' ? 'wait' : missing.length ? 'warn' : 'off'}
+              status={info.state === 'installed' ? 'Connected' : info.state === 'checking' ? 'Checking' : missing.length ? 'Hooks missing' : 'Waiting'}
+              detail={
+                info.state === 'installed'
+                  ? info.status?.events ? `${info.status.events.toLocaleString()} events received` : 'No events yet. Use the agent once to see them.'
+                  : missing.length
+                    ? `Missing ${missing.slice(0, 3).join(', ')}${missing.length > 3 ? ` and ${missing.length - 3} more` : ''}`
+                    : undefined
+              }
+              action={
+                info.state !== 'installed' && (
+                  <button type="button" className="vbtn vbtn-ghost vbtn-sm" aria-expanded={open} onClick={() => setExpanded(open ? null : info.id)}>
+                    Manual setup <Icon name="down" size={14} className="onb-chev" />
+                  </button>
+                )
+              }>
+              {open && <ManualSteps agentId={info.id} status={info.status} />}
+            </StatusRow>
+          );
+        })}
+      </ul>
+      <Actions
+        onBack={onBack}
+        backLabel="Change agents"
+        extra={!advancing && !allConnected && (
+          <>
+            {canInstall && !showCmd && (
+              <button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={() => setShowCmd(true)}>Use a terminal</button>
+            )}
+            <span className="mono faint onb-count">{connectedCount} of {agentIds.length} connected</span>
+          </>
+        )}
+        next={
+          canInstall && !allConnected && !advancing
+            ? { label: installing ? 'Connecting' : pending.length === 1 ? `Connect ${getAgent(pending[0]).product}` : `Connect ${pending.length} agents`, icon: 'plug', disabled: installing, onClick: () => void connect() }
+            : { label: advancing ? 'Continuing' : 'Continue', autoMs: advancing ? AUTO_ADVANCE_MS : undefined, onClick: onContinue }
+        }
+      />
+    </Shell>
   );
 }
 
-
-function AgentBadge({ state }: { state: HookState }) {
-  if (state === 'installed') {
-    return (
-      <span className="chip bg-olive/[0.14] text-olive ring-olive/[0.32]">
-        <span className="h-1.5 w-1.5 rounded-full bg-olive" />
-        Connected
-      </span>
-    );
-  }
-  if (state === 'checking') {
-    return (
-      <span className="chip bg-cobalt/[0.14] text-cobalt ring-cobalt/[0.32]">
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cobalt" />
-        Checking
-      </span>
-    );
-  }
-  return (
-    <span className="chip bg-fg/[0.06] text-fg/60 ring-line/[0.16]">
-      <span className="h-1.5 w-1.5 rounded-full bg-fg/40" />
-      Not connected
-    </span>
-  );
-}
-
-function StatusDetail({ info, product }: { info: AgentHookInfo; product: string }) {
-  if (info.state === 'installed') {
-    return (
-      <p className="font-mono text-data leading-relaxed text-fg/60">
-        <span className="font-semibold text-fg">{product}</span> is connected and
-        streaming events.
-        {info.status?.events ? ` ${info.status.events} events received.` : ''}
-      </p>
-    );
-  }
-  if (info.state === 'checking') {
-    return (
-      <p className="font-mono text-data text-fg/60">
-        Checking whether {product} hooks are installed…
-      </p>
-    );
-  }
-  return (
-    <p className="font-mono text-data leading-relaxed text-fg/60">
-      <span className="font-semibold text-fg">{product}</span> is not connected.
-      {info.status?.missing_labels?.length
-        ? ` Missing ${info.status.missing_labels.slice(0, 3).join(', ')}${info.status.missing_labels.length > 3 ? ` +${info.status.missing_labels.length - 3}` : ''}.`
-        : ' Run the installer to set up hooks.'}
-    </p>
-  );
-}
 
 function ManualSteps({
   agentId,
@@ -268,41 +206,33 @@ function ManualSteps({
   status: HookStatusAgent | null;
 }) {
   const agent = getAgent(agentId);
-  const shellStep = agent.steps.find((s) => s.kind === 'shell');
   const fileSteps = agent.steps.filter((s) => s.kind === 'file');
 
   return (
-    <div className="space-y-4">
+    <div className="onb-manual">
       {status && (status.health === 'missing_hooks' || status.health === 'not_installed') && (
         <div className="space-y-1">
-          <span className="font-mono text-label font-semibold uppercase tracking-label text-hot">
-            REPAIR
-          </span>
-          <a
-            href={status.repair_url}
-            download={`cot-repair-${agentId}.sh`}
-            className="btn">
-            Download repair script
+          <span className="label">Repair</span>
+          <a href={status.repair_url} download={`cot-repair-${agentId}.sh`} className="vbtn vbtn-quiet vbtn-sm">
+            <Icon name="download" size={14} />Download repair script
           </a>
-        </div>
-      )}
-      {shellStep?.command && (
-        <div className="space-y-1">
-          <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/40">
-            INSTALL
-          </span>
-          <ShellCommand command={shellStep.command} />
         </div>
       )}
       {agentId === 'opencode' && (
-        <div className="space-y-1 font-mono text-[0.7rem] leading-relaxed text-fg/60">
-          <span className="block text-[0.55rem] font-bold uppercase tracking-widest text-fg/40">
-            MANUAL PLUGIN
+        <div className="space-y-1">
+          <span className="label">Manual plugin</span>
+          <p className="onb-note">Save the plugin as ~/.config/opencode/plugins/cot.js, then restart OpenCode.</p>
+          <a href="/opencode-plugin.js" download="cot.js" className="vbtn vbtn-quiet vbtn-sm"><Icon name="download" size={14} />cot.js</a>
+        </div>
+      )}
+      {agentId === 'hermes' && (
+        <div className="space-y-1">
+          <span className="label">Manual plugin</span>
+          <p className="onb-note">Save both files to ~/.hermes/plugins/cot/, run hermes plugins enable cot, then restart Hermes.</p>
+          <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <a href="/hermes-plugin/plugin.yaml" download="plugin.yaml" className="vbtn vbtn-quiet vbtn-sm"><Icon name="download" size={14} />plugin.yaml</a>
+            <a href="/hermes-plugin/__init__.py" download="__init__.py" className="vbtn vbtn-quiet vbtn-sm"><Icon name="download" size={14} />__init__.py</a>
           </span>
-          <p>Download the plugin and save it as ~/.config/opencode/plugins/cot.js, then restart OpenCode.</p>
-          <a href="/opencode-plugin.js" download="cot.js" className="text-cobalt underline">
-            Download cot.js
-          </a>
         </div>
       )}
       {fileSteps.map(
@@ -310,9 +240,7 @@ function ManualSteps({
           step.code &&
           step.filename && (
             <div key={step.title} className="space-y-1">
-              <span className="font-mono text-label font-semibold uppercase tracking-label text-fg/40">
-                HOOK CONFIG
-              </span>
+              <span className="label">Hook config</span>
               <CodeBlock filename={step.filename} code={step.code} />
             </div>
           ),

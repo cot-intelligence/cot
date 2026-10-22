@@ -135,8 +135,7 @@ impl Status {
 struct TrayItems {
     status: MenuItem<tauri::Wry>,
     copy_endpoint: MenuItem<tauri::Wry>,
-    install_hooks: MenuItem<tauri::Wry>,
-    repair_hooks: MenuItem<tauri::Wry>,
+    agent_hooks: MenuItem<tauri::Wry>,
 }
 
 struct AppState {
@@ -217,8 +216,7 @@ fn refresh_tray(app: &AppHandle) {
     if let Some(items) = state.tray.lock().unwrap().as_ref() {
         let _ = items.status.set_text(status.summary());
         let _ = items.copy_endpoint.set_enabled(serving);
-        let _ = items.install_hooks.set_enabled(serving);
-        let _ = items.repair_hooks.set_enabled(serving);
+        let _ = items.agent_hooks.set_enabled(serving);
     }
     sync_tray_glyph(app);
 }
@@ -294,49 +292,17 @@ fn watch_collector(app: AppHandle) {
     });
 }
 
-/// Runs the same install.sh the curl path uses, served by our collector.
-/// Interactive prompts need a terminal, so it opens in one.
-fn run_hook_installer(port: u16, repair: bool) {
-    let mut command = format!("COT_ENDPOINT=http://127.0.0.1:{port} curl -fsSL http://127.0.0.1:{port}/install.sh | sh");
-    if repair {
-        command.push_str(" -s -- --repair");
+/// Opens the window on one Settings tab (`#/settings/<tab>`).
+fn show_settings_tab(app: &AppHandle, tab: &str) {
+    if let Some(window) = main_window(app) {
+        let _ = window.eval(format!("location.hash = '#/settings/{tab}'"));
     }
-    open_in_terminal(&command);
+    show_main_window(app);
 }
 
-#[cfg(target_os = "macos")]
-fn open_in_terminal(command: &str) {
-    let escaped = command.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!("tell application \"Terminal\"\n  activate\n  do script \"{escaped}\"\nend tell");
-    let _ = std::process::Command::new("/usr/bin/osascript").arg("-e").arg(script).spawn();
-}
-
-/// Linux has no one terminal, so try the common ones in order. The window
-/// waits for Enter at the end, or it would close before the summary is read.
-#[cfg(not(target_os = "macos"))]
-fn open_in_terminal(command: &str) {
-    let script = format!("{command}; printf '\\nPress Enter to close.'; read _");
-    // How each terminal takes a program to run: the args before `sh -c <script>`.
-    const TERMINALS: &[(&str, &[&str])] = &[
-        ("x-terminal-emulator", &["-e"]),
-        ("gnome-terminal", &["--"]),
-        ("ptyxis", &["--"]),
-        ("kgx", &["--"]),
-        ("konsole", &["-e"]),
-        ("xfce4-terminal", &["-x"]),
-        ("tilix", &["-e"]),
-        ("kitty", &[]),
-        ("alacritty", &["-e"]),
-        ("wezterm", &["start", "--"]),
-        ("foot", &[]),
-        ("xterm", &["-e"]),
-    ];
-    for (terminal, args) in TERMINALS {
-        let spawned = std::process::Command::new(terminal).args(*args).args(["sh", "-c", &script]).spawn();
-        if spawned.is_ok() {
-            return;
-        }
-    }
+/// Settings → Collector, where the collector wires or repairs hooks itself.
+fn show_agent_hooks(app: &AppHandle) {
+    show_settings_tab(app, "collector");
 }
 
 /// The menu-bar "cot." pill: filled while the collector serves, outlined
@@ -359,8 +325,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)?;
     let copy_endpoint = MenuItem::with_id(app, "copy-endpoint", "Copy Endpoint", false, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "Restart Collector", true, None::<&str>)?;
-    let install_hooks = MenuItem::with_id(app, "install-hooks", "Install Agent Hooks…", false, None::<&str>)?;
-    let repair_hooks = MenuItem::with_id(app, "repair-hooks", "Repair Agent Hooks…", false, None::<&str>)?;
+    let agent_hooks = MenuItem::with_id(app, "agent-hooks", "Agent Hooks…", false, None::<&str>)?;
     let reveal = MenuItem::with_id(app, "reveal-data", "Reveal Data Folder", true, None::<&str>)?;
     let open_log = MenuItem::with_id(app, "open-log", "Open Collector Log", true, None::<&str>)?;
     let at_login = app.autolaunch().is_enabled().unwrap_or(false);
@@ -372,12 +337,13 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(
         app,
         &[
-            &status, &sep()?, &open, &copy_endpoint, &sep()?, &restart, &sep()?, &install_hooks,
-            &repair_hooks, &reveal, &open_log, &login, &sep()?, &updates, &quit,
+            &status, &sep()?, &open, &copy_endpoint, &sep()?, &restart, &sep()?, &agent_hooks,
+            &reveal, &open_log, &login, &sep()?, &updates, &quit,
         ],
     )?;
 
     let login_item = login.clone();
+    updates::set_tray_item(app, updates.clone());
     TrayIconBuilder::with_id("cot")
         .icon(tray_glyph(false))
         .icon_as_template(true)
@@ -391,11 +357,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 }
             }
             "restart" => restart_collector(app),
-            "install-hooks" | "repair-hooks" => {
-                if let Some(port) = app.state::<AppState>().status().port() {
-                    run_hook_installer(port, event.id().as_ref() == "repair-hooks");
-                }
-            }
+            "agent-hooks" => show_agent_hooks(app),
             "reveal-data" => {
                 let state = app.state::<AppState>();
                 let db = state.home.database_file();
@@ -412,14 +374,14 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 let _ = if want { autolaunch.enable() } else { autolaunch.disable() };
                 let _ = login_item.set_checked(autolaunch.is_enabled().unwrap_or(false));
             }
-            "check-updates" => updates::check(app.clone(), true),
+            "check-updates" => updates::open_and_check(app),
             "quit" => app.exit(0),
             _ => {}
         })
         .build(app)?;
 
     *app.state::<AppState>().tray.lock().unwrap() =
-        Some(TrayItems { status, copy_endpoint, install_hooks, repair_hooks });
+        Some(TrayItems { status, copy_endpoint, agent_hooks });
     Ok(())
 }
 
@@ -550,6 +512,7 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
+        .manage(updates::Updates::default())
         .manage(AppState {
             home: CotHome::from_env(),
             collector: Mutex::new(None),
@@ -558,7 +521,7 @@ pub fn run() {
             local_page: Mutex::new(None),
             tray: Mutex::new(None),
         })
-        .invoke_handler(tauri::generate_handler![retry_collector])
+        .invoke_handler(tauri::generate_handler![retry_collector, updates::update_state, updates::update_check, updates::update_install])
         .menu(|app| build_app_menu(app))
         .on_menu_event(|app, event| {
             if event.id().as_ref() == "reload" {

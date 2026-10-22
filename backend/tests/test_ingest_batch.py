@@ -45,3 +45,27 @@ def test_single_body_ingest_still_returns_its_result(fresh_db: Path):
     )
     assert resp.status_code == 200
     assert resp.json()["raw_status"] == "projected"
+
+
+def test_batch_folds_attachments_onto_their_prompt(fresh_db: Path):
+    """A replayed spool can carry an attachment body inside a batch; it must
+    fold onto its prompt as it does sent alone, not become an event."""
+    client = TestClient(main.app, base_url="http://127.0.0.1")
+    body = [
+        {"session_id": "att1", "hook_event_name": "UserPromptSubmit", "prompt": "see this",
+         "timestamp": "2026-07-01T00:00:00Z"},
+        {"session_id": "att1", "_attach_to_prompt": True, "text": "see this",
+         "attachments": [{"type": "image", "name": "shot.png"}], "timestamp": "2026-07-01T00:00:00Z"},
+        {"session_id": "att1", "hook_event_name": "UserPromptSubmit", "prompt": "next",
+         "timestamp": "2026-07-01T00:01:00Z"},
+    ]
+    resp = client.post("/v1/ingest/claude", json=body)
+    assert resp.status_code == 200
+    results = resp.json()["results"]
+    assert len(results) == 3 and results[1]["attached"]
+    with store.read() as conn:
+        rows = conn.execute(
+            "SELECT category, detail, attachments FROM events WHERE session_id = 'att1' ORDER BY ts"
+        ).fetchall()
+    assert [r["detail"] for r in rows if r["category"] == "prompt"] == ["see this", "next"]
+    assert "shot.png" in (rows[0]["attachments"] or "")

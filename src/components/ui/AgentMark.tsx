@@ -1,7 +1,8 @@
 import type { AgentId } from '../../lib/agents';
+import { AgentMark as SharedMark } from '../forest/AgentMark';
 
 interface AgentMarkProps {
-  id: AgentId;
+  id: AgentId | (string & {});
   className?: string;
   /** Use the full-color 2.5D cube (onboarding / large placements). */
   variant?: '2d' | '25d';
@@ -18,11 +19,23 @@ const CODEX_PATH =
 
 /** Agent marks used in onboarding and source badges. */
 export function AgentMark({ id, className = '', variant = '2d' }: AgentMarkProps) {
+  // Codex and the agents read only from disk (Gemini CLI, Zed, Goose …) use the shared marks.
+  if (id !== 'claude' && id !== 'cursor' && id !== 'opencode' && id !== 'hermes') {
+    return <SharedMark id={id} className={className} size={null} />;
+  }
   if (id === 'opencode') {
     return (
       <svg viewBox="0 0 16 20" fill="none" className={className} aria-hidden="true">
         <path d="M12 16H4V8H12V16Z" fill="currentColor" opacity="0.25" />
         <path d="M12 4H4V16H12V4ZM16 20H0V0H16V20Z" fill="currentColor" />
+      </svg>
+    );
+  }
+  if (id === 'hermes') {
+    // Hermes Agent marks itself with the caduceus (☤) in its own CLI.
+    return (
+      <svg viewBox="0 0 16 16" className={className} aria-hidden="true">
+        <text x="8" y="12.5" textAnchor="middle" fontSize="14" fill="currentColor">☤</text>
       </svg>
     );
   }

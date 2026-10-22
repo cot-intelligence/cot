@@ -211,18 +211,6 @@ def test_expensive_project_silent_below_min_spend():
     assert not _rules(insights.compute_insights(), "cost.expensive_project")
 
 
-def test_unpriced_tokens_fires_for_unknown_model():
-    _event("s1", category="response", model="mystery-model-9000", i=40_000, o=20_000)
-    hits = _rules(insights.compute_insights(), "cost.unpriced_tokens")
-    assert len(hits) == 1
-    assert "mystery-model-9000" in hits[0]["title"]
-
-
-def test_unpriced_tokens_silent_for_priced_model():
-    _event("s1", category="response", model="claude-sonnet-4-5", i=40_000, o=20_000)
-    assert not _rules(insights.compute_insights(), "cost.unpriced_tokens")
-
-
 def test_cache_write_waste_fires_on_low_readback():
     _event("s1", category="response", model="claude-sonnet-4-5", cw=200_000, cr=10_000)
     hits = _rules(insights.compute_insights(), "cost.cache_write_waste")
@@ -650,7 +638,7 @@ def test_dismiss_reason_is_kept_and_cleared_on_reopen():
     from app import main
 
     finding = {
-        "fingerprint": "fp-reason", "id": "rule", "pillar": "cost", "tier": 2,
+        "fingerprint": "fp-reason", "id": "cost.cache_write_waste", "pillar": "cost", "tier": 2,
         "severity": "warn", "title": "t", "detail": "d", "recommendation": "r", "evidence": [],
     }
     with db.insight_findings_repo() as repo:
@@ -670,3 +658,13 @@ def test_dismiss_reason_is_kept_and_cleared_on_reopen():
     # No body still works (older dashboards).
     assert client.post("/v1/insights/fp-reason/dismiss").status_code == 200
     assert stored()["dismiss_reason"] is None
+
+
+def test_findings_of_a_retired_rule_disappear_instead_of_resolving():
+    old = {"fingerprint": "fp-old", "id": "cost.unpriced_tokens", "pillar": "cost", "tier": 1,
+           "severity": "info", "title": "t", "detail": "d", "recommendation": "r", "evidence": []}
+    with db.insight_findings_repo() as repo:
+        repo.insert(old, _ts())
+    res = insights.compute_insights(days=1)
+    assert all(f["fingerprint"] != "fp-old" for f in res["insights"])
+    assert "cost.unpriced_tokens" not in insights.RULES

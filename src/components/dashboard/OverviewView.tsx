@@ -1,37 +1,44 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
-  getAiAnalyses,
   getInsights,
   getMetrics,
   getConnections,
+  getHookStatus,
   getOverviewWindow,
   getSessionsPage,
-  type AiAnalysis,
+  getOutcomeTotals,
+  getSessionShape,
+  getShipped,
   type Connection,
+  type HookHealthState,
+  type HookStatus,
+  type OutcomesSummaryLite,
+  type ShippedList,
   type InsightPillar,
   type InsightsResponse,
   type Metrics,
   type OverviewWindow,
+  type SessionShape,
   type SessionSummary,
 } from '../../lib/api';
-import { formatDuration, formatRelative, getCategoryMeta, userTimeZone } from '../../lib/categoryMeta';
+import { formatRelative, getCategoryMeta, userTimeZone } from '../../lib/categoryMeta';
 import { compact, formatCost, formatMetricsDay, hourLabel } from '../../lib/format';
 import { formatModel } from '../../lib/modelMeta';
 import { sourceLabel } from '../../lib/sourceLabels';
 import { usePolling } from '../../lib/usePolling';
 import { getPrefs } from '../../lib/prefs';
 import { Icon, type IconName } from '../ui/icons';
-import { CardNote } from '../ui/Surface';
 import { CHART_COLORS, type Datum } from './chartConstants';
-import { DailyArea, DonutChart, HBars, HourBars } from './chartTheme';
-import { ExecutiveSummary } from './ExecutiveSummary';
+import { DonutChart, HBars } from './chartTheme';
 import { Columns, ShareBars as FShareBars, Sparkline, StackBar as FStackBar } from '../forest/charts';
 import { fmt, modelLabel, project as fproject } from '../forest/format';
 import { Icon as FIcon } from '../forest/icons';
 import { Agent, agentColor as fAgentColor, Seg as FSeg, Sev } from '../forest/ui';
+import { AttachmentsDrawer } from './AttachmentsDrawer';
 import { ExportModal } from './ExportModal';
-import { ContributionHeatmap } from './metricsCharts';
+import { ContributionHeatmap, HeatStrip, lastDays } from './metricsCharts';
 import { ShareCardModal } from './ShareCardModal';
+import { ShippedRow } from './ShippedView';
 
 const CARD_GRID = 'overflow-hidden rounded-cell border border-line/10 bg-line/10';
 
@@ -49,6 +56,11 @@ const WINDOWS = [
   { k: 0, l: 'all' },
 ];
 const DAY_MS = 86_400_000;
+/** Rows in the Projects and Spend-by-model cards; the full lists are a click away. */
+const TOP_ROWS = 5;
+const SPEND_CHART_MIN = 96;
+/** Height of Columns' date/value line (12px text + 8px gap), plus a hair of slack. */
+const SPEND_LABEL_H = 30;
 const HOUR_MS = 3_600_000;
 
 /** "14:00" for an hour bucket key ("2026-10-16T14", UTC) in the viewer's time. */
@@ -83,29 +95,21 @@ function Grid({ cols, children }: { cols: string; children: React.ReactNode }) {
   return <div className={`grid gap-px ${CARD_GRID} ${cols}`}>{children}</div>;
 }
 
-function Stat({ label, value, hint, accent }: { label: string; value: string; hint?: string; accent?: string }) {
-  return (
-    <div className="bg-surface px-4 py-3">
-      <p className="font-mono text-label uppercase tracking-label text-fg/40">{label}</p>
-      <p className={`mt-1 font-mono text-2xl font-semibold tabular-nums ${accent ?? 'text-fg'}`}>{value}</p>
-      {hint && <p className="font-mono text-label text-fg/40">{hint}</p>}
-    </div>
-  );
-}
-
 function Spotlight({
   kicker,
   value,
   sub,
   accent,
+  href,
 }: {
   kicker: string;
   value: string;
   sub: string;
   accent: string;
+  href?: string;
 }) {
-  return (
-    <div className="bg-surface px-4 py-5">
+  const body = (
+    <>
       <p className="font-mono text-label font-semibold uppercase tracking-label text-fg/60">
         {kicker}
       </p>
@@ -113,7 +117,12 @@ function Spotlight({
         {value}
       </p>
       <p className="mt-2 font-mono text-label uppercase tracking-label text-fg/60">{sub}</p>
-    </div>
+    </>
+  );
+  return href ? (
+    <a href={href} className="block bg-surface px-4 py-5 transition-colors hover:bg-fg/[0.03]">{body}</a>
+  ) : (
+    <div className="bg-surface px-4 py-5">{body}</div>
   );
 }
 
@@ -131,6 +140,25 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
   const { data: m, error } = usePolling<Metrics>(['metrics', tz], () => getMetrics(tz), 5000);
   const [shareOpen, setShareOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [attachments, setAttachments] = useState<{ type: string | null } | null>(null);
+  // The spend chart fills its card, which stretches to the Needs review card beside it.
+  const spendBody = useRef<HTMLDivElement>(null);
+  const [spendChartH, setSpendChartH] = useState(SPEND_CHART_MIN);
+  const spendReady = !!m;
+  useLayoutEffect(() => {
+    const el = spendBody.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const cs = getComputedStyle(el);
+      const inner = el.clientHeight - (parseFloat(cs.paddingTop) || 0) - (parseFloat(cs.paddingBottom) || 0);
+      // Leave room for the date/value line above the bars. A measure taken before
+      // styles resolve reads NaN; keep the floor rather than an unsized chart.
+      const h = Math.floor(inner - SPEND_LABEL_H);
+      setSpendChartH(Number.isFinite(h) ? Math.max(SPEND_CHART_MIN, h) : SPEND_CHART_MIN);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [spendReady]);
 
   // The window drives findings, spend and the projects table; the deeper charts below stay all-time.
   const [days, setDays] = useState<number>(() => getPrefs().range);
@@ -148,15 +176,15 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
     60000,
   );
   const { data: connections } = usePolling<Connection[]>(['connections'], () => getConnections(), 30000);
-
-  // The executive summary leads with the latest saved AI analysis, if one exists.
-  const [analyses, setAnalyses] = useState<AiAnalysis[]>([]);
-  useEffect(() => {
-    getAiAnalyses().then(setAnalyses).catch(() => {});
-  }, []);
-  const latestAi = analyses.find((a) => a.status === 'ok' && a.result) ?? null;
-
-  const jumpToPillar = (pillar: InsightPillar) => onFindings?.(pillar);
+  // How cot gets each agent's sessions: live hooks, hooks that went missing, or
+  // import only (agents cot reads from disk). "Connected" above only means an
+  // event arrived in the last few minutes, so it can't say whether hooks work.
+  const { data: hooks } = usePolling<HookStatus>(['hooks-status'], () => getHookStatus(), 60000);
+  const hookHealth = useMemo(() => new Map((hooks?.agents ?? []).map((a) => [a.source as string, a.health])), [hooks]);
+  const { data: shipped } = usePolling<ShippedList>(['shipped', days], () => getShipped(days), 60000);
+  const { data: outcomeTotals } = usePolling<OutcomesSummaryLite>(['outcomes', days], () => getOutcomeTotals(days), 120000);
+  const shapeDays = days || 365;
+  const { data: shape } = usePolling<SessionShape>(['session-shape', shapeDays, tz], () => getSessionShape(shapeDays, tz), 60000);
 
   if (!m) {
     if (error) {
@@ -171,8 +199,8 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
 
   const t = m.totals;
   const fun = m.fun;
-  const dayData = m.by_day.map((d) => ({ day: d.day, events: d.events }));
   const activeDays = m.by_day.length;
+  const usage = usageFor(days, m.by_day, win.series);
   const avgPerActive = activeDays
     ? Math.round(m.by_day.reduce((n, d) => n + d.events, 0) / activeDays)
     : 0;
@@ -181,6 +209,7 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
     name: getCategoryMeta(c.category).label,
     value: c.events,
     color: CHART_COLORS[i % CHART_COLORS.length],
+    href: CATEGORY_HREF[c.category],
   }));
   const modelData: Datum[] = m.by_model.map((x, i) => ({
     name: formatModel(x.model),
@@ -209,13 +238,16 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
     return { n: hits.length, critical: hits.some((f) => f.severity === 'critical') };
   };
   const kpis = [
-    { k: 'Sessions', v: fmt.n(win.sessions), spark: win.series.map((x) => x.sessions), note: `${t.active_sessions} live now` },
-    { k: 'Spend', v: fmt.usd(win.cost), spark: win.series.map((x) => x.cost), note: 'list price, all models' },
-    { k: 'Tool calls', v: fmt.n(win.tools), spark: win.series.map((x) => x.events), note: `${fmt.pct(fun.error_rate)} errored` },
-    { k: 'Needs review', v: ins ? fmt.n(review.length) : '…', spark: undefined, note: ins ? `${criticals} critical · ${active.length} open in total` : 'computing…' },
+    { k: 'Sessions', v: fmt.n(win.sessions), spark: win.series.map((x) => x.sessions), note: `${t.active_sessions} live now`, href: '#/sessions', go: 'All sessions' },
+    { k: 'Spend', v: fmt.usd(win.cost), spark: win.series.map((x) => x.cost), note: 'list price, all models', href: '#/sessions?sort=cost', go: 'Costliest sessions' },
+    { k: 'Tool calls', v: fmt.n(win.tools), spark: win.series.map((x) => x.events), note: `${fmt.pct(fun.error_rate)} errored`, href: '#/metrics-history', go: 'Shell activity' },
+    { k: 'Needs review', v: ins ? fmt.n(review.length) : '…', spark: undefined, note: ins ? `${criticals} critical · ${active.length} open in total` : 'computing…', href: '#/findings', go: 'Findings' },
   ];
 
   const now = new Date().toISOString();
+  const go = (hash: string) => { window.location.hash = hash; };
+  // Both leaderboards show the same number of rows, so neither column ends early.
+  const leaderRows = Math.min(m.by_project.length, m.busiest_sessions.length) || Math.max(m.by_project.length, m.busiest_sessions.length);
   const models = [...m.cost.by_model].filter((x) => (x.cost ?? 0) > 0).sort((a, b) => (b.cost ?? 0) - (a.cost ?? 0));
 
   // Markup below mirrors the demo's Overview (demo-variants/src/variants/forest/pages-a.tsx) one to one.
@@ -235,21 +267,54 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
           </div>
         </div>
 
+
         <div className="kpis">
           {kpis.map((k) => (
-            <div className="kpi" key={k.k}>
+            <a className="kpi kpi-link" key={k.k} href={k.href} title={`Open ${k.go}`}>
               <span className="label">{k.k}</span>
               <span className="v">{k.v}</span>
               <span className="d"><span className="truncate">{k.note}</span>{k.spark && <span style={{ color: 'var(--v-hot)' }}><Sparkline values={k.spark} width={72} height={20} /></span>}</span>
-            </div>
+            </a>
           ))}
         </div>
 
+        <>
+          <Section n="01" title={days === 1 ? 'Hourly usage' : 'Daily usage'} aside={<span className="label">{windowText(days).toLowerCase()}</span>}>
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-baseline gap-x-7 gap-y-1">
+                <span className="font-mono text-sm font-semibold tabular-nums text-fg">
+                  {compact(usage.total)}{' '}
+                  <span className="text-label font-normal uppercase tracking-label text-fg/60">{usage.unit}</span>
+                </span>
+                <span className="font-mono text-label text-fg/60">
+                  {usage.active} active {usage.step}{usage.active === 1 ? '' : 's'}
+                </span>
+                <span className="font-mono text-label text-fg/60">
+                  ~{compact(usage.avg)} / {usage.step}
+                </span>
+                {usage.busiest && (
+                  <span className="font-mono text-label text-fg/60">
+                    busiest <span className="font-semibold text-fg/80">{usage.busiest.label}</span> · {compact(usage.busiest.value)}
+                  </span>
+                )}
+              </div>
+              {usage.cells ? (
+                <HeatStrip cells={usage.cells} unit={usage.unit} />
+              ) : (
+                <ContributionHeatmap data={m.by_day.map((d) => ({ label: d.day, value: d.events }))} />
+              )}
+            </div>
+          </Section>
+        </>
+
         <div className="grid-2">
-          <section className="card" aria-labelledby="vf-spend">
+          <section className="card" aria-labelledby="vf-spend" style={{ display: 'flex', flexDirection: 'column' }}>
             <div className="card-h"><span className="card-t" id="vf-spend">{days === 1 ? 'Hourly spend' : 'Daily spend'}</span><span className="mono faint" style={{ fontSize: 12 }}>{fmt.usd(win.cost)} total</span></div>
-            <div className="card-b">
-              <Columns key={days} data={win.series.map((x) => ({ key: x.day, value: x.cost }))} color="var(--v-hot)" muted="var(--v-mute)" label={days === 1 ? hourBucketLabel : fmt.day} format={fmt.usd} height={180} />
+            {/* Out of flow, so the chart can't push the card taller than the row. */}
+            <div style={{ flex: 1, position: 'relative', minHeight: SPEND_CHART_MIN + SPEND_LABEL_H + 40 }}>
+              <div className="card-b" ref={spendBody} style={{ position: 'absolute', inset: 0 }}>
+                <Columns key={days} data={win.series.map((x) => ({ key: x.day, value: x.cost }))} color="var(--v-hot)" muted="var(--v-mute)" label={days === 1 ? hourBucketLabel : fmt.day} format={fmt.usd} height={spendChartH} />
+              </div>
             </div>
           </section>
           <section className="card" aria-labelledby="vf-review">
@@ -257,11 +322,11 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
             {!ins ? (
               <div className="card-b dim" style={{ fontSize: 13 }}>Computing findings…</div>
             ) : (
-              <ul className="card-b" style={{ listStyle: 'none', margin: 0, display: 'grid', gap: 2 }}>
+              <ul className="card-b" style={{ listStyle: 'none', margin: 0, display: 'grid', gap: 0, paddingTop: 4 }}>
                 {review.length === 0 && <li className="dim" style={{ fontSize: 13 }}>Nothing needs review.</li>}
                 {review.slice(0, 5).map((f) => (
                   <li key={f.fingerprint}>
-                    <button type="button" onClick={() => onFindings?.(f.pillar)} className="hov" style={{ width: 'calc(100% + 16px)', display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 10, alignItems: 'center', padding: '8px 8px', margin: '0 -8px', borderRadius: 10, border: 0, background: 'none', textAlign: 'left' }}>
+                    <button type="button" onClick={() => onFindings?.(f.pillar)} className="hov" style={{ width: 'calc(100% + 16px)', display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 10, alignItems: 'center', padding: '5px 8px', margin: '0 -8px', borderRadius: 8, border: 0, background: 'none', textAlign: 'left' }}>
                       <Sev s={f.severity} />
                       <span className="truncate" style={{ fontSize: 13, fontWeight: 500 }}>{f.title}</span>
                     </button>
@@ -273,16 +338,81 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
         </div>
 
         <div className="grid-2">
+          <section className="card" aria-labelledby="vf-shipped" style={{ overflow: 'hidden' }}>
+            <div className="card-h"><span className="card-t" id="vf-shipped">Latest shipped</span><a href="#/metrics-history?tab=shipped" className="vbtn vbtn-ghost vbtn-sm">All <FIcon name="arrow" size={14} /></a></div>
+            {!shipped ? (
+              <div className="card-b" style={{ display: 'grid', gap: 10 }}>{[0, 1, 2].map((i) => <span key={i} className="sk" style={{ height: 40 }} />)}</div>
+            ) : shipped.items.length === 0 ? (
+              <div className="oc-empty"><b>Nothing shipped {days ? 'in this window' : 'yet'}</b><p>Pull requests, commits and pushes agents make show up here with their links.</p></div>
+            ) : (
+              <ul className="sh-list">
+                {/* Pull requests and merges first: they are what a reviewer sees. Commits fill in when there are few. */}
+                {[...shipped.items.filter((it) => it.kind === 'pr' || it.kind === 'merge'), ...shipped.items.filter((it) => it.kind === 'commit')]
+                  .slice(0, 7)
+                  .map((it, i) => <ShippedRow key={`${it.kind}:${it.event_id ?? it.sha}:${i}`} it={it} now={now} onSelect={onSelect} index={i} />)}
+              </ul>
+            )}
+          </section>
+          <section className="card" aria-labelledby="vf-outcomes">
+            <div className="card-h"><span className="card-t" id="vf-outcomes">Outcomes</span><span className="label">{windowText(days).toLowerCase()}</span></div>
+            {!shipped || !outcomeTotals ? (
+              <div className="card-b" style={{ display: 'grid', gap: 10 }}>{[0, 1, 2, 3].map((i) => <span key={i} className="sk" style={{ height: 28 }} />)}</div>
+            ) : (
+              <div className="card-b oc-card">
+                <div className="oc-counts">
+                  {[
+                    { l: 'PRs opened', v: shipped.counts.pr, k: 'pr' },
+                    { l: 'Merged', v: shipped.counts.merge, k: 'merge' },
+                    { l: 'Commits', v: shipped.counts.commit, k: 'commit' },
+                    { l: 'Pushes', v: shipped.counts.push, k: 'push' },
+                  ].map((x) => (
+                    <a key={x.k} href={`#/metrics-history?tab=shipped&kind=${x.k}`} className="oc-count" title={`See every ${x.l.toLowerCase()}`}>
+                      <b className="tnum">{fmt.n(x.v)}</b><span>{x.l}</span>
+                    </a>
+                  ))}
+                </div>
+                <p className="dim" style={{ margin: 0, fontSize: 12 }}>
+                  {outcomeTotals.totals.git_commits > 0 && (
+                    <span className="mono"><span className="d-add">+{fmt.k(outcomeTotals.totals.added)}</span> <span className="d-rm">−{fmt.k(outcomeTotals.totals.removed)}</span> lines · </span>
+                  )}
+                  {fmt.n(outcomeTotals.totals.sessions_shipped)} of {fmt.n(win.sessions)} sessions shipped something
+                </p>
+                <div>
+                  <span className="label">By project</span>
+                  <ul className="oc-proj">
+                    {outcomeTotals.projects
+                      .filter((p) => p.prs_opened || p.commits || p.git_commits)
+                      .sort((a, b) => b.prs_opened - a.prs_opened || Math.max(b.commits, b.git_commits) - Math.max(a.commits, a.git_commits))
+                      .slice(0, 5)
+                      .map((p) => {
+                        const commits = Math.max(p.commits, p.git_commits);
+                        return (
+                          <li key={p.project ?? '-'}>
+                            <a href={`#/metrics-history?tab=shipped&group=${encodeURIComponent(p.project_name ?? 'no project')}`} title={p.project ?? ''}>
+                              <span className="mono truncate">{p.project_name ?? 'no project'}</span>
+                              <span className="tnum dim">{p.prs_opened > 0 && `${fmt.n(p.prs_opened)} PR${p.prs_opened === 1 ? '' : 's'} · `}{fmt.n(commits)} commit{commits === 1 ? '' : 's'}</span>
+                            </a>
+                          </li>
+                        );
+                      })}
+                  </ul>
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
+
+        <div className="grid-2">
           <section className="card" aria-labelledby="vf-proj" style={{ overflow: 'hidden' }}>
             <div className="card-h" style={{ paddingBottom: 12 }}><span className="card-t" id="vf-proj">Projects</span><a href="#/projects" className="vbtn vbtn-ghost vbtn-sm">All <FIcon name="arrow" size={14} /></a></div>
             <div style={{ overflowX: 'auto' }}>
-              <table className="t">
+              <table className="t t-compact">
                 <thead><tr><th>Project</th><th>Agents</th><th className="num">Sessions</th><th className="num">Spend</th><th className="num">Findings</th></tr></thead>
                 <tbody>
-                  {win.projects.map((p) => {
+                  {win.projects.slice(0, TOP_ROWS).map((p) => {
                     const fx = projectFindings(p.cwd);
                     return (
-                      <tr key={p.cwd ?? '-'}>
+                      <tr key={p.cwd ?? '-'} className="click" onClick={() => { window.location.hash = `#/project/${encodeURIComponent(fproject(p.cwd))}`; }}>
                         <td><a href={`#/project/${encodeURIComponent(fproject(p.cwd))}`} className="mono proj-link" style={{ fontSize: 12 }} title={p.cwd ?? ''}>{fproject(p.cwd)}</a></td>
                         <td style={{ minWidth: 120 }}><FStackBar parts={sources.map((a) => ({ key: sourceLabel(a), value: p.agents[a] ?? 0, color: fAgentColor(a) }))} /></td>
                         <td className="num">{p.sessions}</td>
@@ -299,9 +429,9 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
             </div>
           </section>
           <section className="card" aria-labelledby="vf-models">
-            <div className="card-h"><span className="card-t" id="vf-models">Spend by model</span><span className="label">all time</span></div>
+            <div className="card-h"><span className="card-t" id="vf-models">Spend by model</span><a href="#/sessions?sort=cost" className="vbtn vbtn-ghost vbtn-sm" title="Sessions by spend">Costliest sessions <FIcon name="arrow" size={14} /></a></div>
             <div className="card-b">
-              <FShareBars rows={models.map((x) => ({ key: x.model, label: <span className="mono" style={{ fontSize: 12 }}>{modelLabel(x.model)}</span>, value: x.cost ?? 0 }))} color="var(--v-hot)" track="var(--v-panel)" format={fmt.usd} />
+              <FShareBars rows={models.slice(0, TOP_ROWS).map((x) => ({ key: x.model, label: <span className="mono" style={{ fontSize: 12 }}>{modelLabel(x.model)}</span>, value: x.cost ?? 0 }))} color="var(--v-hot)" track="var(--v-panel)" format={fmt.usd} compact />
               {m.cost.unpriced_models.length > 0 && <p className="faint" style={{ fontSize: 12, margin: '14px 0 0' }}>Unpriced: {m.cost.unpriced_models.slice(0, 4).map(modelLabel).join(', ')}{m.cost.unpriced_models.length > 4 ? '…' : ''}</p>}
             </div>
           </section>
@@ -309,53 +439,21 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
 
         <section className="card" style={{ marginTop: 16 }} aria-labelledby="vf-agents">
           <div className="card-h"><span className="card-t" id="vf-agents">Agents</span><a href="#/governance" className="vbtn vbtn-ghost vbtn-sm">Coverage <FIcon name="arrow" size={14} /></a></div>
-          <div className="card-b" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+          <div className="card-b agent-list">
             {(connections ?? m.by_source.map((x) => ({ source: x.source, sessions: x.sessions, events: x.events, last_event: null, connected: true }))).map((c) => (
-              <div key={c.source} style={{ display: 'grid', gap: 6, padding: 14, borderRadius: 12, background: 'var(--v-bg)', border: '1px solid var(--v-line)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}><Agent id={c.source} /><span className={`vchip ${c.connected ? 'c-ok' : 'c-dim'}`}><span className="dot" />{c.connected ? 'connected' : 'not connected'}</span></div>
-                <span className="mono" style={{ fontSize: 12 }}>{c.sessions} sessions · {fmt.n(c.events)} events</span>
-                <span className="faint" style={{ fontSize: 12 }}>{c.last_event ? `Last event ${fmt.ago(c.last_event, now)}` : 'No events yet'}</span>
-              </div>
+              <a key={c.source} href={`#/sessions?agent=${encodeURIComponent(c.source)}`} className="agent-row" title={`${sourceLabel(c.source)} sessions`}>
+                <Agent id={c.source} />
+                <span className="mono num-t agent-n">{fmt.n(c.sessions)} sessions · {fmt.n(c.events)} events</span>
+                <span className="faint agent-last">{c.last_event ? `Last event ${fmt.ago(c.last_event, now)}` : 'No events yet'}</span>
+                <CaptureChip health={hookHealth.get(c.source)} />
+              </a>
             ))}
           </div>
         </section>
 
-        <Section title="Executive summary">
-          <ExecutiveSummary insights={ins ?? null} metrics={m} aiAnalysis={latestAi} onJump={jumpToPillar} />
-        </Section>
-
-        <>
-          <Section n="01" title="Daily usage">
-            <div className="space-y-4">
-              <div className="flex flex-wrap items-baseline gap-x-7 gap-y-1">
-                <span className="font-mono text-sm font-semibold tabular-nums text-fg">
-                  {compact(t.events)}{' '}
-                  <span className="text-label font-normal uppercase tracking-label text-fg/60">
-                    events tracked
-                  </span>
-                </span>
-                <span className="font-mono text-label text-fg/60">
-                  {activeDays} active {activeDays === 1 ? 'day' : 'days'}
-                </span>
-                <span className="font-mono text-label text-fg/60">
-                  ~{compact(avgPerActive)} events / day
-                </span>
-                {fun.busiest_day && (
-                  <span className="font-mono text-label text-fg/60">
-                    busiest{' '}
-                    <span className="font-semibold text-fg/80">{formatMetricsDay(fun.busiest_day.day)}</span> ·{' '}
-                    {compact(fun.busiest_day.events)}
-                  </span>
-                )}
-              </div>
-              <ContributionHeatmap data={m.by_day.map((d) => ({ label: d.day, value: d.events }))} />
-            </div>
-          </Section>
-        </>
-
         <>
           <Section n="02" title="Highlights">
-            <Grid cols="grid-cols-1 sm:grid-cols-3">
+            <Grid cols="grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
               <Spotlight
                 accent="text-hot"
                 kicker="Peak activity"
@@ -374,29 +472,22 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
                 value={String(activeDays)}
                 sub={`~${compact(avgPerActive)} events / day`}
               />
+              <Spotlight
+                href="#/sessions?status=active"
+                accent="text-fg"
+                kicker="Agents at once"
+                value={shape ? String(shape.concurrency.peak) : '—'}
+                sub={shape ? `${Math.round(shape.concurrency.overlap_share * 100)}% of working time in parallel` : 'counting…'}
+              />
             </Grid>
           </Section>
         </>
-
-        <>
-          <Section n="03" title="Activity">
-            <Grid cols="md:grid-cols-2">
-              <ChartBox label="Events per day">
-                <DailyArea data={dayData.slice(-45)} />
-              </ChartBox>
-              <ChartBox label={`By hour — peak ${fun.peak_hour != null ? hourLabel(fun.peak_hour) : '—'}`}>
-                <HourBars data={m.by_hour} peak={fun.peak_hour} />
-              </ChartBox>
-            </Grid>
-          </Section>
-        </>
-
 
         <>
           <Section n="05" title="Breakdown">
             <Grid cols="md:grid-cols-2">
               <ChartBox label="Event categories">
-                <HBars data={categoryData} />
+                <HBars data={categoryData} height={Math.max(200, categoryData.length * 26)} onPick={(d) => { if (d.href) window.location.hash = d.href; }} />
               </ChartBox>
               <ChartBox label="Models">
                 {modelData.length ? (
@@ -444,39 +535,20 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
                     <DonutChart data={agentData} centerLabel={compact(t.events)} centerSub="events" />
                   </div>
                   <div className="min-w-0 flex-1 space-y-2">
-                    {m.by_source.map((s) => (
-                      <div key={s.source} className="">
+                    {m.by_source.slice(0, 4).map((s) => (
+                      <a key={s.source} href={`#/sessions?agent=${encodeURIComponent(s.source)}`} className="block rounded-md px-2 py-1 -mx-2 transition-colors hover:bg-fg/[0.04]">
                         <p className="font-mono text-sm font-semibold text-fg">{sourceLabel(s.source)}</p>
                         <p className="font-mono text-label text-fg/60">
                           {s.sessions} sess · {compact(s.events)} ev
                         </p>
-                      </div>
+                      </a>
                     ))}
+                    {m.by_source.length > 4 && (
+                      <a href="#/governance" className="block font-mono text-label text-fg/50 hover:text-hot">+{m.by_source.length - 4} more agents</a>
+                    )}
                   </div>
                 </div>
               </ChartBox>
-            </Grid>
-          </Section>
-        </>
-
-
-        <>
-          <Section n="08" title="All time" aside={<CardNote>since install</CardNote>}>
-            <Grid cols="grid-cols-2 sm:grid-cols-4">
-              <Stat label="Sessions" value={compact(t.sessions)} hint={`${t.active_sessions} active now`} />
-              <Stat label="Events" value={compact(t.events)} />
-              <Stat label="Tool calls" value={compact(t.tool_calls)} />
-              <Stat label="Tokens" value={compact(m.tokens.total)} />
-              <Stat label="Est. cost" value={m.cost.total > 0 ? formatCost(m.cost.total) : '—'} />
-              <Stat label="Projects" value={compact(t.projects)} />
-              <Stat label="Fixed this week" value={ins ? String(ins.counts.resolved_recently) : '…'} accent="text-olive" />
-              <Stat label="Error rate" value={`${(fun.error_rate * 100).toFixed(1)}%`} />
-              <Stat label="Errors" value={compact(t.errors)} />
-              <Stat label="Permissions" value={compact(t.permissions)} />
-              <Stat
-                label="Avg session"
-                value={t.avg_duration_seconds ? formatDuration(null, t.avg_duration_seconds) : '—'}
-              />
             </Grid>
           </Section>
         </>
@@ -487,26 +559,33 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
             <Section n="10" title="By the numbers">
               <Grid cols="grid-cols-2 sm:grid-cols-3">
                 <Fact icon="terminal" label="Shell commands" value={compact(fun.shell_commands)} onClick={() => onHistory?.('shell')} />
-                <Fact icon="file" label="Files touched" value={compact(fun.files_touched)} />
-                <Fact icon="edit" label="Edits / reads" value={`${compact(fun.files_edited)} / ${compact(fun.files_read)}`} />
-                <Fact icon="plug" label="MCP calls" value={compact(fun.mcp_calls)} />
+                <Fact icon="file" label="Files touched" value={compact(fun.files_touched)} onClick={() => go('#/metrics-history?tab=edits')} />
+                <Fact icon="edit" label="Edits / reads" value={`${compact(fun.files_edited)} / ${compact(fun.files_read)}`} onClick={() => go('#/metrics-history?tab=edits')} />
+                <Fact icon="plug" label="MCP calls" value={compact(fun.mcp_calls)} onClick={() => go('#/metrics-history?tab=mcp')} />
                 <Fact icon="globe" label="Web fetches" value={compact(fun.web_calls)} onClick={() => onHistory?.('web')} />
-                <Fact icon="chat" label="Prompts / replies" value={`${compact(fun.prompts)} / ${compact(fun.responses)}`} />
+                <Fact icon="chat" label="Prompts / replies" value={`${compact(fun.prompts)} / ${compact(fun.responses)}`} onClick={() => go('#/sessions?sort=events')} />
                 <Fact icon="brain" label="Thoughts" value={compact(fun.thoughts)} />
                 <Fact icon="search" label="Favorite tool" value={fun.top_tool ?? '—'} />
-                <Fact icon="layers" label="Projects" value={compact(t.projects)} />
+                <Fact icon="layers" label="Projects" value={compact(t.projects)} onClick={() => go('#/projects')} />
               </Grid>
             </Section>
           </>
         )}
 
         <>
-          <Section n="11" title="Attachments">
+          <Section
+            n="11"
+            title="Attachments"
+            aside={m.attachments.total > 0 && (
+              <button type="button" className="vbtn vbtn-ghost vbtn-sm" onClick={() => setAttachments({ type: null })}>
+                All {fmt.n(m.attachments.total)} <FIcon name="arrow" size={14} />
+              </button>
+            )}>
             {m.attachments.total > 0 ? (
               <div>
                 {m.attachments.by_type.length > 0 && (
                   <div className="flex min-h-[5rem] items-center justify-center border rounded-cell border-line/10 bg-panel/40 px-4 py-5">
-                    <WordCloud data={m.attachments.by_type} />
+                    <WordCloud data={m.attachments.by_type} onPick={(type) => setAttachments({ type })} />
                   </div>
                 )}
               </div>
@@ -524,8 +603,9 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
                   Top projects
                 </p>
                 <ul className="divide-y divide-fg/10">
-                  {m.by_project.map((p, i) => (
-                    <li key={p.cwd} className="flex items-center gap-3 py-2">
+                  {m.by_project.slice(0, leaderRows).map((p, i) => (
+                    <li key={p.cwd}>
+                      <a href={`#/project/${encodeURIComponent(fproject(p.cwd))}`} className="flex items-center gap-3 py-2 transition-colors hover:text-hot">
                       <RankBadge n={i + 1} />
                       <div className="min-w-0 flex-1">
                         <p className="truncate font-mono text-xs text-fg/75" title={p.cwd}>
@@ -535,6 +615,7 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
                           {p.sessions} sess · {compact(p.events)} ev · {formatRelative(p.last_activity)}
                         </p>
                       </div>
+                      </a>
                     </li>
                   ))}
                 </ul>
@@ -544,18 +625,17 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
                   Busiest sessions
                 </p>
                 <ul className="divide-y divide-fg/10">
-                  {m.busiest_sessions.map((s, i) => (
+                  {m.busiest_sessions.slice(0, leaderRows).map((s, i) => (
                     <li key={s.session_id}>
                       <button
                         type="button"
                         onClick={() => onSelect(s.session_id)}
                         className="flex w-full items-center gap-3 py-2 text-left">
                         <RankBadge n={i + 1} />
-                        <span className="min-w-0 flex-1 truncate font-mono text-xs text-fg/75 transition-colors hover:text-hot">
-                          {shortPath(s.cwd)} <span className="text-fg/40">{s.session_id.slice(0, 8)}</span>
-                        </span>
-                        <span className="shrink-0 font-mono text-label tabular-nums text-fg/60">
-                          {compact(s.events)}
+                        {/* Two lines, like Top projects, so both columns end together. */}
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate font-mono text-xs text-fg/75 transition-colors hover:text-hot">{shortPath(s.cwd)}</span>
+                          <span className="block font-mono text-label text-fg/40">{s.session_id.slice(0, 8)} · {compact(s.events)} ev</span>
                         </span>
                       </button>
                     </li>
@@ -577,6 +657,15 @@ export function OverviewView({ onSelect, onHistory, onFindings }: OverviewViewPr
 
       {shareOpen && <ShareCardModal metrics={m} onClose={() => setShareOpen(false)} />}
       {exportOpen && <ExportModal onClose={() => setExportOpen(false)} />}
+      <AttachmentsDrawer
+        open={!!attachments}
+        initialType={attachments?.type}
+        onClose={() => setAttachments(null)}
+        onOpen={(sessionId, eventId) => {
+          setAttachments(null);
+          onSelect(sessionId, eventId);
+        }}
+      />
     </div>
   );
 }
@@ -612,7 +701,7 @@ function Fact({ icon, label, value, onClick }: { icon: IconName; label: string; 
   );
 }
 
-function WordCloud({ data }: { data: { type: string; count: number }[] }) {
+function WordCloud({ data, onPick }: { data: { type: string; count: number }[]; onPick: (type: string) => void }) {
   const counts = data.map((d) => d.count);
   const min = Math.min(...counts);
   const max = Math.max(...counts);
@@ -622,16 +711,18 @@ function WordCloud({ data }: { data: { type: string; count: number }[] }) {
   return (
     <div className="flex flex-wrap items-baseline justify-center gap-x-6 gap-y-2">
       {sized.map((d, i) => (
-        <span
+        <button
+          type="button"
           key={d.type}
-          title={`${d.type} · ${d.count} ${d.count === 1 ? 'file' : 'files'}`}
+          onClick={() => onPick(d.type)}
+          title={`${d.type} · ${d.count} ${d.count === 1 ? 'file' : 'files'} · show them`}
           style={{ fontSize: `${fontRem(d.count)}rem`, color: CHART_COLORS[i % CHART_COLORS.length] }}
-          className="font-mono font-semibold leading-none">
+          className="wc-word font-mono font-semibold leading-none">
           {d.type}
           <span className="ml-1 align-super font-mono text-label not-italic text-fg/40">
             {d.count}
           </span>
-        </span>
+        </button>
       ))}
     </div>
   );
@@ -646,6 +737,33 @@ function RankBadge({ n }: { n: number }) {
       {n}
     </span>
   );
+}
+
+/**
+ * Daily usage for the selected window: the year calendar for "all", otherwise
+ * one strip cell per day (per hour, from tool calls, for the 24-hour window),
+ * with the headline figures worked out over the same cells.
+ */
+function usageFor(days: number, byDay: Metrics['by_day'], series: ReturnType<typeof windowed>['series']) {
+  type Cell = { key: string; label: string; value: number };
+  let cells: Cell[] | null;
+  let unit = 'events tracked';
+  let step = 'day';
+  if (days === 1) {
+    cells = series.map((x) => ({ key: x.day, label: hourBucketLabel(x.day), value: x.tools }));
+    unit = 'tool calls';
+    step = 'hour';
+  } else if (days > 0) {
+    const counts = new Map(byDay.map((d) => [d.day, d.events]));
+    cells = lastDays(days).map((day) => ({ key: day, label: formatMetricsDay(day), value: counts.get(day) ?? 0 }));
+  } else {
+    cells = null;
+  }
+  const all: Cell[] = cells ?? byDay.map((d) => ({ key: d.day, label: formatMetricsDay(d.day), value: d.events }));
+  const active = all.filter((c) => c.value > 0);
+  const total = all.reduce((n, c) => n + c.value, 0);
+  const busiest = active.reduce<Cell | null>((b, c) => (!b || c.value > b.value ? c : b), null);
+  return { cells, unit, step, total, active: active.length, avg: active.length ? Math.round(total / active.length) : 0, busiest };
 }
 
 /** The window's totals with one series point per day (per hour for the 24-hour
@@ -693,4 +811,26 @@ function OverviewSkeleton() {
       </div>
     </div>
   );
+}
+
+/** Where a click on an Event categories bar goes: the Activity page for that kind of event. */
+const CATEGORY_HREF: Record<string, string> = {
+  shell: '#/metrics-history',
+  web: '#/metrics-history?tab=web',
+  file_edit: '#/metrics-history?tab=edits',
+  mcp: '#/metrics-history?tab=mcp',
+  skill: '#/metrics-history?tab=skill',
+  prompt: '#/sessions?sort=events',
+  response: '#/sessions?sort=events',
+};
+
+/** Agent tiles per row: a full row when it fits, else two even rows (6 → 3 + 3, not 4 + 2). */
+/** One quiet word per agent tile on how its sessions reach cot. Only missing hooks
+ *  are a warning; agents read from disk are simply imported. */
+function CaptureChip({ health }: { health: HookHealthState | undefined }) {
+  if (health === undefined) return <span className="vchip c-dim" title="Read from the agent's files on disk">imported</span>;
+  if (health === 'missing_hooks' || health === 'not_installed') {
+    return <span className="vchip c-warn" title="Hooks are missing: new sessions only arrive by import. Fix it under Coverage."><span className="dot" />hooks off</span>;
+  }
+  return <span className="vchip c-ok" title="Events arrive live from the agent's hooks"><span className="dot" />live hooks</span>;
 }

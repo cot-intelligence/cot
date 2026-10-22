@@ -80,6 +80,7 @@ _SEVERITY_RANK = {"critical": 0, "warn": 1, "info": 2}
 CONSTANTS: dict[str, dict[str, Any]] = {
     "usability.automate_command": {"min_repeats": 5, "min_len": 10},
     "usability.retry_loops": {"warn_run": 3, "critical_run": 5},
+    "usability.unfixed_failures": {"min_failures": 5, "warn_fixed": 0.7, "critical_fixed": 0.4},
     "usability.permission_friction": {"min_events": 5, "ratio": 0.10},
     "usability.slow_commands": {"min_ms": 30_000, "min_occurrences": 2},
     "usability.reread_churn": {"min_reads": 5},
@@ -89,7 +90,6 @@ CONSTANTS: dict[str, dict[str, Any]] = {
         "min_total_usd": 0.5,
         "min_session_usd": 1.0,
     },
-    "cost.unpriced_tokens": {"min_tokens": 50_000, "warn_tokens": 1_000_000},
     "cost.cache_write_waste": {"min_cache_write": 100_000, "max_ratio": 0.3},
     "cost.model_mismatch": {"opus_share": 0.6, "min_total_usd": 1.0, "median_tool_calls": 15},
     "cost.trend_anomaly": {"multiple": 2.0, "min_usd": 1.0},
@@ -105,12 +105,12 @@ _EVIDENCE_CAP = 8
 GROUP_TITLES: dict[str, str] = {
     "usability.automate_command": "Repeated commands you could automate",
     "usability.retry_loops": "Tools stuck in retry loops",
+    "usability.unfixed_failures": "Tool failures agents work around",
     "usability.permission_friction": "Permission-prompt friction",
     "usability.stalled_clarifications": "Unanswered questions at session end",
     "usability.slow_commands": "Slow commands",
     "usability.reread_churn": "Files re-read repeatedly",
     "cost.expensive_project": "Expensive projects & sessions",
-    "cost.unpriced_tokens": "Unpriced model usage",
     "cost.cache_write_waste": "Cache written but not reused",
     "cost.model_mismatch": "Model choice vs. workload",
     "cost.trend_anomaly": "Spend trend spikes",
@@ -287,6 +287,58 @@ def _retry_loops(snap: Snapshot) -> list[dict[str, Any]]:
                 "and document the workaround in your project rules.",
                 metric={"value": n, "unit": "errors", "label": "consecutive failures"},
                 evidence=[_ev(r, target, r["status"]) for r in streak],
+            )
+        )
+    return out
+
+
+@rule(id="usability.unfixed_failures", pillar="usability", tier=2, aggregate_only=True)
+def _unfixed_failures(snap: Snapshot) -> list[dict[str, Any]]:
+    """A tool whose failures agents mostly don't fix: they work around it with other
+    tools or give up, so the same failure comes back in the next session."""
+    from .recovery import chains_from
+
+    c = CONSTANTS["usability.unfixed_failures"]
+    by_session: dict[str, list[dict[str, Any]]] = {}
+    for e in snap.events:
+        if e.tool is None or e.status is None or _is_tool_start(e):
+            continue
+        by_session.setdefault(e.session_id, []).append(
+            {"id": e.id, "session_id": e.session_id, "ts": e.ts, "tool": e.tool, "target": e.target,
+             "category": e.category, "status": e.status}
+        )
+    per_tool: dict[str, dict[str, Any]] = {}
+    for sid, rows in by_session.items():
+        for chain in chains_from(rows):
+            t = per_tool.setdefault(chain["tool"], {"n": 0, "fixed": 0, "moved_on": 0, "abandoned": 0, "unfixed": []})
+            t["n"] += 1
+            if chain["outcome"] == "recovered":
+                t["fixed"] += 1
+            else:
+                t[chain["outcome"]] += 1
+                t["unfixed"].append({"session_id": sid, "id": chain["event_id"], "ts": chain["ts"], "target": chain["target"]})
+    out = []
+    for tool, t in per_tool.items():
+        rate = t["fixed"] / t["n"]
+        if t["n"] < c["min_failures"] or rate >= c["warn_fixed"]:
+            continue
+        unfixed = t["n"] - t["fixed"]
+        latest = sorted(t["unfixed"], key=lambda r: str(r["ts"] or ""), reverse=True)
+        out.append(
+            _finding(
+                "usability.unfixed_failures",
+                tool,
+                "critical" if rate < c["critical_fixed"] else "warn",
+                f"{tool} failures usually aren't fixed",
+                f"{unfixed} of {t['n']} failed {tool} calls were never made to work: "
+                + " and ".join(x for x in (
+                    f"the agent worked around {t['moved_on']} with other tools" if t["moved_on"] else "",
+                    f"gave up on {t['abandoned']}" if t["abandoned"] else "",
+                ) if x) + ".",
+                "Open a few examples. A repeated cause (a wrong path, a missing permission, a flaky server) "
+                "is worth fixing once in the tool's setup or a project rule, so agents stop paying for it.",
+                metric={"value": round(rate * 100), "unit": "%", "label": "failures fixed"},
+                evidence=[_ev(r, str(r["target"] or tool), "not fixed") for r in latest],
             )
         )
     return out
@@ -533,43 +585,6 @@ def _expensive_project(snap: Snapshot) -> list[dict[str, Any]]:
     return out
 
 
-@rule(id="cost.unpriced_tokens", pillar="cost", tier=1)
-def _unpriced_tokens(snap: Snapshot) -> list[dict[str, Any]]:
-    c = CONSTANTS["cost.unpriced_tokens"]
-    totals: dict[str, int] = {}
-    for e in snap.events:
-        if not e.model:
-            continue
-        totals[e.model] = totals.get(e.model, 0) + (
-            e.input_tokens + e.output_tokens + e.cache_read_tokens + e.cache_write_tokens
-        )
-    rows = [{"m": m, "t": t} for m, t in totals.items()]
-    unpriced: dict[str, int] = {}
-    for r in rows:
-        if cost_for(r["m"], 1, 1) is None:
-            key = normalize_model(r["m"]) or r["m"]
-            unpriced[key] = unpriced.get(key, 0) + (r["t"] or 0)
-    out = []
-    for model, tokens in unpriced.items():
-        if tokens < c["min_tokens"]:
-            continue
-        severity = "warn" if tokens >= c["warn_tokens"] else "info"
-        out.append(
-            _finding(
-                "cost.unpriced_tokens",
-                model,
-                severity,
-                f"{tokens:,} tokens on '{model}' have no price",
-                f"Cost for model '{model}' can't be computed, so every cost insight and "
-                "metric silently undercounts.",
-                "Add a rate for it in ~/.cot/pricing.overrides.json (or fix the model-id "
-                "alias) so spend becomes visible.",
-                metric={"value": tokens, "unit": "tokens", "label": "unpriced tokens"},
-            )
-        )
-    return out
-
-
 @rule(id="cost.cache_write_waste", pillar="cost", tier=1)
 def _cache_write_waste(snap: Snapshot) -> list[dict[str, Any]]:
     c = CONSTANTS["cost.cache_write_waste"]
@@ -752,7 +767,7 @@ _EXFIL_TOOLS = re.compile(r"\b(?:curl|wget|scp|rsync|nc)\b")
 
 # Paths agents legitimately edit outside the project (configs, temp, cot itself).
 _OUT_OF_CWD_EXCLUDES = re.compile(
-    r"/\.(?:claude|cursor|codex|opencode|config|cot|cache)(?:/|$)|^/(?:private/)?tmp(?:/|$)|^/var/folders/"
+    r"/\.(?:claude|cursor|codex|opencode|hermes|config|cot|cache)(?:/|$)|^/(?:private/)?tmp(?:/|$)|^/var/folders/"
 )
 
 
@@ -1095,6 +1110,11 @@ def _reconcile(store: FindingsStore, findings: list[dict[str, Any]]) -> list[dic
         out.append(f)
     for fp, r in stored.items():
         if fp in current:
+            continue
+        # A finding from a rule since retired (cost.unpriced_tokens: a gap in
+        # cot's price list, not something to act on) is dropped, rather than
+        # left to auto-resolve and show as "fixed".
+        if r["rule_id"] not in RULES and not str(r["rule_id"]).startswith(user_rules.ID_PREFIX):
             continue
         if r["status"] == "active":
             last = db.parse_ts(r["last_seen"])

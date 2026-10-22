@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 from pathlib import Path
 from typing import Any
+
+from . import folders
 
 # Marker files at the project root, and the stack each one means.
 _STACK_MARKERS = (
@@ -158,23 +159,14 @@ def git_info(path: Path) -> dict[str, Any] | None:
 
 # macOS asks the user before an app reads these, so a projects list would pop a
 # permission prompt per folder. Their projects are listed without disk details.
-_PROTECTED = ("Desktop", "Documents", "Downloads", "Library/Mobile Documents")
-
-
-def _protected(path: Path) -> bool:
-    if sys.platform != "darwin":
-        return False
-    home = Path.home()
-    return any(path == home / d or home / d in path.parents for d in _PROTECTED)
-
-
 def describe(cwd: str | None) -> dict[str, Any]:
     """Whether ``cwd`` is on this machine, and if so its git details and stacks.
-    ``exists`` is None when the folder is one macOS guards (see _PROTECTED)."""
+    ``exists`` is None when the folder is one macOS guards and reading those
+    is off (see folders.py)."""
     if not cwd:
         return {"exists": False}
     path = Path(cwd)
-    if _protected(path):
+    if not folders.readable(path):
         return {"exists": None}
     try:
         if not path.is_dir():

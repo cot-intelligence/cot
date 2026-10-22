@@ -1,34 +1,34 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { AnimatePresence, motion } from 'framer-motion';
-import { useEffect, useMemo, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  deleteSession,
   getInsights,
-  getSessionDetail,
   getSessionProjects,
+  getSessionKinds,
   getSessionsPage,
-  sessionExportUrl,
+  type Archetype,
   setSessionArchived,
   setSessionBookmarked,
-  type ActionableInsight,
   type InsightsResponse,
-  type SessionDetail,
   type SessionPage,
   type SessionSummary,
-  type TimelineItem,
 } from '../../lib/api';
 import { usePolling } from '../../lib/usePolling';
-import { sessionDetailKey, useHoverPrefetch } from '../../lib/sessionDetailQuery';
+import { useHoverPrefetch } from '../../lib/sessionDetailQuery';
 import { agentLabel } from '../forest/AgentMark';
-import { categoryLabel, fmt, modelLabel, project, shortId } from '../forest/format';
-import { CATEGORY_ICON, Icon } from '../forest/icons';
+import { fmt, project, shortId } from '../forest/format';
+import { Icon } from '../forest/icons';
 import { Dropdown } from '../forest/Dropdown';
-import { EASE_OUT } from '../forest/motion';
 import { Agent, Sev, type Severity } from '../forest/ui';
+import { DeleteSessionDialog, SessionContextMenu, type SessionAction } from './SessionContextMenu';
 
 type SortKey = 'recent' | 'events' | 'duration' | 'cost';
 const SEV_RANK: Record<Severity, number> = { critical: 0, warn: 1, info: 2 };
 /** Sessions per page; the collector filters, sorts and counts across all of them. */
 const PAGE = 20;
+const KIND_ORDER: Archetype[] = ['quick', 'standard', 'deep', 'marathon', 'automation'];
+// Kinds are judged on active time against this user's own history (session_shape.py).
+const KIND_LABEL: Record<Archetype, string> = { quick: 'Quick', standard: 'Standard', deep: 'Deep', marathon: 'Marathon', automation: 'Automation' };
 
 interface SessionsViewProps {
   onSelect: (id: string, eventId?: number) => void;
@@ -43,15 +43,29 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
     const t = window.setTimeout(() => setQ(qInput.trim()), 250);
     return () => window.clearTimeout(t);
   }, [qInput]);
-  const [proj, setProj] = useState('');
-  const [agent, setAgent] = useState('');
-  const [status, setStatus] = useState('');
-  const [onlyFlagged, setOnlyFlagged] = useState(false);
+  // #/sessions?agent=cursor&kind=deep&project=cot&status=active&sort=cost&flagged=1 opens pre-filtered
+  // (the Overview links here from its numbers).
+  const [init] = useState(() => new URLSearchParams(window.location.hash.split('?')[1] ?? ''));
+  const [proj, setProj] = useState(init.get('project') ?? '');
+  const [agent, setAgent] = useState(init.get('agent') ?? '');
+  const [status, setStatus] = useState(init.get('status') ?? '');
+  const [onlyFlagged, setOnlyFlagged] = useState(init.get('flagged') === '1');
   const [onlyBookmarked, setOnlyBookmarked] = useState(false);
   const [archived, setArchived] = useState(false);
-  const [sort, setSort] = useState<SortKey>('recent');
+  const [kind, setKind] = useState<Archetype | ''>(() => {
+    const k = init.get('kind') as Archetype | null;
+    return k && KIND_ORDER.includes(k) ? k : '';
+  });
+  const [sort, setSort] = useState<SortKey>(() => {
+    const k = init.get('sort');
+    return k === 'events' || k === 'duration' || k === 'cost' ? k : 'recent';
+  });
   const [dir, setDir] = useState<'asc' | 'desc'>('desc');
-  const [peek, setPeek] = useState<SessionSummary | null>(null);
+  const [menu, setMenu] = useState<{ s: SessionSummary; x: number; y: number } | null>(null);
+  const [toDelete, setToDelete] = useState<SessionSummary | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
   const [page, setPage] = useState(0);
 
   const queryClient = useQueryClient();
@@ -73,9 +87,9 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
   const flaggedIds = useMemo(() => (onlyFlagged ? [...flagged.keys()].sort() : undefined), [onlyFlagged, flagged]);
 
   // Any filter or sort change starts again at the first page.
-  useEffect(() => setPage(0), [q, proj, agent, status, onlyFlagged, onlyBookmarked, archived, sort, dir]);
+  useEffect(() => setPage(0), [q, proj, agent, status, onlyFlagged, onlyBookmarked, archived, kind, sort, dir]);
 
-  const queryKey = ['sessionsTable', status, agent, q, proj, flaggedIds?.join(','), archived, onlyBookmarked, sort, dir, page];
+  const queryKey = ['sessionsTable', status, agent, q, proj, flaggedIds?.join(','), archived, onlyBookmarked, kind, sort, dir, page];
   // The live stream keeps the visible page fresh; the poll is the fallback.
   const { data } = usePolling<SessionPage>(
     queryKey,
@@ -92,9 +106,11 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
         order: dir,
         archived,
         bookmarked: onlyBookmarked,
+        kind: kind || undefined,
       }),
     3000,
   );
+  const { data: kinds } = usePolling(['sessionKinds'], getSessionKinds, 60000);
   const { data: projectList } = usePolling(['sessionProjects', archived], () => getSessionProjects(archived), 60000);
   const rows = data?.sessions ?? [];
   const total = data?.total ?? 0;
@@ -103,7 +119,7 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
   useEffect(() => {
     if (data && page > 0 && page >= pages) setPage(pages - 1);
   }, [data, page, pages]);
-  const agents = useMemo(() => [...new Set(['claude', 'cursor', 'codex', ...rows.map((s) => s.source)])], [rows]);
+  const agents = useMemo(() => [...new Set(['claude', 'cursor', 'codex', 'opencode', 'hermes', ...rows.map((s) => s.source)])], [rows]);
 
   const sortBy = (k: SortKey) => {
     if (sort === k) setDir((d) => (d === 'desc' ? 'asc' : 'desc'));
@@ -134,7 +150,6 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
   };
   const toggleArchive = async (s: SessionSummary) => {
     patch((p) => p.filter((x) => x.id !== s.id));
-    setPeek(null);
     try {
       await setSessionArchived(s.id, !archived);
     } finally {
@@ -142,7 +157,45 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
     }
   };
 
-  const any = q || proj || agent || status || onlyFlagged || onlyBookmarked || archived;
+  const copy = (text: string, what: string) => {
+    void navigator.clipboard?.writeText(text).then(() => {
+      setCopied(what);
+      window.setTimeout(() => setCopied((c) => (c === what ? null : c)), 1600);
+    });
+  };
+  const onAction = (action: SessionAction, s: SessionSummary) => {
+    if (action === 'open') onSelect(s.id);
+    else if (action === 'copy-id') copy(s.id, 'Session ID copied');
+    else if (action === 'copy-path' && s.cwd) copy(s.cwd, 'Project path copied');
+    else if (action === 'bookmark') void toggleBookmark(s);
+    else if (action === 'archive') void toggleArchive(s);
+    else if (action === 'delete') {
+      setDeleteError(null);
+      setToDelete(s);
+    }
+  };
+  const confirmDelete = async () => {
+    if (!toDelete) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deleteSession(toDelete.id);
+      patch((p) => p.filter((x) => x.id !== toDelete.id));
+      setToDelete(null);
+      void queryClient.invalidateQueries({ queryKey: ['sessionsTable'] });
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : "Couldn't delete the session.");
+    } finally {
+      setDeleting(false);
+    }
+  };
+  const closeMenu = useCallback(() => setMenu(null), []);
+  const openMenuAt = (s: SessionSummary, el: HTMLElement) => {
+    const r = el.getBoundingClientRect();
+    setMenu({ s, x: r.right - 232, y: r.bottom + 4 });
+  };
+
+  const any = q || proj || agent || status || onlyFlagged || onlyBookmarked || archived || kind;
   const clear = () => {
     setQInput('');
     setQ('');
@@ -152,22 +205,28 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
     setOnlyFlagged(false);
     setOnlyBookmarked(false);
     setArchived(false);
+    setKind('');
   };
   const now = new Date().toISOString();
-  const quiet = (on: boolean) => (on ? { borderColor: 'var(--v-hot)', color: 'var(--v-hot)' } : undefined);
 
   return (
     <div className="scroll" id="vf-scroll">
       <div className="page">
         <div className="ph">
-          <div><span className="label">Monitor</span><h1>Sessions</h1><p>Every traced agent session. Select a row to peek, open it for the full trace.</p></div>
+          <div><span className="label">Monitor</span><h1>Sessions</h1><p>Every traced agent session. Open one for its timeline, or right-click for quick actions.</p></div>
         </div>
         <div className="toolbar">
           <label className="vfield"><Icon name="search" size={15} /><input value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="Search title, id or path" aria-label="Search sessions" /></label>
           <Dropdown label="Project" value={proj} onChange={setProj} options={[{ value: '', label: 'All projects' }, ...(projectList ?? []).map((p) => ({ value: p.project, label: p.project, meta: p.sessions }))]} />
           <Dropdown label="Agent" value={agent} onChange={setAgent} options={[{ value: '', label: 'All agents' }, ...agents.map((a) => ({ value: a, label: agentLabel(a) }))]} />
           <Dropdown label="Status" value={status} onChange={setStatus} options={[{ value: '', label: 'Any status' }, { value: 'active', label: 'Live' }, { value: 'completed', label: 'Completed' }]} />
-          <button type="button" className="vbtn vbtn-quiet vbtn-sm" aria-pressed={onlyFlagged} onClick={() => setOnlyFlagged((x) => !x)} style={quiet(onlyFlagged)}><Icon name="findings" size={14} />With findings</button>
+          <Dropdown
+            label="Kind"
+            value={kind}
+            onChange={(v) => setKind(v as Archetype | '')}
+            options={[{ value: '', label: 'Any kind' }, ...KIND_ORDER.filter((k) => !kinds || kinds.counts[k] > 0).map((k) => ({ value: k, label: KIND_LABEL[k], meta: kinds?.counts[k] }))]}
+          />
+          <button type="button" className="tgl" aria-pressed={onlyFlagged} onClick={() => setOnlyFlagged((x) => !x)}><Icon name="findings" size={14} />With findings</button>
           <Dropdown
             label="View"
             value={archived ? 'archived' : onlyBookmarked ? 'bookmarked' : ''}
@@ -189,13 +248,34 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
                   <Th k="duration" num>Duration</Th>
                   <Th k="cost" num>Spend</Th>
                   <Th k="recent">Last active</Th>
+                  <th style={{ width: 36 }} aria-label="Actions" />
                 </tr>
               </thead>
               <tbody>
                 {rows.map((s) => {
                   const sev = flagged.get(s.id);
                   return (
-                    <tr key={s.id} className="click" data-sel={peek?.id === s.id} onClick={() => setPeek(s)} onKeyDown={(e) => e.key === 'Enter' && setPeek(s)} onPointerEnter={() => hoverPrefetch.start(s.id)} onPointerLeave={hoverPrefetch.cancel} onFocus={() => hoverPrefetch.start(s.id)} tabIndex={0}>
+                    <tr
+                      key={s.id}
+                      className="click"
+                      data-sel={menu?.s.id === s.id}
+                      onClick={() => onSelect(s.id)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        setMenu({ s, x: e.clientX, y: e.clientY });
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.target !== e.currentTarget) return;
+                        if (e.key === 'Enter') onSelect(s.id);
+                        else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+                          e.preventDefault();
+                          openMenuAt(s, e.currentTarget);
+                        }
+                      }}
+                      onPointerEnter={() => hoverPrefetch.start(s.id)}
+                      onPointerLeave={hoverPrefetch.cancel}
+                      onFocus={() => hoverPrefetch.start(s.id)}
+                      tabIndex={0}>
                       <td>
                         <button
                           type="button"
@@ -220,11 +300,30 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
                         </div>
                         <span className="mono faint" style={{ fontSize: 11 }}>{project(s.cwd)} · {shortId(s.id)}</span>
                       </td>
-                      <td><Agent id={s.source} /></td>
+                      <td><span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><Agent id={s.source} />{s.machine && <span className="mono faint" style={{ fontSize: 11 }} title="Imported from another machine">@{s.machine}</span>}</span></td>
                       <td className="num">{s.event_count}</td>
-                      <td className="num">{fmt.dur(s.duration_seconds ?? 0)}</td>
+                      <td className="num" title={s.active_seconds != null ? `${fmt.dur(s.active_seconds)} active of ${fmt.dur(s.duration_seconds ?? 0)} open` : undefined}>
+                        {fmt.dur(s.active_seconds ?? s.duration_seconds ?? 0)}
+                        {s.kind && s.kind !== 'standard' && <span className="faint" style={{ fontSize: 11, marginLeft: 6 }}>{KIND_LABEL[s.kind].toLowerCase()}</span>}
+                      </td>
                       <td className="num">{s.has_cost ? fmt.usd(s.cost_usd) : '—'}</td>
                       <td className="mono dim" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{fmt.ago(s.last_activity ?? s.started_at, now)}</td>
+                      <td style={{ paddingLeft: 0 }}>
+                        <button
+                          type="button"
+                          className="iconbtn row-more"
+                          style={{ width: 28, height: 28 }}
+                          aria-label="Session actions"
+                          aria-haspopup="menu"
+                          aria-expanded={menu?.s.id === s.id}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (menu?.s.id === s.id) setMenu(null);
+                            else openMenuAt(s, e.currentTarget);
+                          }}>
+                          <Icon name="more" size={16} stroke={2.4} />
+                        </button>
+                      </td>
                     </tr>
                   );
                 })}
@@ -236,162 +335,11 @@ export function SessionsView({ onSelect }: SessionsViewProps) {
           {data && total > PAGE && <Pager page={page} pages={pages} total={total} onPage={setPage} />}
         </div>
       </div>
-      <Peek
-        s={peek}
-        findings={(ins?.insights ?? []).filter((f) => f.status === 'active' && peek && f.evidence.some((e) => e.session_id === peek.id))}
-        archived={archived}
-        onClose={() => setPeek(null)}
-        onOpen={onSelect}
-        onArchive={toggleArchive}
-      />
+      <SessionContextMenu session={menu?.s ?? null} at={menu} archived={archived} onAction={onAction} onClose={closeMenu} />
+      <DeleteSessionDialog session={toDelete} busy={deleting} error={deleteError} onCancel={() => setToDelete(null)} onConfirm={() => void confirmDelete()} />
+      {copied && <div className="toast-mini" role="status">{copied}</div>}
     </div>
   );
-}
-
-function Peek({
-  s,
-  findings,
-  archived,
-  onClose,
-  onOpen,
-  onArchive,
-}: {
-  s: SessionSummary | null;
-  findings: ActionableInsight[];
-  archived: boolean;
-  onClose: () => void;
-  onOpen: (id: string, eventId?: number) => void;
-  onArchive: (s: SessionSummary) => void;
-}) {
-  // Same cache entry as the trace page, so "Open full trace" after a peek is instant.
-  const { data: detail } = useQuery<SessionDetail>({
-    queryKey: sessionDetailKey(s?.id ?? ''),
-    queryFn: () => getSessionDetail(s!.id),
-    enabled: !!s,
-    staleTime: 30_000,
-  });
-  const moments = useMemo(() => (detail && s ? keyMoments(detail.events ?? detail.timeline ?? [], findings, s.id) : null), [detail, findings, s]);
-
-  return (
-    <AnimatePresence>
-      {s && (
-        <>
-          <motion.div className="scrim" onClick={onClose} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }} />
-          <motion.aside
-            className="drawer"
-            role="dialog"
-            aria-modal="true"
-            aria-label={s.title ?? 'Session'}
-            initial={{ transform: 'translateX(105%)' }}
-            animate={{ transform: 'translateX(0%)' }}
-            exit={{ transform: 'translateX(105%)', transition: { duration: 0.2, ease: EASE_OUT } }}
-            transition={{ duration: 0.38, ease: [0.32, 0.72, 0, 1] }}
-            onKeyDown={(e) => e.key === 'Escape' && onClose()}>
-            <div className="drawer-h">
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <span className="mono faint" style={{ fontSize: 11 }}>{project(s.cwd)} · {shortId(s.id)}</span>
-                <h2 style={{ margin: '4px 0 0', fontSize: 17, lineHeight: '24px', fontWeight: 600, letterSpacing: '-0.01em' }}>{s.title || 'Untitled session'}</h2>
-              </div>
-              <button type="button" className="iconbtn" onClick={onClose} aria-label="Close" autoFocus><Icon name="close" /></button>
-            </div>
-            <div className="drawer-b">
-              <div className="kpis" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-                <div className="kpi"><span className="label">Events</span><span className="v" style={{ fontSize: 22 }}>{s.event_count}</span></div>
-                <div className="kpi"><span className="label">Spend</span><span className="v" style={{ fontSize: 22 }}>{s.has_cost ? fmt.usd(s.cost_usd) : '—'}</span></div>
-                <div className="kpi"><span className="label">Duration</span><span className="v" style={{ fontSize: 22 }}>{fmt.dur(s.duration_seconds ?? 0)}</span></div>
-              </div>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '16px 0' }}>
-                <Agent id={s.source} />
-                {s.models.map((m) => <span key={m} className="vchip c-dim">{modelLabel(m)}</span>)}
-              </div>
-              {findings.map((f) => (
-                <div key={f.fingerprint} className="finding" style={{ marginBottom: 8 }}>
-                  <span className="meta" style={{ color: `var(--v-${f.severity === 'critical' ? 'alert' : f.severity === 'warn' ? 'amber' : 'cobalt'})` }}>{f.severity} · {f.id}</span>
-                  <span className="ttl">{f.title}</span>
-                </div>
-              ))}
-              <span className="label" style={{ display: 'block', margin: '16px 0 4px' }}>Key moments</span>
-              {!moments ? (
-                <p className="dim" style={{ fontSize: 13, margin: 0 }}>Loading…</p>
-              ) : (
-                <>
-                  {moments.mix && <p className="mono faint" style={{ fontSize: 11, margin: '0 0 8px' }}>{moments.mix}</p>}
-                  <ol className="tl">
-                    {moments.rows.map(({ e, why, text }) => (
-                      <li key={e.id} className="tl-i" data-cat={e.category} data-err={why === 'failed'}>
-                        <span className="tl-ic"><Icon name={CATEGORY_ICON[e.category] ?? 'file'} size={15} /></span>
-                        <div style={{ minWidth: 0 }}>
-                          <button type="button" className="km" onClick={() => onOpen(s.id, e.id)} title="Open in the trace">
-                            <span className="tl-t">
-                              {e.tool ?? categoryLabel(e.category)}
-                              {why === 'failed' && <span className="vchip c-critical" style={{ marginLeft: 8 }}>failed</span>}
-                              {why === 'finding' && <span className="vchip c-warn" style={{ marginLeft: 8 }}>evidence</span>}
-                            </span>
-                            {text && <span className={e.category === 'prompt' || e.category === 'response' ? 'km-text' : 'tl-x'}>{text}</span>}
-                          </button>
-                        </div>
-                        <span className="tl-ts">{fmt.time(e.ts)}</span>
-                      </li>
-                    ))}
-                  </ol>
-                  {moments.more > 0 && <p className="mono faint" style={{ fontSize: 11, margin: '4px 0 0 44px' }}>+{moments.more} more failed · in the full trace</p>}
-                </>
-              )}
-            </div>
-            <div style={{ padding: 16, borderTop: '1px solid var(--v-line)', display: 'flex', gap: 8 }}>
-              <button type="button" className="vbtn vbtn-primary" style={{ flex: 1, justifyContent: 'center' }} onClick={() => onOpen(s.id)}>Open full trace <Icon name="arrow" size={15} /></button>
-              <a className="vbtn vbtn-quiet" href={sessionExportUrl(s.id)} download aria-label="Export session as JSON" title="Export as JSON"><Icon name="download" size={15} /></a>
-              <button type="button" className="vbtn vbtn-quiet" onClick={() => onArchive(s)} aria-label={archived ? 'Restore session' : 'Archive session'} title={archived ? 'Restore' : 'Archive'}><Icon name="archive" size={15} /></button>
-            </div>
-          </motion.aside>
-        </>
-      )}
-    </AnimatePresence>
-  );
-}
-
-type MomentWhy = 'prompt' | 'finding' | 'failed' | 'reply';
-interface Moment { e: TimelineItem; why: MomentWhy; text: string | null }
-
-const MAX_MOMENTS = 6;
-const MIX: [string, string][] = [['shell', 'shell'], ['file_edit', 'edits'], ['file_read', 'reads'], ['web', 'web'], ['mcp', 'mcp'], ['subagent', 'subagents']];
-
-/**
- * What a reader needs to decide whether to open a session: what it was asked, what went wrong, the
- * events behind its findings, and how it ended. Picked by meaning, shown in time order.
- */
-function keyMoments(events: TimelineItem[], findings: ActionableInsight[], sessionId: string) {
-  const byId = new Map<number, TimelineItem>();
-  for (const e of events) {
-    byId.set(e.id, e);
-    if (e.end_id) byId.set(e.end_id, e);
-  }
-  const picked = new Map<number, Moment>();
-  const add = (e: TimelineItem | undefined, why: MomentWhy) => {
-    if (!e || picked.has(e.id) || picked.size >= MAX_MOMENTS) return;
-    const text = e.category === 'prompt' || e.category === 'response' ? e.detail?.trim() || null : e.target;
-    picked.set(e.id, { e, why, text });
-  };
-
-  add(events.find((e) => e.category === 'prompt'), 'prompt');
-  for (const f of findings) for (const ev of f.evidence) if (ev.session_id === sessionId && ev.event_id != null) add(byId.get(ev.event_id), 'finding');
-  // Keep a slot for the ending so a session with many failures still says how it finished.
-  const reply = [...events].reverse().find((e) => e.category === 'response');
-  const failed = events.filter((e) => e.status === 'error' || e.status === 'failed');
-  const room = MAX_MOMENTS - picked.size - (reply ? 1 : 0);
-  failed.slice(0, Math.max(0, room)).forEach((e) => add(e, 'failed'));
-  add(reply, 'reply');
-
-  const shownFailed = [...picked.values()].filter((m) => failed.includes(m.e)).length;
-  const counts = new Map<string, number>();
-  for (const e of events) counts.set(e.category, (counts.get(e.category) ?? 0) + 1);
-  const mix = MIX.filter(([c]) => counts.get(c)).map(([c, label]) => `${counts.get(c)} ${label}`).join(' · ');
-
-  return {
-    rows: [...picked.values()].sort((a, b) => a.e.ts.localeCompare(b.e.ts)),
-    more: failed.length - shownFailed,
-    mix: failed.length ? `${mix}${mix ? ' · ' : ''}${failed.length} failed` : mix,
-  };
 }
 
 /** Page numbers with the first, last and two around the current; the rest fold into "…". */

@@ -110,7 +110,7 @@ export function SessionsTable({ onSelect }: SessionsTableProps) {
   };
 
   const sourceOptions = useMemo(() => {
-    const set = new Set<string>(['claude', 'cursor', 'codex', 'opencode']);
+    const set = new Set<string>(['claude', 'cursor', 'codex', 'opencode', 'hermes']);
     sessions.forEach((s) => set.add(s.source));
     return Array.from(set);
   }, [sessions]);

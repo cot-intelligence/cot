@@ -32,7 +32,7 @@ def test_new_findings_notify_after_the_first_pass(fresh_db: Path, monkeypatch):
     reconcile()  # re-detection doesn't notify again
     items = db.list_notifications()["items"]
     assert [i["title"] for i in items] == ["Finding mine", "Finding new"]
-    assert items[1]["href"] == "#/findings?pillar=security"
+    assert items[1]["href"] == "#/findings?pillar=security&f=new"
     assert items[1]["body"] == "Rotate the key."
 
     client = TestClient(main.app, base_url="http://127.0.0.1")
@@ -44,3 +44,40 @@ def test_new_findings_notify_after_the_first_pass(fresh_db: Path, monkeypatch):
     assert client.post("/v1/notifications/read").json()["unread"] == 0
     client.put("/v1/settings", json={"notify_desktop": False})
     assert client.get("/v1/notifications").json()["notify_desktop"] is False
+
+
+def test_old_finding_links_point_at_the_finding(fresh_db: Path):
+    """Notifications queued before links named the finding open it too."""
+    with db.store.write() as conn:
+        db._insert_notification(conn, kind="finding", title="t", now="2026-10-01T00:00:00Z",
+                                href="#/findings?pillar=cost", dedup_key="finding:abc123")
+        db._insert_notification(conn, kind="finding", title="u", now="2026-10-01T00:00:00Z",
+                                href="#/findings", dedup_key="finding:def456")
+    hrefs = sorted(i["href"] for i in db.list_notifications()["items"])
+    assert hrefs == ["#/findings?f=def456", "#/findings?pillar=cost&f=abc123"]
+
+
+def test_single_evidence_findings_open_the_event(fresh_db: Path, monkeypatch):
+    """A finding about one command opens that command in its session; one with
+    several pieces of evidence opens the finding, which lists them."""
+    monkeypatch.setattr(insights, "_dedup", lambda fs: fs)
+    one = _finding("one", evidence=[{"session_id": "s1", "event_id": 42}])
+    many = _finding("many", evidence=[{"session_id": "s1", "event_id": 1}, {"session_id": "s2", "event_id": 2}])
+    whole = _finding("whole", evidence=[{"session_id": "s3"}])
+    out: list[dict] = [_finding("old")]
+
+    def reconcile() -> None:
+        with db.insight_findings_repo() as store:
+            insights._reconcile(store, [dict(f) for f in out])
+
+    reconcile()  # first pass is history
+    out += [one, many, whole]
+    reconcile()
+    hrefs = {i["title"]: i["href"] for i in db.list_notifications()["items"]}
+    assert hrefs == {"Finding one": "#/session/s1?e=42", "Finding many": "#/findings?pillar=security&f=many",
+                     "Finding whole": "#/session/s3"}
+
+    # An older notification for the same finding is pointed at the event too.
+    with db.store.write() as conn:
+        conn.execute("UPDATE notifications SET href = '#/findings?pillar=security' WHERE dedup_key = 'finding:one'")
+    assert {i["title"]: i["href"] for i in db.list_notifications()["items"]}["Finding one"] == "#/session/s1?e=42"

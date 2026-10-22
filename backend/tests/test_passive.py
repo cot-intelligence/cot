@@ -25,6 +25,8 @@ def _home(fresh_db, monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(home))
     for agent, env in (("claude", "COT_CLAUDE_HOME"), ("cursor", "COT_CURSOR_HOME"), ("codex", "COT_CODEX_HOME")):
         monkeypatch.setenv(env, str(home / f".{agent}"))
+    monkeypatch.setenv("COT_OPENCODE_HOME", str(home / ".local" / "share" / "opencode"))
+    passive._pending_cache.clear()  # noqa: SLF001
     monkeypatch.setenv("COT_PASSIVE_SCHEDULER", "0")
     return home
 
@@ -206,3 +208,129 @@ def test_real_import_builds_sessions_from_a_transcript(_home):
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+
+
+OC_SID = "ses_fixture0001"
+OC_OLD = "ses_legacy0001"
+
+
+def _opencode_store(home: Path, *, age_min: float = 60) -> Path:
+    """An OpenCode data dir: one session in opencode.db, one in legacy JSON storage."""
+    import sqlite3
+
+    root = home / ".local" / "share" / "opencode"
+    root.mkdir(parents=True)
+    t = int((time.time() - age_min * 60) * 1000)
+    conn = sqlite3.connect(root / "opencode.db")
+    conn.executescript(
+        "CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, parent_id TEXT, slug TEXT, directory TEXT,"
+        " title TEXT, version TEXT, time_created INTEGER, time_updated INTEGER);"
+        "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);"
+        "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);"
+    )
+    conn.execute("INSERT INTO session VALUES (?, 'p', NULL, 's', '/Users/dev/code/atlas', 'Fix deploy', '2', ?, ?)", (OC_SID, t, t + 5000))
+    conn.execute("INSERT INTO message VALUES ('msg_1', ?, ?, ?, ?)", (OC_SID, t, t, json.dumps({"role": "user", "time": {"created": t}, "model": {"modelID": "big-pickle"}})))
+    conn.execute("INSERT INTO message VALUES ('msg_2', ?, ?, ?, ?)", (OC_SID, t + 1000, t + 4000, json.dumps({
+        "role": "assistant", "modelID": "big-pickle", "time": {"created": t + 1000, "completed": t + 4000},
+        "tokens": {"input": 40, "output": 12, "cache": {"read": 900, "write": 10}}})))
+    parts = [
+        ("prt_1", "msg_1", {"type": "text", "text": "fix the deploy script"}),
+        ("prt_2", "msg_2", {"type": "reasoning", "text": "Look at the script first.", "time": {"start": t + 1100, "end": t + 1200}}),
+        ("prt_3", "msg_2", {"type": "tool", "tool": "bash", "callID": "call_1", "state": {
+            "status": "completed", "input": {"command": "ls"}, "output": "deploy.sh", "metadata": {"exit": 0},
+            "time": {"start": t + 1300, "end": t + 1400}}}),
+        ("prt_4", "msg_2", {"type": "text", "text": "Fixed.", "time": {"start": t + 3000, "end": t + 3900}}),
+    ]
+    for pid, mid, data in parts:
+        conn.execute("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)", (pid, mid, OC_SID, t, t, json.dumps(data)))
+    conn.commit()
+    conn.close()
+
+    storage = root / "storage"
+    (storage / "session" / "proj").mkdir(parents=True)
+    (storage / "session" / "proj" / f"{OC_OLD}.json").write_text(json.dumps({
+        "id": OC_OLD, "directory": "/Users/dev/code/ledger", "title": "Old one", "time": {"created": t, "updated": t + 2000}}))
+    (storage / "message" / OC_OLD).mkdir(parents=True)
+    (storage / "message" / OC_OLD / "msg_a.json").write_text(json.dumps({"id": "msg_a", "role": "user", "time": {"created": t}}))
+    (storage / "part" / "msg_a").mkdir(parents=True)
+    (storage / "part" / "msg_a" / "prt_a.json").write_text(json.dumps({"id": "prt_a", "type": "text", "text": "add tests"}))
+    return root
+
+
+def test_opencode_scan_reads_both_stores(_home):
+    _opencode_store(_home)
+    s = passive.scan("opencode")
+    assert s["readable"] and s["transcripts"] == 2 and s["projects"] == 2 and s["bytes"] > 0
+
+
+def test_pending_counts_sessions_cot_has_not_seen(_home):
+    _claude_transcript(_home, "atlas", SID_A, "x")
+    _claude_transcript(_home, "ledger", SID_B, "y", age_min=1)  # still running: not offered yet
+    _opencode_store(_home)
+    p = passive.pending(fresh=True)
+    assert p["by_agent"] == {"claude": 1, "opencode": 2} and p["total"] == 3
+    db.record_ingest("claude", {"session_id": SID_A, "hook_event_name": "UserPromptSubmit", "prompt": "x"})
+    assert passive.pending(fresh=True)["by_agent"] == {"opencode": 2}
+    # Only enabled agents are offered.
+    passive.update_config(agents=["claude"])
+    assert passive.pending(fresh=True)["total"] == 0
+
+
+def test_history_keeps_thirty_days(_home):
+    passive.run(importer=lambda a: 1, analyzer=lambda: 0)
+    old = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+    with store.write() as conn:
+        conn.execute("INSERT INTO passive_runs (trigger, started_at, status, detail) VALUES ('schedule', ?, 'ok', '{}')", (old,))
+    assert len(passive.history()) == 1  # the 31-day-old run is outside the window
+    passive.run(importer=lambda a: 1, analyzer=lambda: 0)
+    with store.read() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM passive_runs WHERE started_at = ?", (old,)).fetchone()[0] == 0
+    body = _client().get("/v1/passive/history").json()
+    assert body["days"] == 30 and len(body["runs"]) == 2
+
+
+def test_real_opencode_import(_home):
+    """The bridge importer against a live collector, from both OpenCode stores."""
+    import uvicorn
+
+    from app.main import app
+
+    port = _free_port()
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    for _ in range(100):
+        if server.started:
+            break
+        time.sleep(0.05)
+    try:
+        _opencode_store(_home)
+        passive.update_config(agents=["opencode"])
+        passive.self_url = f"http://127.0.0.1:{port}"
+        result = passive.run("manual", analyzer=lambda: 0)
+        assert result["status"] == "ok", result
+        assert result["new_sessions"] == 2
+        listed = {s["id"]: s for s in _client().get("/v1/sessions").json()["sessions"]}
+        assert set(listed) == {OC_SID, OC_OLD}
+        assert listed[OC_SID]["source"] == "opencode" and listed[OC_SID]["cwd"] == "/Users/dev/code/atlas"
+        with store.read() as conn:
+            cats = [r["category"] for r in conn.execute(
+                "SELECT category FROM events WHERE session_id = ? ORDER BY ts, id", (OC_SID,))]
+        assert "prompt" in cats and "shell" in cats and "response" in cats and "thought" in cats
+        passive.self_url = f"http://127.0.0.1:{port}"
+        again = passive.run("manual", analyzer=lambda: 0)
+        assert again["events"] == 0 and again["new_sessions"] == 0
+        assert passive.pending(fresh=True)["total"] == 0
+    finally:
+        server.should_exit = True
+        thread.join(timeout=5)
+
+
+def test_on_by_default_once_onboarded_unless_turned_off(fresh_db):
+    from app import db, passive
+
+    assert passive.config()["enabled"] is False  # not onboarded yet: nothing imports
+    db.set_setting("ui_onboarded", "1")
+    assert passive.config()["enabled"] is True  # never chosen either way: on
+    passive.update_config(enabled=False)
+    assert passive.config()["enabled"] is False  # an explicit "off" stays off

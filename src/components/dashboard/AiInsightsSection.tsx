@@ -122,7 +122,7 @@ export function AiInsightsSection({
           {!envDisabled && (
             <>
               {' — '}
-              <a href="#/settings" className="underline transition-colors hover:text-hot">
+              <a href="#/settings/ai" className="underline transition-colors hover:text-hot">
                 open Settings
               </a>
             </>

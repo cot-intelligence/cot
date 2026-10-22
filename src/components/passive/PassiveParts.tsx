@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react';
 import {
+  addPassiveHome,
   previewSchedule,
+  removePassiveHome,
   type PassiveAgent,
   type PassiveAgentDetail,
+  type PassiveHistoryRun,
   type PassiveRun,
   type PassiveStatus,
 } from '../../lib/api';
@@ -10,6 +13,8 @@ import { agentLabel } from '../forest/AgentMark';
 import { fmt } from '../forest/format';
 import { Icon } from '../forest/icons';
 import { Agent, Switch } from '../forest/ui';
+import { Dropdown } from '../forest/Dropdown';
+import { AgentMark } from '../forest/AgentMark';
 import { homePath } from '../dashboard/GovernanceView';
 
 /** Matches ACTIVE_WINDOW_MIN in backend/app/passive.py. */
@@ -32,7 +37,15 @@ export function scanLine(d: PassiveAgentDetail): string {
     .join(' · ');
 }
 
-/** Per-agent on/off with what was found on disk for each. */
+/** Agents that never show up on their own: Aider writes its history inside
+ *  each repo, so the collector only searches folders named in AIDER_DIR. */
+const NEEDS_SETUP: Record<string, { short: string; long: string }> = {
+  aider: { short: 'Needs AIDER_DIR', long: 'Set AIDER_DIR to the folders that hold your repos (":"-separated)' },
+};
+
+/** Per-agent on/off with what was found on disk for each. Agents with nothing
+ *  on this machine fold into one row, so a long registry doesn't bury the few
+ *  that matter here; their switches still decide what a later run picks up. */
 export function AgentSources({
   detail,
   enabled,
@@ -44,30 +57,70 @@ export function AgentSources({
   onToggle: (agent: PassiveAgent, on: boolean) => void;
   disabled?: boolean;
 }) {
+  const found = detail.filter((d) => d.readable || d.sessions > 0);
+  const absent = detail.filter((d) => !d.readable && d.sessions === 0);
+  // Open by default only when there's nothing else to look at.
+  const [open, setOpen] = useState(found.length === 0);
   return (
-    <ul className="psv-list">
-      {detail.map((d) => {
-        const on = enabled.includes(d.agent);
-        return (
-          <li key={d.agent} className="psv-src" data-off={!on || undefined}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <Agent id={d.agent} />
-                {d.sessions > 0 && <span className="vchip c-dim">{fmt.n(d.sessions)} in cot</span>}
-                {d.active > 0 && (
-                  <span className="vchip c-info" title={`Written to in the last ${ACTIVE_WINDOW_MIN} minutes`}>
-                    {d.active} running now
-                  </span>
-                )}
-              </div>
-              <p className="psv-meta mono">{scanLine(d)}</p>
-              <p className="psv-path mono faint truncate" title={d.root}>{homePath(d.root)}</p>
-            </div>
-            <Switch on={on} onChange={(v) => onToggle(d.agent, v)} label={`Import ${agentLabel(d.agent)} transcripts`} disabled={disabled} />
-          </li>
-        );
-      })}
-    </ul>
+    <div className="psv-sources">
+      {found.length > 0 && (
+        <ul className="psv-list">
+          {found.map((d) => {
+            const on = enabled.includes(d.agent);
+            return (
+              <li key={d.agent} className="psv-src" data-off={!on || undefined}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <Agent id={d.agent} />
+                    {d.sessions > 0 && <span className="vchip c-dim">{fmt.n(d.sessions)} in cot</span>}
+                    {d.active > 0 && (
+                      <span className="vchip c-info" title={`Written to in the last ${ACTIVE_WINDOW_MIN} minutes`}>
+                        {d.active} running now
+                      </span>
+                    )}
+                  </div>
+                  <p className="psv-meta mono">{scanLine(d)}</p>
+                  <p className="psv-path mono faint truncate" title={d.root}>{homePath(d.root)}</p>
+                </div>
+                <Switch on={on} onChange={(v) => onToggle(d.agent, v)} label={`Import ${agentLabel(d.agent)} transcripts`} disabled={disabled} />
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {absent.length > 0 && (
+        <div className="psv-absent" data-open={open || undefined}>
+          <button type="button" className="psv-absent-t" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+            <Icon name="chevron" size={14} />
+            <span>Not found on this machine</span>
+            <span className="psv-absent-n mono">{absent.length}</span>
+            <span className="psv-absent-h faint">
+              {absent.slice(0, 4).map((d) => agentLabel(d.agent)).join(', ')}
+              {absent.length > 4 ? ` and ${absent.length - 4} more` : ''}
+            </span>
+          </button>
+          {open && (
+            <ul className="psv-absent-l">
+              {absent.map((d) => {
+                const on = enabled.includes(d.agent);
+                const hint = NEEDS_SETUP[d.agent];
+                return (
+                  <li key={d.agent} className="psv-absent-r" data-off={!on || undefined}>
+                    <div style={{ minWidth: 0 }}>
+                      <Agent id={d.agent} />
+                      <p className="psv-path mono faint truncate" title={hint ? hint.long : d.root}>
+                        {hint ? hint.short : homePath(d.root)}
+                      </p>
+                    </div>
+                    <Switch on={on} onChange={(v) => onToggle(d.agent, v)} label={`Import ${agentLabel(d.agent)} transcripts when it appears`} disabled={disabled} />
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -230,6 +283,146 @@ function LastRun({ run }: { run: PassiveRun }) {
         <p key={a} className="mono" style={{ fontSize: 12, margin: '4px 0 0', color: 'var(--v-alert)' }}>{agentLabel(a)}: {info?.error}</p>
       ))}
       {run.error && <p className="mono" style={{ fontSize: 12, margin: '4px 0 0', color: 'var(--v-alert)' }}>{run.error}</p>}
+    </div>
+  );
+}
+
+const HISTORY_DAYS = 30;
+const DAY_MS = 86_400_000;
+
+const dayKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+/**
+ * When imports ran over the last 30 days (all the collector keeps): a headline
+ * for the latest run, one column per day (height is runs that day, with failed
+ * runs in red), and the most recent runs underneath.
+ */
+export function ImportHistory({ runs, now = new Date() }: { runs: PassiveHistoryRun[]; now?: Date }) {
+  const [hover, setHover] = useState<number | null>(null);
+  const days = Array.from({ length: HISTORY_DAYS }, (_, i) => {
+    const d = new Date(now.getTime() - (HISTORY_DAYS - 1 - i) * DAY_MS);
+    return { key: dayKey(d), date: d, ok: 0, failed: 0, sessions: 0, last: null as string | null };
+  });
+  const byKey = new Map(days.map((d) => [d.key, d]));
+  for (const r of runs) {
+    const d = byKey.get(dayKey(new Date(r.started_at)));
+    if (!d) continue;
+    if (r.status === 'error' || r.status === 'partial') d.failed += 1;
+    else if (r.status !== 'running') d.ok += 1;
+    d.sessions += r.new_sessions ?? 0;
+    d.last = r.finished_at ?? r.started_at;
+  }
+  const max = Math.max(1, ...days.map((d) => d.ok + d.failed));
+  const finished = runs.filter((r) => r.status !== 'running');
+  const last = finished[finished.length - 1];
+  const failed = finished.filter((r) => r.status === 'error' || r.status === 'partial').length;
+  const imported = finished.reduce((n, r) => n + (r.new_sessions ?? 0), 0);
+  const shown = hover != null ? days[hover] : null;
+
+  if (finished.length === 0) {
+    return <p className="dim" style={{ margin: 0, fontSize: 13 }}>No imports in the last {HISTORY_DAYS} days. Runs show up here as they happen.</p>;
+  }
+  return (
+    <div className="ih">
+      <p className="ih-line">
+        <span>Last import <b>{fmt.ago(last.finished_at ?? last.started_at, now.toISOString())}</b></span>
+        <span className="faint">·</span>
+        <span><b className="tnum">{fmt.n(finished.length)}</b> run{finished.length === 1 ? '' : 's'}</span>
+        <span className="faint">·</span>
+        <span><b className="tnum">{fmt.n(imported)}</b> session{imported === 1 ? '' : 's'} imported</span>
+        {failed > 0 && (
+          <>
+            <span className="faint">·</span>
+            <span style={{ color: 'var(--v-alert)' }}>{failed} with errors</span>
+          </>
+        )}
+      </p>
+      <div className="ih-chart" role="img" aria-label={`Import runs per day over the last ${HISTORY_DAYS} days: ${finished.length} runs, ${failed} with errors.`} onMouseLeave={() => setHover(null)}>
+        {days.map((d, i) => {
+          const n = d.ok + d.failed;
+          return (
+            <span key={d.key} className="ih-col" onMouseEnter={() => setHover(i)}>
+              <span className="ih-bar" data-on={hover === i || undefined} data-fail={d.failed > 0 || undefined} style={{ height: n ? `${Math.max(30, (n / max) * 100)}%` : undefined }} data-empty={!n || undefined} />
+            </span>
+          );
+        })}
+      </div>
+      <div className="ih-axis mono faint">
+        <span>{fmt.day(days[0].date.toISOString())}</span>
+        {shown && (
+          <span className="ih-tip">
+            {fmt.day(shown.date.toISOString())} · {shown.ok + shown.failed} run{shown.ok + shown.failed === 1 ? '' : 's'}
+            {shown.failed ? ` · ${shown.failed} failed` : ''} · {fmt.n(shown.sessions)} new{shown.last ? ` · last ${fmt.time(shown.last)}` : ''}
+          </span>
+        )}
+        <span>Today</span>
+      </div>
+    </div>
+  );
+}
+
+/** Extra data folders per agent: a custom CLAUDE_CONFIG_DIR, CODEX_HOME or a
+ *  second install, read as well as the agent's default folder. */
+export function ExtraHomes({ status, onChange }: { status: PassiveStatus; onChange: (s: PassiveStatus) => void }) {
+  const [agent, setAgent] = useState<PassiveAgent>('claude');
+  const [path, setPath] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const homes = status.agents_detail.flatMap((d) =>
+    (d.extra_homes ?? []).map((h) => ({ agent: d.agent, path: h, found: (d.roots ?? []).includes(h) })),
+  );
+  const run = async (fn: () => Promise<PassiveStatus>) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      onChange(await fn());
+      return true;
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Could not save');
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  const add = async () => {
+    if (!path.trim()) return;
+    if (await run(() => addPassiveHome(agent, path.trim()))) setPath('');
+  };
+  return (
+    <div className="psv-homes">
+      {homes.length > 0 && (
+        <ul className="psv-homes-l">
+          {homes.map((h) => (
+            <li key={`${h.agent}:${h.path}`} className="psv-home">
+              <Agent id={h.agent} />
+              <span className="mono truncate psv-home-p" title={h.path}>{homePath(h.path)}</span>
+              {!h.found && <span className="vchip c-warn">missing</span>}
+              <button type="button" className="iconbtn" aria-label={`Stop reading ${h.path}`} disabled={busy}
+                onClick={() => void run(() => removePassiveHome(h.agent, h.path))}>
+                <Icon name="close" size={14} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <form className="psv-homes-add" onSubmit={(e) => { e.preventDefault(); void add(); }}>
+        <Dropdown
+          label="Agent"
+          value={agent}
+          onChange={(v) => setAgent(v)}
+          searchable
+          width={200}
+          options={status.agents_detail.map((d) => ({ value: d.agent, label: agentLabel(d.agent), icon: <AgentMark id={d.agent} size={14} /> }))}
+        />
+        <label className="vfield psv-homes-in">
+          <Icon name="folder" size={15} />
+          <input className="mono" value={path} onChange={(e) => setPath(e.target.value)} placeholder="~/.claude-work" aria-label="Folder" spellCheck={false} />
+        </label>
+        <button type="submit" className="vbtn vbtn-quiet vbtn-sm" disabled={busy || !path.trim()}>
+          <Icon name="plus" size={14} />Add folder
+        </button>
+      </form>
+      {err && <p role="alert" className="psv-homes-err">{err}</p>}
     </div>
   );
 }

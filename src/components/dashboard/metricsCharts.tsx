@@ -104,3 +104,50 @@ export function ContributionHeatmap({
     </div>
   );
 }
+
+/**
+ * The heatmap's colours on one row, one cell per day (or hour) of a short
+ * window, where a year calendar would be mostly empty. Cells share the width;
+ * the first and last labels sit under the ends.
+ */
+export function HeatStrip({ cells, unit }: { cells: { key: string; label: string; value: number }[]; unit: string }) {
+  const max = Math.max(1, ...cells.map((c) => c.value));
+  const level = (c: number) => (c === 0 ? 0 : c <= max * 0.25 ? 1 : c <= max * 0.5 ? 2 : c <= max * 0.75 ? 3 : 4);
+  const gap = cells.length > 60 ? 'gap-[2px]' : 'gap-1';
+  return (
+    <div className="space-y-1.5">
+      <div className={`flex ${gap}`} style={{ height: 28 }}>
+        {cells.map((c) => (
+          <span
+            key={c.key}
+            title={`${c.label}: ${c.value.toLocaleString()} ${unit}`}
+            className={`min-w-0 flex-1 rounded-[3px] ${HEAT_LEVELS[level(c.value)]} ${c.value ? 'ring-1 ring-inset ring-hot/10' : ''}`}
+          />
+        ))}
+      </div>
+      <div className="flex items-center justify-between gap-3 font-mono text-label text-fg/40">
+        <span>{cells[0]?.label}</span>
+        <span className="flex items-center gap-1 uppercase tracking-label">
+          Less
+          {HEAT_LEVELS.map((l, i) => (
+            <span key={i} className={`h-2.5 w-2.5 rounded-[2px] ${l}`} />
+          ))}
+          More
+        </span>
+        <span>{cells[cells.length - 1]?.label}</span>
+      </div>
+    </div>
+  );
+}
+
+/** Local calendar days, oldest first, ending today. */
+export function lastDays(n: number): string[] {
+  const out: string[] = [];
+  const d = new Date();
+  for (let i = n - 1; i >= 0; i--) {
+    const x = new Date(d);
+    x.setDate(d.getDate() - i);
+    out.push(localISO(x));
+  }
+  return out;
+}

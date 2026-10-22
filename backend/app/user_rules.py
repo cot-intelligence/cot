@@ -73,6 +73,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from . import db, timeutil
+from .passive import AGENTS as SOURCES  # every agent cot captures or imports
 from .insight_snapshot import Event, Snapshot, event_from_row
 from .pricing import cost_for
 
@@ -80,7 +81,6 @@ SPEC_VERSION = 1
 RULE_TYPES = ("match", "threshold")
 PILLARS = ("usability", "cost", "security")
 SEVERITIES = ("info", "warn", "critical")
-SOURCES = ("claude", "cursor", "codex", "opencode")
 CATEGORIES = (
     "shell", "file_read", "file_edit", "context_read", "memory", "mcp", "web",
     "permission", "prompt", "question", "response", "thought", "plan",

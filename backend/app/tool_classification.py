@@ -107,9 +107,21 @@ _OPENCODE_TOOL_ALIASES = {
 }
 
 
+# Hermes core tools (toolsets.py ``_HERMES_CORE_TOOLS``). Argument names already
+# match what the classifier reads (``command``, ``path``, ``pattern``, ``url``).
+_HERMES_TOOL_ALIASES = {
+    "terminal": "Bash", "read_file": "Read", "write_file": "Write", "patch": "Edit",
+    "search_files": "Grep", "web_search": "WebSearch", "web_extract": "WebFetch",
+    "delegate_task": "Task", "clarify": "AskUserQuestion", "todo_list": "TodoWrite",
+    "skill_view": "Skill",
+}
+
+
 def canonical_tool(name: str | None, source: str | None = None) -> str:
     if source == "opencode":
         name = _OPENCODE_TOOL_ALIASES.get(name or "", name or "")
+    elif source == "hermes":
+        name = _HERMES_TOOL_ALIASES.get(name or "", name or "")
     return _TOOL_ALIASES.get(name or "", name or "")
 
 

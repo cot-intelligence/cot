@@ -15,7 +15,7 @@ import {
 } from '../../../../lib/settings';
 import { clearSearchHits } from '../../../../lib/searchHighlight';
 import { Icon } from '../../../ui/icons';
-import { ActivityMap } from '../ActivityMap';
+import { FlowMap } from '../FlowMap';
 import { ChatTimeline, type ChatTimelineHandle, type ExpansionRequest } from '../ChatTimeline';
 import { SubagentNestedList } from '../SubagentNestedList';
 
@@ -290,11 +290,13 @@ export function TimelineTab({ items, runs, focusEventId, focusQuery, sessionId, 
               </div>
             </div>
             {sidebarMode === 'map' ? (
-              <ActivityMap
+              <FlowMap
                 items={items}
                 sessionId={sessionId}
                 activeKey={activeKey}
-                onJump={onMapJump}
+                onSelect={onMapJump}
+                className="h-[calc(100vh-14rem)] min-h-[400px] p-3"
+                hint="Click a step to jump to it in the transcript; click again for the next."
               />
             ) : nested ? (
               <SubagentNestedList

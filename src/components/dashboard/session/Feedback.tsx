@@ -16,7 +16,7 @@ export function useAnnotations(sessionId: string, enabled = true) {
 }
 
 /** Thumbs, labels and a note on the session (`eventId` unset) or one event. */
-export function Feedback({ sessionId, eventId, compact = false }: { sessionId: string; eventId?: number; compact?: boolean }) {
+export function Feedback({ sessionId, eventId, compact = false, toolbar = false }: { sessionId: string; eventId?: number; compact?: boolean; toolbar?: boolean }) {
   const queryClient = useQueryClient();
   const { data } = useAnnotations(sessionId);
   const current = eventId == null ? data?.session ?? null : data?.events.find((a) => a.event_id === eventId) ?? null;
@@ -58,9 +58,9 @@ export function Feedback({ sessionId, eventId, compact = false }: { sessionId: s
   const size = compact ? 13 : 14;
   const what = eventId == null ? 'session' : 'event';
   return (
-    <div style={{ display: 'grid', gap: 8 }}>
+    <div className={toolbar ? 'fb-bar' : undefined} style={toolbar ? undefined : { display: 'grid', gap: 8 }}>
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-        {!compact && <span className="label" style={{ marginRight: 2 }}>Your take</span>}
+        {!compact && !toolbar && <span className="label" style={{ marginRight: 2 }}>Your take</span>}
         {([1, -1] as Rating[]).map((r) => {
           const on = current?.rating === r;
           return (
@@ -78,14 +78,27 @@ export function Feedback({ sessionId, eventId, compact = false }: { sessionId: s
             </button>
           );
         })}
-        <button type="button" className="vbtn vbtn-ghost vbtn-sm" aria-expanded={editing} onClick={() => setEditing((e) => !e)}>
-          {current?.labels.length || current?.note ? 'Edit note' : 'Add note'}
-        </button>
-        {!editing && current?.labels.map((l) => <span key={l} className="vchip c-dim" style={{ textTransform: 'none', letterSpacing: 0 }}>{l}</span>)}
+        {toolbar ? (
+          <button
+            type="button"
+            className="vbtn vbtn-quiet vbtn-sm"
+            aria-expanded={editing}
+            aria-label={current?.labels.length || current?.note ? 'Edit note' : 'Add note'}
+            title={[...(current?.labels ?? []), current?.note].filter(Boolean).join(' · ') || 'Add a note'}
+            onClick={() => setEditing((e) => !e)}
+            style={current?.labels.length || current?.note ? { color: 'var(--v-fg)' } : undefined}>
+            <Icon name="edit" size={size} />
+          </button>
+        ) : (
+          <button type="button" className="vbtn vbtn-ghost vbtn-sm" aria-expanded={editing} onClick={() => setEditing((e) => !e)}>
+            {current?.labels.length || current?.note ? 'Edit note' : 'Add note'}
+          </button>
+        )}
+        {!editing && !toolbar && current?.labels.map((l) => <span key={l} className="vchip c-dim" style={{ textTransform: 'none', letterSpacing: 0 }}>{l}</span>)}
       </div>
-      {!editing && current?.note && <p className="dim" style={{ margin: 0, fontSize: 13, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{current.note}</p>}
+      {!editing && !toolbar && current?.note && <p className="dim" style={{ margin: 0, fontSize: 13, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{current.note}</p>}
       {editing && (
-        <div className="card" style={{ padding: 12, display: 'grid', gap: 10, maxWidth: 560 }}>
+        <div className={`card${toolbar ? ' fb-pop' : ''}`} style={{ padding: 12, display: 'grid', gap: 10, maxWidth: 560 }}>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             {[...SUGGESTED, ...labels.filter((l) => !SUGGESTED.includes(l))].map((l) => (
               <button key={l} type="button" className={`vchip ${labels.includes(l) ? 'c-fg' : 'c-dim'}`} aria-pressed={labels.includes(l)} onClick={() => toggleLabel(l)} style={{ border: 0, cursor: 'pointer', textTransform: 'none', letterSpacing: 0 }}>

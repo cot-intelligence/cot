@@ -16,31 +16,19 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
-import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from . import cron, db, store, timeutil
 
-AGENTS = ("claude", "cursor", "codex")
-_HOME_ENV = {"claude": "COT_CLAUDE_HOME", "cursor": "COT_CURSOR_HOME", "codex": "COT_CODEX_HOME"}
-_HOME_DIR = {"claude": ".claude", "cursor": ".cursor", "codex": ".codex"}
-# Same globs as the bridge's ``_discover_transcripts``.
-_GLOB = {
-    "claude": "projects/**/*.jsonl",
-    "cursor": "projects/**/agent-transcripts/**/*.jsonl",
-    "codex": "sessions/**/*.jsonl",
-}
-# An import is stopped only when it goes quiet this long: the bridge reports
-# progress per transcript, so a large history can run as long as it needs.
-_IMPORT_IDLE_TIMEOUT_S = 15 * 60
-_RUNS_KEPT = 50
-_POSTED_RE = re.compile(r"done\s+\S+\s+(\d+)\s+events posted")
-_HELD_RE = re.compile(r"held back (\d+) in-progress")
+# The agents passive mode offered before the bridge's reader registry; a saved
+# agent list without ``passive_agents_known`` was chosen from these.
+_LEGACY_AGENTS = ("claude", "cursor", "codex", "opencode", "hermes")
+# Run history behind the Settings import chart.
+RUNS_KEPT_DAYS = 30
 # A transcript written to this recently belongs to a session that's still
 # running; scheduled passes leave it for the next run so it's imported whole.
 ACTIVE_WINDOW_MIN = 10
@@ -57,14 +45,34 @@ def config() -> dict[str, Any]:
         agents = json.loads(db.get_setting("passive_agents") or "null")
     except ValueError:
         agents = None
+    try:
+        known = json.loads(db.get_setting("passive_agents_known") or "null")
+    except ValueError:
+        known = None
     if not isinstance(agents, list):
-        agents = list(AGENTS)
+        chosen = {a for a in AGENTS if not readers()[a].opt_in}
+    else:
+        # Agents added since the list was saved start on, unless opt-in.
+        seen = set(known) if isinstance(known, list) else set(_LEGACY_AGENTS)
+        chosen = set(agents) | {a for a in AGENTS if a not in seen and not readers()[a].opt_in}
     expr = db.get_setting("passive_cron") or cron.DEFAULT_CRON
     return {
-        "enabled": db.get_setting("passive_enabled") == "1",
-        "agents": [a for a in AGENTS if a in agents],
+        "enabled": _enabled(),
+        "agents": [a for a in AGENTS if a in chosen],
         "cron": expr,
     }
+
+
+def _enabled() -> bool:
+    """On when chosen, or by default once onboarding is done: hooks and
+    transcript import work together (hooked sessions are skipped), so an install
+    that never chose either way, like one upgraded from before the two were
+    paired, imports too. An explicit "off" stays off, and nothing imports before
+    someone has finished onboarding."""
+    value = db.get_setting("passive_enabled")
+    if value in ("0", "1"):
+        return value == "1"
+    return db.get_setting("ui_onboarded") == "1"
 
 
 def update_config(*, enabled: bool | None = None, agents: list[str] | None = None, expr: str | None = None) -> dict[str, Any]:
@@ -74,6 +82,7 @@ def update_config(*, enabled: bool | None = None, agents: list[str] | None = Non
         db.set_setting("passive_next_run", "")
     if agents is not None:
         db.set_setting("passive_agents", json.dumps([a for a in AGENTS if a in agents]))
+        db.set_setting("passive_agents_known", json.dumps(list(AGENTS)))
     if enabled is not None:
         db.set_setting("passive_enabled", "1" if enabled else "0")
         if enabled:
@@ -99,14 +108,85 @@ def _import_home() -> Path:
 
 
 def transcript_root(agent: str) -> Path:
-    if os.environ.get("COT_IMPORT_HOME"):
-        return _import_home() / _HOME_DIR[agent]
-    env = os.environ.get(_HOME_ENV[agent])
-    return Path(env) if env else Path.home() / _HOME_DIR[agent]
+    return readers()[agent].root()
+
+
+_bridge_module: Any = None
+
+
+def _load_bridge() -> Any:
+    import importlib.machinery
+    import importlib.util
+
+    loader = importlib.machinery.SourceFileLoader("cot_bridge", str(_bridge_path()))
+    spec = importlib.util.spec_from_loader("cot_bridge", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def _bridge() -> Any:
+    """The bridge script loaded as a module, for the OpenCode store reader it
+    shares with ``cot import`` (OpenCode keeps a database, not transcripts)."""
+    global _bridge_module
+    if _bridge_module is None:
+        _bridge_module = _load_bridge()
+    return _bridge_module
+
+
+def readers() -> dict[str, Any]:
+    """The bridge's reader registry: every agent passive mode can import."""
+    return _bridge().READERS
+
+
+def add_home(agent: str, path: str) -> str:
+    """Add an extra data folder for ``agent`` (ValueError when it can't be read)."""
+    stored = _bridge()._add_agent_home(agent, path)  # noqa: SLF001
+    db.record_audit_event("settings.passive.home_added", target=agent, detail={"path": stored})
+    return stored
+
+
+def remove_home(agent: str, path: str) -> None:
+    _bridge()._remove_agent_home(agent, path)  # noqa: SLF001
+    db.record_audit_event("settings.passive.home_removed", target=agent, detail={"path": path})
+
+
+def reader_info() -> list[dict[str, Any]]:
+    return [r.describe() for r in readers().values()]
+
+
+def _store_sessions(agent: str) -> list[dict[str, Any]]:
+    try:
+        return readers()[agent].sessions()
+    except Exception:  # noqa: BLE001 - an unreadable store reads as empty
+        return []
+
+
+def _hermes_store_bytes(root: Path) -> int:
+    total = 0
+    for name in ("state.db", "state.db-wal"):
+        try:
+            total += (root / name).stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _opencode_store_bytes(root: Path) -> int:
+    total = 0
+    for p in [root / "opencode.db", root / "opencode.db-wal", *root.glob("storage/**/*.json")]:
+        try:
+            total += p.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def _project_of(agent: str, root: Path, path: Path) -> str | None:
     """Project folder name for Claude/Cursor (``projects/<encoded cwd>/``)."""
+    reader = readers()[agent]
+    if reader.meta is not None:
+        return (reader.meta(path) or {}).get("cwd")
     if agent == "codex":
         return None
     try:
@@ -118,12 +198,16 @@ def _project_of(agent: str, root: Path, path: Path) -> str | None:
 
 def scan(agent: str) -> dict[str, Any]:
     """What's on disk for one agent, without importing anything: the metadata
-    onboarding shows straight away."""
-    root = transcript_root(agent)
+    onboarding shows straight away. Covers every folder the agent has: the
+    default ones and any extra homes added in Settings."""
+    reader = readers()[agent]
+    roots = [r for r in reader.roots() if os.access(r, os.R_OK | os.X_OK)]
     out: dict[str, Any] = {
         "agent": agent,
-        "root": str(root),
-        "readable": False,
+        "root": str(roots[0] if roots else transcript_root(agent)),
+        "roots": [str(r) for r in roots],
+        "extra_homes": reader.describe()["extra_homes"],
+        "readable": bool(roots),
         "transcripts": 0,
         "bytes": 0,
         "projects": 0,
@@ -131,19 +215,30 @@ def scan(agent: str) -> dict[str, Any]:
         "newest": None,
         "active": 0,
     }
-    try:
-        resolved = root.resolve(strict=True)
-        resolved.relative_to(_import_home().resolve(strict=True))
-    except (OSError, ValueError):
-        # Missing, or outside the home folder (the bridge refuses those too).
+    # Missing, or outside the home folder (the bridge refuses those too).
+    if not roots:
         return out
-    if not os.access(resolved, os.R_OK | os.X_OK):
-        return out
-    out["readable"] = True
     projects: set[str] = set()
     oldest = newest = None
     active_after = time.time() - ACTIVE_WINDOW_MIN * 60
-    for path in resolved.glob(_GLOB[agent]):
+    if reader.kind == "store":
+        for sess in _store_sessions(agent):
+            if sess.get("parent_id"):
+                continue  # subagent and compression children fold into their parent
+            updated = sess.get("updated") or 0
+            out["transcripts"] += 1
+            oldest = updated if oldest is None else min(oldest, updated)
+            newest = updated if newest is None else max(newest, updated)
+            if updated >= active_after:
+                out["active"] += 1
+            if sess.get("cwd"):
+                projects.add(sess["cwd"])
+            out["bytes"] += int(sess.get("bytes") or 0)
+        if agent == "opencode":
+            out["bytes"] = sum(_opencode_store_bytes(r) for r in roots)
+        elif agent == "hermes":
+            out["bytes"] = sum(_hermes_store_bytes(r) for r in roots)
+    for root, path in reader.discover_in() if reader.kind == "transcript" else ():
         try:
             st = path.stat()
         except OSError:
@@ -154,7 +249,7 @@ def scan(agent: str) -> dict[str, Any]:
         newest = st.st_mtime if newest is None else max(newest, st.st_mtime)
         if st.st_mtime >= active_after:
             out["active"] += 1
-        p = _project_of(agent, resolved, path)
+        p = _project_of(agent, root, path)
         if p:
             projects.add(p)
     out["projects"] = len(projects)
@@ -171,6 +266,82 @@ def _session_counts() -> dict[str, int]:
             " AND import_root_id IS NULL GROUP BY source"
         ).fetchall()
     return {r["source"]: r["n"] for r in rows}
+
+
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_PENDING_TTL_S = 30.0
+_pending_cache: dict[str, Any] = {}
+
+
+def _import_offsets() -> dict[str, int]:
+    # The bridge keeps its state under the real HOME even when it reads
+    # transcripts from COT_IMPORT_HOME (sandboxed desktop builds).
+    path = Path.home() / ".cot" / "import_offsets.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _on_disk(agent: str) -> list[tuple[str, str, float]]:
+    """(session id, offsets key, last written) for each quiet session on disk.
+    Sessions written to in the last ACTIVE_WINDOW_MIN are left out: an import
+    holds them back anyway."""
+    reader = readers()[agent]
+    quiet_before = time.time() - ACTIVE_WINDOW_MIN * 60
+    out: list[tuple[str, str, float]] = []
+    if reader.kind == "store":
+        for sess in _store_sessions(agent):
+            updated = sess.get("updated") or 0
+            if not sess.get("parent_id") and updated < quiet_before:
+                out.append((str(sess["id"]), f"{agent}:{sess['id']}", updated))
+        return out
+    for path in reader.discover():
+        if path.parent.name == "subagents":
+            continue
+        m = _UUID_RE.search(path.stem)
+        if not m:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < quiet_before:
+            out.append((m.group(0), str(path), mtime))
+    return out
+
+
+def pending(*, fresh: bool = False) -> dict[str, Any]:
+    """Sessions on disk that cot hasn't imported yet, per enabled agent.
+
+    A session counts as imported once it exists in cot (by hook or import) or
+    the importer has recorded reading it, so one that yields no events doesn't
+    keep the prompt up forever. Cached briefly: it walks the transcript folders."""
+    now = time.monotonic()
+    if not fresh and _pending_cache.get("at", -1e9) > now - _PENDING_TTL_S:
+        return _pending_cache["value"]
+    with store.read() as conn:
+        known = {r["id"] for r in conn.execute("SELECT id FROM sessions")}
+    offsets = _import_offsets()
+    by_agent: dict[str, int] = {}
+    newest: float | None = None
+    for agent in config()["agents"]:
+        n = 0
+        for sid, key, written in _on_disk(agent):
+            if sid in known or key in offsets:
+                continue
+            n += 1
+            newest = written if newest is None else max(newest, written)
+        if n:
+            by_agent[agent] = n
+    value = {
+        "total": sum(by_agent.values()),
+        "by_agent": by_agent,
+        "newest": datetime.fromtimestamp(newest, tz=timezone.utc).isoformat() if newest else None,
+    }
+    _pending_cache.update(at=now, value=value)
+    return value
 
 
 # ----------------------------------------------------------------- runs
@@ -219,6 +390,29 @@ def runs(limit: int = 10) -> list[dict[str, Any]]:
     ]
 
 
+def _history_cutoff(days: int = RUNS_KEPT_DAYS) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+def history(days: int = RUNS_KEPT_DAYS) -> list[dict[str, Any]]:
+    """Every run in the last ``days``, oldest first, for the Settings chart."""
+    _ensure_runs_table()
+    days = max(1, min(days, RUNS_KEPT_DAYS))
+    with store.read() as conn:
+        rows = conn.execute(
+            "SELECT * FROM passive_runs WHERE started_at >= ? ORDER BY id", (_history_cutoff(days),)
+        ).fetchall()
+    out = []
+    for r in rows:
+        d = json.loads(r["detail"] or "{}")
+        out.append({
+            "id": r["id"], "trigger": r["trigger"], "status": r["status"],
+            "started_at": r["started_at"], "finished_at": r["finished_at"],
+            "new_sessions": d.get("new_sessions"), "events": d.get("events"), "findings": d.get("findings"),
+        })
+    return out
+
+
 def running() -> dict[str, Any]:
     return dict(_state)
 
@@ -248,52 +442,56 @@ def _bridge_path() -> Path:
     return here.parent.parent.parent / "bridge" / "cot"
 
 
-def _import_agent(agent: str) -> dict[str, int]:
-    """Run ``cot import --agent <agent>`` against this collector, holding back
-    transcripts of sessions still in progress. Returns events posted and how
-    many transcripts were held back."""
-    env = {**os.environ, "COT_ENDPOINT": self_url, "COT_IMPORT_PROGRESS": "1", "PYTHONUNBUFFERED": "1"}
-    proc = subprocess.Popen(
-        [sys.executable, str(_bridge_path()), "import", "--agent", agent, "--skip-active", str(ACTIVE_WINDOW_MIN)],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    last_output = time.monotonic()
-    stalled = threading.Event()
-    finished = threading.Event()
+# Called with a session id after imported events are stored, so the dashboard's
+# live stream picks them up. main.py points it at its revision counter.
+on_ingest: Callable[[str | None], None] = lambda session_id: None
 
-    def watchdog() -> None:
-        while not finished.wait(5):
-            if time.monotonic() - last_output > _IMPORT_IDLE_TIMEOUT_S:
-                stalled.set()
-                proc.kill()
-                return
 
-    threading.Thread(target=watchdog, daemon=True).start()
-    lines: list[str] = []
+def _ingest(url: str, body: dict[str, Any] | list[dict[str, Any]]) -> None:
+    """Where the in-process import's events go instead of an HTTP POST: the
+    same writes ``/v1/ingest/{source}`` makes, one transaction per batch."""
+    source = url.rsplit("/v1/ingest/", 1)[-1]
+    if isinstance(body, dict) and body.get("_attach_to_prompt"):
+        db.attach_to_prompt(str(body.get("session_id") or ""), body.get("text"),
+                            body.get("attachments") or [], body.get("timestamp"))
+        on_ingest(str(body.get("session_id") or ""))
+        return
+    items = body if isinstance(body, list) else [body]
+    for result in db.record_ingests([(source, b) for b in items]):
+        on_ingest(result.get("session_id"))
+
+
+def _import_agent(agent: str, *, hold_back: bool = True, progress: bool = True) -> dict[str, int]:
+    """Import one agent's transcripts in this process, with the bridge's own
+    parsers, writing events straight to the store. Transcripts of sessions
+    still in progress are held back unless ``hold_back`` is off (the watcher,
+    which imports them as they're written). Either way only sessions quiet for
+    ACTIVE_WINDOW_MIN are marked completed. Returns events stored and how many
+    transcripts were held back.
+
+    The bridge still reaches this collector over HTTP for the few per-pass
+    calls (session origins, completion, question recovery); only the events,
+    which are nearly all the work, skip the round trip."""
+    # A fresh load per run, as the subprocess it replaces was: the bridge reads
+    # HOME (its ~/.cot state) and its config when it loads.
+    bridge = _load_bridge()
+    bridge.COT_ENDPOINT = self_url
+    bridge._INGEST_SINK = _ingest  # noqa: SLF001
+    bridge._PROGRESS_SINK = _set_progress if progress else (lambda *_: None)  # noqa: SLF001
     try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            last_output = time.monotonic()
-            parts = line.split()
-            if len(parts) == 6 and parts[0] == "cot-progress" and parts[1] == agent:
-                _set_progress(agent, *(int(x) for x in parts[2:]))
-            else:
-                lines.append(line)
-        proc.wait()
+        posted, held_back = bridge._run_import(  # noqa: SLF001
+            [agent], skip_active_s=ACTIVE_WINDOW_MIN * 60 if hold_back else 0, verbose=False,
+            complete_quiet_s=ACTIVE_WINDOW_MIN * 60,
+        )
+        # Other machines' copied or mounted session folders (`cot sources`).
+        posted += bridge._import_sources(  # noqa: SLF001
+            [agent], skip_active_s=ACTIVE_WINDOW_MIN * 60 if hold_back else 0, verbose=False,
+            complete_quiet_s=ACTIVE_WINDOW_MIN * 60,
+        )
     finally:
-        finished.set()
-    out = "".join(lines)
-    if stalled.is_set():
-        raise RuntimeError(f"import stopped: no progress for {_IMPORT_IDLE_TIMEOUT_S // 60} minutes")
-    if proc.returncode != 0:
-        tail = out.strip().splitlines()[-1:] or [f"import failed (exit {proc.returncode})"]
-        raise RuntimeError(tail[0][:300])
-    posted = _POSTED_RE.search(out)
-    held = _HELD_RE.search(out)
-    return {"events": int(posted.group(1)) if posted else 0, "held_back": int(held.group(1)) if held else 0}
+        bridge._INGEST_SINK = None  # noqa: SLF001
+        bridge._PROGRESS_SINK = None  # noqa: SLF001
+    return {"events": posted, "held_back": len(held_back)}
 
 
 def _analyze() -> int:
@@ -374,14 +572,30 @@ def run(
                 "UPDATE passive_runs SET finished_at = ?, status = ?, detail = ? WHERE id = ?",
                 (finished, status, json.dumps(detail), run_id),
             )
-            conn.execute(
-                "DELETE FROM passive_runs WHERE id NOT IN (SELECT id FROM passive_runs ORDER BY id DESC LIMIT ?)",
-                (_RUNS_KEPT,),
-            )
+            conn.execute("DELETE FROM passive_runs WHERE started_at < ?", (_history_cutoff(),))
+        _pending_cache.clear()
         _state.clear()
         _state["running"] = False
         _lock.release()
     return {"id": run_id, "trigger": trigger, "started_at": started, "finished_at": finished, "status": status, **detail}
+
+
+def import_now(agents: list[str]) -> bool:
+    """Import ``agents`` straight away, live sessions included, without the
+    analysis pass or a run record: the file watcher's path. False when another
+    pass holds the lock (the caller retries)."""
+    if not _lock.acquire(blocking=False):
+        return False
+    try:
+        for agent in agents:
+            try:
+                _import_agent(agent, hold_back=False, progress=False)
+            except Exception:  # noqa: BLE001 - one agent failing shouldn't stop the rest
+                pass
+        _pending_cache.clear()
+    finally:
+        _lock.release()
+    return True
 
 
 def run_in_background(trigger: str = "manual") -> bool:
@@ -435,3 +649,7 @@ def start_scheduler(interval_s: float = 20.0) -> threading.Thread | None:
     t = threading.Thread(target=loop, daemon=True, name="cot-passive-scheduler")
     t.start()
     return t
+
+
+# Every agent the bridge can import, in its registry order.
+AGENTS: tuple[str, ...] = tuple(readers())

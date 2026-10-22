@@ -1,4 +1,6 @@
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { motion, useReducedMotion } from 'framer-motion';
 import {
   cleanupRetention,
   getHealth,
@@ -6,6 +8,7 @@ import {
   getRetention,
   getSettings,
   getPassive,
+  getPassiveHistory,
   getVersionInfo,
   runPassiveNow,
   updatePassive,
@@ -18,21 +21,30 @@ import {
   type HookStatus,
   PassiveUnsupportedError,
   type PassiveAgent,
+  type PassiveHistoryRun,
   type PassiveStatus,
   type RetentionCleanupResult,
   type RetentionStatus,
   type Settings,
   type VersionInfo,
+  getMcpInstall,
+  setMcpInstalled,
+  type McpInstallAgent,
+  getHooksInstall,
+  installHooks,
+  type HooksInstallStatus,
 } from '../../lib/api';
+import { sourceLabel } from '../../lib/sourceLabels';
 import { setPref, usePrefs, type Prefs } from '../../lib/prefs';
 import { useTheme } from '../../lib/theme';
+import { checkAppUpdate, inApp, installAppUpdate, mb, useAppUpdate } from '../../lib/appUpdates';
 import { usePolling } from '../../lib/usePolling';
 import { fmt } from '../forest/format';
 import { Icon } from '../forest/icons';
 import { Agent, Seg, Switch } from '../forest/ui';
 import { MarkPicker } from '../forest/MarkPicker';
 import { ExportModal } from './ExportModal';
-import { AgentSources, HooksGap, RunStatus, SchedulePicker } from '../passive/PassiveParts';
+import { AgentSources, ExtraHomes, HooksGap, ImportHistory, RunStatus, SchedulePicker } from '../passive/PassiveParts';
 import { homePath } from './GovernanceView';
 
 interface SettingsViewProps {
@@ -41,17 +53,29 @@ interface SettingsViewProps {
   navCollapsed: boolean;
   onNavCollapsedChange: (collapsed: boolean) => void;
   onRunOnboarding: () => void;
+  /** The tab in the address (``#/settings/<tab>``); the first one when absent or unknown. */
+  tab?: string;
 }
 
-const SECTIONS = [
+/** One tab per group; each opens at ``#/settings/<id>`` so other screens can link to it. */
+export const SECTIONS = [
   { id: 'appearance', label: 'Appearance', icon: 'sun' },
   { id: 'defaults', label: 'Defaults', icon: 'overview' },
   { id: 'ai', label: 'AI insights', icon: 'sparkle' },
   { id: 'collector', label: 'Collector & hooks', icon: 'plug' },
+  { id: 'mcp', label: 'cot MCP', icon: 'layers' },
   { id: 'passive', label: 'Passive import', icon: 'clock' },
   { id: 'privacy', label: 'Privacy', icon: 'lock' },
   { id: 'data', label: 'Data & retention', icon: 'database' },
-];
+  { id: 'about', label: 'About', icon: 'cot' },
+] as const;
+
+export type SettingsTab = (typeof SECTIONS)[number]['id'];
+export const settingsHref = (tab: SettingsTab) => `#/settings/${tab}`;
+
+// The sidebar's highlight timing: a short spring, no bounce.
+const PILL = { type: 'spring', duration: 0.22, bounce: 0 } as const;
+const PILL_INSTANT = { duration: 0 } as const;
 
 const HOOK_HEALTH: Record<HookHealthState, { label: string; c: string }> = {
   healthy: { label: 'healthy', c: 'c-ok' },
@@ -62,16 +86,28 @@ const HOOK_HEALTH: Record<HookHealthState, { label: string; c: string }> = {
 };
 
 /** Markup mirrors the demo's Settings page (demo-variants/src/variants/forest/settings.tsx); every control writes for real. */
-export function SettingsView({ sidebarOpen, onSidebarOpenChange, navCollapsed, onNavCollapsedChange, onRunOnboarding }: SettingsViewProps) {
+export function SettingsView({ sidebarOpen, onSidebarOpenChange, navCollapsed, onNavCollapsedChange, onRunOnboarding, tab }: SettingsViewProps) {
   const prefs = usePrefs();
   const { preference, setPreference } = useTheme();
-  const [section, setSection] = useScrollSpy();
+  const pill = useReducedMotion() ? PILL_INSTANT : PILL;
+  const section = SECTIONS.find((x) => x.id === tab) ?? SECTIONS[0];
   const [settings, setSettings] = useState<Settings | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
 
   useEffect(() => {
     getSettings().then(setSettings).catch(() => {});
   }, []);
+  // A new tab starts at the top, not wherever the last one was scrolled to.
+  const nav = useRef<HTMLElement>(null);
+  useEffect(() => {
+    document.getElementById('vf-scroll')?.scrollTo({ top: 0 });
+    // On narrow screens the tabs are a sideways strip: keep the open one in view.
+    const strip = nav.current;
+    const on = strip?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (strip && on && strip.scrollWidth > strip.clientWidth) {
+      strip.scrollLeft = on.offsetLeft - (strip.clientWidth - on.offsetWidth) / 2;
+    }
+  }, [section.id]);
 
   const pref = <K extends keyof Prefs>(k: K) => (v: Prefs[K]) => setPref(k, v);
 
@@ -82,82 +118,84 @@ export function SettingsView({ sidebarOpen, onSidebarOpenChange, navCollapsed, o
           <div><span className="label">Workspace</span><h1>Settings</h1><p>Display, AI, collector and data. Your traces stay on your machine.</p></div>
         </div>
         <div className="set">
-          <nav className="set-nav" aria-label="Settings sections">
-            {SECTIONS.map((x) => (
-              <a
-                key={x.id}
-                href="#/settings"
-                className="nav-i"
-                aria-current={section === x.id ? 'true' : undefined}
-                onClick={(e) => {
-                  e.preventDefault();
-                  setSection(x.id);
-                  document.getElementById(`set-${x.id}`)?.scrollIntoView({ block: 'start' });
-                }}>
-                <Icon name={x.icon} />
-                <span>{x.label}</span>
-              </a>
-            ))}
+          <nav className="set-nav" aria-label="Settings" ref={nav}>
+            {SECTIONS.map((x) => {
+              const on = x.id === section.id;
+              return (
+                <a key={x.id} href={settingsHref(x.id)} className="nav-i" aria-current={on ? 'page' : undefined}>
+                  {on && <motion.span layoutId="set-pill" className="pill" transition={pill} />}
+                  {x.icon === 'cot' ? <span className="wordmark set-mark" aria-hidden="true">c<i>.</i></span> : <Icon name={x.icon} />}
+                  <span>{x.label}</span>
+                </a>
+              );
+            })}
           </nav>
 
-          <div className="set-body">
-            <Section id="appearance" title="Appearance" desc="How the dashboard looks on this browser.">
-              <Row label="Theme" hint="Light is the default. System follows your OS setting.">
-                <Seg
-                  id="set-theme"
-                  label="Theme"
-                  value={preference}
-                  onChange={setPreference}
-                  options={[
-                    { k: 'light', l: <Icon name="sun" size={16} />, name: 'Light' },
-                    { k: 'dark', l: <Icon name="moon" size={16} />, name: 'Dark' },
-                    { k: 'system', l: <Icon name="monitor" size={16} />, name: 'System' },
-                  ]}
-                />
-              </Row>
-              <Row label="Density" hint="Compact fits more rows into tables and traces.">
-                <Seg id="set-density" value={prefs.density} onChange={pref('density')} options={[{ k: 'comfortable', l: 'Comfortable' }, { k: 'compact', l: 'Compact' }]} />
-              </Row>
-              <Row label="Sidebar" hint="The rail keeps icons only, with names on hover.">
-                <Seg id="set-rail" value={navCollapsed ? 'rail' : 'full'} onChange={(v) => onNavCollapsedChange(v === 'rail')} options={[{ k: 'full', l: 'Expanded' }, { k: 'rail', l: 'Rail' }]} />
-              </Row>
-              <Row label="Session list" hint="Whether the session list stays open beside a session's trace.">
-                <Seg id="set-sesslist" value={sidebarOpen ? 'open' : 'closed'} onChange={(v) => onSidebarOpenChange(v === 'open')} options={[{ k: 'open', l: 'Open' }, { k: 'closed', l: 'Collapsed' }]} />
-              </Row>
-              <Row label="Workspace mark" hint="The image beside the workspace name in the sidebar. Saved on this browser.">
-                <MarkPicker value={prefs.avatar} initial="L" onChange={(v) => setPref('avatar', v)} />
-              </Row>
-              <Row label="Motion" hint="Reduced keeps fades and drops movement, whatever the OS says.">
-                <Seg id="set-motion" value={prefs.motion} onChange={pref('motion')} options={[{ k: 'system', l: 'System' }, { k: 'reduced', l: 'Reduced' }]} />
-              </Row>
-            </Section>
+          {/* Keyed so each tab mounts fresh and fades in; only this one group is on the page. */}
+          <div className="set-body" key={section.id}>
+            {section.id === 'appearance' && (
+              <Section id="appearance" title="Appearance" desc="How the dashboard looks on this browser.">
+                <Row label="Theme" hint="Light is the default. System follows your OS setting.">
+                  <Seg
+                    id="set-theme"
+                    label="Theme"
+                    value={preference}
+                    onChange={setPreference}
+                    options={[
+                      { k: 'light', l: <Icon name="sun" size={16} />, name: 'Light' },
+                      { k: 'dark', l: <Icon name="moon" size={16} />, name: 'Dark' },
+                      { k: 'system', l: <Icon name="monitor" size={16} />, name: 'System' },
+                    ]}
+                  />
+                </Row>
+                <Row label="Density" hint="Compact fits more rows into tables and traces.">
+                  <Seg id="set-density" value={prefs.density} onChange={pref('density')} options={[{ k: 'comfortable', l: 'Comfortable' }, { k: 'compact', l: 'Compact' }]} />
+                </Row>
+                <Row label="Sidebar" hint="The rail keeps icons only, with names on hover.">
+                  <Seg id="set-rail" value={navCollapsed ? 'rail' : 'full'} onChange={(v) => onNavCollapsedChange(v === 'rail')} options={[{ k: 'full', l: 'Expanded' }, { k: 'rail', l: 'Rail' }]} />
+                </Row>
+                <Row label="Session list" hint="Whether the session list stays open beside a session's trace.">
+                  <Seg id="set-sesslist" value={sidebarOpen ? 'open' : 'closed'} onChange={(v) => onSidebarOpenChange(v === 'open')} options={[{ k: 'open', l: 'Open' }, { k: 'closed', l: 'Collapsed' }]} />
+                </Row>
+                <Row label="Workspace mark" hint="The image beside the workspace name in the sidebar. Saved on this browser.">
+                  <MarkPicker value={prefs.avatar} initial="L" onChange={(v) => setPref('avatar', v)} />
+                </Row>
+                <Row label="Motion" hint="Reduced keeps fades and drops movement, whatever the OS says.">
+                  <Seg id="set-motion" value={prefs.motion} onChange={pref('motion')} options={[{ k: 'system', l: 'System' }, { k: 'reduced', l: 'Reduced' }]} />
+                </Row>
+              </Section>
+            )}
 
-            <Section id="defaults" title="Defaults" desc="Where the dashboard opens and what it shows first.">
-              <Row label="Start page" hint="Opened when you visit the dashboard root.">
-                <Seg id="set-start" value={prefs.start} onChange={pref('start')} options={[{ k: 'overview', l: 'Overview' }, { k: 'sessions', l: 'Sessions' }, { k: 'findings', l: 'Findings' }]} />
-              </Row>
-              <Row label="Overview range" hint="Used until you pick another range on the page.">
-                <Seg id="set-range" value={prefs.range} onChange={pref('range')} options={[{ k: 1, l: '1d' }, { k: 7, l: '7d' }, { k: 30, l: '30d' }, { k: 90, l: '90d' }]} />
-              </Row>
-              <Row label="macOS notifications" hint="In the Mac app, new findings and rule matches also arrive as macOS notifications. They always appear in the bell's inbox.">
-                <Switch
-                  on={settings?.notify_desktop ?? true}
-                  disabled={!settings}
-                  label="macOS notifications"
-                  onChange={(on) => {
-                    if (!settings) return;
-                    setSettings({ ...settings, notify_desktop: on });
-                    updateSettings({ notify_desktop: on }).then(setSettings).catch(() => setSettings({ ...settings, notify_desktop: !on }));
-                  }}
-                />
-              </Row>
-            </Section>
+            {section.id === 'defaults' && (
+              <Section id="defaults" title="Defaults" desc="Where the dashboard opens and what it shows first.">
+                <Row label="Start page" hint="Opened when you visit the dashboard root.">
+                  <Seg id="set-start" value={prefs.start} onChange={pref('start')} options={[{ k: 'overview', l: 'Overview' }, { k: 'sessions', l: 'Sessions' }, { k: 'findings', l: 'Findings' }]} />
+                </Row>
+                <Row label="Overview range" hint="Used until you pick another range on the page.">
+                  <Seg id="set-range" value={prefs.range} onChange={pref('range')} options={[{ k: 1, l: '1d' }, { k: 7, l: '7d' }, { k: 30, l: '30d' }, { k: 90, l: '90d' }]} />
+                </Row>
+                <Row label="macOS notifications" hint="In the Mac app, new findings and rule matches also arrive as macOS notifications. They always appear in the bell's inbox.">
+                  <Switch
+                    on={settings?.notify_desktop ?? true}
+                    disabled={!settings}
+                    label="macOS notifications"
+                    onChange={(on) => {
+                      if (!settings) return;
+                      setSettings({ ...settings, notify_desktop: on });
+                      updateSettings({ notify_desktop: on }).then(setSettings).catch(() => setSettings({ ...settings, notify_desktop: !on }));
+                    }}
+                  />
+                </Row>
+              </Section>
+            )}
 
-            <AiSection settings={settings} onSettings={setSettings} />
-            <CollectorSection onRunOnboarding={onRunOnboarding} />
-            <PassiveSection />
-            <PrivacySection settings={settings} onSettings={setSettings} />
-            <DataSection onExport={() => setExportOpen(true)} />
+            {section.id === 'ai' && <AiSection settings={settings} onSettings={setSettings} />}
+            {section.id === 'collector' && <CollectorSection onRunOnboarding={onRunOnboarding} />}
+            {section.id === 'mcp' && <McpSection />}
+            {section.id === 'passive' && <PassiveSection />}
+            {section.id === 'privacy' && <PrivacySection settings={settings} onSettings={setSettings} />}
+            {section.id === 'data' && <DataSection onExport={() => setExportOpen(true)} />}
+            {section.id === 'about' && <AboutSection />}
           </div>
         </div>
       </div>
@@ -270,24 +308,29 @@ function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) 
   const { data: health, error } = usePolling<Health>(['health'], () => getHealth(), 10000);
   const { data: hooks } = usePolling<HookStatus>(['hookStatus'], () => getHookStatus(), 10000);
   const [r, setR] = useState<RetentionStatus | null>(null);
-  const [v, setV] = useState<VersionInfo | null>(null);
-  const [checking, setChecking] = useState(false);
-  const [checkError, setCheckError] = useState<string | null>(null);
+  const [direct, setDirect] = useState<HooksInstallStatus | null>(null);
+  const [wiring, setWiring] = useState(false);
+  const [wireNote, setWireNote] = useState<string | null>(null);
   useEffect(() => {
+    getHooksInstall().then(setDirect).catch(() => {});
     getRetention().then(setR).catch(() => {});
-    getVersionInfo().then(setV).catch(() => {});
   }, []);
-  const check = async () => {
-    setChecking(true);
-    setCheckError(null);
+  const unwired = (hooks?.agents ?? []).filter((h) => h.health === 'not_installed' || h.health === 'missing_hooks').map((h) => h.source);
+  const wire = async () => {
+    setWiring(true);
+    setWireNote(null);
     try {
-      const d = await getVersionInfo(true);
-      setV(d);
-      if (!d.latest) setCheckError('Update check unavailable: offline or disabled.');
-    } catch {
-      setCheckError('Could not reach the collector.');
+      const res = await installHooks(unwired);
+      const done = res.agents.filter((a) => !res.skipped.includes(a));
+      setWireNote([
+        done.length ? `Connected ${done.map(sourceLabel).join(', ')}.` : '',
+        res.skipped.length ? `Not on this machine: ${res.skipped.map(sourceLabel).join(', ')}.` : '',
+        done.includes('codex') ? 'In Codex, run /hooks and trust cot.' : '',
+      ].filter(Boolean).join(' '));
+    } catch (e) {
+      setWireNote(e instanceof Error ? e.message : 'Could not connect the agents.');
     } finally {
-      setChecking(false);
+      setWiring(false);
     }
   };
   const now = new Date().toISOString();
@@ -313,15 +356,153 @@ function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) 
         ))}
         {!hooks && <li className="dim" style={{ fontSize: 13 }}>Checking hook status…</li>}
       </ul>
+      {direct?.available && (unwired.length > 0 || wireNote) && (
+        <Row label="Agent hooks" hint={wireNote ?? `${unwired.map(sourceLabel).join(', ')} ${unwired.length === 1 ? 'isn\'t' : 'aren\'t'} connected. cot backs up each config before changing it.`}>
+          {unwired.length > 0 && (
+            <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={wiring} onClick={() => void wire()}>{wiring ? 'Connecting…' : 'Connect'}</button>
+          )}
+        </Row>
+      )}
       <Row label="Setup wizard" hint="Re-run onboarding to switch agents or re-verify hooks.">
         <button type="button" className="vbtn vbtn-quiet vbtn-sm" onClick={onRunOnboarding}>Run setup</button>
       </Row>
+    </Section>
+  );
+}
+
+function AboutSection() {
+  const app = inApp();
+  const { data: health } = usePolling<Health>(['health'], () => getHealth(), 10000);
+  const [v, setV] = useState<VersionInfo | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const { update: u, setUpdate, refresh } = useAppUpdate();
+  useEffect(() => {
+    if (!app) getVersionInfo().then(setV).catch(() => {});
+  }, [app]);
+  const check = async () => {
+    setChecking(true);
+    setCheckError(null);
+    try {
+      if (app) {
+        setUpdate(await checkAppUpdate());
+        return;
+      }
+      const d = await getVersionInfo(true);
+      setV(d);
+      if (!d.latest) setCheckError('Update check unavailable: offline or disabled.');
+    } catch {
+      setCheckError(app ? 'Could not start the update check.' : 'Could not reach the collector.');
+    } finally {
+      setChecking(false);
+    }
+  };
+  const install = async () => {
+    try {
+      await installAppUpdate();
+    } finally {
+      void refresh();
+    }
+  };
+  const appHint = (): string => {
+    if (checkError) return checkError;
+    switch (u?.status) {
+      case 'checking': return 'Checking…';
+      case 'current': return `Up to date. cot ${u.current} is the latest.`;
+      case 'available': return `cot ${u.version} is available. You have ${u.current}.`;
+      case 'downloading': return u.total ? `Downloading ${mb(u.downloaded)} of ${mb(u.total)}…` : `Downloading ${mb(u.downloaded)}…`;
+      case 'installing': return 'Installing. cot will restart.';
+      case 'failed': return u.error ?? 'The update check failed.';
+      default: return 'cot checks on launch and every 6 hours, and installs an update only after you confirm.';
+    }
+  };
+  const moving = checking || u?.status === 'checking' || u?.status === 'downloading' || u?.status === 'installing';
+  const version = health?.version ?? u?.current ?? v?.current;
+  return (
+    <Section id="about" title="About" desc="Self-hosted observability for AI coding agents.">
+      <dl className="set-facts">
+        <div><dt className="label">Version</dt><dd className="mono">{version ?? '—'}</dd></div>
+        <div><dt className="label">Runs as</dt><dd>{app ? 'Mac app' : 'Collector'}</dd></div>
+      </dl>
       <Row
         label="Updates"
-        hint={checking ? 'Checking…' : checkError ? checkError : v?.latest ? (v.update_available ? `Update available: v${v.latest}.` : `Up to date. Latest is v${v.latest}.`) : 'Check whether a newer release is available.'}>
-        {v?.update_available && v.url && <a className="vbtn vbtn-ghost vbtn-sm" href={v.url} target="_blank" rel="noreferrer">Instructions <Icon name="external" size={14} /></a>}
-        <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={checking || error} onClick={check}>Check for updates</button>
+        hint={app ? appHint() : checking ? 'Checking…' : checkError ? checkError : v?.latest ? (v.update_available ? `Update available: v${v.latest}.` : `Up to date. Latest is v${v.latest}.`) : 'Check whether a newer release is available.'}>
+        {!app && v?.update_available && v.url && <a className="vbtn vbtn-ghost vbtn-sm" href={v.url} target="_blank" rel="noreferrer">Instructions <Icon name="external" size={14} /></a>}
+        {app && u?.status === 'available' ? (
+          <button type="button" className="vbtn vbtn-primary vbtn-sm" onClick={() => void install()}>Install and restart</button>
+        ) : (
+          <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={moving} onClick={() => void check()}>{moving && u?.status !== 'downloading' && u?.status !== 'installing' ? 'Checking…' : 'Check for updates'}</button>
+        )}
       </Row>
+      <Row label="Release notes" hint="What changed in each version.">
+        <a className="vbtn vbtn-ghost vbtn-sm" href="https://github.com/cot-intelligence/cot/releases" target="_blank" rel="noreferrer">GitHub <Icon name="external" size={14} /></a>
+      </Row>
+      <Row label="Website" hint="Docs, install and updates.">
+        <a className="vbtn vbtn-ghost vbtn-sm" href="https://cot.run" target="_blank" rel="noreferrer">cot.run <Icon name="external" size={14} /></a>
+      </Row>
+    </Section>
+  );
+}
+
+const MCP_AGENT_LABEL: Record<McpInstallAgent['agent'], string> = { claude: 'Claude Code', cursor: 'Cursor', codex: 'Codex' };
+
+/** Registers `cot mcp` with the agents on this machine, so they can read cot's
+ *  sessions and run Analysis with their own model. Merges one entry; restart the agent to load it. */
+function McpSection() {
+  const queryClient = useQueryClient();
+  const { data, isError } = useQuery({ queryKey: ['mcpInstall'], queryFn: getMcpInstall });
+  const [error, setError] = useState<string | null>(null);
+  const [changed, setChanged] = useState(false);
+  const toggle = useMutation({
+    mutationFn: async (targets: { agent: McpInstallAgent['agent']; on: boolean }[]) => {
+      for (const t of targets) await setMcpInstalled(t.agent, t.on);
+    },
+    onMutate: () => setError(null),
+    onSuccess: () => setChanged(true),
+    onError: (e) => setError((e as Error).message),
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: ['mcpInstall'] }),
+  });
+  const agents = data?.agents ?? [];
+  const pending = agents.filter((a) => a.present && !a.current);
+  const allDone = agents.length > 0 && pending.length === 0 && agents.some((a) => a.current);
+  return (
+    <Section id="mcp" title="cot MCP" desc="Lets your agents read cot's sessions, costs and findings, and write Analysis reports with their own model, no API key needed.">
+      <Row
+        label="Install for your agents"
+        hint={!data ? 'Checking your agents…' : !data.bridge_exists ? 'Install agent hooks first: the MCP server runs through the same cot bridge.' : allDone ? 'Installed everywhere it can be. Restart an agent to pick it up.' : `Adds cot to ${pending.map((a) => MCP_AGENT_LABEL[a.agent]).join(', ') || 'your agents'}. Existing servers and settings are kept.`}>
+        <button
+          type="button"
+          className="vbtn vbtn-primary vbtn-sm"
+          disabled={!data?.bridge_exists || pending.length === 0 || toggle.isPending}
+          onClick={() => toggle.mutate(pending.map((a) => ({ agent: a.agent, on: true })))}>
+          {toggle.isPending ? 'Installing…' : allDone ? <><Icon name="check" size={14} />Installed</> : 'Install'}
+        </button>
+      </Row>
+      <ul className="set-list">
+        {agents.map((a) => (
+          <li key={a.agent}>
+            <div style={{ display: 'grid', gap: 2, minWidth: 0 }}>
+              <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <Agent id={a.agent} />
+                <span className={`vchip ${a.current ? 'c-ok' : a.installed ? 'c-warn' : 'c-dim'}`}><span className="dot" />{a.current ? 'Installed' : a.installed ? 'Points elsewhere' : a.present ? 'Not installed' : 'Agent not found'}</span>
+              </span>
+              <span className="mono faint truncate" style={{ fontSize: 11 }} title={a.config_path}>{homePath(a.config_path)}</span>
+            </div>
+            {a.installed ? (
+              <button type="button" className="vbtn vbtn-ghost vbtn-sm" disabled={toggle.isPending} onClick={() => toggle.mutate([{ agent: a.agent, on: false }])}>Remove</button>
+            ) : (
+              <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={!data?.bridge_exists || toggle.isPending} onClick={() => toggle.mutate([{ agent: a.agent, on: true }])}>Install</button>
+            )}
+          </li>
+        ))}
+        {!data && !isError && <li className="dim" style={{ fontSize: 13 }}>Checking your agents…</li>}
+        {isError && <li className="dim" style={{ fontSize: 13 }}>The collector didn't answer.</li>}
+      </ul>
+      {(error || changed) && (
+        <p className={error ? 'an-err' : 'dim'} role={error ? 'alert' : 'status'} style={{ margin: '0 20px 16px', fontSize: 12 }}>
+          {error ?? 'Saved. Restart the agent (or start a new session) to load cot.'}
+        </p>
+      )}
     </Section>
   );
 }
@@ -337,15 +518,31 @@ function PrivacySection({ settings: s, onSettings }: { settings: Settings | null
       onSettings({ ...s, telemetry_enabled: !on });
     }
   };
+  const setFolders = async (on: boolean) => {
+    if (!s) return;
+    onSettings({ ...s, read_protected_folders: on });
+    try {
+      onSettings(await updateSettings({ read_protected_folders: on }));
+    } catch {
+      onSettings({ ...s, read_protected_folders: !on });
+    }
+  };
+  const affected = s?.protected_folder_sessions ?? 0;
   return (
-    <Section id="privacy" title="Privacy" desc="What, if anything, leaves this machine.">
+    <Section id="privacy" title="Privacy" desc="What, if anything, leaves this machine, and what cot reads on it.">
       <Row
         label="Usage metrics"
         hint={s?.telemetry_env_disabled ? 'Turned off for this install by COT_DISABLE_TELEMETRY.' : `Anonymous totals (sessions, events, models, error rate) sent to ${s?.telemetry_endpoint ?? 'cot.run'}. No traces, prompts, paths or code.`}>
         <Switch on={!!s?.telemetry_enabled} disabled={locked} label="Usage metrics" onChange={(v) => void setOn(v)} />
       </Row>
+      <Row
+        label="Protected folders"
+        hint={`Let cot read git history and project files in Documents, Desktop, Downloads, iCloud Drive and external drives. macOS asks once per folder when you turn this on.${
+          affected ? ` ${fmt.n(affected)} session${affected === 1 ? '' : 's'} ran in one of them.` : ''}`}>
+        <Switch on={!!s?.read_protected_folders} disabled={!s} label="Read protected folders" onChange={(v) => void setFolders(v)} />
+      </Row>
       <Row label="AI analysis" hint="Sends findings and masked excerpts to your provider, only when you run it.">
-        <a href="#/settings" className="vbtn vbtn-ghost vbtn-sm" onClick={(e) => { e.preventDefault(); document.getElementById('set-ai')?.scrollIntoView({ block: 'start' }); }}>
+        <a href={settingsHref('ai')} className="vbtn vbtn-ghost vbtn-sm">
           {s?.ai_configured ? 'Configured' : 'Off'} <Icon name="arrow" size={14} />
         </a>
       </Row>
@@ -391,6 +588,14 @@ function PassiveSection() {
     await runPassiveNow();
     setP(await getPassive());
   };
+  // Reload the 30-day history whenever a run starts or finishes.
+  const lastRun = p?.runs[0];
+  const [history, setHistory] = useState<PassiveHistoryRun[] | null>(null);
+  useEffect(() => {
+    getPassiveHistory()
+      .then((h) => setHistory(h.runs))
+      .catch(() => setHistory(null));
+  }, [lastRun?.id, lastRun?.status]);
   return (
     <Section id="passive" title="Passive import" desc="Build sessions from agent transcripts on a schedule, with or without hooks. Each run imports metadata first, then runs analysis.">
       {problem && !p ? (
@@ -413,6 +618,9 @@ function PassiveSection() {
       <Row label="Agents" hint="Transcripts found on this machine. Only switched-on agents are imported." stack>
         {p && <AgentSources detail={p.agents_detail} enabled={p.agents} onToggle={toggleAgent} />}
       </Row>
+      <Row label="Extra folders" hint="Read another data folder for an agent too, such as a custom CLAUDE_CONFIG_DIR, CODEX_HOME or a second install." stack>
+        {p && <ExtraHomes status={p} onChange={setP} />}
+      </Row>
       <Row label="Schedule" hint="Pick a plain-English schedule or write your own cron." stack>
         {p && <SchedulePicker value={p.cron} presets={p.presets} onChange={(c) => void save({ cron: c })} />}
       </Row>
@@ -424,6 +632,9 @@ function PassiveSection() {
             <Icon name="bolt" size={14} />{running ? 'Running…' : 'Run now'}
           </button>
         </div>
+      </Row>
+      <Row label="Import history" hint="Every run in the last 30 days. Older runs aren't kept." stack>
+        {history ? <ImportHistory runs={history} /> : <span className="sk" style={{ display: 'block', height: 120 }} />}
       </Row>
       <Row label="Without hooks" hint="What transcripts alone can't show.">
         <button type="button" className="vbtn vbtn-ghost vbtn-sm" aria-expanded={gap} aria-controls="set-hooks-gap" onClick={() => setGap((g) => !g)}>
@@ -493,7 +704,7 @@ function DataSection({ onExport }: { onExport: () => void }) {
 
 function Section({ id, title, desc, children }: { id: string; title: string; desc: string; children: ReactNode }) {
   return (
-    <section className="card set-sec" id={`set-${id}`} aria-labelledby={`set-${id}-t`} data-spy={id}>
+    <section className="card set-sec" id={`set-${id}`} aria-labelledby={`set-${id}-t`}>
       <div className="set-h"><h2 id={`set-${id}-t`}>{title}</h2><p className="dim">{desc}</p></div>
       {children}
     </section>
@@ -507,49 +718,4 @@ function Row({ label, hint, children, wide, stack }: { label: string; hint?: str
       <div className="set-c" style={{ gap: 8 }}>{children}</div>
     </div>
   );
-}
-
-/** Highlights the last section whose heading has reached the top of the scroll area (or the final one at the bottom).
- *  A click sets it directly and holds it until the jump settles, so the spy never flickers through sections in between. */
-function useScrollSpy(): [string, (id: string) => void] {
-  const [cur, setCur] = useState(SECTIONS[0].id);
-  // A nav click pins its section until the reader scrolls on their own: the
-  // short sections near the bottom can't reach the top, so position alone
-  // would hand the click to the last section.
-  const pinned = useRef(false);
-  useEffect(() => {
-    const root = document.getElementById('vf-scroll');
-    if (!root) return;
-    let raf = 0;
-    const tick = () => {
-      raf = 0;
-      if (pinned.current) return;
-      const els = [...root.querySelectorAll<HTMLElement>('[data-spy]')];
-      const top = root.getBoundingClientRect().top;
-      // The reading line sits near the top, then slides down over the last
-      // screen of scroll so every section, however short, takes a turn.
-      const left = root.scrollHeight - root.clientHeight - root.scrollTop;
-      const reach = Math.min(root.clientHeight * 0.6, 360);
-      const line = 96 + Math.max(0, 1 - left / reach) * (root.clientHeight - 96 - 48);
-      const pick = els.filter((el) => el.getBoundingClientRect().top - top <= line).pop() ?? els[0];
-      if (pick?.dataset.spy) setCur(pick.dataset.spy);
-    };
-    const on = () => { if (!raf) raf = requestAnimationFrame(tick); };
-    const unpin = () => { pinned.current = false; };
-    root.addEventListener('scroll', on, { passive: true });
-    root.addEventListener('wheel', unpin, { passive: true });
-    root.addEventListener('touchmove', unpin, { passive: true });
-    root.addEventListener('keydown', unpin);
-    root.addEventListener('pointerdown', unpin);
-    tick();
-    return () => {
-      root.removeEventListener('scroll', on);
-      root.removeEventListener('wheel', unpin);
-      root.removeEventListener('touchmove', unpin);
-      root.removeEventListener('keydown', unpin);
-      root.removeEventListener('pointerdown', unpin);
-      cancelAnimationFrame(raf);
-    };
-  }, []);
-  return [cur, (id) => { pinned.current = true; setCur(id); }];
 }

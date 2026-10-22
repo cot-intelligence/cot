@@ -37,9 +37,8 @@ sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 Build on the oldest distro you support: the frozen collector needs a glibc at
 least as new as the build machine's. Differences from macOS: the window keeps
 the desktop's own titlebar, the tray needs an AppIndicator host (GNOME needs
-the AppIndicator extension), "Install Agent Hooks…" opens the first terminal it
-finds, and only the AppImage self-updates (`.deb` installs update through a new
-download).
+the AppIndicator extension), and only the AppImage self-updates (`.deb`
+installs update through a new download).
 
 Needs Rust, Node and Python 3.12. `scripts/prepare-collector.sh` builds the
 dashboard and freezes the collector into `src-tauri/resources/`. Python deps go
@@ -78,10 +77,12 @@ Docker users still see it.
 
 ## Releasing
 
-`.github/workflows/desktop-release.yml` runs on `v*` tags. It builds on
-`macos-14` (Apple Silicon), runs `verify-bundle.sh`, uploads the DMG,
-`cot.app.tar.gz` and `.sig` to the GitHub Release, and opens a PR on the site
-repo that updates `public/version.json`. Merging that PR ships the update.
+`.github/workflows/release.yml` runs on `v*` tags: CI and the Collector checks
+first, then the Docker image and `desktop-release.yml` side by side. The
+desktop build runs on `macos-14` (Apple Silicon), runs `verify-bundle.sh` and
+uploads the DMG, `cot.app.tar.gz` and `.sig` to a draft GitHub Release. The
+release is published once both builds pass, and then a PR on the site repo
+updates `public/version.json`. Merging that PR ships the update.
 
 One-time setup:
 

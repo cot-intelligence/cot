@@ -1,23 +1,27 @@
 name: Desktop release
 
 # Builds cot.app (Tauri) for Apple Silicon and the Linux x86_64 .deb and
-# .AppImage on the same v* tags as the Docker image, attaches them and the
-# updater artifacts to the GitHub Release, and opens a PR on the site repo that
-# points version.json at them (the AppImage is the Linux updater's target). Merging that PR is
-# what ships the update to installed apps.
+# .AppImage, and attaches them and the updater artifacts to the tag's GitHub
+# Release, created as a draft when missing. The AppImage is the Linux
+# updater's target.
+# release.yml calls this after CI passes, publishes the release once every
+# build is in, and then opens the site PR (see release.yml).
 #
 # Secrets:
 #   TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD  updater signing (required)
-#   SITE_REPO_TOKEN          token that can push branches and open PRs on the site repo
 #   R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY  optional cot.run binary mirror
 # Variables:
-#   SITE_REPO                e.g. cot-intelligence/website (the PR step is skipped when unset)
 #   R2_ACCOUNT_ID, R2_BUCKET optional mirror (skipped when unset)
 
 on:
-  push:
-    tags: ['v*']
-  workflow_dispatch:
+  workflow_call:
+    outputs:
+      version:
+        value: ${{ jobs.build.outputs.version }}
+      signature:
+        value: ${{ jobs.build.outputs.signature }}
+      linux_signature:
+        value: ${{ jobs.build-linux.outputs.signature }}
 
 permissions:
   contents: write
@@ -29,9 +33,9 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       signature: ${{ steps.artifacts.outputs.signature }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -39,7 +43,7 @@ jobs:
             package-lock.json
             desktop/package-lock.json
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -89,18 +93,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: v${{ steps.version.outputs.version }}
         run: |
-          # docker-publish.yml may create the release first; either order works.
+          # A draft until release.yml publishes it; a re-run reuses it.
           gh release view "${TAG}" >/dev/null 2>&1 \
-            || gh release create "${TAG}" --title "${TAG}" --generate-notes \
-            || gh release view "${TAG}" >/dev/null
+            || gh release create "${TAG}" --draft --verify-tag --title "${TAG}" --generate-notes
           gh release upload "${TAG}" out/* --clobber
 
       - name: Mirror to R2
         if: vars.R2_BUCKET != ''
+        # A backup copy only: a failed mirror must not hold the release as a draft.
+        continue-on-error: true
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
+          # R2 rejects some of the CLI's default checksum headers.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
         run: |
           aws s3 cp out/ "s3://${{ vars.R2_BUCKET }}/desktop/v${{ steps.version.outputs.version }}/" \
             --recursive --endpoint-url "https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
@@ -112,14 +120,14 @@ jobs:
     outputs:
       signature: ${{ steps.artifacts.outputs.signature }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system packages
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev file xdg-utils
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -127,7 +135,7 @@ jobs:
             package-lock.json
             desktop/package-lock.json
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -171,67 +179,25 @@ jobs:
           ls -la out
 
       - name: Upload to GitHub Release
-        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: v${{ steps.version.outputs.version }}
         run: |
+          # The macOS job may create the draft first; either order works.
           gh release view "${TAG}" >/dev/null 2>&1 \
-            || gh release create "${TAG}" --title "${TAG}" --generate-notes \
+            || gh release create "${TAG}" --draft --verify-tag --title "${TAG}" --generate-notes \
             || gh release view "${TAG}" >/dev/null
           gh release upload "${TAG}" out/* --clobber
 
       - name: Mirror to R2
-        if: vars.R2_BUCKET != '' && github.ref_type == 'tag'
+        if: vars.R2_BUCKET != ''
+        continue-on-error: true
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
         run: |
           aws s3 cp out/ "s3://${{ vars.R2_BUCKET }}/desktop/v${{ steps.version.outputs.version }}/" \
             --recursive --endpoint-url "https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
-
-  site-pr:
-    needs: [build, build-linux]
-    if: vars.SITE_REPO != '' && github.ref_type == 'tag'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ vars.SITE_REPO }}
-          token: ${{ secrets.SITE_REPO_TOKEN }}
-
-      - name: Point version.json at the new build
-        env:
-          VERSION: ${{ needs.build.outputs.version }}
-          SIGNATURE: ${{ needs.build.outputs.signature }}
-          URL: https://github.com/${{ github.repository }}/releases/download/v${{ needs.build.outputs.version }}/cot.app.tar.gz
-          LINUX_SIGNATURE: ${{ needs.build-linux.outputs.signature }}
-          LINUX_URL: https://github.com/${{ github.repository }}/releases/download/v${{ needs.build.outputs.version }}/cot_${{ needs.build.outputs.version }}_amd64.AppImage
-        run: |
-          file=public/version.json
-          jq --arg v "${VERSION}" --arg url "${URL}" --arg sig "${SIGNATURE}" \
-             --arg linux_url "${LINUX_URL}" --arg linux_sig "${LINUX_SIGNATURE}" \
-             --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-             '.version = $v | .pub_date = $date
-              | .platforms["darwin-aarch64"] = {url: $url, signature: $sig}
-              | .platforms["linux-x86_64"] = {url: $linux_url, signature: $linux_sig}' \
-             "${file}" > "${file}.tmp"
-          mv "${file}.tmp" "${file}"
-          cat "${file}"
-
-      - name: Open PR
-        env:
-          GH_TOKEN: ${{ secrets.SITE_REPO_TOKEN }}
-          VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          branch="release/desktop-v${VERSION}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "${branch}"
-          git commit -am "release: cot ${VERSION} desktop update"
-          git push --force origin "${branch}"
-          gh pr create --repo "${{ vars.SITE_REPO }}" --head "${branch}" \
-            --title "release: cot ${VERSION} desktop update" \
-            --body "Points \`version.json\` at the cot.app ${VERSION} build from ${{ github.server_url }}/${{ github.repository }}/releases/tag/v${VERSION}. Merging ships the update to installed apps. Check \`notes\` before merging." \
-            || echo "PR already exists"

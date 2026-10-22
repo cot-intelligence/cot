@@ -1,4 +1,5 @@
 import type { AgentId } from './agents';
+import { AGENT_LABELS } from '../components/forest/AgentMark';
 
 /** Display label for a session source / type. Falls back to a humanized
  *  version of any custom source string (API, custom apps, etc.). */
@@ -12,6 +13,8 @@ export function sourceLabel(source: string): string {
       return 'Codex';
     case 'opencode':
       return 'OpenCode';
+    case 'hermes':
+      return 'Hermes';
     case 'api':
       return 'API';
     case 'custom':
@@ -24,6 +27,7 @@ export function sourceLabel(source: string): string {
     case 'otel':
       return 'OpenTelemetry';
     default:
+      if (AGENT_LABELS[source]) return AGENT_LABELS[source];
       return source
         .replace(/[_-]+/g, ' ')
         .replace(/\b\w/g, (c) => c.toUpperCase());
@@ -41,11 +45,13 @@ export function sourceTag(source: string): string {
       return 'CODEX';
     case 'opencode':
       return 'OPENCODE';
+    case 'hermes':
+      return 'HERMES';
     default:
       return source.toUpperCase();
   }
 }
 
 export function isKnownAgent(source: string): source is AgentId {
-  return source === 'claude' || source === 'cursor' || source === 'codex' || source === 'opencode';
+  return source === 'claude' || source === 'cursor' || source === 'codex' || source === 'opencode' || source === 'hermes';
 }

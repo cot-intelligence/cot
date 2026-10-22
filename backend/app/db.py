@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import string
@@ -16,7 +17,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterator
 
 if TYPE_CHECKING:
     from .insight_snapshot import InsightInputs
@@ -209,6 +210,32 @@ CREATE TABLE IF NOT EXISTS ai_analyses (
 
 CREATE INDEX IF NOT EXISTS idx_ai_analyses_created ON ai_analyses(created_at);
 
+-- Analysis runs (analysis.py): a persona's report on one session or across
+-- sessions, with its deliverables and follow-ups. ``runner`` is 'cot' (the
+-- configured provider, BYOK) or 'agent' (an outside agent over cot mcp).
+CREATE TABLE IF NOT EXISTS analysis_runs (
+    id            TEXT PRIMARY KEY,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    scope         TEXT NOT NULL,
+    session_id    TEXT,
+    days          INTEGER,
+    persona       TEXT NOT NULL,
+    question      TEXT,
+    status        TEXT NOT NULL,
+    runner        TEXT NOT NULL,
+    provider      TEXT,
+    model         TEXT,
+    steps         TEXT,
+    report        TEXT,
+    deliverables  TEXT,
+    followups     TEXT,
+    usage         TEXT,
+    error         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_runs_created ON analysis_runs(created_at);
+CREATE INDEX IF NOT EXISTS idx_analysis_runs_session ON analysis_runs(session_id, created_at);
+
 -- Things worth telling the person about (a new finding, a rule match), shown in
 -- the dashboard's inbox and, in the Mac app, as macOS notifications.
 CREATE TABLE IF NOT EXISTS notifications (
@@ -394,6 +421,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("import_root_id", "TEXT"),
         # Context the person typed when importing: why this trace is here.
         ("import_note", "TEXT"),
+        # The machine an imported session ran on, when it came from another
+        # machine's copied or mounted session folders (`cot import --from`).
+        ("machine", "TEXT"),
     ):
         _add_column_if_missing(conn, "sessions", name, col_def, session_cols)
     if "parent_session_id" in session_cols:
@@ -1143,13 +1173,17 @@ def _purge_import_for_hook_sessions(conn: sqlite3.Connection) -> None:
     timestamps mixed with real ones. Live hook data is authoritative (real
     timestamps, proper Pre/Post pairs), so drop the imported approximation for
     any session that has hook events, then reset that session's bounds to the
-    surviving (real) events."""
+    surviving (real) events.
+
+    Cursor is left alone: its importer adds subagent responses and no-hook
+    tools to hooked sessions on purpose (see ``_import_shadows_hooks``)."""
     affected = [
         r["session_id"]
         for r in conn.execute(
-            "SELECT session_id FROM events GROUP BY session_id"
-            " HAVING SUM(CASE WHEN origin = 'hook' OR origin IS NULL THEN 1 ELSE 0 END) > 0"
-            "    AND SUM(CASE WHEN origin = 'import' THEN 1 ELSE 0 END) > 0"
+            "SELECT i.session_id FROM (SELECT DISTINCT session_id FROM events"
+            "   WHERE origin = 'import' AND source != 'cursor') i"
+            " WHERE EXISTS (SELECT 1 FROM events h WHERE h.session_id = i.session_id"
+            "               AND (h.origin = 'hook' OR h.origin IS NULL))"
         ).fetchall()
     ]
     if not affected:
@@ -1211,7 +1245,16 @@ def _question_response_obj(detail: Any) -> dict[str, Any] | None:
     return obj if isinstance(obj, dict) else None
 
 
-_MIGRATIONS_VERSION = "10"
+_MIGRATIONS_VERSION = "11"
+
+# The steps each migrations version added or changed. A DB already at version N
+# runs only the steps listed for N+1 through the current version; one older than
+# that (or with no record) runs the whole chain below, which stays idempotent.
+# Re-running the whole chain on every bump took 18-27s on a 3GB DB, past the
+# desktop app's startup timeout, so list each new version's steps here.
+_UPGRADES: dict[int, tuple[Callable[[sqlite3.Connection], None], ...]] = {
+    11: (_purge_import_for_hook_sessions,),
+}
 _RAW_PAYLOAD_MAX_BYTES = 64 * 1024
 
 
@@ -1410,6 +1453,7 @@ def init_db(build_search_index: bool = True) -> None:
     """``build_search_index=False`` leaves a first-time index build to
     :func:`ensure_search_index`; the server runs that after it starts, because
     on a large DB the build outlasts the desktop app's startup timeout."""
+    _import_only_sessions.clear()
     with store.write() as conn:
         for statement in SCHEMA.split(";"):
             if statement.strip():
@@ -1435,30 +1479,79 @@ def init_db(build_search_index: bool = True) -> None:
         ).fetchone()
         if stored and stored["value"] == _MIGRATIONS_VERSION:
             return
-        _backfill(conn)
-        # Older Event rows predate Origin; normalize them before migrations
-        # whose reconciliation policy depends on distinguishing hook/import.
-        conn.execute("UPDATE events SET origin = 'hook' WHERE origin IS NULL")
-        _recategorize_network_calls(conn)
-        _recategorize_subagents(conn)
-        _repair_claude_desktop_events(conn)
-        _recategorize_cursor_tools(conn)
-        _recategorize_web_targets(conn)
-        _recategorize_questions(conn)
-        _drop_redundant_cursor_hooks(conn)
-        _recategorize_web_search(conn)
-        _recategorize_browser_navigate_starts(conn)
-        _backfill_search_targets(conn)
-        _merge_search_into_shell(conn)
-        _dedup_cursor_subagent_starts(conn)
-        _backfill_cursor_questions(conn)
-        _recategorize_other_tools(conn)
-        _purge_import_for_hook_sessions(conn)
+        with _migrating_marker():
+            _run_migrations(conn, stored["value"] if stored else None)
         conn.execute(
             "INSERT INTO settings (key, value) VALUES ('migrations_version', ?)"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (_MIGRATIONS_VERSION,),
         )
+
+
+def _pending_upgrades(stored: str | None) -> list[Callable[[sqlite3.Connection], None]] | None:
+    """The listed steps that take a DB from ``stored`` to the current version,
+    or None when some version in between has no list (run the whole chain)."""
+    try:
+        done = int(stored) if stored is not None else None
+    except ValueError:
+        return None
+    current = int(_MIGRATIONS_VERSION)
+    if done is None or done >= current:
+        return None
+    versions = range(done + 1, current + 1)
+    if not all(v in _UPGRADES for v in versions):
+        return None
+    return [step for v in versions for step in _UPGRADES[v]]
+
+
+def _migration_marker_path() -> Path:
+    return store.path().parent / "migrating"
+
+
+@contextmanager
+def _migrating_marker():
+    """Leave ``migrating`` next to the DB while migrations run. The desktop app
+    gives a collector that shows it far longer than its usual startup timeout,
+    since stopping one mid-migration rolls the work back and repeats it."""
+    marker = _migration_marker_path()
+    try:
+        marker.write_text(str(os.getpid()))
+    except OSError:
+        pass
+    try:
+        yield
+    finally:
+        try:
+            marker.unlink()
+        except OSError:
+            pass
+
+
+def _run_migrations(conn: sqlite3.Connection, stored: str | None) -> None:
+    upgrades = _pending_upgrades(stored)
+    if upgrades is not None:
+        for step in upgrades:
+            step(conn)
+        return
+    _backfill(conn)
+    # Older Event rows predate Origin; normalize them before migrations
+    # whose reconciliation policy depends on distinguishing hook/import.
+    conn.execute("UPDATE events SET origin = 'hook' WHERE origin IS NULL")
+    _recategorize_network_calls(conn)
+    _recategorize_subagents(conn)
+    _repair_claude_desktop_events(conn)
+    _recategorize_cursor_tools(conn)
+    _recategorize_web_targets(conn)
+    _recategorize_questions(conn)
+    _drop_redundant_cursor_hooks(conn)
+    _recategorize_web_search(conn)
+    _recategorize_browser_navigate_starts(conn)
+    _backfill_search_targets(conn)
+    _merge_search_into_shell(conn)
+    _dedup_cursor_subagent_starts(conn)
+    _backfill_cursor_questions(conn)
+    _recategorize_other_tools(conn)
+    _purge_import_for_hook_sessions(conn)
 
 
 def get_setting(key: str, default: str | None = None) -> str | None:
@@ -1522,6 +1615,97 @@ def list_ai_analyses(limit: int = 10) -> list[dict[str, Any]]:
             (limit,),
         ).fetchall()
     return [_ai_analysis_row(r) for r in rows]
+
+
+_ANALYSIS_JSON = ("steps", "report", "deliverables", "followups", "usage")
+
+
+def insert_analysis_run(run: dict[str, Any]) -> None:
+    cols = (
+        "id", "created_at", "updated_at", "scope", "session_id", "days", "persona", "question",
+        "status", "runner", "provider", "model", *_ANALYSIS_JSON, "error",
+    )
+    values = [
+        json.dumps(run.get(c), ensure_ascii=False) if c in _ANALYSIS_JSON and run.get(c) is not None else run.get(c)
+        for c in cols
+    ]
+    with store.write() as conn:
+        conn.execute(
+            f"INSERT INTO analysis_runs ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+            values,
+        )
+
+
+def update_analysis_run(run_id: str, **fields: Any) -> None:
+    if not fields:
+        return
+    fields["updated_at"] = timeutil.now()
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    values = [
+        json.dumps(v, ensure_ascii=False) if k in _ANALYSIS_JSON and v is not None else v
+        for k, v in fields.items()
+    ]
+    with store.write() as conn:
+        conn.execute(f"UPDATE analysis_runs SET {sets} WHERE id = ?", (*values, run_id))
+
+
+def _analysis_run_row(r: Any) -> dict[str, Any]:
+    out = dict(r)
+    for c in _ANALYSIS_JSON:
+        raw = out.get(c)
+        try:
+            out[c] = json.loads(raw) if raw else None
+        except (json.JSONDecodeError, TypeError):
+            out[c] = None
+    return out
+
+
+def get_analysis_run(run_id: str) -> dict[str, Any] | None:
+    with store.read() as conn:
+        row = conn.execute("SELECT * FROM analysis_runs WHERE id = ?", (run_id,)).fetchone()
+    return _analysis_run_row(row) if row is not None else None
+
+
+def list_analysis_runs(
+    limit: int = 50, session_id: str | None = None, days: int = 0
+) -> list[dict[str, Any]]:
+    clauses, params = [], []
+    if session_id:
+        clauses.append("session_id = ?")
+        params.append(session_id)
+    if days > 0:
+        clauses.append("created_at >= ?")
+        params.append((datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S"))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with store.read() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM analysis_runs {where} ORDER BY created_at DESC LIMIT ?",
+            (*params, max(1, min(limit, 200))),
+        ).fetchall()
+    return [_analysis_run_row(r) for r in rows]
+
+
+def delete_analysis_run(run_id: str) -> bool:
+    with store.write() as conn:
+        return conn.execute("DELETE FROM analysis_runs WHERE id = ?", (run_id,)).rowcount > 0
+
+
+def event_session_id(event_id: int) -> str | None:
+    with store.read() as conn:
+        row = conn.execute("SELECT session_id FROM events WHERE id = ?", (event_id,)).fetchone()
+    return row["session_id"] if row is not None else None
+
+
+def events_in_sessions(event_ids: list[int]) -> dict[int, str]:
+    """Which session each of these event ids belongs to (unknown ids omitted)."""
+    ids = sorted({int(i) for i in event_ids})[:500]
+    if not ids:
+        return {}
+    with store.read() as conn:
+        rows = conn.execute(
+            f"SELECT id, session_id FROM events WHERE id IN ({', '.join('?' * len(ids))})", ids
+        ).fetchall()
+    return {int(r["id"]): r["session_id"] for r in rows}
 
 
 def _ai_analysis_row(r: Any) -> dict[str, Any]:
@@ -2110,12 +2294,45 @@ def _mark_raw_ingest(
     *,
     event_id: int | None = None,
     projection_error: str | None = None,
+    drop_payload: bool = False,
 ) -> None:
     conn.execute(
         "UPDATE raw_ingest_events SET status = ?, event_id = ?, projection_error = ?"
-        " WHERE id = ?",
+        + (", raw_payload = NULL" if drop_payload else "")
+        + " WHERE id = ?",
         (status, event_id, projection_error, raw_ingest_id),
     )
+
+
+# Batch size for clearing the raw copy of already-projected imports.
+_PRUNE_BATCH = 2000
+
+
+def prune_import_raw_payloads() -> int:
+    """Clear ``raw_payload`` on imported rows that projected cleanly, a batch
+    per write so ingest gets in between. Their event row holds the full body
+    (``events.payload`` is uncapped; the raw copy is cut at 64 KB) and the
+    transcript on disk is the source, so the copy only took space: about a
+    third of an import-heavy DB. Hook rows, failures and duplicates keep
+    theirs. The freed pages are reused by later writes; reclaiming them on
+    disk needs a VACUUM, which is left to the user. Returns rows cleared."""
+    if get_setting("raw_import_pruned") == "1":
+        return 0
+    cleared = 0
+    while True:
+        with store.write() as conn:
+            n = conn.execute(
+                "UPDATE raw_ingest_events SET raw_payload = NULL WHERE id IN ("
+                " SELECT id FROM raw_ingest_events"
+                " WHERE status = 'projected' AND origin = 'import' AND raw_payload IS NOT NULL"
+                " LIMIT ?)",
+                (_PRUNE_BATCH,),
+            ).rowcount
+        cleared += n
+        if n < _PRUNE_BATCH:
+            break
+    set_setting("raw_import_pruned", "1")
+    return cleared
 
 
 def raw_ingest_events(limit: int = 100) -> list[dict[str, Any]]:
@@ -2170,6 +2387,41 @@ def record_ingests(items: list[tuple[str, dict[str, Any]]]) -> list[dict[str, An
     return results
 
 
+# Sessions found to hold no live hook rows, so the guard below costs one query
+# per session rather than one per event of a large imported transcript. A hook
+# row landing for the session drops it from the set.
+_import_only_sessions: set[str] = set()
+
+
+def _import_shadows_hooks(
+    conn: sqlite3.Connection, norm: dict[str, Any], raw: dict[str, Any]
+) -> bool:
+    """Whether an imported event would duplicate a session captured live.
+
+    Hooks and the transcript importer each record every tool call, with their
+    own dedup keys, so a transcript imported over a hooked session stores
+    every call twice. The bridge skips hooked sessions using
+    ``/v1/sessions/origins``, but when that read fails (a cold read of a large
+    DB outlasts its timeout) it imports everything; this keeps the store
+    right regardless. Hook rows already purge imported ones as they arrive
+    (``_record_event``); this covers an import landing after the last hook.
+
+    Cursor is exempt: its importer deliberately adds subagent responses and
+    tools that never fire hooks to hooked sessions, and filters the rest."""
+    if not raw.get("_import") or norm["source"] == "cursor":
+        return False
+    sid = norm["session_id"]
+    if sid in _import_only_sessions:
+        return False
+    hooked = conn.execute(
+        "SELECT 1 FROM events WHERE session_id = ? AND origin = 'hook' LIMIT 1",
+        (sid,),
+    ).fetchone() is not None
+    if not hooked:
+        _import_only_sessions.add(sid)
+    return hooked
+
+
 def _record_ingest(conn: sqlite3.Connection, source: str, raw: dict[str, Any]) -> dict[str, Any]:
     raw_id = _append_raw_ingest(
         conn, source, raw, origin="import" if raw.get("_import") else "hook"
@@ -2177,7 +2429,7 @@ def _record_ingest(conn: sqlite3.Connection, source: str, raw: dict[str, Any]) -
     conn.execute("SAVEPOINT project_event")
     try:
         norm = normalize(source, raw)
-        if should_ignore_event(norm, raw):
+        if should_ignore_event(norm, raw) or _import_shadows_hooks(conn, norm, raw):
             conn.execute("RELEASE project_event")
             _mark_raw_ingest(conn, raw_id, "ignored")
             return {
@@ -2209,7 +2461,10 @@ def _record_ingest(conn: sqlite3.Connection, source: str, raw: dict[str, Any]) -
         }
 
     raw_status = "projected" if inserted else "duplicate"
-    _mark_raw_ingest(conn, raw_id, raw_status, event_id=event_id)
+    # An imported body that projected lives on in its event row (uncapped) and
+    # in the transcript; the raw copy would only double it.
+    _mark_raw_ingest(conn, raw_id, raw_status, event_id=event_id,
+                     drop_payload=inserted and bool(raw.get("_import")))
     return {
         "ok": True,
         "raw_ingest_id": raw_id,
@@ -2279,9 +2534,9 @@ def _record_event(
     if row is None or boundary == "session_start":
         if row is None:
             conn.execute(
-                "INSERT INTO sessions (id, source, cwd, started_at, status, created_at)"
-                " VALUES (?, ?, ?, ?, 'active', ?)",
-                (sid, norm["source"], norm["cwd"], ts, timeutil.now()),
+                "INSERT INTO sessions (id, source, cwd, started_at, status, created_at, machine)"
+                " VALUES (?, ?, ?, ?, 'active', ?, ?)",
+                (sid, norm["source"], norm["cwd"], ts, timeutil.now(), _machine_of(raw)),
             )
         elif boundary == "session_start":
             conn.execute(
@@ -2296,7 +2551,7 @@ def _record_event(
             (norm["cwd"], sid),
         )
 
-    if norm["source"] == "opencode" and raw.get("parent_session_id"):
+    if (norm["source"] in ("opencode", "hermes") or raw.get("_reader")) and raw.get("parent_session_id"):
         parent = str(raw["parent_session_id"])
         if parent != sid:
             conn.execute(
@@ -2347,6 +2602,7 @@ def _record_event(
     # had also ingested (timing race), drop the imported approximation and
     # reset the session's start to the real events. No-op after the first.
     if origin == "hook":
+        _import_only_sessions.discard(sid)
         purged = conn.execute(
             "DELETE FROM events WHERE session_id = ? AND origin = 'import'", (sid,)
         ).rowcount
@@ -2425,7 +2681,7 @@ def _session_link_item(
     # Subagent sessions rarely have a user prompt; fall back to the label the
     # importer derived from the parent's Task launch.
     title = _first_prompt(conn, row["id"]) or label
-    recent_status = timeutil.live_status(agg["last_ts"])
+    recent_status = timeutil.live_status(agg["last_ts"], row["ended_at"])
     stored_status = row["status"] or "completed"
     last_status = status_event["status"] if status_event else None
     if last_status in ("error", "blocked", "interrupted"):
@@ -2554,7 +2810,7 @@ def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any
         "models": models,
         "archived": bool(row["archived"]),
         "bookmarked": bool(row["bookmarked"]),
-        "status": timeutil.live_status(last_ts),
+        "status": timeutil.live_status(last_ts, row["ended_at"]),
         "started_at": timeutil.format_ts(row["started_at"]) or str(row["started_at"] or ""),
         "ended_at": timeutil.format_ts(row["ended_at"]),
         "last_activity": timeutil.format_ts(last_ts),
@@ -2569,6 +2825,11 @@ def session_summary(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any
         "rating": _session_ratings(conn, [row["id"]]).get(row["id"]),
         **_import_fields(row),
     }
+
+
+def _machine_of(raw: dict) -> str | None:
+    machine = raw.get("_machine")
+    return str(machine)[:64] if isinstance(machine, str) and machine.strip() else None
 
 
 def _session_ratings(conn: sqlite3.Connection, session_ids: list[str]) -> dict[str, int]:
@@ -2587,10 +2848,14 @@ def _session_ratings(conn: sqlite3.Connection, session_ids: list[str]) -> dict[s
 
 
 def _import_fields(row: sqlite3.Row) -> dict[str, Any]:
-    """Provenance of a Session Replay copy; nothing for a traced session."""
-    if "imported_from" not in row.keys() or not row["imported_from"]:
-        return {}
+    """Provenance: the machine of a session imported from another one, and the
+    origin of a Session Replay copy; nothing for a session traced here."""
+    keys = row.keys()
+    machine = {"machine": row["machine"]} if "machine" in keys and row["machine"] else {}
+    if "imported_from" not in keys or not row["imported_from"]:
+        return machine
     return {
+        **machine,
         "imported_from": row["imported_from"],
         "imported_at": timeutil.format_ts(row["imported_at"]),
         "import_note": row["import_note"] if "import_note" in row.keys() else None,
@@ -2649,7 +2914,7 @@ def _batched_session_summaries(
                 "models": [mr["model"] for mr in model_rows],
                 "archived": bool(row["archived"]),
                 "bookmarked": bool(row["bookmarked"]),
-                "status": timeutil.live_status(last_ts),
+                "status": timeutil.live_status(last_ts, row["ended_at"]),
                 "started_at": timeutil.format_ts(row["started_at"]) or str(row["started_at"] or ""),
                 "ended_at": timeutil.format_ts(row["ended_at"]),
                 "last_activity": timeutil.format_ts(last_ts),
@@ -2675,6 +2940,9 @@ def _resolve_tz(tz: str | None) -> ZoneInfo | None:
         return ZoneInfo(tz.strip())
     except ZoneInfoNotFoundError:
         return None
+
+
+resolve_tz = _resolve_tz
 
 
 # Timestamps already in canonical UTC text form (``...Z`` or ``...+00:00``), whose
@@ -2769,8 +3037,11 @@ def metrics(
         )
         projects = one("SELECT COUNT(DISTINCT cwd) n FROM sessions WHERE cwd IS NOT NULL")["n"]
 
-        last_rows = rows("SELECT session_id, last_ts lt FROM session_stats")
-        active = sum(1 for r in last_rows if timeutil.live_status(r["lt"]) == "active")
+        last_rows = rows(
+            "SELECT st.last_ts lt, s.ended_at FROM session_stats st"
+            " LEFT JOIN sessions s ON s.id = st.session_id"
+        )
+        active = sum(1 for r in last_rows if timeutil.live_status(r["lt"], r["ended_at"]) == "active")
 
         durs = rows("SELECT (julianday(last_ts)-julianday(first_ts))*86400 d FROM session_stats")
         dvals = [r["d"] for r in durs if r["d"] is not None]
@@ -2978,6 +3249,49 @@ def metrics(
             "attachments": attachments_summary,
             "fun": fun,
         }
+
+
+def list_attachments(limit: int = 500) -> list[dict[str, Any]]:
+    """Every file attached to a prompt, newest first, with where it was attached.
+
+    Agents hand over the file's name, type and size, not where it lived on
+    disk, so the location is the session and prompt it went into."""
+    with store.read() as conn:
+        rows = conn.execute(
+            "SELECT e.id, e.session_id, e.ts, e.attachments, s.cwd, s.source"
+            " FROM events e JOIN sessions s ON s.id = e.session_id"
+            " WHERE e.attachments IS NOT NULL AND e.attachments NOT IN ('', '[]')"
+            " ORDER BY e.ts DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            atts = json.loads(r["attachments"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for i, a in enumerate(atts if isinstance(atts, list) else []):
+            if not isinstance(a, dict):
+                continue
+            name = a.get("name")
+            ext = a.get("extension") or (Path(str(name)).suffix.lstrip(".") if name else None)
+            out.append({
+                "session_id": r["session_id"],
+                "event_id": r["id"],
+                "index": i,
+                "ts": timeutil.format_ts(r["ts"]),
+                "cwd": r["cwd"],
+                "source": r["source"],
+                "kind": a.get("kind"),
+                "media_type": a.get("media_type"),
+                "extension": ext or None,
+                "name": name,
+                "path": a.get("path"),
+                "size_bytes": a.get("size_bytes"),
+                "width": a.get("width"),
+                "height": a.get("height"),
+            })
+    return out
 
 
 def metrics_history(category: str, limit: int = 200) -> list[dict[str, Any]]:
@@ -3337,7 +3651,7 @@ def export_sessions(
         rows = conn.execute(
             f"SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
             f" s.status, s.archived, s.bookmarked, s.created_at,"
-            f" s.imported_from, s.imported_at, s.import_note,"
+            f" s.imported_from, s.imported_at, s.import_note, s.machine,"
             f" e.event_count, e.tool_count, e.first_ts, e.last_ts,"
             f" e.input_tokens AS i, e.output_tokens AS o,"
             f" e.cache_read_tokens AS cr, e.cache_write_tokens AS cw,"
@@ -3714,7 +4028,7 @@ def list_sessions_page(
     select = (
         "SELECT s.id, s.source, s.cwd, s.started_at, s.ended_at,"
         " s.status, s.archived, s.bookmarked, s.created_at,"
-        " s.imported_from, s.imported_at, s.import_note,"
+        " s.imported_from, s.imported_at, s.import_note, s.machine,"
         " e.event_count, e.tool_count, e.first_ts, e.last_ts,"
         " e.input_tokens AS i, e.output_tokens AS o,"
         " e.cache_read_tokens AS cr, e.cache_write_tokens AS cw,"
@@ -4061,10 +4375,10 @@ def session_components(session_id: str) -> dict[str, Any]:
     }
 
 
-def get_session_detail(session_id: str) -> dict[str, Any] | None:
+def get_session_detail(session_id: str, first: int | None = None) -> dict[str, Any] | None:
     from .session_read import build_session_detail
 
-    return build_session_detail(session_id)
+    return build_session_detail(session_id, first=first)
 
 
 EXPORT_FORMAT = "cot.session-export"
@@ -4246,6 +4560,23 @@ def delete_imported_session(session_id: str) -> bool:
     return True
 
 
+def delete_session(session_id: str) -> bool:
+    """Permanently delete a traced session, its subagent sessions, and the raw
+    hook rows they came from. Events, annotations and extension uses cascade."""
+    with store.write() as conn:
+        ids = [session_id] + [
+            r["id"] for r in conn.execute(
+                "SELECT id FROM sessions WHERE parent_session_id = ?", (session_id,)
+            )
+        ]
+        if conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone() is None:
+            return False
+        marks = ",".join("?" * len(ids))
+        conn.execute(f"DELETE FROM raw_ingest_events WHERE session_id_guess IN ({marks})", ids)
+        conn.execute(f"DELETE FROM sessions WHERE id IN ({marks})", ids)
+    return True
+
+
 IMPORT_NOTE_MAX = 2000
 
 
@@ -4305,17 +4636,33 @@ def get_session(session_id: str) -> dict[str, Any] | None:
 
 def session_origins() -> dict[str, str]:
     """Return the dominant origin per session: 'hook' if any hook events exist,
-    else 'import'. Used by the bridge to skip already-hooked sessions."""
+    else 'import', or 'deleted' for a session someone deleted. Used by the
+    bridge to skip already-hooked sessions and never re-import deleted ones.
+
+    A session is import-only when all of its events are imported, so this
+    compares session_stats' event count with a count over idx_events_import
+    (import rows only) instead of grouping every event: the full scan took
+    seconds on a large DB and outlasted the bridge's timeout."""
     with store.read() as conn:
         rows = conn.execute(
-            "SELECT session_id,"
-            " MAX(CASE WHEN origin = 'hook' OR origin IS NULL THEN 1 ELSE 0 END) AS has_hook"
-            " FROM events GROUP BY session_id"
+            "SELECT s.session_id, s.event_count, COALESCE(i.n, 0) AS imported"
+            " FROM session_stats s LEFT JOIN ("
+            "   SELECT session_id, COUNT(*) AS n FROM events"
+            "   WHERE origin = 'import' GROUP BY session_id"
+            " ) i ON i.session_id = s.session_id"
         ).fetchall()
-    return {
-        r["session_id"]: "hook" if r["has_hook"] else "import"
+        # Deleted on purpose: the bridge must not import these again when it
+        # re-reads a transcript whose session is gone.
+        deleted = conn.execute(
+            "SELECT DISTINCT target FROM audit_events"
+            " WHERE action = 'session.deleted' AND target IS NOT NULL"
+        ).fetchall()
+    origins = {r["target"]: "deleted" for r in deleted}
+    origins.update({
+        r["session_id"]: "import" if r["imported"] >= r["event_count"] else "hook"
         for r in rows
-    }
+    })
+    return origins
 
 
 def import_summary() -> dict[str, Any]:
@@ -4616,13 +4963,19 @@ def import_quality() -> dict[str, Any]:
     }
 
 
-def complete_imported_sessions() -> dict[str, Any]:
+def complete_imported_sessions(quiet_seconds: float | None = None) -> dict[str, Any]:
     """Mark import-only sessions as completed.
 
     Transcripts don't carry lifecycle-end events so imported sessions
     stay 'active' forever.  This closes them using the timestamp of
-    their most recent event as ended_at.
+    their most recent event as ended_at. With ``quiet_seconds``, only
+    sessions whose last event is at least that old: an import that reads
+    transcripts while they're still being written (the watcher) must not
+    close a session that's still running.
     """
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(seconds=quiet_seconds) if quiet_seconds else None
+    )
     with store.write() as conn:
         rows = conn.execute(
             "SELECT s.id, MAX(e.ts) AS last_ts"
@@ -4635,6 +4988,8 @@ def complete_imported_sessions() -> dict[str, Any]:
             "   )"
             " GROUP BY s.id"
         ).fetchall()
+        if cutoff is not None:
+            rows = [r for r in rows if (last := timeutil.parse_ts(r["last_ts"])) is not None and last <= cutoff]
         for r in rows:
             conn.execute(
                 "UPDATE sessions SET status = 'completed', ended_at = ? WHERE id = ?",
@@ -4655,11 +5010,13 @@ def stats() -> dict[str, Any]:
         # Effective status is recency-derived, so count live sessions from each
         # session's most recent event rather than the stored flag.
         event_rows = conn.execute(
-            "SELECT session_id, last_ts, event_count AS events, tool_count AS tools,"
-            " (julianday(last_ts) - julianday(first_ts)) * 86400 AS duration"
-            " FROM session_stats"
+            "SELECT st.session_id, st.last_ts, st.event_count AS events, st.tool_count AS tools,"
+            " (julianday(st.last_ts) - julianday(st.first_ts)) * 86400 AS duration, s.ended_at"
+            " FROM session_stats st LEFT JOIN sessions s ON s.id = st.session_id"
         ).fetchall()
-        active = sum(1 for r in event_rows if timeutil.live_status(r["last_ts"]) == "active")
+        active = sum(
+            1 for r in event_rows if timeutil.live_status(r["last_ts"], r["ended_at"]) == "active"
+        )
         by_status = {"active": active, "completed": max(sessions - active, 0)}
         events = sum(r["events"] or 0 for r in event_rows)
         tool_calls = sum(r["tools"] or 0 for r in event_rows)
@@ -4953,7 +5310,7 @@ class InsightFindingsRepo:
             severity=finding.get("severity"),
             title=finding.get("title") or "New finding",
             body=finding.get("recommendation") or finding.get("detail"),
-            href=f"#/findings?pillar={finding.get('pillar')}" if finding.get("pillar") else "#/findings",
+            href=_finding_href(finding["fingerprint"], finding.get("pillar"), finding.get("evidence")),
             dedup_key=f"finding:{finding['fingerprint']}",
             now=now,
         )
@@ -5005,6 +5362,40 @@ class InsightFindingsRepo:
         self._conn.commit()
 
 
+def _finding_href(fingerprint: str, pillar: str | None = None, evidence: Any = None) -> str:
+    """Where a finding's notification leads: straight to the event when the
+    finding rests on a single one (the command, file or prompt it's about), to
+    the session when it's about a whole session (its cost), otherwise the
+    Findings page opened on the finding, which lists every piece of evidence."""
+    if isinstance(evidence, str):
+        try:
+            evidence = json.loads(evidence)
+        except (json.JSONDecodeError, TypeError):
+            evidence = None
+    if isinstance(evidence, list) and len(evidence) == 1 and isinstance(evidence[0], dict):
+        sid, eid = evidence[0].get("session_id"), evidence[0].get("event_id")
+        if sid and eid is not None:
+            return f"#/session/{sid}?e={eid}"
+        if sid:  # about the session as a whole, e.g. its cost
+            return f"#/session/{sid}"
+    return f"#/findings?pillar={pillar}&f={fingerprint}" if pillar else f"#/findings?f={fingerprint}"
+
+
+def _notification_out(row: sqlite3.Row, findings: dict[str, sqlite3.Row] | None = None) -> dict[str, Any]:
+    item = dict(row)
+    # Finding links are worked out again when listed, so notifications queued
+    # before a link format existed (pillar only, then the finding) still land
+    # on the event itself.
+    key = item.get("dedup_key") or ""
+    if key.startswith("finding:"):
+        fp = key.removeprefix("finding:")
+        f = (findings or {}).get(fp)
+        href = item.get("href") or ""
+        pillar = f["pillar"] if f is not None else (href.partition("pillar=")[2].partition("&")[0] or None)
+        item["href"] = _finding_href(fp, pillar, f["evidence"] if f is not None else None)
+    return item
+
+
 def _insert_notification(
     conn: sqlite3.Connection,
     *,
@@ -5038,7 +5429,15 @@ def list_notifications(limit: int = 30, after: int | None = None) -> dict[str, A
             ).fetchall()
         unread = conn.execute("SELECT COUNT(*) FROM notifications WHERE read_at IS NULL").fetchone()[0]
         latest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM notifications").fetchone()[0]
-    return {"items": [dict(r) for r in rows], "unread": unread, "latest_id": latest}
+        fps = [r["dedup_key"].removeprefix("finding:") for r in rows if (r["dedup_key"] or "").startswith("finding:")]
+        findings = {
+            f["fingerprint"]: f
+            for f in conn.execute(
+                f"SELECT fingerprint, pillar, evidence FROM insight_findings WHERE fingerprint IN ({','.join('?' * len(fps))})",
+                fps,
+            )
+        } if fps else {}
+    return {"items": [_notification_out(r, findings) for r in rows], "unread": unread, "latest_id": latest}
 
 
 def mark_notifications_read(ids: list[int] | None = None) -> int:

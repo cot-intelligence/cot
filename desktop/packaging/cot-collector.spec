@@ -16,6 +16,8 @@ a = Analysis(
         (os.path.join(REPO, "bridge", "install.sh"), "bridge"),
         (os.path.join(REPO, "bridge", "cot"), "bridge"),
         (os.path.join(REPO, "bridge", "opencode-plugin.js"), "bridge"),
+        (os.path.join(REPO, "bridge", "hermes-plugin", "plugin.yaml"), "bridge/hermes-plugin"),
+        (os.path.join(REPO, "bridge", "hermes-plugin", "__init__.py"), "bridge/hermes-plugin"),
     ],
     hiddenimports=[
         "uvicorn.logging",
@@ -29,6 +31,8 @@ a = Analysis(
         # stdlib modules it needs that the collector itself may not pull in.
         "argparse", "base64", "fcntl", "hashlib", "mimetypes", "shutil", "socket", "struct",
         "urllib.request", "urllib.error",
+        # watchdog picks its platform observer at runtime (app/watch.py).
+        "watchdog.observers.fsevents", "_watchdog_fsevents",
     ],
     hookspath=[],
     runtime_hooks=[],

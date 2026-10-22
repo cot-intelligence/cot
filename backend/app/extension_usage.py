@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from . import extensions, marketplace_scan, store, timeutil
+from . import extensions, folders, marketplace_scan, store, timeutil
 
 # Bump to rebuild extension_uses from scratch (e.g. when classify() changes).
 USAGE_VERSION = "2"
@@ -693,7 +693,7 @@ def _scan_root(ext: dict[str, Any]) -> Path | None:
     if ext["kind"] not in ("skill", "plugin"):
         return None
     for i in ext.get("installs", []):
-        if i.get("path") and Path(i["path"]).is_dir():
+        if i.get("path") and folders.readable(i["path"]) and Path(i["path"]).is_dir():
             return Path(i["path"])
     return None
 

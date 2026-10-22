@@ -134,8 +134,10 @@ def main() -> int:
     check(claude.get("source") == "claude", "claude session tagged source=claude")
     check(claude.get("event_count", 0) >= 4, f"claude has >=4 events (got {claude.get('event_count')})")
 
+    # The dashboard reads `events`; the parent-only `timeline` is compat-only
+    # (`?compat=1`) since the session read stopped sending it by default.
     status, detail = _get("/v1/sessions/SMOKE-claude")
-    tl = detail.get("timeline") if isinstance(detail, dict) else None
+    tl = detail.get("events") if isinstance(detail, dict) else None
     check(status == 200 and isinstance(tl, list) and len(tl) > 0,
           f"claude timeline non-empty (status {status}, len {len(tl) if isinstance(tl, list) else 'n/a'})")
 

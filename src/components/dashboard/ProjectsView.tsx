@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { getInsights, getProjects, getSessionsPage, type InsightsResponse, type ProjectListItem, type SessionSummary } from '../../lib/api';
+import { getInsights, getProjects, getSessionsPage, type InsightsResponse, type OutcomeCounts, type ProjectListItem, type SessionSummary } from '../../lib/api';
 import { getPrefs } from '../../lib/prefs';
 import { sourceLabel } from '../../lib/sourceLabels';
 import { usePolling } from '../../lib/usePolling';
@@ -147,6 +147,7 @@ export function ProjectsView() {
                     <th>Stack</th>
                     <th>Agents</th>
                     <SortTh k="sessions" sort={sort} onSort={setSort} num />
+                    <th className="num" title="Commits and PRs agents made, from the git and gh commands they ran">Shipped</th>
                     <SortTh k="cost" sort={sort} onSort={setSort} num />
                     <th className="num">Findings</th>
                     <SortTh k="recent" sort={sort} onSort={setSort} num />
@@ -197,6 +198,13 @@ export function ProjectsView() {
                           {fmt.n(p.sessions)}
                           {p.active > 0 && <div style={{ color: 'var(--v-olive)', fontSize: 11 }}>{p.active} live</div>}
                         </td>
+                        <td className="num" style={{ whiteSpace: 'nowrap' }}>
+                          {p.shipped && (p.shipped.commits || p.shipped.git_commits || p.shipped.prs_opened) ? (
+                            <a href={`#/metrics-history?tab=shipped&group=${encodeURIComponent(p.name)}`} onClick={(e) => e.stopPropagation()} className="proj-link" title="See every PR and commit">
+                              <Shipped s={p.shipped} />
+                            </a>
+                          ) : <Shipped s={p.shipped} />}
+                        </td>
                         <td className="num">{fmt.usd(p.cost)}</td>
                         <td className="num">{!findings ? '…' : fx ? <span style={fx.critical ? { color: 'var(--v-alert)' } : undefined}>{fx.n}</span> : 0}</td>
                         <td className="num dim" style={{ whiteSpace: 'nowrap' }}>{p.last_active ? fmt.ago(p.last_active, now) : '—'}</td>
@@ -222,5 +230,23 @@ function SortTh({ k, sort, onSort, num }: { k: SortKey; sort: SortKey; onSort: (
         {on && <Icon name="down" size={12} style={k === 'name' ? { transform: 'rotate(180deg)' } : undefined} />}
       </button>
     </th>
+  );
+}
+
+/** "12 commits · 3 PRs" for a project row, with lines when git could be read. */
+function Shipped({ s }: { s?: OutcomeCounts | null }) {
+  const commits = s ? Math.max(s.commits, s.git_commits) : 0;
+  if (!s || (!commits && !s.prs_opened)) return <span className="faint">—</span>;
+  return (
+    <span style={{ display: 'grid', gap: 2, justifyItems: 'end' }} title={`${s.pushes} pushes · ${s.prs_merged} PRs merged by an agent`}>
+      <span className="tnum" style={{ fontSize: 13 }}>
+        {commits > 0 && `${fmt.n(commits)} commit${commits === 1 ? '' : 's'}`}
+        {commits > 0 && s.prs_opened > 0 && <span className="faint"> · </span>}
+        {s.prs_opened > 0 && `${fmt.n(s.prs_opened)} PR${s.prs_opened === 1 ? '' : 's'}`}
+      </span>
+      {s.git_commits > 0 && (
+        <span className="mono tnum" style={{ fontSize: 11 }}><span className="d-add">+{fmt.k(s.added)}</span> <span className="d-rm">−{fmt.k(s.removed)}</span></span>
+      )}
+    </span>
   );
 }

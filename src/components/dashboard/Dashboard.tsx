@@ -14,6 +14,7 @@ import { AppSidebar, type NavKey } from './AppSidebar';
 import { CommandPalette, type PaletteCommand, type PaletteScope } from './CommandPalette';
 import { PassiveBanner } from '../passive/PassiveBanner';
 import { TaskTray } from './TaskTray';
+import { AppUpdateCard } from './AppUpdateCard';
 import { FetchBar } from '../ui/FetchBar';
 import { SessionsView } from './SessionsView';
 
@@ -34,6 +35,7 @@ const SettingsView = lazy(() => import('./SettingsView').then((m) => ({ default:
 const FindingsView = lazy(() => import('./FindingsView').then((m) => ({ default: m.FindingsView })));
 const GovernanceView = lazy(() => import('./GovernanceView').then((m) => ({ default: m.GovernanceView })));
 const RulesView = lazy(() => import('./RulesView').then((m) => ({ default: m.RulesView })));
+const AnalysisView = lazy(() => import('./analysis/AnalysisView').then((m) => ({ default: m.AnalysisView })));
 const ProjectView = lazy(() => import('./ProjectView').then((m) => ({ default: m.ProjectView })));
 const ProjectsView = lazy(() => import('./ProjectsView').then((m) => ({ default: m.ProjectsView })));
 const ExtensionDetailView = lazy(() =>
@@ -70,16 +72,17 @@ type DashboardRoute =
   | { view: 'metrics-history'; tab?: MetricsHistoryTab; group?: string }
   | { view: 'replay' }
   | { view: 'replay-session'; sessionId: string; focusEventId?: number; focusQuery?: string; focusNonce?: number }
-  | { view: 'settings' }
-  | { view: 'findings'; pillar?: InsightPillar }
+  | { view: 'settings'; tab?: string }
+  | { view: 'findings'; pillar?: InsightPillar; finding?: string; focusNonce?: number }
   | { view: 'governance' }
   | { view: 'rules'; fromEvent?: number }
+  | { view: 'analysis'; runId?: string }
   | { view: 'project'; name: string }
   | { view: 'projects' }
   | { view: 'extension'; key: string };
 
-type MetricsHistoryTab = 'shell' | 'web' | 'mcp' | 'skill' | 'plugin';
-const ACTIVITY_LABEL: Record<MetricsHistoryTab, string> = { shell: 'Shell', web: 'Web', mcp: 'MCP', skill: 'Skills', plugin: 'Plugins' };
+type MetricsHistoryTab = 'shell' | 'web' | 'edits' | 'shipped' | 'mcp' | 'skill' | 'plugin';
+const ACTIVITY_LABEL: Record<MetricsHistoryTab, string> = { shell: 'Shell', web: 'Web', edits: 'Files', shipped: 'Shipped', mcp: 'MCP', skill: 'Skills', plugin: 'Plugins' };
 const ACTIVITY_TABS = Object.keys(ACTIVITY_LABEL) as MetricsHistoryTab[];
 
 /** The Activity page that lists an extension kind (MCP, Skills, Plugins). */
@@ -89,9 +92,13 @@ function installedHref(kind: string): string {
 
 function parseHash(): DashboardRoute {
   const hash = window.location.hash.replace(/^#\/?/, '');
-  if (hash === 'settings') return { view: 'settings' };
+  const settingsTab = hash.match(/^settings(?:\/([a-z-]+))?$/);
+  if (settingsTab) return { view: 'settings', tab: settingsTab[1] };
   if (hash === 'governance') return { view: 'governance' };
   if (hash === 'projects') return { view: 'projects' };
+  // #/analysis, or #/analysis/<runId> for one saved run.
+  const analysisMatch = hash.match(/^analysis(?:\/([^?]+))?$/);
+  if (analysisMatch) return { view: 'analysis', runId: analysisMatch[1] ? decodeURIComponent(analysisMatch[1]) : undefined };
   const rulesMatch = hash.match(/^rules(?:\?from=(\d+))?$/);
   if (rulesMatch) return { view: 'rules', fromEvent: rulesMatch[1] ? Number(rulesMatch[1]) : undefined };
   const projectPage = hash.match(/^project\/(.+)$/);
@@ -100,8 +107,17 @@ function parseHash(): DashboardRoute {
   if (extPage) return { view: 'extension', key: decodeURIComponent(extPage[1]) };
   // The old Extensions list now lives in Activity (MCP / Skills → Installed, Plugins).
   if (/^extensions(\?.*)?$/.test(hash)) return { view: 'metrics-history', tab: 'mcp' };
-  const findingsMatch = hash.match(/^findings(?:\?pillar=(security|cost|usability))?$/);
-  if (findingsMatch) return { view: 'findings', pillar: findingsMatch[1] as InsightPillar | undefined };
+  // #/findings[?pillar=<pillar>][&f=<fingerprint>]: a pillar, optionally opened on one finding.
+  const findingsMatch = hash.match(/^findings(?:\?(.*))?$/);
+  if (findingsMatch) {
+    const q = new URLSearchParams(findingsMatch[1] ?? '');
+    const pillar = q.get('pillar');
+    return {
+      view: 'findings',
+      pillar: pillar === 'security' || pillar === 'cost' || pillar === 'usability' ? pillar : undefined,
+      finding: q.get('f') ?? undefined,
+    };
+  }
   // The workspace opens on the Overview.
   if (hash === '') return { view: 'overview' };
   // #/metrics-history?tab=mcp[&group=<server>][&view=installed]: a tab, optionally with the log
@@ -202,6 +218,12 @@ export function Dashboard({ onSetup }: DashboardProps) {
       // follows parses the same route again. Keep the current one then, or every
       // navigation renders twice (and re-runs focus effects keyed on the nonce).
       const next = parseHash();
+      // A link to one finding (a notification) is followed every time, even to
+      // the finding already open, so it always lands on and pulses it.
+      if (next.view === 'findings' && next.finding) {
+        setRoute({ ...next, focusNonce: Date.now() });
+        return;
+      }
       setRoute((prev) => (sameRoute(prev, next) ? prev : next));
     };
     window.addEventListener('hashchange', onHash);
@@ -237,6 +259,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
     else if (route.view === 'findings') setDocumentTitle('Findings');
     else if (route.view === 'governance') setDocumentTitle('Governance');
     else if (route.view === 'rules') setDocumentTitle('Rules');
+    else if (route.view === 'analysis') setDocumentTitle('Analysis');
     else if (route.view === 'project') setDocumentTitle(route.name);
     else if (route.view === 'projects') setDocumentTitle('Projects');
     else if (route.view === 'extension') setDocumentTitle(route.key.split(':').slice(1).join(':'));
@@ -285,6 +308,11 @@ export function Dashboard({ onSetup }: DashboardProps) {
     window.location.hash = '#/rules';
   }, []);
 
+  const goAnalysis = useCallback(() => {
+    setRoute({ view: 'analysis' });
+    window.location.hash = '#/analysis';
+  }, []);
+
   const goInstalled = useCallback((kind: 'mcp' | 'skill' | 'plugin') => {
     window.location.hash = installedHref(kind);
   }, []);
@@ -303,12 +331,13 @@ export function Dashboard({ onSetup }: DashboardProps) {
   const onFindings = route.view === 'findings';
   const onGovernance = route.view === 'governance';
   const onRules = route.view === 'rules';
+  const onAnalysis = route.view === 'analysis';
   const onProject = route.view === 'project';
   const onProjects = route.view === 'projects';
   const extensionKey = route.view === 'extension' ? route.key : null;
   const extensionKind = extensionKey ? (extensionKey.split(':')[0] as 'mcp' | 'skill' | 'plugin') : null;
   const onExtensions = !!extensionKey;
-  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay && !onFindings && !onGovernance && !onRules && !onExtensions && !onProject && !onProjects;
+  const onList = !selectedId && !onSettings && !onOverview && !onMetricsHistory && !onReplay && !onFindings && !onGovernance && !onRules && !onAnalysis && !onExtensions && !onProject && !onProjects;
 
   // Counts for the navigation: sessions traced, and findings that still need a look.
   // /v1/stats carries them all, so the shell never pays for metrics or an insights pass.
@@ -337,6 +366,22 @@ export function Dashboard({ onSetup }: DashboardProps) {
         keywords: 'overview metrics charts analytics usage insights findings recommendations security cost usability',
         active: onOverview,
         run: goOverview,
+      },
+      {
+        id: 'nav-shipped',
+        label: 'Go to what agents shipped',
+        icon: 'chart',
+        keywords: 'shipped pull requests prs commits pushes merges outcomes github',
+        active: onMetricsHistory && route.view === 'metrics-history' && route.tab === 'shipped',
+        run: () => goMetricsHistory('shipped'),
+      },
+      {
+        id: 'nav-files',
+        label: 'Go to recently edited files',
+        icon: 'file',
+        keywords: 'files edits recent changed written diff lines',
+        active: onMetricsHistory && route.view === 'metrics-history' && route.tab === 'edits',
+        run: () => goMetricsHistory('edits'),
       },
       {
         id: 'nav-metrics-history',
@@ -379,6 +424,14 @@ export function Dashboard({ onSetup }: DashboardProps) {
         run: goRules,
       },
       {
+        id: 'nav-analysis',
+        label: 'Go to Analysis',
+        icon: 'brain',
+        keywords: 'analysis agentic ai llm persona report deliverables coach debugger cost security manager',
+        active: onAnalysis,
+        run: goAnalysis,
+      },
+      {
         id: 'nav-governance',
         label: 'Go to Governance',
         icon: 'plug',
@@ -405,10 +458,12 @@ export function Dashboard({ onSetup }: DashboardProps) {
       onFindings,
       onGovernance,
       onRules,
+      onAnalysis,
       onExtensions,
       goFindings,
       goGovernance,
       goRules,
+      goAnalysis,
       goInstalled,
       route,
       goSessions,
@@ -438,6 +493,8 @@ export function Dashboard({ onSetup }: DashboardProps) {
       ? 'governance'
       : onRules
       ? 'rules'
+      : onAnalysis
+      ? 'analysis'
       : onSettings
     ? 'settings'
     : onOverview
@@ -469,6 +526,8 @@ export function Dashboard({ onSetup }: DashboardProps) {
           ? [{ label: 'Projects', href: '#/projects' }, { label: route.name }]
         : onProjects
           ? [{ label: 'Projects' }]
+        : route.view === 'analysis'
+          ? route.runId ? [{ label: 'Analysis', href: '#/analysis' }, { label: 'Report' }] : [{ label: 'Analysis' }]
         : onMetricsHistory
       ? [{ label: 'Activity', href: '#/metrics-history' }, { label: ACTIVITY_LABEL[route.view === 'metrics-history' ? route.tab ?? 'shell' : 'shell'] }]
       : [{ label: onFindings ? 'Findings' : onGovernance ? 'Governance' : onRules ? 'Rules' : onSettings ? 'Settings' : onOverview ? 'Overview' : 'Sessions' }];
@@ -520,13 +579,19 @@ export function Dashboard({ onSetup }: DashboardProps) {
                   navCollapsed={navCollapsed}
                   onNavCollapsedChange={(c) => c !== navCollapsed && toggleNav()}
                   onRunOnboarding={onSetup}
+                  tab={route.view === 'settings' ? route.tab : undefined}
                 />
               </Suspense>
             </main>
           ) : onFindings ? (
             <main className="flex min-w-0 flex-1 flex-col">
               <Suspense fallback={<MetricsSkeleton />}>
-                <FindingsView onSelect={selectSession} initialPillar={route.view === 'findings' ? route.pillar : undefined} />
+                <FindingsView
+                  onSelect={selectSession}
+                  initialPillar={route.view === 'findings' ? route.pillar : undefined}
+                  focusFinding={route.view === 'findings' ? route.finding : undefined}
+                  focusNonce={route.view === 'findings' ? route.focusNonce : undefined}
+                />
               </Suspense>
             </main>
           ) : onExtensions ? (
@@ -545,6 +610,12 @@ export function Dashboard({ onSetup }: DashboardProps) {
             <main className="flex min-w-0 flex-1 flex-col">
               <Suspense fallback={<MetricsSkeleton />}>
                 <ProjectsView />
+              </Suspense>
+            </main>
+          ) : route.view === 'analysis' ? (
+            <main className="flex min-w-0 flex-1 flex-col">
+              <Suspense fallback={<MetricsSkeleton />}>
+                <AnalysisView runId={route.runId} />
               </Suspense>
             </main>
           ) : onRules ? (
@@ -629,6 +700,7 @@ export function Dashboard({ onSetup }: DashboardProps) {
         commands={paletteCommands}
         scope={paletteScope}
       />
+      <AppUpdateCard />
     </div>
   );
 }

@@ -14,9 +14,11 @@ import { Icon as FIcon } from '../forest/icons';
 import { Dropdown } from '../forest/Dropdown';
 import { Seg as FSeg, Sev } from '../forest/ui';
 import { ExtensionsView, useExtensions } from './ExtensionsView';
+import { FilesView } from './FilesView';
+import { ShippedView } from './ShippedView';
 
 /** Activity's pages: one per kind of thing agents use. Plugins only have an installed list. */
-export type ActivityPage = ActivityCategory | 'plugin';
+export type ActivityPage = ActivityCategory | 'plugin' | 'edits' | 'shipped';
 
 interface MetricsHistoryViewProps {
   onSelect: (sessionId: string, eventId?: number) => void;
@@ -29,6 +31,9 @@ interface MetricsHistoryViewProps {
 /** Activity: one page per Activity entry in the sidebar, all in the same layout. */
 export function MetricsHistoryView({ onSelect, initialTab = 'shell', initialGroup }: MetricsHistoryViewProps) {
   if (initialTab === 'plugin') return <PluginsPage />;
+  if (initialTab === 'edits') return <FilesView onSelect={onSelect} />;
+  // For Shipped, `group` carries the project to open on (from a Projects row).
+  if (initialTab === 'shipped') return <ShippedView key={initialGroup ?? ''} onSelect={onSelect} initialProject={initialGroup} />;
   // Remount per tab so filters, the picked group and the range start fresh.
   return <UsageView key={initialTab} tab={initialTab} initialGroup={initialGroup} onSelect={onSelect} />;
 }

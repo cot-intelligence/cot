@@ -1,6 +1,6 @@
 import { defaultCollectorUrl } from './ports';
 
-export type AgentId = 'claude' | 'cursor' | 'codex' | 'opencode';
+export type AgentId = 'claude' | 'cursor' | 'codex' | 'opencode' | 'hermes';
 
 export interface SetupStep {
   tag: string;
@@ -37,6 +37,9 @@ export const HOOK_LABELS: Record<string, string> = {
   PostCompact: 'Compaction finish',
   Notification: 'Notification',
   PermissionRequest: 'Permission requested',
+  PermissionGranted: 'Permission granted',
+  PermissionDenied: 'Permission denied',
+  ApiRequestError: 'API request failed',
   sessionStart: 'Session start',
   sessionEnd: 'Session end',
   beforeSubmitPrompt: 'Prompt submitted',
@@ -50,6 +53,7 @@ export const HOOK_LABELS: Record<string, string> = {
   preCompact: 'Compaction start',
   stop: 'Session stopped',
   OpenCodeUsage: 'Model usage',
+  ModelUsage: 'Model usage',
 };
 
 export function hookLabel(name: string): string {
@@ -213,6 +217,26 @@ export const AGENTS: Agent[] = [
       'PostToolUse',
       'afterAgentResponse',
       'OpenCodeUsage',
+      'Stop',
+    ],
+    steps: [INSTALL_STEP],
+  },
+  {
+    id: 'hermes',
+    name: 'Hermes',
+    product: 'Hermes Agent',
+    tagline:
+      'Trace prompts, tool calls, subagents, and per-request usage from Hermes Agent through a local plugin, and import past sessions from its state.db.',
+    events: [
+      'SessionStart',
+      'UserPromptSubmit',
+      'PostToolUse',
+      'afterAgentResponse',
+      'ModelUsage',
+      'ApiRequestError',
+      'PermissionRequest',
+      'SubagentStart',
+      'PostCompact',
       'Stop',
     ],
     steps: [INSTALL_STEP],

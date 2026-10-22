@@ -178,11 +178,20 @@ def test_delete_removes_an_imported_session_and_its_children():
     assert _replay(client, "/v1/search", q="billing").json()["results"] == []
 
 
-def test_real_sessions_cannot_be_deleted():
+def test_replay_delete_never_reaches_traced_sessions():
     _seed_family()
-    assert _client().delete(f"/v1/sessions/{ROOT}").status_code == 404
+    assert _client().delete(f"/v1/sessions/{ROOT}", params={"store": "replay"}).status_code == 404
     with store.read() as conn:
         assert conn.execute("SELECT 1 FROM sessions WHERE id = ?", (ROOT,)).fetchone()
+
+
+def test_traced_session_delete_takes_its_subagents_and_events():
+    _seed_family()
+    assert _client().delete(f"/v1/sessions/{ROOT}").status_code == 200
+    with store.read() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM sessions WHERE id IN (?, ?)", (ROOT, SUB)).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM events WHERE session_id = ?", (ROOT,)).fetchone()[0] == 0
+    assert _client().delete(f"/v1/sessions/{ROOT}").status_code == 404
 
 
 def test_unknown_store_is_rejected():

@@ -46,10 +46,18 @@ def duration_seconds(first: Any, last: Any) -> float | None:
     return round((last_dt - first_dt).total_seconds(), 2)
 
 
-def live_status(last_ts: Any) -> str:
-    """Return effective Session status from recency of its last Event."""
+def live_status(last_ts: Any, ended_at: Any = None) -> str:
+    """Return effective Session status from recency of its last Event.
+
+    A session whose recorded end is its latest event has ended, however
+    recent: the SessionEnd hook itself is often the event that would
+    otherwise make a long-idle session look live.
+    """
     parsed = parse_ts(last_ts)
     if parsed is None:
+        return "completed"
+    ended = parse_ts(ended_at)
+    if ended is not None and ended >= parsed:
         return "completed"
     age = (datetime.now(timezone.utc) - parsed).total_seconds()
     return "active" if age <= _ACTIVE_WINDOW_SECONDS else "completed"

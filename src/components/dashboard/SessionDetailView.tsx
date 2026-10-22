@@ -1,24 +1,29 @@
 import { motion } from 'framer-motion';
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getSessionDetail, getSessionExtensions, sessionExportUrl, setSessionBookmarked, type Annotation, type ComponentEntry, type SessionDetail, type Store, type TimelineItem } from '../../lib/api';
+import { getSessionDetail, getSessionExtensions, setSessionBookmarked, type Annotation, type ComponentEntry, type SessionDetail, type Store, type TimelineItem } from '../../lib/api';
 import { setDocumentTitle } from '../../lib/documentTitle';
 import { cachedSessionSummary, seededSessionDetail, sessionDetailKey } from '../../lib/sessionDetailQuery';
 import { useFullEventDetail } from '../../lib/useFullEventDetail';
+import { SessionRowsSkeleton } from '../ui/Skeleton';
+import { QuestionCards } from './session/QuestionCards';
 import { BackToTop } from '../ui/BackToTop';
 import { sessionHref, SessionStoreContext } from '../../lib/sessionStore';
 import { categoryLabel, fmt, modelLabel, project } from '../forest/format';
 import { CATEGORY_ICON, Icon } from '../forest/icons';
 import { Agent } from '../forest/ui';
 import { extensionPageHref, SCOPE_LABEL } from './ExtensionsView';
-import { ActivityMap } from './session/ActivityMap';
+import { SessionTrace } from './session/SessionTrace';
 import { AttachmentTags } from './session/AttachmentTags';
 import { EventDetailPanel } from './session/EventDetailPanel';
 import { Feedback, RatingMark, useAnnotations } from './session/Feedback';
+import { SessionOutcomes } from './session/SessionOutcomes';
 
 // The findings tab draws charts (recharts); load it when the tab is opened, not
 // with every session.
+import { ExportMenu } from './session/ExportMenu';
 const InsightsTab = lazy(() => import('./session/tabs/InsightsTab').then((m) => ({ default: m.InsightsTab })));
+const SessionAnalysisTab = lazy(() => import('./analysis/AnalysisView').then((m) => ({ default: m.SessionAnalysisTab })));
 
 interface SessionDetailViewProps {
   sessionId: string;
@@ -32,8 +37,10 @@ interface SessionDetailViewProps {
   focusNonce?: number;
 }
 
-type Tab = 'timeline' | 'files' | 'findings' | 'map';
+type Tab = 'timeline' | 'files' | 'findings' | 'map' | 'analysis';
 const PAGE = 200;
+/** Events in the quick first read; matches one rendered page. */
+const FIRST_EVENTS = PAGE;
 const TEXT_KINDS = new Set(['prompt', 'response', 'thought', 'question', 'plan', 'subagent', 'notification']);
 
 /** Markup mirrors the demo's session page (demo-variants/src/variants/forest/pages-a.tsx, SessionPage),
@@ -48,15 +55,27 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   // Only a live session changes, so only a live one refetches: a finished trace can be large,
   // and re-reading it every 15s holds up whatever the collector is asked next.
   // Until it arrives, the row from the sessions list (if cached) paints the header and figures.
-  const { data: detail, isPlaceholderData: seeded } = useQuery({
+  // A big session takes seconds to read in full, so the opening events come first (a much
+  // smaller read) and render while the whole session loads behind them.
+  const haveFull = queryClient.getQueryData(key) !== undefined;
+  const { data: head } = useQuery({
+    queryKey: [...key, 'first'],
+    queryFn: () => getSessionDetail(sessionId, store, FIRST_EVENTS),
+    enabled: !haveFull,
+    staleTime: 60_000,
+  });
+  const row = store === 'main' ? cachedSessionSummary(queryClient, sessionId) : undefined;
+  const { data: detail, isPlaceholderData } = useQuery({
     queryKey: key,
     queryFn: () => getSessionDetail(sessionId, store),
     refetchInterval: (q) => (store === 'main' && q.state.data?.summary.status === 'active' ? 15000 : false),
-    placeholderData: () => {
-      const row = store === 'main' ? cachedSessionSummary(queryClient, sessionId) : undefined;
-      return row ? seededSessionDetail(row) : undefined;
-    },
+    placeholderData: head ?? (row ? seededSessionDetail(row) : undefined),
   });
+  // `seeded`: only the list row so far, no events. `partial`: the opening events, more coming.
+  const fromHead = isPlaceholderData && !!head && detail === head;
+  const seeded = isPlaceholderData && !fromHead;
+  const partial = fromHead && !!head?.partial;
+  const settled = !isPlaceholderData || (fromHead && !partial);
 
   // Which plugins, skills and MCP servers this session (and its subagents) used.
   const { data: used } = useQuery({
@@ -108,32 +127,41 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   );
   useEffect(() => {
     if (!reveal || tab !== 'timeline') return;
+    // Timers, not animation frames: a notification click sets the link while the
+    // window may still be hidden or just coming forward, where frames don't run.
     let tries = 0;
-    let raf = 0;
+    const timers: number[] = [];
     const seek = () => {
       const el = document.querySelector<HTMLElement>(`[data-ev="${reveal.id}"]`);
-      if (!el) {
-        if (++tries < 30) raf = requestAnimationFrame(seek);
+      // The row can exist before it has layout (still mounting, or the window hidden).
+      if (!el?.getClientRects().length) {
+        if (++tries < 120) timers.push(window.setTimeout(seek, 25));
         return;
       }
       // Centre a row that fits; a tall one (an open event with its detail) starts at the top so its header shows.
-      const tall = el.getBoundingClientRect().height > window.innerHeight * 0.6;
-      el.scrollIntoView({ block: tall ? 'start' : 'center' });
+      const align = () => {
+        const tall = el.getBoundingClientRect().height > window.innerHeight * 0.6;
+        el.scrollIntoView({ block: tall ? 'start' : 'center' });
+      };
+      align();
+      // Rows above it mount lazily and grow as they do, so re-align a few times.
+      for (const ms of [80, 200, 400]) timers.push(window.setTimeout(align, ms));
       const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
       el.animate(
         [{ backgroundColor: 'color-mix(in srgb, var(--v-hot) 14%, transparent)' }, { backgroundColor: 'transparent' }],
         { duration: reduce ? 600 : 1400, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' },
       );
-      setReveal(null);
+      timers.push(window.setTimeout(() => setReveal(null), 450));
     };
-    raf = requestAnimationFrame(seek);
-    return () => cancelAnimationFrame(raf);
+    seek();
+    return () => timers.forEach(clearTimeout);
   }, [reveal, tab, shown, cat]);
 
   // A link that names an event (search, a finding, Key moments, Activity) lands on it.
+  // Tried again once the full session lands, for an event past the opening page.
   useEffect(() => {
     if (focusEventId != null && events.length) revealEvent(focusEventId);
-  }, [focusEventId, focusNonce, events.length > 0]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [focusEventId, focusNonce, events.length > 0, partial]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!detail) {
     return (
@@ -142,7 +170,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
           <span className="sk" style={{ display: 'block', height: 14, width: 90, marginBottom: 16 }} />
           <span className="sk" style={{ display: 'block', height: 28, width: '55%', marginBottom: 12 }} />
           <span className="sk" style={{ display: 'block', height: 18, width: 300, marginBottom: 24 }} />
-          <div className="kpis">{[0, 1, 2, 3].map((i) => <div className="kpi" key={i}><span className="sk" style={{ height: 10, width: 70 }} /><span className="sk" style={{ height: 28, width: 90 }} /></div>)}</div>
+          <SessionRowsSkeleton />
         </div>
       </div>
     );
@@ -165,9 +193,10 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
   };
   const tabs: { k: Tab; l: string }[] = [
     { k: 'timeline', l: `Timeline · ${seeded ? s.event_count : events.length}` },
-    { k: 'files', l: seeded ? 'Files' : `Files · ${fileCount}` },
+    { k: 'files', l: settled ? `Files · ${fileCount}` : 'Files' },
     { k: 'findings', l: 'Findings' },
     { k: 'map', l: 'Map' },
+    ...(store === 'main' ? [{ k: 'analysis' as const, l: 'Analysis' }] : []),
   ];
   const strip = (p: string) => (s.cwd && p.startsWith(s.cwd + '/') ? p.slice(s.cwd.length + 1) : p);
 
@@ -181,11 +210,12 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
             <div style={{ minWidth: 0, maxWidth: 820 }}>
               <span className="mono faint" style={{ fontSize: 12 }}>{s.cwd ? <a href={`#/project/${encodeURIComponent(project(s.cwd))}`} className="proj-link">{project(s.cwd)}</a> : project(s.cwd)} · {s.id}</span>
               <h1 style={{ fontSize: 24, lineHeight: '30px', overflowWrap: 'anywhere' }}>{s.title || 'Untitled session'}</h1>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10, alignItems: 'center' }}>
-                {s.status === 'active' ? <span className="vchip c-ok"><span className="dot" />live</span> : <span className="vchip c-dim">completed</span>}
+              <div className="sd-meta">
+                {s.status === 'active' ? <span className="sd-live"><span className="live" />Live</span> : <span>Completed</span>}
                 <Agent id={s.source} />
-                {s.models.map((m) => <span key={m} className="vchip c-dim">{modelLabel(m)}</span>)}
-                <span className="mono faint" style={{ fontSize: 12 }}>started {fmt.dayTime(s.started_at)}</span>
+                {s.machine && <span title="Imported from this machine's session folders">{s.machine}</span>}
+                {s.models.length > 0 && <span>{s.models.map(modelLabel).join(', ')}</span>}
+                <span>{fmt.dayTime(s.started_at)}</span>
               </div>
               {(parents.length > 0 || subagents.length > 0) && (
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10, fontSize: 12 }} className="dim">
@@ -193,28 +223,29 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
                   {subagents.map((p) => <a key={p.session_id} href={sessionHref(p.session_id, store)} className="vchip c-dim">subagent · {p.label || p.session_id.slice(0, 8)}</a>)}
                 </div>
               )}
-              {used && used.length > 0 && (
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 10 }}>
-                  <span className="label" style={{ marginRight: 2 }}>Extensions</span>
-                  {used.map((x) => (
-                    <a
-                      key={x.key}
-                      href={extensionPageHref(x.key)}
-                      aria-label={`${x.display_name}, ${x.calls} use${x.calls === 1 ? '' : 's'}`}
-                      className={`vchip ${x.installed ? (x.kind === 'mcp' ? 'c-info' : 'c-fg') : 'c-dim'}`}
-                      title={`${x.kind === 'mcp' ? 'MCP server' : 'Skill'} · ${x.calls} use${x.calls === 1 ? '' : 's'}${x.errors ? ` · ${x.errors} failed` : ''}${x.scopes.length ? ` · ${x.scopes.map((sc) => SCOPE_LABEL[sc]).join(', ')}` : ''}${x.tools.length ? `\n${x.tools.join(', ')}` : ''}`}
-                      style={{ textTransform: 'none', letterSpacing: 0 }}>
-                      <Icon name={x.kind === 'mcp' ? 'plug' : 'layers'} size={11} />
-                      {x.display_name}
-                      <span style={{ opacity: 0.7 }}>{x.calls}</span>
-                    </a>
-                  ))}
-                </div>
-              )}
-              {store === 'main' && <div style={{ marginTop: 12 }}><Feedback sessionId={sessionId} /></div>}
+              {(() => {
+                const extensions = used?.map((x) => (
+                  <a
+                    key={x.key}
+                    href={extensionPageHref(x.key)}
+                    aria-label={`${x.display_name}, ${x.calls} use${x.calls === 1 ? '' : 's'}`}
+                    className={`sd-sig-i${x.installed ? '' : ' is-faint'}`}
+                    title={`${x.kind === 'mcp' ? 'MCP server' : 'Skill'} · ${x.calls} use${x.calls === 1 ? '' : 's'}${x.errors ? ` · ${x.errors} failed` : ''}${x.scopes.length ? ` · ${x.scopes.map((sc) => SCOPE_LABEL[sc]).join(', ')}` : ''}${x.tools.length ? `\n${x.tools.join(', ')}` : ''}`}>
+                    <Icon name={x.kind === 'mcp' ? 'plug' : 'layers'} size={13} />
+                    {x.display_name}
+                    <span className="num-t faint">{x.calls}</span>
+                  </a>
+                ));
+                return store === 'main' ? (
+                  <SessionOutcomes sessionId={sessionId} onSelect={(sid, eventId) => { window.location.hash = `#/session/${encodeURIComponent(sid)}${eventId ? `?e=${eventId}` : ''}`; }}>
+                    {extensions?.length ? extensions : null}
+                  </SessionOutcomes>
+                ) : extensions?.length ? <div className="sd-sig">{extensions}</div> : null;
+              })()}
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <a className="vbtn vbtn-quiet vbtn-sm" href={sessionExportUrl(s.id, store)} download><Icon name="download" size={14} />Export</a>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+              {store === 'main' && <Feedback sessionId={sessionId} toolbar />}
+              <ExportMenu sessionId={s.id} store={store} />
               {store === 'main' && (
                 <button type="button" className="vbtn vbtn-quiet vbtn-sm" aria-pressed={s.bookmarked} onClick={toggleBookmark} style={s.bookmarked ? { borderColor: 'var(--v-hot)', color: 'var(--v-hot)' } : undefined}>
                   <Icon name="star" size={14} style={s.bookmarked ? { fill: 'currentColor' } : undefined} />{s.bookmarked ? 'Bookmarked' : 'Bookmark'}
@@ -239,13 +270,9 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
             ))}
           </div>
 
-          {seeded && (
-            <div className="card" aria-busy="true">
-              <div className="card-b" style={{ display: 'grid', gap: 14 }}>
-                {[72, 54, 86, 61, 78, 47].map((w, i) => (
-                  <span key={i} className="sk" style={{ display: 'block', height: 18, width: `${w}%` }} />
-                ))}
-              </div>
+          {(seeded || (partial && tab !== 'timeline')) && (
+            <div aria-busy="true" style={{ paddingTop: 8 }}>
+              <SessionRowsSkeleton rows={6} />
             </div>
           )}
 
@@ -259,7 +286,13 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
                     ))}
                   </ol>
                   {list.length === 0 && <div className="empty">No events{cat ? ' of this kind' : ''}.</div>}
-                  {list.length > shown && (
+                  {partial && (
+                    <div className="tl-more" role="status">
+                      <span className="sk" style={{ width: 14, height: 14, borderRadius: 999 }} />
+                      Loading the other {fmt.n(Math.max(0, s.event_count - events.length))} events…
+                    </div>
+                  )}
+                  {!partial && list.length > shown && (
                     <div style={{ textAlign: 'center', paddingTop: 12 }}>
                       <button type="button" className="vbtn vbtn-quiet vbtn-sm" onClick={() => setShown((n) => n + PAGE)}>Show {Math.min(PAGE, list.length - shown)} more of {list.length - shown}</button>
                     </div>
@@ -284,7 +317,7 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
             </div>
           )}
 
-          {!seeded && tab === 'files' && (
+          {settled && tab === 'files' && (
             <div className="grid-2e" style={{ marginTop: 0 }}>
               <FileCard title="Edited" icon="edit" color="var(--v-olive)" items={c.files_edited} strip={strip} />
               <FileCard title="Read" icon="file" color="var(--v-cobalt)" items={c.files_read} strip={strip} />
@@ -295,13 +328,17 @@ export function SessionDetailView({ sessionId, focusEventId, focusQuery, store =
             </div>
           )}
 
-          {!seeded && tab === 'findings' && (
+          {settled && tab === 'findings' && (
             <div className="card"><div className="card-b"><Suspense fallback={null}><InsightsTab detail={detail} /></Suspense></div></div>
           )}
 
-          {!seeded && tab === 'map' && (
-            <div className="card"><div className="card-b" style={{ overflowX: 'auto' }}>
-              <ActivityMap items={events} sessionId={sessionId} activeKey={null} onJump={(it) => revealEvent(it.id)} />
+          {tab === 'analysis' && store === 'main' && (
+            <Suspense fallback={null}><SessionAnalysisTab sessionId={sessionId} /></Suspense>
+          )}
+
+          {settled && tab === 'map' && (
+            <div className="card"><div className="card-b">
+              <SessionTrace items={events} sessionId={sessionId} onOpen={(it) => revealEvent(it.id)} />
             </div></div>
           )}
         </div>
@@ -327,15 +364,17 @@ const TraceRow = memo(TraceRowView, (a, b) =>
 
 function TraceRowView({ e, open, live, focusQuery, onToggle, sessionId, onJump, annotatable, annotation, ruleable }: TraceRowProps) {
   const failed = e.status === 'error' || e.status === 'failed';
-  const text = TEXT_KINDS.has(e.category) ? e.detail?.trim() : '';
+  // A question's body is its raw tool JSON; QuestionCards shows it properly instead.
+  const text = TEXT_KINDS.has(e.category) && !e.questions?.length ? e.detail?.trim() : '';
   return (
     <li className="tl-i" data-cat={e.category} data-err={failed} data-ev={e.id} data-open={open}>
       <span className="tl-ic"><Icon name={CATEGORY_ICON[e.category] ?? 'file'} size={15} /></span>
       <div style={{ minWidth: 0 }}>
         <button type="button" onClick={onToggle} aria-expanded={open} style={{ all: 'unset', cursor: 'pointer', display: 'block', width: '100%' }}>
           <div className="tl-t">{e.tool ?? categoryLabel(e.category)}{failed ? <span className="vchip c-critical" style={{ marginLeft: 8 }}>failed</span> : null}{live && e.ongoing === true ? <span className="vchip c-ok" style={{ marginLeft: 8 }}><span className="dot" />running</span> : null}<RatingMark annotation={annotation} /></div>
-          {e.target && <div className="tl-x" title={e.target}>{e.target}</div>}
+          {e.target && !e.questions?.length && <div className="tl-x" title={e.target}>{e.target}</div>}
         </button>
+        {e.questions && e.questions.length > 0 && <QuestionCards questions={e.questions} waiting={live && e.ongoing === true} />}
         {text && <TraceText kind={e.category} text={text} item={e} sessionId={sessionId} />}
         {e.attachments && e.attachments.length > 0 && <div style={{ marginTop: 6 }}><AttachmentTags attachments={e.attachments} /></div>}
         {open && (

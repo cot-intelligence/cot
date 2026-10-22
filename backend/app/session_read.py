@@ -8,6 +8,7 @@ clarifications, and preview metadata come out.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any, Literal
 
@@ -61,15 +62,54 @@ def _coerce_dict(val: Any) -> dict[str, Any]:
     return {}
 
 
+# Answers that come back as text rather than a dict (OpenCode's question tool, and
+# Claude Code when only the tool's message survives):
+#   User has answered your questions: "Q1"="A1", "Q2"="A2". You can now continue…
+_TEXT_ANSWER_RE = re.compile(r'"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _text_answers(text: str) -> dict[str, str]:
+    return {q: a for q, a in _TEXT_ANSWER_RE.findall(text)}
+
+
+def _picked_options(answer: str | None, labels: list[str], multi: bool) -> tuple[list[str], str | None]:
+    """Which option labels an answer chose, and any free text that isn't an option
+    (the "Other" box). Multi-select answers arrive comma-joined, and a label can
+    itself contain a comma, so whole labels are matched before splitting."""
+    if not answer:
+        return [], None
+    text = answer.strip()
+    if text in labels:
+        return [text], None
+    if not multi:
+        return [], text
+    picked: list[str] = []
+    rest = text
+    for label in sorted(labels, key=len, reverse=True):
+        if label and label in rest:
+            picked.append(label)
+            rest = rest.replace(label, "")
+    leftover = ", ".join(p.strip() for p in rest.split(",") if p.strip())
+    return [label for label in labels if label in picked], leftover or None
+
+
 def parse_questions(detail: Any) -> list[dict[str, Any]]:
-    """Return structured sub-questions plus recovered answers, if present."""
+    """Return structured sub-questions plus recovered answers, if present.
+
+    Each question keeps its options with their descriptions (``choices``), whether
+    several could be picked (``multi``), which were picked (``picked``), a typed
+    answer that isn't one of the options (``custom``) and any note left with it."""
     obj = _coerce_dict(detail)
     if not obj:
         return []
     src = obj.get("input") if isinstance(obj.get("input"), dict) else obj
     qs = src.get("questions") if isinstance(src.get("questions"), list) else []
-    resp = _coerce_dict(obj.get("response") or obj.get("output"))
+    raw_resp = obj.get("response") or obj.get("output")
+    resp = _coerce_dict(raw_resp)
     answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
+    if not answers and isinstance(raw_resp, str):
+        answers = _text_answers(raw_resp)
+    notes = resp.get("annotations") if isinstance(resp.get("annotations"), dict) else {}
     skipped_raw = resp.get("skipped") or resp.get("skipped_questions") or []
     skipped = {str(v) for v in skipped_raw if v} if isinstance(skipped_raw, list) else set()
 
@@ -77,28 +117,38 @@ def parse_questions(detail: Any) -> list[dict[str, Any]]:
     for q in qs:
         if not isinstance(q, dict) or not (q.get("question") or q.get("prompt")):
             continue
+        text = str(q.get("question") or q.get("prompt"))
         ans: str | None = None
         picked = answers.get(q.get("id")) if q.get("id") else None
         if picked is None:
-            picked = answers.get(q.get("question")) or answers.get(q.get("prompt"))
+            picked = answers.get(text)
         if isinstance(picked, dict) and isinstance(picked.get("answers"), list):
             ans = ", ".join(str(a) for a in picked["answers"] if a)
         elif isinstance(picked, list):
             ans = ", ".join(str(a) for a in picked if a)
         elif isinstance(picked, str):
             ans = picked
-        options = [
-            str(o.get("label"))
+        choices = [
+            {"label": str(o.get("label")), "description": o.get("description") or None}
             for o in (q.get("options") or [])
             if isinstance(o, dict) and o.get("label")
         ]
+        labels = [c["label"] for c in choices]
+        multi = bool(q.get("multiSelect") or q.get("multiple"))
+        chosen, custom = _picked_options(ans, labels, multi)
+        note = notes.get(text) if isinstance(notes.get(text), dict) else {}
         qid = str(q.get("id") or "")
         out.append(
             {
                 "header": q.get("header"),
-                "question": str(q.get("question") or q.get("prompt")),
-                "options": options,
+                "question": text,
+                "options": labels,
+                "choices": choices,
+                "multi": multi,
                 "answer": ans or None,
+                "picked": chosen,
+                "custom": custom,
+                "note": note.get("notes") or None,
                 "skipped": bool(qid and qid in skipped and not ans),
             }
         )
@@ -429,13 +479,13 @@ def _build_timeline_items_from_events(events: list[dict[str, Any]]) -> list[dict
     return items
 
 
-def _session_event_rows(conn: sqlite3.Connection, session_id: str) -> list[sqlite3.Row]:
+def _session_event_rows(conn: sqlite3.Connection, session_id: str, limit: int | None = None) -> list[sqlite3.Row]:
     """A session's events in timeline order: one read feeds both the
-    clarifications and the timeline items."""
-    return conn.execute(
-        f"SELECT {store.event_columns()} FROM events WHERE session_id=? ORDER BY ts ASC, id ASC",
-        (session_id,),
-    ).fetchall()
+    clarifications and the timeline items. ``limit`` reads only the first rows."""
+    sql = f"SELECT {store.event_columns()} FROM events WHERE session_id=? ORDER BY ts ASC, id ASC"
+    if limit is not None:
+        return conn.execute(f"{sql} LIMIT ?", (session_id, limit)).fetchall()
+    return conn.execute(sql, (session_id,)).fetchall()
 
 
 def build_timeline_items(session_id: str) -> list[dict[str, Any]]:
@@ -770,17 +820,25 @@ def _apply_event_annotations(
         _trim_detail_inplace(item, session_id)
 
 
-def build_session_detail(session_id: str, *, full_detail: bool = False) -> dict[str, Any] | None:
+def build_session_detail(
+    session_id: str, *, full_detail: bool = False, first: int | None = None
+) -> dict[str, Any] | None:
     """Return the display-ready session detail read model.
 
     Long bodies are trimmed to previews the UI lazy-loads; ``full_detail``
-    keeps them whole (session export)."""
+    keeps them whole (session export). ``first`` builds only the opening
+    events, without linked subagent rows or the files/tools rollup, so a big
+    session's page can paint at once while the full read loads behind it; the
+    result says ``partial`` when there was more."""
     with store.read() as conn:
         row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if row is None:
             return None
         summary = db.session_summary(conn, row)
-        ev_rows = _session_event_rows(conn, session_id)
+        ev_rows = _session_event_rows(conn, session_id, None if first is None else first + 1)
+        partial = first is not None and len(ev_rows) > first
+        if partial:
+            ev_rows = ev_rows[:first]
         links = db.session_links(conn, session_id)
         clarifications, annotations = build_clarifications(ev_rows)
         _stamp_clarification_session(clarifications, session_id)
@@ -790,7 +848,10 @@ def build_session_detail(session_id: str, *, full_detail: bool = False) -> dict[
         for item in events:
             item["owner_session_id"] = session_id
             _apply_event_annotations(item, annotations, session_id=session_id, trim_detail=not full_detail)
-        events, linked_clarifications = _merge_linked_session_events(conn, events, links)
+        if partial:
+            linked_clarifications = []
+        else:
+            events, linked_clarifications = _merge_linked_session_events(conn, events, links)
         clarifications.extend(linked_clarifications)
         clarifications.sort(key=lambda c: (c.get("question_ts") or "", c.get("question_event_id") or 0))
         for item in events:
@@ -805,11 +866,12 @@ def build_session_detail(session_id: str, *, full_detail: bool = False) -> dict[
             _apply_event_annotations(item, annotations, session_id=session_id, trim_detail=False)
             item["detail"] = None
 
-        components = db.session_components(session_id)
+        components = _EMPTY_COMPONENTS if partial else db.session_components(session_id)
 
     runs = _timeline_runs(timeline_items, events)
     _assign_run_membership(events, runs)
     return {
+        **({"partial": True} if partial else {}),
         "summary": summary,
         "links": links,
         "components": components,
@@ -820,6 +882,12 @@ def build_session_detail(session_id: str, *, full_detail: bool = False) -> dict[
         "timeline_runs": runs,
         "clarifications": clarifications,
     }
+
+
+_EMPTY_COMPONENTS: dict[str, Any] = {
+    "files_edited": [], "files_read": [], "skills_context": [], "mcp_plugins": [], "web_calls": [],
+    "subagents": [], "shell_count": 0, "prompt_count": 0, "response_count": 0,
+}
 
 
 def build_event_detail(session_id: str, event_id: int) -> dict[str, Any] | None:

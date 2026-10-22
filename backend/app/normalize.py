@@ -19,7 +19,7 @@ from .tool_classification import (
     subagent_label as _subagent_label,
 )
 
-Source = str  # 'claude' | 'cursor' | 'codex' | 'opencode'
+Source = str  # 'claude' | 'cursor' | 'codex' | 'opencode' | 'hermes'
 LifecycleBoundary = Literal["session_start", "turn_end", "session_end"]
 APPROVAL_REVIEW_PREFIX = "The following is the Codex agent history"
 
@@ -66,7 +66,7 @@ def lifecycle_boundary(source: Source, hook: str) -> LifecycleBoundary | None:
     if hook in ("SessionEnd", "sessionEnd"):
         return "session_end"
     if hook in ("Stop", "stop"):
-        return "turn_end" if source in ("claude", "opencode") else "session_end"
+        return "turn_end" if source in ("claude", "opencode", "hermes") else "session_end"
     return None
 
 
@@ -271,13 +271,24 @@ def categorize(source: Source, hook: str, body: dict[str, Any], tool: str | None
             "status": "ok",
             "duration_ms": duration_ms,
         }
-    if hook in ("PermissionRequest", "PermissionDenied"):
+    if hook in ("PermissionRequest", "PermissionDenied", "PermissionGranted"):
         return {
             "category": "permission",
             "title": hook,
             "target": body.get("tool_name"),
             "detail": _json_detail(body),
-            "status": "blocked" if hook == "PermissionDenied" else "pending",
+            "status": {"PermissionDenied": "blocked", "PermissionGranted": "ok"}.get(hook, "pending"),
+            "duration_ms": duration_ms,
+        }
+
+    # --- Provider failures (one per failed attempt) ---
+    if hook == "ApiRequestError":
+        return {
+            "category": "lifecycle",
+            "title": "API request failed",
+            "target": body.get("model"),
+            "detail": _json_detail(body),
+            "status": "error",
             "duration_ms": duration_ms,
         }
 
@@ -423,9 +434,10 @@ def normalize(source: Source, body: dict[str, Any] | None) -> dict[str, Any]:
             cwd = roots[0]
         tool = _cursor_tool(hook, body)
     else:
-        # Claude Code, Codex, and OpenCode use the same bridge payload shape.
-        # OpenTelemetry records keep the agent otlp.py named from service.name.
-        if source not in ("codex", "opencode") and not body.get("_otel"):
+        # Claude Code, Codex, OpenCode, and Hermes use the same bridge payload shape.
+        # OpenTelemetry records keep the agent otlp.py named from service.name,
+        # and the bridge's passive readers the agent they read.
+        if source not in ("codex", "opencode", "hermes") and not body.get("_otel") and not body.get("_reader"):
             source = "claude"
         session_id = body.get("session_id") or "unknown"
         cwd = body.get("cwd")

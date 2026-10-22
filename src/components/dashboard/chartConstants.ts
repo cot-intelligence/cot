@@ -18,4 +18,6 @@ export interface Datum {
   name: string;
   value: number;
   color?: string;
+  /** Where a click on this bar goes, when the chart is clickable. */
+  href?: string;
 }

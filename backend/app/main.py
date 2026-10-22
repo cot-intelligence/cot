@@ -13,8 +13,10 @@ import os
 import platform as _platform
 import re
 import shlex
+import shutil
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -41,13 +43,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import (
-    __version__, activity, ai_insights, context_cost, cron, db, extension_usage, insights, otlp,
-    passive, rule_drafts, store, timeutil, user_rules,
+    __version__, activity, ai_insights, analysis, analysis_personas, analysis_tools, context_cost, cron, db, edits,
+    extension_usage, folders, hooks_install, insights, mcp_install, otlp, outcomes, passive, recovery, rule_drafts, semantic,
+    session_html, session_markdown, session_shape, store, timeutil, usage_line, user_rules, watch,
 )
 
 app = FastAPI(title="cot collector", version=__version__)
 
-AGENTS = ("claude", "cursor", "codex", "opencode")
+AGENTS = ("claude", "cursor", "codex", "opencode", "hermes")
 EXPECTED_HOOKS = {
     "claude": [
         "SessionStart",
@@ -92,6 +95,12 @@ EXPECTED_HOOKS = {
         "PostToolUseFailure", "afterAgentResponse", "afterAgentThought",
         "OpenCodeUsage", "PermissionRequest", "PostCompact", "Stop",
     ],
+    "hermes": [
+        "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
+        "afterAgentResponse", "ModelUsage", "ApiRequestError", "PermissionRequest",
+        "PermissionGranted", "PermissionDenied", "Notification", "SubagentStart",
+        "SubagentStop", "PostCompact", "Stop", "SessionEnd",
+    ],
 }
 HOOK_LABELS = {
     "SessionStart": "Session start",
@@ -107,6 +116,9 @@ HOOK_LABELS = {
     "PostCompact": "Compaction finish",
     "Notification": "Notification",
     "PermissionRequest": "Permission requested",
+    "PermissionGranted": "Permission granted",
+    "PermissionDenied": "Permission denied",
+    "ApiRequestError": "API request failed",
     "sessionStart": "Session start",
     "sessionEnd": "Session end",
     "beforeSubmitPrompt": "Prompt submitted",
@@ -120,6 +132,7 @@ HOOK_LABELS = {
     "preCompact": "Compaction start",
     "stop": "Session stopped",
     "OpenCodeUsage": "Model usage",
+    "ModelUsage": "Model usage",
 }
 
 # --- Local-only network hardening -------------------------------------------
@@ -254,6 +267,38 @@ def _bridge_dir() -> Path:
 _BRIDGE_DIR = _bridge_dir()
 
 
+def _refresh_installed_bridge() -> bool:
+    """Bring ``~/.cot/bin/cot`` up to this collector's bridge.
+
+    Only install.sh writes that file, so after an app update agents kept running
+    the old bridge (and its old ``cot mcp`` tools) until hooks were reinstalled.
+    Keeps the shebang install.sh chose; never installs a bridge that isn't there.
+    """
+    target = mcp_install.bridge_path()
+    source = _BRIDGE_DIR / "cot"
+    if not target.is_file() or not source.is_file():
+        return False
+    installed = target.read_bytes()
+    shebang, _, _ = installed.partition(b"\n")
+    bundled_shebang, _, body = source.read_bytes().partition(b"\n")
+    if not shebang.startswith(b"#!"):
+        shebang = bundled_shebang
+    updated = shebang + b"\n" + body
+    if updated == installed:
+        return False
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(updated)
+        shutil.copymode(target, tmp)
+        # Hooks run this file constantly; a rename never shows them half a script.
+        os.replace(tmp, target)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return True
+
+
 _search_index_building = False
 
 
@@ -287,6 +332,11 @@ def _build_search_index() -> None:
         insights.warm_shared_insights(30)
     except Exception:  # noqa: BLE001 - the first request computes it instead
         pass
+    # Last, so it never delays a read: a one-time batched pass on existing DBs.
+    try:
+        db.prune_import_raw_payloads()
+    except sqlite3.Error:
+        pass  # resumes next start
 
 
 # A findings pass is seconds of pure-Python work, and every SQLite call drops
@@ -302,6 +352,10 @@ _GIL_SWITCH_INTERVAL_S = 0.0005
 async def _startup() -> None:
     sys.setswitchinterval(_GIL_SWITCH_INTERVAL_S)
     db.init_db(build_search_index=False)
+    try:
+        _refresh_installed_bridge()
+    except OSError:
+        pass  # agents keep the bridge they have; install.sh still replaces it
     # A first-time search index build can take longer than the desktop app waits
     # for /health; search scans until it lands.
     threading.Thread(target=_build_search_index, name="search-index", daemon=True).start()
@@ -312,6 +366,10 @@ async def _startup() -> None:
     # and degrades silently when offline/air-gapped.
     asyncio.create_task(_telemetry_loop())
     passive.start_scheduler()
+    # Watching sets up an FSEvents/inotify stream per transcript folder (inotify
+    # walks the tree), so it starts off the startup path too.
+    threading.Thread(target=watch.start, name="transcript-watch-start", daemon=True).start()
+    semantic.start()
 
 
 @app.get("/health")
@@ -611,6 +669,9 @@ def get_settings() -> dict[str, Any]:
         "ui_onboarding_agents": _stored_onboarding_agents(),
         # macOS notifications from the Mac app for new inbox items.
         "notify_desktop": db.get_setting("notify_desktop", "1") != "0",
+        # Reading project folders macOS protects (Documents, Desktop …); see folders.py.
+        "read_protected_folders": folders.allowed(),
+        "protected_folder_sessions": folders.sessions_in_protected(),
     }
 
 
@@ -658,6 +719,8 @@ async def update_settings(request: Request) -> dict[str, Any]:
     for key in ("ui_nav_collapsed", "ui_sidebar_open", "ui_onboarded", "notify_desktop"):
         if key in body:
             db.set_setting(key, "1" if bool(body[key]) else "0")
+    if "read_protected_folders" in body:
+        folders.set_allowed(bool(body["read_protected_folders"]))
     if "ui_onboarding_agents" in body:
         agents = body["ui_onboarding_agents"]
         if not isinstance(agents, list):
@@ -914,6 +977,18 @@ def opencode_plugin() -> FileResponse:
     return FileResponse(script, media_type="text/javascript")
 
 
+_HERMES_PLUGIN_FILES = {"plugin.yaml": "text/yaml", "__init__.py": "text/x-python"}
+
+
+@app.get("/hermes-plugin/{name}")
+def hermes_plugin(name: str) -> FileResponse:
+    media_type = _HERMES_PLUGIN_FILES.get(name)
+    script = _BRIDGE_DIR / "hermes-plugin" / name
+    if media_type is None or not script.exists():
+        raise HTTPException(status_code=404, detail="Hermes plugin file not found")
+    return FileResponse(script, media_type=media_type)
+
+
 async def _json_body(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
@@ -941,9 +1016,30 @@ async def _ingest_body(
     return body, None
 
 
+def _ingest_batch(source: str, bodies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Store a batch in order. Attachment bodies fold onto their prompt, as
+    they do sent alone (a replayed spool can carry one); each run of other
+    bodies between them is one write transaction."""
+    results: list[dict[str, Any]] = []
+    run: list[tuple[str, dict[str, Any]]] = []
+    for body in bodies:
+        if not body.get("_attach_to_prompt"):
+            run.append((source, body))
+            continue
+        if run:
+            results.extend(db.record_ingests(run))
+            run = []
+        sid = str(body.get("session_id") or "")
+        attached = db.attach_to_prompt(sid, body.get("text"), body.get("attachments") or [], body.get("timestamp"))
+        results.append({"ok": True, "attached": attached, "session_id": sid})
+    if run:
+        results.extend(db.record_ingests(run))
+    return results
+
+
 @app.post("/v1/ingest/{source}")
 async def ingest(source: str, request: Request) -> dict[str, Any]:
-    if source not in AGENTS:
+    if source not in AGENTS and source not in passive.AGENTS:
         raise HTTPException(status_code=404, detail=f"Unknown source: {source}")
     body, malformed_error = await _ingest_body(request)
     # The writes below are synchronous SQLite calls (and may wait on the write
@@ -958,7 +1054,7 @@ async def ingest(source: str, request: Request) -> dict[str, Any]:
         return result
 
     if isinstance(body, list):
-        results = await asyncio.to_thread(db.record_ingests, [(source, b) for b in body])
+        results = await asyncio.to_thread(_ingest_batch, source, body)
         for r in results:
             _bump_revision(r.get("session_id"))
         return {"ok": True, "results": results}
@@ -1069,6 +1165,10 @@ def _bump_revision(session_id: str | None = None) -> None:
             pass  # that loop has closed
 
 
+# The passive import writes events in this process; tell the live stream.
+passive.on_ingest = _bump_revision
+
+
 def _changed_sessions(after: int, upto: int) -> list[str] | None:
     """Sessions changed in revisions (after, upto]; None when that can't be told
     (a change without a session, or history older than the buffer)."""
@@ -1168,7 +1268,15 @@ def get_stats() -> dict[str, Any]:
 def get_projects(days: int = 0) -> dict[str, Any]:
     """Every project in the window with its totals and folder details; 0 days = all time."""
     days = max(0, days)
-    return {"days": days, "projects": _cached_aggregate("projects", (days,), lambda: db.project_list(days))}
+    projects = _cached_aggregate("projects", (days,), lambda: db.project_list(days))
+    shipped = _cached_aggregate("outcomes", (days, True), lambda: outcomes.summary(days, True))
+    by_name: dict[str, dict[str, int]] = {}
+    for o in shipped["projects"]:
+        acc = by_name.setdefault(o["project_name"] or "", outcomes.blank())
+        for k in acc:
+            acc[k] += o[k]
+    # Shipped counts ride along on a copy: the cached project list is shared.
+    return {"days": days, "projects": [{**p, "shipped": by_name.get(p["name"])} for p in projects]}
 
 
 @app.get("/v1/projects/{name}")
@@ -1223,10 +1331,19 @@ def get_sessions(
     ids: str | None = None,
     sort: str = "recent",
     order: str = "desc",
+    kind: str | None = None,
 ) -> dict[str, Any]:
-    """A page of sessions plus ``total`` matching. ``ids`` is comma-separated."""
+    """A page of sessions plus ``total`` matching. ``ids`` is comma-separated;
+    ``kind`` narrows to one session kind (quick, standard, deep, marathon, automation)."""
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
+    wanted = [x for x in ids.split(",") if x] if ids is not None else None
+    shapes = _cached_aggregate("session-kinds", (), session_shape.kinds)
+    if kind:
+        of_kind = {sid for sid, k in shapes.items() if k["kind"] == kind}
+        wanted = [x for x in wanted if x in of_kind] if wanted is not None else sorted(of_kind)
+        if not wanted:
+            return {"sessions": [], "total": 0, "has_more": False}
     sessions, total = db.list_sessions_page(
         limit,
         offset=offset,
@@ -1236,11 +1353,25 @@ def get_sessions(
         archived=archived,
         bookmarked=bookmarked,
         project=project or None,
-        ids=[x for x in ids.split(",") if x] if ids is not None else None,
+        ids=wanted,
         sort=sort,
         desc=order != "asc",
     )
+    for sess in sessions:
+        shape = shapes.get(sess["id"])
+        if shape:
+            sess["kind"], sess["active_seconds"] = shape["kind"], shape["active_s"]
     return {"sessions": sessions, "total": total, "has_more": offset + len(sessions) < total}
+
+
+@app.get("/v1/sessions/kinds")
+def get_session_kinds() -> dict[str, Any]:
+    """How many listed sessions are of each kind, and the active-time cut points."""
+    shapes = _cached_aggregate("session-kinds", (), session_shape.kinds)
+    counts: dict[str, int] = {k: 0 for k in session_shape.ARCHETYPES}
+    for v in shapes.values():
+        counts[v["kind"]] += 1
+    return {"counts": counts}
 
 
 @app.post("/v1/sessions/{session_id}/archive")
@@ -1357,8 +1488,16 @@ def get_drift_report() -> dict[str, Any]:
 
 
 @app.post("/v1/sessions/complete-imported")
-def complete_imported_sessions() -> dict[str, Any]:
-    return db.complete_imported_sessions()
+async def complete_imported_sessions(request: Request) -> dict[str, Any]:
+    """``{"quiet_seconds": N}`` closes only sessions quiet that long; an older
+    bridge sends ``{}`` and closes every import-only active session."""
+    try:
+        body = json.loads(await request.body() or b"{}")
+    except ValueError:
+        body = {}
+    quiet = body.get("quiet_seconds") if isinstance(body, dict) else None
+    quiet = float(quiet) if isinstance(quiet, (int, float)) and quiet > 0 else None
+    return await asyncio.to_thread(db.complete_imported_sessions, quiet)
 
 
 @app.post("/v1/import/reset")
@@ -1464,6 +1603,7 @@ def _passive_payload() -> dict[str, Any]:
         "next_scheduled": passive.next_scheduled(),
         "running": passive.running(),
         "agents_detail": [{**passive.scan(a), "sessions": counts.get(a, 0)} for a in passive.AGENTS],
+        "readers": passive.reader_info(),
         "runs": passive.runs(10),
         "presets": cron.PRESETS,
     }
@@ -1492,6 +1632,30 @@ async def update_passive(request: Request) -> dict[str, Any]:
     return _passive_payload()
 
 
+@app.post("/v1/passive/homes")
+async def add_passive_home(request: Request) -> dict[str, Any]:
+    """Add an extra data folder for an agent (a custom CLAUDE_CONFIG_DIR, CODEX_HOME …)."""
+    body = await _json_body(request)
+    agent, path = str(body.get("agent") or ""), str(body.get("path") or "")
+    if agent not in passive.AGENTS or not path.strip():
+        raise HTTPException(status_code=400, detail="agent and path are required")
+    try:
+        await asyncio.to_thread(passive.add_home, agent, path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return _passive_payload()
+
+
+@app.delete("/v1/passive/homes")
+async def remove_passive_home(request: Request) -> dict[str, Any]:
+    body = await _json_body(request)
+    agent, path = str(body.get("agent") or ""), str(body.get("path") or "")
+    if agent not in passive.AGENTS:
+        raise HTTPException(status_code=400, detail="unknown agent")
+    await asyncio.to_thread(passive.remove_home, agent, path)
+    return _passive_payload()
+
+
 @app.post("/v1/passive/schedule/preview")
 async def preview_passive_schedule(request: Request) -> dict[str, Any]:
     """Plain-English reading and next runs for a cron expression, without saving it."""
@@ -1507,6 +1671,24 @@ def get_passive_running() -> dict[str, Any]:
     """Cheap progress for the dashboard banner: no transcript scan."""
     last = passive.runs(1)
     return {"running": passive.running(), "last_run": last[0] if last else None}
+
+
+@app.get("/v1/attachments")
+def get_attachments(limit: int = Query(500, ge=1, le=2000)) -> dict[str, Any]:
+    """Files attached to prompts, newest first, with the session they went into."""
+    return {"attachments": db.list_attachments(limit)}
+
+
+@app.get("/v1/passive/pending")
+def get_passive_pending(fresh: bool = False) -> dict[str, Any]:
+    """Sessions on disk that haven't been imported yet, for the "import now" prompt."""
+    return passive.pending(fresh=fresh)
+
+
+@app.get("/v1/passive/history")
+def get_passive_history(days: int = Query(passive.RUNS_KEPT_DAYS, ge=1, le=passive.RUNS_KEPT_DAYS)) -> dict[str, Any]:
+    """Import runs over the last ``days`` (30 at most; older runs are pruned)."""
+    return {"days": days, "runs": passive.history(days)}
 
 
 @app.post("/v1/passive/run")
@@ -1587,6 +1769,31 @@ def get_tasks() -> dict[str, Any]:
     return {"running": running, "recent": recent}
 
 
+@app.get("/v1/hooks/install")
+def get_hooks_install() -> dict[str, Any]:
+    """Whether this collector can wire hooks itself (it runs on the host and
+    found a Python for the bridge), so setup can skip the terminal."""
+    return hooks_install.status()
+
+
+@app.post("/v1/hooks/install")
+async def post_hooks_install(request: Request) -> dict[str, Any]:
+    body = await _json_body(request)
+    agents = body.get("agents")
+    if not isinstance(agents, list) or not all(isinstance(a, str) for a in agents):
+        raise HTTPException(status_code=400, detail="agents must be a list of agent ids")
+    endpoint = str(request.base_url).rstrip("/")
+    try:
+        # Off the event loop: the bridge calls back into this collector.
+        return await asyncio.to_thread(
+            hooks_install.install, agents, endpoint=endpoint, bridge_source=_BRIDGE_DIR / "cot",
+        )
+    except hooks_install.InstallError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Could not write {exc.filename or 'the bridge'}: {exc.strerror or exc}")
+
+
 @app.get("/v1/hooks/status")
 def get_hook_status() -> dict[str, Any]:
     manifest = _read_hook_manifest()
@@ -1609,7 +1816,7 @@ def get_hook_status() -> dict[str, Any]:
         connected = bool(conn.get("connected"))
         manifest_installed = bool(entry.get("installed"))
         installed = manifest_installed or (not manifest_agents and events > 0)
-        if source == "opencode" and source not in manifest_agents and events > 0:
+        if source in ("opencode", "hermes") and source not in manifest_agents and events > 0:
             # A manually copied plugin has no bridge-written manifest. Its
             # events prove installation only when no explicit entry exists.
             installed = True
@@ -1656,7 +1863,7 @@ def get_hook_status() -> dict[str, Any]:
         "updated_at": manifest.get("updated_at"),
         "endpoint": manifest.get("endpoint"),
         "manifest_found": bool(manifest_agents),
-        "repair_all_url": "/repair.sh?agents=claude,cursor,codex,opencode",
+        "repair_all_url": "/repair.sh?agents=" + ",".join(AGENTS),
         "agents": agents,
     }
 
@@ -1687,6 +1894,78 @@ def get_activity(
     if category not in activity.CATEGORIES:
         raise HTTPException(status_code=400, detail=f"category must be one of {', '.join(activity.CATEGORIES)}")
     return _json_payload(request, activity.summarize(category, max(0, days), project or None, source or None, plugin or None))
+
+
+@app.get("/v1/edits")
+def get_edits(
+    request: Request,
+    days: int = Query(7),
+    project: str | None = None,
+    source: str | None = None,
+    limit: int = Query(200, ge=1, le=1000),
+) -> Response:
+    """Files agents changed, newest first, grouped by project and path."""
+    return _json_payload(request, _cached_aggregate(
+        "edits", (days, project, source, limit), lambda: edits.recent(max(0, days), project or None, source or None, limit)
+    ))
+
+
+@app.get("/v1/outcomes")
+def get_outcomes(request: Request, days: int = Query(30), git: bool = True) -> Response:
+    """Commits, pushes and PRs sessions made; lines and files from git when the repo is readable."""
+    return _json_payload(request, _cached_aggregate("outcomes", (days, git), lambda: outcomes.summary(max(0, days), git)))
+
+
+@app.get("/v1/shipped")
+def get_shipped(
+    request: Request,
+    days: int = Query(30),
+    project: str | None = None,
+    session_id: str | None = None,
+    kind: str | None = None,
+) -> Response:
+    """Every PR, merge, commit and push agents made, newest first, with a link when one was
+    found and always the session event that did it."""
+    if kind and kind not in ("pr", "merge", "commit", "push"):
+        raise HTTPException(status_code=400, detail="kind must be pr, merge, commit or push")
+    data = _cached_aggregate(
+        "shipped", (days, session_id), lambda: outcomes.items(max(0, days), session_id=session_id or None)
+    )
+    if project or kind:
+        rows = [it for it in data["items"] if not project or it["project"] == project or it["project_name"] == project]
+        counts = {k: sum(1 for it in rows if it["kind"] == k) for k in ("pr", "merge", "commit", "push")}
+        data = {**data, "counts": counts, "items": [it for it in rows if not kind or it["kind"] == kind]}
+    return _json_payload(request, data)
+
+
+@app.get("/v1/sessions/{session_id}/outcomes")
+def get_session_outcomes(session_id: str, git: bool = True) -> dict[str, Any]:
+    return outcomes.per_session(0, git, session_id).get(session_id) or outcomes.blank()
+
+
+@app.get("/v1/session-shape")
+def get_session_shape(request: Request, days: int = Query(30), tz: str | None = None) -> Response:
+    """Session archetypes, distributions and concurrency over the window."""
+    return _json_payload(request, _cached_aggregate("session-shape", (days, tz), lambda: session_shape.report(days, tz)))
+
+
+@app.get("/v1/recovery")
+def get_recovery(request: Request, days: int = Query(7), project: str | None = None, source: str | None = None) -> Response:
+    """What agents did after tool calls failed: retries, switches, recoveries."""
+    return _json_payload(request, _cached_aggregate(
+        "recovery", (days, project, source), lambda: recovery.summary(max(0, days), project or None, source or None)
+    ))
+
+
+@app.get("/v1/sessions/{session_id}/recovery")
+def get_session_recovery(session_id: str) -> dict[str, Any]:
+    return recovery.for_session(session_id)
+
+
+@app.get("/v1/statusline")
+def get_statusline(session_id: str | None = None, tz: str | None = None) -> dict[str, Any]:
+    """Today's spend and the current session's cost and context, for a shell or agent status line."""
+    return usage_line.summary(session_id or None, tz)
 
 
 @app.get("/v1/activity/log")
@@ -1875,6 +2154,171 @@ class AnalyzeRequest(BaseModel):
     days: int = 30
 
 
+class AnalysisRunRequest(BaseModel):
+    scope: str = "session"
+    session_id: str | None = None
+    persona: str
+    question: str | None = None
+    days: int = 30
+    budget_usd: float | None = None
+
+
+class AnalysisExternalRequest(AnalysisRunRequest):
+    report: dict[str, Any]
+    agent: str | None = None
+    model: str | None = None
+
+
+class AnalysisFollowupRequest(BaseModel):
+    question: str
+
+
+class AnalysisApplyRequest(BaseModel):
+    cwd: str | None = None
+
+
+class AnalysisStatusRequest(BaseModel):
+    status: str
+
+
+def _analysis_call(fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+    """Map analysis/provider errors onto HTTP the same way /v1/insights/analyze does."""
+    try:
+        return fn(*args, **kwargs)
+    except ai_insights.AiDisabledError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ai_insights.AiNotConfiguredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except ai_insights.AiProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except rule_drafts.DraftError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except user_rules.SpecError as exc:
+        raise _spec_error(exc)
+    except analysis.AnalysisError as exc:
+        raise HTTPException(status_code=404 if "unknown run" in str(exc) else 400, detail=str(exc))
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"could not write the file: {exc.strerror or exc}")
+
+
+@app.get("/v1/mcp/install")
+def get_mcp_install() -> dict[str, Any]:
+    """Whether `cot mcp` is registered with Claude Code, Cursor and Codex."""
+    return mcp_install.status()
+
+
+@app.post("/v1/mcp/install/{agent}")
+def post_mcp_install(agent: str) -> dict[str, Any]:
+    try:
+        result = mcp_install.install(agent)
+    except mcp_install.InstallError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"could not write {mcp_install.config_path(agent)}: {exc.strerror or exc}")
+    db.record_audit_event("mcp.installed", target=agent, detail={"config": result["config_path"]})
+    return result
+
+
+@app.delete("/v1/mcp/install/{agent}")
+def delete_mcp_install(agent: str) -> dict[str, Any]:
+    try:
+        result = mcp_install.uninstall(agent)
+    except mcp_install.InstallError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"could not write {mcp_install.config_path(agent)}: {exc.strerror or exc}")
+    db.record_audit_event("mcp.uninstalled", target=agent, detail={"config": result["config_path"]})
+    return result
+
+
+@app.get("/v1/analysis/personas")
+def get_analysis_personas() -> dict[str, Any]:
+    return analysis_personas.catalog()
+
+
+@app.get("/v1/analysis/estimate")
+def get_analysis_estimate(scope: str = "session", session_id: str | None = None) -> dict[str, Any]:
+    return analysis.estimate(scope, session_id)
+
+
+@app.post("/v1/analysis/runs", status_code=202)
+def post_analysis_run(body: AnalysisRunRequest) -> dict[str, Any]:
+    """Start a run (costs the user money: explicit action, never polled). The
+    investigation runs on a thread; poll GET /v1/analysis/runs/{id}."""
+    days = max(1, min(body.days, 365))
+    run = _analysis_call(analysis.start_run, body.scope, body.session_id, body.persona, body.question, days, body.budget_usd)
+    db.record_audit_event("analysis.started", target=run["id"], detail={"persona": run["persona"], "scope": run["scope"], "provider": run["provider"], "model": run["model"]})
+    return {"run": run}
+
+
+@app.post("/v1/analysis/runs/external")
+def post_analysis_external(body: AnalysisExternalRequest) -> dict[str, Any]:
+    """A report an outside agent wrote over cot mcp (see GET /v1/analysis/brief)."""
+    days = max(1, min(body.days, 365))
+    run = _analysis_call(analysis.save_external, body.scope, body.session_id, body.persona, body.report, body.question, days, body.agent, body.model)
+    db.record_audit_event("analysis.saved", target=run["id"], detail={"persona": run["persona"], "scope": run["scope"], "agent": run["provider"]})
+    return {"run": run}
+
+
+@app.get("/v1/analysis/brief")
+def get_analysis_brief(persona: str, scope: str = "session", session_id: str | None = None, question: str | None = None, days: int = 30) -> dict[str, Any]:
+    return _analysis_call(analysis.brief, scope, session_id, persona, question, max(1, min(days, 365)))
+
+
+@app.post("/v1/analysis/tools/{name}")
+def post_analysis_tool(name: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """One investigation tool call, for outside agents over cot mcp."""
+    args = dict(body or {})
+    box = analysis_tools.Toolbox(args.get("session_id"), int(args.get("days") or 30))
+    try:
+        return analysis_tools.call(box, name, args)
+    except analysis_tools.ToolError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/v1/analysis/runs")
+def get_analysis_runs(session_id: str | None = None, limit: int = 50, days: int = 0) -> dict[str, Any]:
+    return {"runs": analysis.list_runs(limit=limit, session_id=session_id, days=days)}
+
+
+@app.get("/v1/analysis/runs/{run_id}")
+def get_analysis_run(run_id: str) -> dict[str, Any]:
+    return {"run": _analysis_call(analysis.get_run, run_id)}
+
+
+@app.delete("/v1/analysis/runs/{run_id}")
+def delete_analysis_run(run_id: str) -> dict[str, Any]:
+    if not analysis.delete_run(run_id):
+        raise HTTPException(status_code=404, detail="unknown run")
+    return {"deleted": run_id}
+
+
+@app.post("/v1/analysis/runs/{run_id}/cancel")
+def cancel_analysis_run(run_id: str) -> dict[str, Any]:
+    return {"cancelled": analysis.cancel_run(run_id)}
+
+
+@app.get("/v1/analysis/runs/{run_id}/export.md")
+def export_analysis_run(run_id: str) -> PlainTextResponse:
+    text = _analysis_call(analysis.markdown, run_id)
+    return PlainTextResponse(text, media_type="text/markdown", headers={"Content-Disposition": f'attachment; filename="cot-analysis-{run_id}.md"'})
+
+
+@app.post("/v1/analysis/runs/{run_id}/followups", status_code=202)
+def post_analysis_followup(run_id: str, body: AnalysisFollowupRequest) -> dict[str, Any]:
+    return {"followup": _analysis_call(analysis.ask_followup, run_id, body.question)}
+
+
+@app.post("/v1/analysis/runs/{run_id}/deliverables/{did}/apply")
+def apply_analysis_deliverable(run_id: str, did: str, body: AnalysisApplyRequest | None = None) -> dict[str, Any]:
+    return {"deliverable": _analysis_call(analysis.apply_deliverable, run_id, did, body.cwd if body else None)}
+
+
+@app.post("/v1/analysis/runs/{run_id}/deliverables/{did}/status")
+def set_analysis_deliverable_status(run_id: str, did: str, body: AnalysisStatusRequest) -> dict[str, Any]:
+    return {"deliverable": _analysis_call(analysis.set_deliverable_status, run_id, did, body.status)}
+
+
 @app.post("/v1/insights/analyze")
 def analyze_insights(req: AnalyzeRequest | None = None) -> dict[str, Any]:
     """Explicit BYOK LLM analysis — costs the user money, so never polled.
@@ -2012,11 +2456,24 @@ def get_session_insights(session_id: str) -> dict[str, Any]:
 
 
 @app.get("/v1/search")
-def search(q: str = "", limit: int = 40, session_id: str | None = None) -> dict[str, Any]:
+def search(q: str = "", limit: int = 40, session_id: str | None = None, mode: str = "keyword") -> dict[str, Any]:
+    """``mode`` is keyword (default), semantic or hybrid; the last two need embeddings configured."""
     q = q.strip()
     if len(q) < 2:
         return {"results": []}
-    return {"results": db.search(q, max(1, min(limit, 100)), session_id=session_id or None)}
+    limit = max(1, min(limit, 100))
+    if mode in ("semantic", "hybrid"):
+        try:
+            return {**semantic.search(q, limit, session_id or None, mode), "mode": mode}
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError) as exc:
+            raise HTTPException(status_code=502, detail=f"Embeddings endpoint failed: {exc}") from exc
+    return {"results": db.search(q, limit, session_id=session_id or None)}
+
+
+@app.get("/v1/search/semantic")
+def semantic_status() -> dict[str, Any]:
+    """Whether semantic search is on, and how much of the conversation is indexed."""
+    return semantic.status()
 
 
 class ExportRequest(BaseModel):
@@ -2124,9 +2581,13 @@ async def import_replay_session(request: Request) -> dict[str, Any]:
 
 @app.delete("/v1/sessions/{session_id}")
 def delete_session(session_id: str) -> dict[str, Any]:
-    """Delete a Session Replay import. Traced sessions can't be deleted here."""
-    if not db.delete_imported_session(session_id):
-        raise HTTPException(status_code=404, detail="No imported session with this id")
+    """Delete a Session Replay import (``?store=replay``) or a traced session."""
+    if store.path() == store.replay_path():
+        if not db.delete_imported_session(session_id):
+            raise HTTPException(status_code=404, detail="No imported session with this id")
+    elif not db.delete_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+    db.record_audit_event("session.deleted", target=session_id)
     return {"deleted": session_id}
 
 
@@ -2142,13 +2603,68 @@ def set_import_note(session_id: str, body: ImportNoteBody) -> dict[str, Any]:
     return {"session_id": session_id, "import_note": (body.note or "").strip() or None}
 
 
+class SessionHtmlExport(BaseModel):
+    redact: list[str] = Field(default_factory=list)
+    terms: list[str] = Field(default_factory=list)
+    thoughts: bool = True
+    outputs: bool = True
+
+
+@app.get("/v1/sessions/{session_id}/export/scan")
+def scan_session_export(session_id: str, thoughts: bool = True, outputs: bool = True) -> dict[str, Any]:
+    """What might be a password or token in the HTML export: suggestions for
+    the export dialog. Nothing is hidden unless the person picks it."""
+    found = session_html.scan(session_id, session_html.Options(thoughts=thoughts, outputs=outputs))
+    if found is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"suggestions": found}
+
+
+@app.post("/v1/sessions/{session_id}/export/html")
+def export_session_html(session_id: str, body: SessionHtmlExport) -> Response:
+    """The branded HTML page with the person's chosen redactions."""
+    terms = [t.strip() for t in body.terms if t.strip()][:200]
+    page = session_html.render(
+        session_id, body.redact, terms, session_html.Options(thoughts=body.thoughts, outputs=body.outputs)
+    )
+    if page is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    day = datetime.now().strftime("%Y%m%d")
+    return Response(
+        content=page,
+        media_type="text/html; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="cot-session-{session_id[:8]}-{day}.html"'},
+    )
+
+
 @app.get("/v1/sessions/{session_id}/export")
-def export_session(session_id: str) -> Response:
-    """The whole session as a downloadable JSON file."""
+def export_session(session_id: str, format: str = Query("json", pattern="^(json|md|html)$")) -> Response:  # noqa: A002
+    """The whole session as a downloadable JSON file, ``format=md`` for a
+    readable Markdown transcript, or ``format=html`` for a branded, shareable page."""
+    day = datetime.now().strftime("%Y%m%d")
+    if format == "html":
+        page = session_html.render(session_id)
+        if page is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return Response(
+            content=page,
+            media_type="text/html; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="cot-session-{session_id[:8]}-{day}.html"'},
+        )
+    if format == "md":
+        from .session_read import build_session_detail
+
+        detail = build_session_detail(session_id, full_detail=True)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return Response(
+            content=session_markdown.render(detail),
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="cot-session-{session_id[:8]}-{day}.md"'},
+        )
     data = db.export_session(session_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    day = datetime.now().strftime("%Y%m%d")
     filename = f"cot-session-{session_id[:8]}-{day}.json"
     return Response(
         content=json.dumps(data, indent=2, ensure_ascii=False, default=str),
@@ -2158,8 +2674,10 @@ def export_session(session_id: str) -> Response:
 
 
 @app.get("/v1/sessions/{session_id}")
-def get_session(session_id: str, compat: int = 0) -> dict[str, Any]:
-    session = db.get_session_detail(session_id)
+def get_session(session_id: str, compat: int = 0, first: int | None = Query(None, ge=1, le=5000)) -> dict[str, Any]:
+    """``first=N`` returns only the opening N events (``partial: true`` when
+    there are more), for a quick first paint; the page then loads the rest."""
+    session = db.get_session_detail(session_id, first=first)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     # The deprecated parent-only `timeline` repeats every parent row already in

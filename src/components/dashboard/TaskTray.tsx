@@ -82,7 +82,7 @@ function finishedImport(r: TaskRecent): DoneItem {
     title: r.status === 'error' ? 'Transcript import failed' : 'Transcript import finished',
     detail: r.status === 'error' ? r.error ?? 'See Settings › Passive import' : bits.join(' · '),
     // Findings are the thing to look at when there are any; otherwise the new sessions.
-    href: r.status === 'error' ? '#/settings' : r.findings ? '#/findings' : '#/sessions',
+    href: r.status === 'error' ? '#/settings/passive' : r.findings ? '#/findings' : '#/sessions',
     at: r.finished_at,
     tone: r.status === 'ok' ? 'ok' : r.status === 'partial' ? 'warn' : 'error',
   };
@@ -106,7 +106,7 @@ function runningLine(t: TaskRunning, now: string): { title: string; detail: stri
           ? `Step 1 of 2 · ingestion ${now}% · ${agentLabel(t.progress.agent)}`
           : 'Step 1 of 2 · sessions appear as they land';
       })(),
-      href: '#/settings',
+      href: '#/settings/passive',
     };
   }
   return { title: t.title, detail: 'Search covers new sessions once this finishes', href: null };

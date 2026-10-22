@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import marketplace_scan
+from . import folders, marketplace_scan
 
 SKILL_FILE = "SKILL.md"
 MAX_SKILL_DIRS = 2000
@@ -848,7 +848,7 @@ def project_roots(cwds: Iterable[str]) -> list[str]:
     out: set[str] = set()
     seen: set[str] = set()
     for cwd in cwds:
-        if not cwd or not cwd.startswith("/"):
+        if not cwd or not cwd.startswith("/") or not folders.readable(cwd):
             continue
         p = Path(cwd)
         for _ in range(8):

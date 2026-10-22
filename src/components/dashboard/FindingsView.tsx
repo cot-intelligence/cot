@@ -38,10 +38,13 @@ const SEVERITIES: InsightSeverity[] = ['critical', 'warn', 'info'];
 interface FindingsViewProps {
   onSelect: (id: string, eventId?: number) => void;
   initialPillar?: InsightPillar;
+  /** Open on this finding (by fingerprint), e.g. from a notification; a new nonce re-opens it. */
+  focusFinding?: string;
+  focusNonce?: number;
 }
 
 /** Markup mirrors the demo's Findings page (demo-variants/src/variants/forest/pages-b.tsx). */
-export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
+export function FindingsView({ onSelect, initialPillar, focusFinding, focusNonce }: FindingsViewProps) {
   const [days, setDays] = useState(30);
   const [status, setStatus] = useState<InsightStatus>('active');
   const [pillar, setPillar] = useState<InsightPillar | ''>(initialPillar ?? '');
@@ -68,6 +71,57 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
   useEffect(() => {
     if (initialPillar) setPillar(initialPillar);
   }, [initialPillar]);
+
+  // A link to one finding: once it is loaded, clear whatever hides it (window, status,
+  // pillar, filters), select it, then scroll its row into view and pulse it once.
+  const [focus, setFocus] = useState<string | null>(null);
+  const [reveal, setReveal] = useState<{ fp: string; at: number } | null>(null);
+  useEffect(() => {
+    if (focusFinding) setFocus(focusFinding);
+  }, [focusFinding, focusNonce]);
+  useEffect(() => {
+    if (!focus || !ins || ins.window_days !== days) return;
+    const f = ins.insights.find((x) => x.fingerprint === focus);
+    if (!f && days !== 0) {
+      setDays(0); // outside this window: look through all history
+      return;
+    }
+    setFocus(null);
+    // Drop the finding from the URL so following the same link again is a new navigation.
+    window.history.replaceState(null, '', f ? `#/findings?pillar=${f.pillar}` : '#/findings');
+    if (!f) return; // gone since the link was made
+    setStatus(f.status);
+    setPillar(f.pillar);
+    setQ(''); setSev(''); setRule(''); setProj(''); setAgent('');
+    setSel(f.fingerprint);
+    setReveal({ fp: f.fingerprint, at: Date.now() });
+  }, [focus, ins, days]);
+  useEffect(() => {
+    if (!reveal) return;
+    // Timers, not animation frames: a window just brought forward can hold frames back.
+    let tries = 0;
+    const timers: number[] = [];
+    const seek = () => {
+      const el = document.querySelector<HTMLElement>(`[data-fp="${reveal.fp}"]`);
+      // On a cold load the row can exist before it has layout (a lazy chunk still suspending).
+      if (!el?.getClientRects().length) {
+        if (++tries < 120) timers.push(window.setTimeout(seek, 25));
+        return;
+      }
+      // Rows and the detail card settle around it, so re-align a few times.
+      el.scrollIntoView({ block: 'center' });
+      for (const ms of [80, 200, 400]) timers.push(window.setTimeout(() => el.scrollIntoView({ block: 'center' }), ms));
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      el.animate(
+        [{ backgroundColor: 'color-mix(in srgb, var(--v-hot) 14%, transparent)' }, { backgroundColor: 'transparent' }],
+        { duration: reduce ? 600 : 1400, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' },
+      );
+    };
+    seek();
+    return () => {
+      timers.forEach(clearTimeout);
+    };
+  }, [reveal]);
 
   const all = ins?.insights ?? [];
   // Project and agent come from the evidence sessions; a finding matches if any of them does.
@@ -98,6 +152,23 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
   const filter = <T,>(set: (v: T) => void) => (v: T) => { set(v); setSel(null); };
   const clear = () => { setQ(''); setSev(''); setRule(''); setProj(''); setAgent(''); setSel(null); };
   const cur: ActionableInsight | undefined = rows.find((f) => f.fingerprint === sel) ?? rows[0];
+  // One row per rule: a rule that fired several times (the same command run over
+  // and over, say) folds into a group you open, in the order its worst finding sorts.
+  const groups = useMemo(() => {
+    const m = new Map<string, ActionableInsight[]>();
+    for (const f of rows) m.set(f.id, [...(m.get(f.id) ?? []), f]);
+    return [...m.values()];
+  }, [rows]);
+  const [open, setOpen] = useState<Set<string>>(() => new Set());
+  const toggle = (id: string) => setOpen((o) => { const n = new Set(o); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  // A link or j/k that lands inside a closed group opens it, so the selection is visible.
+  useEffect(() => {
+    if (!sel) return;
+    const f = rows.find((r) => r.fingerprint === sel);
+    if (f && !open.has(f.id) && (groups.find((g) => g[0].id === f.id)?.length ?? 0) > 1) setOpen((o) => new Set(o).add(f.id));
+  }, [sel]);
+  // What j/k walks: each finding of an open group, or a closed group's first one.
+  const visible = groups.flatMap((g) => (g.length === 1 || open.has(g[0].id) ? g : [g[0]]));
 
   const act = async (f: ActionableInsight, action: 'dismiss' | 'restore', reason?: string) => {
     const i = rows.findIndex((r) => r.fingerprint === f.fingerprint);
@@ -119,16 +190,17 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey || (e.target as HTMLElement).closest('input, textarea, select, [contenteditable]')) return;
       const dir = e.key === 'j' || e.key === 'ArrowDown' ? 1 : e.key === 'k' || e.key === 'ArrowUp' ? -1 : 0;
-      if (!dir || !rows.length) return;
+      if (!dir || !visible.length) return;
       e.preventDefault();
-      const i = Math.max(0, rows.findIndex((r) => r.fingerprint === cur?.fingerprint));
-      const n = rows[Math.min(rows.length - 1, Math.max(0, i + dir))];
+      const at = visible.findIndex((r) => r.fingerprint === cur?.fingerprint);
+      const i = at >= 0 ? at : Math.max(0, visible.findIndex((r) => r.id === cur?.id));
+      const n = visible[Math.min(visible.length - 1, Math.max(0, i + dir))];
       setSel(n.fingerprint);
-      document.querySelector(`[data-fp="${n.fingerprint}"]`)?.scrollIntoView({ block: 'nearest' });
+      document.querySelector(`[data-fp="${n.fingerprint}"], [data-group="${n.id}"]`)?.scrollIntoView({ block: 'nearest' });
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [rows, cur]);
+  }, [visible, cur]);
 
   return (
     <div className="scroll" id="vf-scroll">
@@ -193,19 +265,44 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
               {ins && rows.length === 0 && <div className="empty">{anyFilter ? `No ${status} findings match these filters.` : `Nothing ${status} here.`}</div>}
               {ins && (
                 <motion.ul variants={listParent} initial={false} animate="show" style={{ listStyle: 'none', margin: 0, padding: 6 }}>
-                  {rows.map((f) => {
-                    const on = cur?.fingerprint === f.fingerprint;
+                  {groups.map((g) => {
+                    if (g.length === 1) {
+                      const f = g[0];
+                      return (
+                        <motion.li key={f.fingerprint} variants={listItem}>
+                          <FindingRow f={f} on={cur?.fingerprint === f.fingerprint} onSelect={() => setSel(f.fingerprint)} />
+                        </motion.li>
+                      );
+                    }
+                    const id = g[0].id;
+                    const isOpen = open.has(id);
+                    const holds = g.some((f) => f.fingerprint === cur?.fingerprint);
                     return (
-                      <motion.li key={f.fingerprint} variants={listItem}>
+                      <motion.li key={`g:${id}`} variants={listItem} className="fnd-g" data-open={isOpen || undefined}>
                         <button
                           type="button"
-                          data-fp={f.fingerprint}
-                          onClick={() => setSel(f.fingerprint)}
-                          aria-current={on}
-                          style={{ width: '100%', textAlign: 'left', border: 0, background: on ? 'var(--v-bg)' : 'none', borderRadius: 10, padding: '10px 12px', display: 'grid', gap: 4, boxShadow: on ? '0 0 0 1px var(--v-mute)' : undefined }}>
-                          <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Sev s={f.severity} /><span className="mono faint truncate" style={{ fontSize: 11 }}>{f.id.startsWith('user.') ? `your rule · ${f.group_title}` : f.id}</span></span>
-                          <span className="truncate" style={{ fontWeight: 500, fontSize: 13 }}>{f.title}</span>
+                          data-group={id}
+                          className="fnd-row fnd-gh"
+                          aria-expanded={isOpen}
+                          aria-current={holds && !isOpen ? true : undefined}
+                          onClick={() => { toggle(id); if (!holds) setSel(g[0].fingerprint); }}>
+                          <span className="fnd-top">
+                            <Sev s={worst(g)} />
+                            <span className="mono faint truncate" style={{ fontSize: 11 }}>{id.startsWith('user.') ? `your rule · ${g[0].group_title}` : id}</span>
+                            <span className="fnd-n mono">{g.length}</span>
+                            <Icon name="down" size={14} className="fnd-chev" />
+                          </span>
+                          <span className="truncate" style={{ fontWeight: 500, fontSize: 13 }}>{g[0].group_title}</span>
                         </button>
+                        {isOpen && (
+                          <ul className="fnd-kids">
+                            {g.map((f) => (
+                              <li key={f.fingerprint}>
+                                <FindingRow f={f} on={cur?.fingerprint === f.fingerprint} onSelect={() => setSel(f.fingerprint)} nested />
+                              </li>
+                            ))}
+                          </ul>
+                        )}
                       </motion.li>
                     );
                   })}
@@ -272,6 +369,23 @@ export function FindingsView({ onSelect, initialPillar }: FindingsViewProps) {
         )}
       </div>
     </div>
+  );
+}
+
+const SEV_RANK: Record<string, number> = { critical: 3, warn: 2, info: 1 };
+const worst = (g: ActionableInsight[]) => g.reduce((a, f) => ((SEV_RANK[f.severity] ?? 0) > (SEV_RANK[a] ?? 0) ? f.severity : a), g[0].severity);
+
+/** One finding in the list. Inside a group the rule is already said above, so the
+ *  row shows the title and its first evidence (which command, which file) instead. */
+function FindingRow({ f, on, onSelect, nested }: { f: ActionableInsight; on: boolean; onSelect: () => void; nested?: boolean }) {
+  return (
+    <button type="button" data-fp={f.fingerprint} onClick={onSelect} aria-current={on} className="fnd-row" data-nested={nested || undefined}>
+      {!nested && (
+        <span className="fnd-top"><Sev s={f.severity} /><span className="mono faint truncate" style={{ fontSize: 11 }}>{f.id.startsWith('user.') ? `your rule · ${f.group_title}` : f.id}</span></span>
+      )}
+      <span className="truncate" style={{ fontWeight: 500, fontSize: 13 }}>{f.title}</span>
+      {nested && f.evidence[0]?.label && <span className="mono faint truncate" style={{ fontSize: 11 }}>{f.evidence[0].label}</span>}
+    </button>
   );
 }
 

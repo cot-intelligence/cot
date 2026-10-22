@@ -246,6 +246,11 @@ def _post_json(url: str, headers: dict[str, str], body: dict[str, Any]) -> dict[
         raise AiProviderError(f"provider unreachable: {exc}") from exc
 
 
+def post_json(url: str, headers: dict[str, str], body: dict[str, Any]) -> dict[str, Any]:
+    """POST to a provider with cot's error masking (the analysis agent loop)."""
+    return _post_json(url, headers, body)
+
+
 def _call_anthropic(cfg: AiConfig, payload_json: str, system: str = SYSTEM_PROMPT) -> str:
     data = _post_json(
         provider_call_endpoint("anthropic", cfg.endpoint),
