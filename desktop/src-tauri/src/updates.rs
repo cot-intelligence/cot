@@ -214,7 +214,28 @@ pub fn update_install(app: AppHandle) -> Result<(), String> {
             crate::restart_collector(&app);
             return fail(format!("The update could not be installed. {error}"));
         }
-        app.restart();
+        relaunch(&app);
     });
     Ok(())
+}
+
+/// Opens the updated bundle once this process has exited. `AppHandle::restart`
+/// starts the new copy while this one is still shutting down, so the
+/// single-instance plugin hands off to the dying process and the app just
+/// closes; `open` after exit also brings the window up through Launch Services.
+fn relaunch(app: &AppHandle) {
+    let bundle = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.ancestors().nth(3).map(|p| p.to_path_buf()))
+        .filter(|p| p.extension().is_some_and(|e| e == "app"));
+    let Some(bundle) = bundle else { app.restart() };
+    let wait_then_open = r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open "$2""#;
+    let spawned = std::process::Command::new("/bin/sh")
+        .args(["-c", wait_then_open, "sh", &std::process::id().to_string()])
+        .arg(&bundle)
+        .spawn();
+    if spawned.is_err() {
+        app.restart();
+    }
+    app.exit(0);
 }
