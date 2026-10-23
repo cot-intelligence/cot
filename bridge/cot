@@ -859,6 +859,21 @@ def _clean_user_text(text: str) -> str:
     return out
 
 
+# Whole user-role turns Codex writes itself: the AGENTS.md preamble, the body of
+# a skill the user mentioned, and the desktop app's open-page marker. Matched
+# only when the turn is nothing but the block, so typed text is never dropped.
+_CODEX_INJECTED_TURN_RE = re.compile(
+    r"\s*(?:# AGENTS\.md instructions[^\n]*\s*<INSTRUCTIONS>.*</INSTRUCTIONS>"
+    r"|<skill>.*</skill>"
+    r"|<external_codex_apps_open_page>.*</external_codex_apps_open_page>)\s*",
+    re.S,
+)
+
+
+def _is_codex_injected_user_turn(text: str) -> bool:
+    return bool(text) and bool(_CODEX_INJECTED_TURN_RE.fullmatch(text))
+
+
 def _text_from_blocks(content, *, clean_user: bool = False) -> str:
     if isinstance(content, str):
         text = content.strip()
@@ -3695,7 +3710,153 @@ def _codex_map_tool(name: str, raw_args: object) -> tuple[str, object]:
         if not patch and isinstance(raw_args, str):
             patch = raw_args
         return "apply_patch", {"command": patch}
+    if name == "exec" and isinstance(raw_args, str):
+        return _codex_map_code_mode(raw_args) or ("exec", {"code": raw_args})
     return name, args if args else {}
+
+
+_JS_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+
+
+class _JsLiteral:
+    """Reads a JS literal (object, array, string, number, keyword) out of a
+    Codex code-mode script. Anything it can't evaluate (an identifier, an
+    interpolated template, a call) comes back as None instead of raising."""
+
+    def __init__(self, src: str, pos: int) -> None:
+        self.src = src
+        self.pos = pos
+
+    def _ws(self) -> None:
+        while self.pos < len(self.src) and self.src[self.pos] in " \t\r\n":
+            self.pos += 1
+
+    def value(self) -> object:
+        self._ws()
+        if self.pos >= len(self.src):
+            raise ValueError("eof")
+        ch = self.src[self.pos]
+        if ch == "{":
+            return self._object()
+        if ch == "[":
+            return self._array()
+        if ch in "\"'`":
+            return self._string()
+        m = re.compile(r"-?\d+(?:\.\d+)?|[A-Za-z_$][\w$.]*").match(self.src, self.pos)
+        if not m:
+            raise ValueError(f"unexpected {ch!r}")
+        self.pos = m.end()
+        tok = m.group(0)
+        if tok[0].isdigit() or tok[0] == "-":
+            return float(tok) if "." in tok else int(tok)
+        return {"true": True, "false": False, "null": None}.get(tok)
+
+    def _string(self) -> str | None:
+        quote = self.src[self.pos]
+        self.pos += 1
+        out: list[str] = []
+        interpolated = False
+        while self.pos < len(self.src):
+            ch = self.src[self.pos]
+            if ch == "\\" and self.pos + 1 < len(self.src):
+                nxt = self.src[self.pos + 1]
+                if nxt == "u" and re.fullmatch(r"[0-9a-fA-F]{4}", self.src[self.pos + 2:self.pos + 6]):
+                    out.append(chr(int(self.src[self.pos + 2:self.pos + 6], 16)))
+                    self.pos += 6
+                    continue
+                out.append(_JS_ESCAPES.get(nxt, nxt))
+                self.pos += 2
+                continue
+            if quote == "`" and ch == "$" and self.src.startswith("${", self.pos):
+                interpolated = True
+            self.pos += 1
+            if ch == quote:
+                return None if interpolated else "".join(out)
+            out.append(ch)
+        raise ValueError("unterminated string")
+
+    def _array(self) -> list:
+        self.pos += 1
+        items: list = []
+        while True:
+            self._ws()
+            if self.src.startswith("]", self.pos):
+                self.pos += 1
+                return items
+            items.append(self.value())
+            self._ws()
+            if self.src.startswith(",", self.pos):
+                self.pos += 1
+
+    def _object(self) -> dict:
+        self.pos += 1
+        obj: dict = {}
+        while True:
+            self._ws()
+            if self.src.startswith("}", self.pos):
+                self.pos += 1
+                return obj
+            if self.src[self.pos] in "\"'`":
+                key = self._string() or ""
+            else:
+                m = re.compile(r"[A-Za-z_$][\w$]*").match(self.src, self.pos)
+                if not m:
+                    raise ValueError("bad key")
+                key = m.group(0)
+                self.pos = m.end()
+            self._ws()
+            if self.src.startswith(":", self.pos):
+                self.pos += 1
+                obj[key] = self.value()
+            else:  # shorthand {cmd}: the value is a variable we can't see
+                obj[key] = None
+            self._ws()
+            if self.src.startswith(",", self.pos):
+                self.pos += 1
+
+
+def _codex_code_mode_calls(script: str) -> list[tuple[str, object]]:
+    """Inner ``tools.<name>(<arg>)`` calls of a Codex code-mode ``exec`` script."""
+    calls: list[tuple[str, object]] = []
+    for m in re.finditer(r"\btools\.([A-Za-z_]\w*)\s*\(", script):
+        try:
+            arg = _JsLiteral(script, m.end()).value()
+        except (ValueError, IndexError):
+            arg = None
+        calls.append((m.group(1), arg))
+    return calls
+
+
+def _codex_map_code_mode(script: str) -> tuple[str, object] | None:
+    """Codex code mode runs every tool through one ``exec`` call whose input is
+    a JS script (``await tools.exec_command({cmd: "..."})``). Map it onto the
+    tool it actually ran so the timeline shows the command, patch or lookup."""
+    calls = _codex_code_mode_calls(script)
+    if not calls:
+        return None
+    for name, arg in calls:
+        if name == "apply_patch":
+            patch = arg if isinstance(arg, str) else ""
+            if isinstance(arg, dict):
+                patch = arg.get("input") or arg.get("patch") or ""
+            if patch:
+                return "apply_patch", {"command": patch}
+    cmds = [
+        str(arg.get("cmd") or arg.get("command"))
+        for name, arg in calls
+        if name in ("exec_command", "shell", "shell_command")
+        and isinstance(arg, dict)
+        and (arg.get("cmd") or arg.get("command"))
+    ]
+    if cmds:
+        return "Bash", {"command": "\n".join(cmds)}
+    if any(name in ("exec_command", "shell", "shell_command") for name, _ in calls):
+        # The command is built at runtime (a template or concatenation), so the
+        # script is the most faithful record of what ran.
+        return "Bash", {"command": script.strip()}
+    # write_stdin only polls a command started earlier; prefer anything else.
+    name, arg = next(((n, a) for n, a in calls if n != "write_stdin"), calls[0])
+    return name, arg if isinstance(arg, dict) else {}
 
 
 def _codex_reasoning_text(payload: dict) -> str:
@@ -3913,6 +4074,8 @@ def _codex_line_to_ingest_events(
         if env_block:
             events.append(_env_context_event(base, env_block))
         text_val = _clean_user_text(raw_text)
+        if _is_codex_injected_user_turn(text_val):
+            return events
         if _is_interruption(text_val):
             events.append({
                 **base,

@@ -391,6 +391,58 @@ def test_codex_token_count_folds_onto_message():
     assert resp[0]["cache_read_tokens"] == 40, resp[0]
 
 
+def _code_mode_line(call_id: str, script: str) -> dict:
+    return {"type": "response_item", "id": call_id, "timestamp": "2026-04-01T00:00:00Z",
+            "payload": {"type": "custom_tool_call", "name": "exec", "call_id": call_id,
+                        "input": script}}
+
+
+def test_codex_code_mode_exec_maps_to_inner_tool():
+    lines = [
+        _code_mode_line("c1", 'const r = await Promise.allSettled([\n'
+                              'tools.exec_command({cmd:"cat \\"a b\\".md",max_output_tokens:3000}),\n'
+                              "tools.exec_command({cmd:'git status',workdir:\"/tmp\"})]);"),
+        _code_mode_line("c2", 'text(await tools.apply_patch("*** Begin Patch\\n'
+                              '*** Update File: /a/b.py\\n+x\\n*** End Patch"));'),
+        _code_mode_line("c3", 'text(await tools.mcp__cot__search({query:"release",limit:5}));'),
+        _code_mode_line("c4", "const x = 1;\ntext(ALL_TOOLS.map(t => t.name));"),
+    ]
+    evs = _categories("codex", bridge._codex_line_to_events, lines)  # noqa: SLF001
+    shell = next(ev for ev, n in evs if n["category"] == "shell")
+    assert shell["tool_input"]["command"] == 'cat "a b".md\ngit status', shell
+    assert any(n["category"] == "file_edit" for _, n in evs), evs
+    mcp = next(ev for ev, _ in evs if ev.get("tool_name") == "mcp__cot__search")
+    assert mcp["tool_input"] == {"query": "release", "limit": 5}, mcp
+    assert any(ev.get("tool_name") == "exec" for ev, _ in evs), evs
+
+
+def test_codex_code_mode_prefers_real_call_over_stdin_poll():
+    script = ('await tools.write_stdin({session_id:7,chars:""});\n'
+              'text(await tools.view_image({path:`/tmp/shot.png`}));')
+    assert bridge._codex_map_code_mode(script) == ("view_image", {"path": "/tmp/shot.png"})  # noqa: SLF001
+    dynamic = "tools.exec_command({cmd:`ls ${dir}`})"
+    assert bridge._codex_map_code_mode(dynamic) == ("Bash", {"command": dynamic})  # noqa: SLF001
+
+
+def test_codex_injected_user_turns_are_not_prompts():
+    turns = [
+        "# AGENTS.md instructions\n\n<INSTRUCTIONS>\n@/Users/x/.codex/RTK.md\n</INSTRUCTIONS>\n"
+        "<environment_context>\n  <cwd>/r</cwd>\n</environment_context>",
+        "<skill>\n<name>emil</name>\n<path>/s/SKILL.md</path>\nbody\n</skill>",
+        '<external_codex_apps_open_page>{"page_id":null}</external_codex_apps_open_page>',
+        "what does <skill>x</skill> mean here?",
+    ]
+    lines = [
+        {"type": "response_item", "id": f"u{i}", "timestamp": f"2026-04-01T00:00:0{i}Z",
+         "payload": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": t}]}}
+        for i, t in enumerate(turns)
+    ]
+    evs = _categories("codex", bridge._codex_line_to_events, lines)  # noqa: SLF001
+    prompts = [n["detail"] for _, n in evs if n["category"] == "prompt"]
+    assert prompts == ["what does <skill>x</skill> mean here?"], prompts
+
+
 def test_codex_environment_context_becomes_system_event_not_prompt():
     env = ("<environment_context>\n  <cwd>/repo</cwd>\n  <shell>zsh</shell>\n"
            "</environment_context>")
