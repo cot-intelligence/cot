@@ -224,18 +224,29 @@ pub fn update_install(app: AppHandle) -> Result<(), String> {
 /// single-instance plugin hands off to the dying process and the app just
 /// closes; `open` after exit also brings the window up through Launch Services.
 fn relaunch(app: &AppHandle) {
-    let bundle = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.ancestors().nth(3).map(|p| p.to_path_buf()))
-        .filter(|p| p.extension().is_some_and(|e| e == "app"));
-    let Some(bundle) = bundle else { app.restart() };
-    let wait_then_open = r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec /usr/bin/open "$2""#;
+    let Some(command) = relaunch_command() else { app.restart() };
+    let wait_then_run = r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; shift; exec "$@""#;
     let spawned = std::process::Command::new("/bin/sh")
-        .args(["-c", wait_then_open, "sh", &std::process::id().to_string()])
-        .arg(&bundle)
+        .args(["-c", wait_then_run, "sh", &std::process::id().to_string()])
+        .args(&command)
         .spawn();
     if spawned.is_err() {
         app.restart();
     }
     app.exit(0);
+}
+
+/// `open cot.app` on macOS, found from the executable inside the bundle.
+#[cfg(target_os = "macos")]
+fn relaunch_command() -> Option<Vec<std::ffi::OsString>> {
+    let bundle = std::env::current_exe().ok()?.ancestors().nth(3)?.to_path_buf();
+    let is_app = bundle.extension().is_some_and(|e| e == "app");
+    is_app.then(|| vec!["/usr/bin/open".into(), bundle.into_os_string()])
+}
+
+/// The AppImage the updater just replaced. The running executable lives in the
+/// image's temporary mount, which goes away on exit, so it can't be reused.
+#[cfg(not(target_os = "macos"))]
+fn relaunch_command() -> Option<Vec<std::ffi::OsString>> {
+    std::env::var_os("APPIMAGE").map(|image| vec![image])
 }

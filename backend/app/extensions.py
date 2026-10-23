@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import threading
 import time
 import tomllib
@@ -99,17 +100,19 @@ def claude_json_path() -> Path | None:
 
 
 def claude_desktop_config() -> Path:
-    return _env_path(
-        "COT_CLAUDE_DESKTOP_CONFIG",
-        default="~/Library/Application Support/Claude/claude_desktop_config.json",
-    )
+    if sys.platform == "darwin":
+        default = "~/Library/Application Support/Claude/claude_desktop_config.json"
+    else:
+        default = str(_env_path("XDG_CONFIG_HOME", default="~/.config") / "Claude" / "claude_desktop_config.json")
+    return _env_path("COT_CLAUDE_DESKTOP_CONFIG", default=default)
 
 
 def claude_managed_mcp() -> Path:
-    return _env_path(
-        "COT_CLAUDE_MANAGED_MCP",
-        default="/Library/Application Support/ClaudeCode/managed-mcp.json",
-    )
+    if sys.platform == "darwin":
+        default = "/Library/Application Support/ClaudeCode/managed-mcp.json"
+    else:
+        default = "/etc/claude-code/managed-mcp.json"
+    return _env_path("COT_CLAUDE_MANAGED_MCP", default=default)
 
 
 # --- Small readers ---------------------------------------------------------

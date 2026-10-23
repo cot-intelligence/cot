@@ -22,6 +22,24 @@ just desktop test      # Rust unit tests
 just desktop verify    # bundled collector answers /health
 ```
 
+### Linux
+
+`just desktop linux` builds `cot_<version>_<arch>.deb` and `.AppImage` in
+Docker (`packaging/linux/Dockerfile`, Ubuntu 22.04) into `desktop/build/linux/`,
+for the Docker host's architecture; `COT_LINUX_PLATFORM=linux/amd64` builds
+x86_64 under emulation. On a Linux machine, `scripts/build.sh --dmg` builds the
+same bundles directly, given:
+
+```sh
+sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+```
+
+Build on the oldest distro you support: the frozen collector needs a glibc at
+least as new as the build machine's. Differences from macOS: the window keeps
+the desktop's own titlebar, the tray needs an AppIndicator host (GNOME needs
+the AppIndicator extension), and only the AppImage self-updates (`.deb`
+installs update through a new download).
+
 Needs Rust, Node and Python 3.12. `scripts/prepare-collector.sh` builds the
 dashboard and freezes the collector into `src-tauri/resources/`. Python deps go
 into `desktop/build/venv`, never the host. The version comes from

@@ -70,12 +70,16 @@ jobs:
           VERSION: ${{ needs.desktop.outputs.version }}
           SIGNATURE: ${{ needs.desktop.outputs.signature }}
           URL: https://github.com/${{ github.repository }}/releases/download/v${{ needs.desktop.outputs.version }}/cot.app.tar.gz
+          LINUX_SIGNATURE: ${{ needs.desktop.outputs.linux_signature }}
+          LINUX_URL: https://github.com/${{ github.repository }}/releases/download/v${{ needs.desktop.outputs.version }}/cot_${{ needs.desktop.outputs.version }}_amd64.AppImage
         run: |
           file=public/version.json
           jq --arg v "${VERSION}" --arg url "${URL}" --arg sig "${SIGNATURE}" \
+             --arg linux_url "${LINUX_URL}" --arg linux_sig "${LINUX_SIGNATURE}" \
              --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
              '.version = $v | .pub_date = $date
-              | .platforms["darwin-aarch64"] = {url: $url, signature: $sig}' \
+              | .platforms["darwin-aarch64"] = {url: $url, signature: $sig}
+              | .platforms["linux-x86_64"] = {url: $linux_url, signature: $linux_sig}' \
              "${file}" > "${file}.tmp"
           mv "${file}.tmp" "${file}"
           cat "${file}"

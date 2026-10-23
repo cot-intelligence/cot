@@ -1,7 +1,9 @@
 name: Desktop release
 
-# Builds cot.app (Tauri) for Apple Silicon and attaches the DMG and updater
-# artifacts to the tag's GitHub Release, created as a draft when missing.
+# Builds cot.app (Tauri) for Apple Silicon and the Linux x86_64 .deb and
+# .AppImage, and attaches them and the updater artifacts to the tag's GitHub
+# Release, created as a draft when missing. The AppImage is the Linux
+# updater's target.
 # release.yml calls this after CI passes, publishes the release once every
 # build is in, and then opens the site PR (see release.yml).
 #
@@ -18,6 +20,8 @@ on:
         value: ${{ jobs.build.outputs.version }}
       signature:
         value: ${{ jobs.build.outputs.signature }}
+      linux_signature:
+        value: ${{ jobs.build-linux.outputs.signature }}
 
 permissions:
   contents: write
@@ -117,6 +121,95 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
           # R2 rejects some of the CLI's default checksum headers.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          aws s3 cp out/ "s3://${{ vars.R2_BUCKET }}/desktop/v${{ steps.version.outputs.version }}/" \
+            --recursive --endpoint-url "https://${{ vars.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+
+  build-linux:
+    # 22.04, not latest: the frozen collector needs a glibc at least as new as
+    # the one it was built against, so the oldest supported distro builds.
+    runs-on: ubuntu-22.04
+    outputs:
+      signature: ${{ steps.artifacts.outputs.signature }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev file xdg-utils
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Read version
+        id: version
+        run: |
+          version="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' backend/app/__init__.py)"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix desktop
+
+      - name: Build .deb and .AppImage
+        env:
+          COT_PYTHON: python
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: desktop/scripts/build.sh --release
+
+      - name: Verify bundle
+        run: desktop/scripts/verify-bundle.sh
+
+      - name: Collect artifacts
+        id: artifacts
+        run: |
+          bundle=desktop/src-tauri/target/release/bundle
+          version=${{ steps.version.outputs.version }}
+          mkdir -p out
+          cp "${bundle}"/deb/*.deb "out/cot_${version}_amd64.deb"
+          cp "${bundle}"/appimage/*.AppImage "out/cot_${version}_amd64.AppImage"
+          cp "${bundle}"/appimage/*.AppImage.sig "out/cot_${version}_amd64.AppImage.sig"
+          echo "signature=$(cat out/*.AppImage.sig)" >> "${GITHUB_OUTPUT}"
+          ls -la out
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          # The macOS job may create the draft first; either order works.
+          gh release view "${TAG}" >/dev/null 2>&1 \
+            || gh release create "${TAG}" --draft --verify-tag --title "${TAG}" --generate-notes \
+            || gh release view "${TAG}" >/dev/null
+          gh release upload "${TAG}" out/* --clobber
+
+      - name: Mirror to R2
+        if: vars.R2_BUCKET != ''
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
           AWS_REQUEST_CHECKSUM_CALCULATION: when_required
           AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
         run: |
