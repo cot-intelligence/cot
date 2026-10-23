@@ -69,10 +69,24 @@ jobs:
           COT_PYTHON: python
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # In CI the bundler skips the Finder step that lays out the DMG window
+          # (background, icon positions, hidden files tucked away); run it anyway.
+          TAURI_BUNDLER_DMG_IGNORE_CI: 'true'
         run: desktop/scripts/build.sh --release
 
       - name: Verify bundle
         run: desktop/scripts/verify-bundle.sh
+
+      - name: Verify DMG layout
+        run: |
+          # Without .DS_Store, Finder opens the DMG as a bare folder with the
+          # dot-files showing and no drag-to-Applications background.
+          dmg="$(ls desktop/src-tauri/target/release/bundle/dmg/*.dmg)"
+          mnt="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -mountpoint "${mnt}" "${dmg}" >/dev/null
+          ok=0; [ -f "${mnt}/.DS_Store" ] && [ -f "${mnt}/.background/background.png" ] && ok=1
+          hdiutil detach "${mnt}" >/dev/null
+          [ "${ok}" = 1 ] || { echo "DMG has no Finder layout (.DS_Store missing)" >&2; exit 1; }
 
       - name: Collect artifacts
         id: artifacts
