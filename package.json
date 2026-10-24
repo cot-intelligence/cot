@@ -3,6 +3,9 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
+  },
   "scripts": {
     "dev": "node scripts/run-node-tool.mjs vite",
     "build": "node scripts/run-node-tool.mjs vite build",

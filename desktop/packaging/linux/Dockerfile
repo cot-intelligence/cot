@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3.12 python3.12-venv python3.12-dev \
     && rm -rf /var/lib/apt/lists/*
 
-ARG NODE_VERSION=22.20.0
+ARG NODE_VERSION=24.22.1
 RUN arch="$(dpkg --print-architecture | sed 's/amd64/x64/')" \
     && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${arch}.tar.xz" \
        | tar -xJ -C /usr/local --strip-components=1
