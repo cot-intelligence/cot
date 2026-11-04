@@ -7,7 +7,7 @@
  * returns null for anything outside that subset, and the editor falls back to
  * the advanced form for it, so nothing a user wrote is ever silently changed.
  */
-import type { InsightPillar, InsightSeverity, RuleCondition, RuleLeaf, RuleSpec } from './api';
+import type { InsightPillar, InsightSeverity, RuleAction, RuleCondition, RuleLeaf, RuleSpec } from './api';
 
 export type VerbKey = 'shell' | 'read' | 'edit' | 'web' | 'mcp' | 'any' | 'spend';
 
@@ -72,7 +72,29 @@ export const PER: Record<string, string> = {
   tool: 'per tool',
 };
 
+/** How the sentence opens, per action: "Block it when any agent runs a command…". */
+export const ACTION_LEADS: { action: RuleAction; label: string }[] = [
+  { action: 'finding', label: 'Tell me when' },
+  { action: 'ask', label: 'Ask me first when' },
+  { action: 'deny', label: 'Block it when' },
+];
+
+export const blocks = (a: RuleAction) => a === 'ask' || a === 'deny';
+
+/**
+ * Bring a sentence into the shape a blocking rule needs: one action, decided
+ * before it runs, on an agent that can block. Spend, "and it fails" and
+ * repeat limits are only known afterwards, so they go.
+ */
+export function fitForBlocking(s: Sentence, canBlock: (agent: string) => boolean): Partial<Sentence> {
+  const patch: Partial<Sentence> = { fails: false, limit: null };
+  if (s.verb === 'spend') Object.assign(patch, { verb: 'shell', conds: blankSentence('shell').conds, subject: undefined });
+  if (s.agent && !canBlock(s.agent)) patch.agent = '';
+  return patch;
+}
+
 export interface Sentence {
+  action: RuleAction;
   agent: string; // '' = any agent
   verb: VerbKey;
   join: 'and' | 'or';
@@ -97,6 +119,7 @@ export interface Sentence {
 export function blankSentence(verb: VerbKey = 'shell'): Sentence {
   const v = verbOf(verb);
   return {
+    action: 'finding',
     agent: '',
     verb,
     join: 'and',
@@ -161,7 +184,7 @@ export function toSpec(s: Sentence): RuleSpec {
     severity: s.severity,
     scope: { sources: s.agent ? [s.agent] : [], projects: s.projects },
     recommendation: s.recommendation,
-    action: 'finding' as const,
+    action: s.action,
   };
   if (s.verb === 'spend') {
     return {
@@ -206,8 +229,9 @@ const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every((
 /** The sentence a spec reads as, or null when it needs the advanced editor. */
 export function fromSpec(spec: RuleSpec): Sentence | null {
   const sources = spec.scope?.sources ?? [];
-  if (sources.length > 1 || (spec.action && spec.action !== 'finding')) return null;
+  if (sources.length > 1) return null;
   const common = {
+    action: spec.action ?? 'finding',
     agent: sources[0] ?? '',
     projects: spec.scope?.projects ?? [],
     name: spec.name ?? '',

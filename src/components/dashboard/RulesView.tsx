@@ -8,6 +8,7 @@ import {
   getRuleSchema,
   draftRuleFromEvent,
   RuleSpecError,
+  setEnforcementPaused,
   updateRule,
   type RuleCondition,
   type RuleField,
@@ -24,13 +25,14 @@ import { fmt } from '../forest/format';
 import { Icon } from '../forest/icons';
 import { listItem, listParent } from '../forest/motion';
 import { Seg, Sev, Switch } from '../forest/ui';
-import { autoName, blankSentence, fromSpec, toSpec, type Sentence } from '../../lib/ruleSentence';
+import { autoName, blankSentence, blocks, fromSpec, toSpec, type Sentence } from '../../lib/ruleSentence';
 import { useRulePreview } from '../../lib/useRulePreview';
 import { RulePreviewCard, RuleSentenceEditor } from './RuleSentenceEditor';
 
 const PILLAR_ICON: Record<string, string> = { security: 'lock', cost: 'dollar', usability: 'bolt' };
 const PREVIEW_DAYS = 30;
-const PRE_RUN_HINT = 'Uses only details known before a tool runs, so this rule can switch to blocking once cot supports it.';
+const PRE_RUN_HINT = 'Uses only details known before a tool runs, so this rule can block or ask first.';
+const ACTION_LABEL: Record<string, string> = { finding: 'record', ask: 'ask first', deny: 'block' };
 
 /** Starting points, so nobody faces a blank form. Each is a complete, valid spec. */
 const TEMPLATES: { title: string; blurb: string; spec: RuleSpec }[] = [
@@ -232,6 +234,16 @@ export function RulesView({ fromEvent }: { fromEvent?: number }) {
       void load();
     }
   };
+  const paused = schema?.enforcement_paused ?? false;
+  const anyBlocking = rules?.some((r) => r.enabled && blocks(r.spec.action ?? 'finding')) ?? false;
+  const setPaused = async (next: boolean) => {
+    qc.setQueryData<RuleSchema>(['ruleSchema'], (sc) => (sc ? { ...sc, enforcement_paused: next } : sc));
+    try {
+      await setEnforcementPaused(next);
+    } finally {
+      void qc.invalidateQueries({ queryKey: ['ruleSchema'] });
+    }
+  };
   const remove = async (r: UserRule) => {
     if (!window.confirm(`Delete “${r.spec.name}”? Its findings are removed too.`)) return;
     await deleteRule(r.id);
@@ -294,7 +306,15 @@ export function RulesView({ fromEvent }: { fromEvent?: number }) {
             <section className="card" aria-labelledby="vf-myrules" style={{ overflow: 'hidden' }}>
               <div className="card-h">
                 <span className="card-t" id="vf-myrules">Your rules</span>
-                {rules && <span className="mono faint" style={{ fontSize: 11 }}>{rules.filter((r) => r.enabled).length} of {rules.length} on</span>}
+                <span style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
+                  {anyBlocking && (
+                    <span className="rule-pause" title={paused ? 'No rule blocks or asks until you turn this back on.' : 'Turn off to let every tool call through without deleting your rules.'}>
+                      <span className={paused ? 'faint' : 'dim'}>{paused ? 'Blocking paused' : 'Blocking on'}</span>
+                      <Switch on={!paused} onChange={(on) => void setPaused(!on)} label={paused ? 'Resume blocking' : 'Pause all blocking'} />
+                    </span>
+                  )}
+                  {rules && <span className="mono faint" style={{ fontSize: 11 }}>{rules.filter((r) => r.enabled).length} of {rules.length} on</span>}
+                </span>
               </div>
               {!rules || !schema ? (
                 <div aria-busy="true" style={{ marginTop: 8 }}>
@@ -316,7 +336,12 @@ export function RulesView({ fromEvent }: { fromEvent?: number }) {
                           <span style={{ fontWeight: 500, fontSize: 13 }}>{r.spec.name}</span>
                           <Sev s={r.spec.severity} />
                           <span className="vchip c-dim"><Icon name={PILLAR_ICON[r.spec.pillar]} size={11} />{r.spec.pillar}</span>
-                          {r.enforceable && <span className="vchip c-dim" title={PRE_RUN_HINT}>pre-run</span>}
+                          {blocks(r.spec.action ?? 'finding') ? (
+                            <span className={`vchip ${paused || !r.enabled ? 'c-dim' : r.spec.action === 'deny' ? 'c-critical' : 'c-warn'}`}
+                              title={paused ? 'Blocking is paused for every rule.' : r.spec.action === 'deny' ? 'Stops matching tool calls before they run.' : 'Waits for your OK before matching tool calls run.'}>
+                              <Icon name="lock" size={11} />{ACTION_LABEL[r.spec.action!]}{paused ? ' · paused' : ''}
+                            </span>
+                          ) : r.enforceable && <span className="vchip c-dim" title={PRE_RUN_HINT}>pre-run</span>}
                           {!r.valid && <span className="vchip c-critical" title={r.error ?? ''}>needs fixing</span>}
                         </span>
                         <span className="mono faint truncate" style={{ fontSize: 11 }} title={describe(r.spec, schema)}>{describe(r.spec, schema)}</span>
@@ -543,7 +568,7 @@ function RuleEditor({ schema, initial, onCancel, onSaved, onSimple }: {
                     {schema.actions.length > 1 && (
                       <div style={{ display: 'grid', gap: 6 }}>
                         <span className="label">On match</span>
-                        <Seg id="vf-rule-action" value={spec.action ?? 'finding'} onChange={(action) => set({ action })} options={schema.actions.map((a) => ({ k: a, l: a === 'finding' ? 'record' : a }))} />
+                        <Seg id="vf-rule-action" value={spec.action ?? 'finding'} onChange={(action) => set({ action })} options={schema.actions.map((a) => ({ k: a, l: ACTION_LABEL[a] ?? a }))} />
                       </div>
                     )}
                   </div>
@@ -563,7 +588,7 @@ function RuleEditor({ schema, initial, onCancel, onSaved, onSimple }: {
           </section>
 
           <div style={{ alignSelf: 'start', position: 'sticky', top: 0 }}>
-            <RulePreviewCard preview={preview} loading={loading} failed={!!problem} flush />
+            <RulePreviewCard preview={preview} loading={loading} failed={!!problem} flush action={spec.action} />
           </div>
         </div>
       </div>

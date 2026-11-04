@@ -1542,8 +1542,54 @@ def _emit_codex_events(body: dict, source: str) -> None:
     ])
 
 
-def _hook_response(source: str, body: dict) -> dict | None:
+# The hook each agent fires before a tool runs, where a cot Block / Ask first
+# rule can answer. Mirrors ENFORCEMENT_SUPPORT in backend/app/user_rules.py.
+DECIDE_HOOKS = {"claude": "PreToolUse", "cursor": "preToolUse"}
+# The agent waits on this before the tool runs. On a timeout or any error the
+# call is allowed: a slow collector must never stall or block an agent.
+_DECIDE_TIMEOUT_S = 0.5
+
+
+def _decide(source: str, body: dict) -> dict | None:
+    """A cot rule's ``deny``/``ask`` decision for a pending tool call, or None to allow."""
     hook = body.get("hook_event_name") or body.get("hook") or body.get("event") or ""
+    # Always ask, even inside the down backoff: one slow ingest post marks the
+    # collector down for a few seconds, and skipping here would let blocked
+    # calls through. A collector that is really down refuses at once; a hung
+    # one costs at most the short timeout below.
+    if DECIDE_HOOKS.get(source) != hook:
+        return None
+    req = urllib.request.Request(
+        f"{COT_ENDPOINT}/v1/decide/{source}",
+        data=json.dumps(body, ensure_ascii=False, default=str).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_DECIDE_TIMEOUT_S) as resp:
+            data = json.loads(resp.read().decode("utf-8") or "{}")
+    except Exception:
+        return None
+    if not isinstance(data, dict) or data.get("decision") not in ("deny", "ask"):
+        return None
+    return data
+
+
+def _hook_response(source: str, body: dict, decision: dict | None = None) -> dict | None:
+    hook = body.get("hook_event_name") or body.get("hook") or body.get("event") or ""
+    if decision is not None:
+        action = decision["decision"]
+        reason = str(decision.get("reason") or "Blocked by a cot rule.")
+        if source == "cursor":
+            return {"permission": action, "user_message": reason, "agent_message": reason}
+        if source == "claude":
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": hook,
+                    "permissionDecision": action,
+                    "permissionDecisionReason": reason,
+                },
+            }
     if source == "cursor":
         if hook in CURSOR_ALLOW_HOOKS:
             return {"permission": "allow"}
@@ -8972,6 +9018,12 @@ def main() -> int:
         body = {"_raw": raw}
 
     hook = body.get("hook_event_name") or body.get("hook") or body.get("event") or ""
+    # Ask before the tool runs, then record the answer on the stored event.
+    decision = _decide(source, body)
+    if decision is not None:
+        body["cot_decision"] = {
+            k: decision.get(k) for k in ("decision", "rule_id", "rule_name", "reason")
+        }
     # Fold the sandbox/approval posture onto the live Codex SessionStart so it
     # matches what the importer records (Codex keeps it out of the hook payload).
     if source == "codex" and hook in ("SessionStart", "sessionStart"):
@@ -9038,7 +9090,7 @@ def main() -> int:
         # responses in now, so active sessions don't wait for cot watch/import.
         _reconcile_cursor_subagents(body)
 
-    response = _hook_response(source, body)
+    response = _hook_response(source, body, decision)
     if response is not None:
         print(json.dumps(response))
     return 0

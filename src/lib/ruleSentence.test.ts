@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { RuleSpec } from './api';
-import { autoName, blankSentence, fromSpec, isSpecific, toSpec } from './ruleSentence';
+import { autoName, blankSentence, fitForBlocking, fromSpec, isSpecific, toSpec } from './ruleSentence';
 
 const base = { pillar: 'security', severity: 'warn' } as const;
 
@@ -90,5 +90,23 @@ describe('isSpecific', () => {
     expect(isSpecific({ ...blankSentence('read'), conds: [{ field: 'target', op: 'is_sensitive_path' }] })).toBe(true);
     expect(isSpecific({ ...blankSentence('mcp'), fails: true })).toBe(true);
     expect(isSpecific(blankSentence('spend'))).toBe(true);
+  });
+
+  it('round-trips Block and Ask first rules through the sentence', () => {
+    const s = { ...blankSentence('shell'), action: 'deny' as const, conds: [{ field: 'target', op: 'contains', value: 'git push --force' }] };
+    const spec = toSpec(s);
+    expect(spec.action).toBe('deny');
+    expect(fromSpec(spec)!.action).toBe('deny');
+    expect(fromSpec({ ...spec, action: 'ask' })!.action).toBe('ask');
+    expect(fromSpec({ ...spec, action: undefined })!.action).toBe('finding');
+  });
+
+  it('drops what a blocking rule cannot decide before the tool runs', () => {
+    const canBlock = (a: string) => !a || a === 'claude' || a === 'cursor';
+    const s = { ...blankSentence('shell'), agent: 'codex', fails: true, limit: { count: 3, per: 'session' } };
+    expect(fitForBlocking(s, canBlock)).toEqual({ fails: false, limit: null, agent: '' });
+    const spend = fitForBlocking({ ...blankSentence('spend'), agent: 'claude' }, canBlock);
+    expect(spend.verb).toBe('shell');
+    expect(spend.agent).toBeUndefined();
   });
 });

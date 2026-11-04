@@ -33,10 +33,13 @@ auto-resolve, sticky dismissal), evidence and Insights UI.
 "field": <num field for sum / any field for distinct>, "op": "gte"|"gt"|...,
 "value": <number>}`` and fires once per group whose aggregate passes.
 
-## Built for enforcement later
-Today cot only observes — the bridge posts hooks fire-and-forget. Blocking a
-tool call needs a synchronous ``PreToolUse`` round trip, and the pieces it
-needs are already here so that step is wiring, not a rewrite:
+## Enforcement
+A rule whose action is ``ask`` or ``deny`` can stop a tool call before it runs.
+The bridge asks ``POST /v1/decide/{source}`` from the agent's pre-tool hook,
+:func:`decide_hook` answers from the in-memory rule cache, and the bridge maps
+the answer onto that agent's hook reply. Only agents in
+:data:`ENFORCEMENT_SUPPORT` can carry a decision today; every other agent keeps
+observing. If the collector is slow or down the bridge allows the call.
 
 * **One evaluator, two callers.** Conditions run over a flat *facts* mapping,
   not over SQLite rows. Stored events become facts via :func:`facts_from_event`;
@@ -48,9 +51,9 @@ needs are already here so that step is wiring, not a rewrite:
   (``post``: status, duration, tokens, cost). A rule is *enforceable* only if it
   is a ``match`` rule over ``pre`` fields — the API reports this per rule so the
   UI can show which rules could block once enforcement ships.
-* **Actions.** ``action`` is ``"finding"`` today; ``"ask"`` and ``"deny"`` are
-  reserved and rejected by validation until :data:`ENFORCEMENT_ENABLED` flips.
-  :func:`decide` already resolves a hook to the strictest matching decision.
+* **Actions.** ``"finding"`` records an insight; ``"ask"`` and ``"deny"`` also
+  block (they must be enforceable). :func:`decide` resolves a hook to the
+  strictest matching decision.
 * **Bounded cost.** Specs are size-capped, regexes are compiled once at load and
   matched against a capped prefix of the value, and compiled rules are cached —
   the hot path must stay well inside a hook's timeout.
@@ -87,11 +90,22 @@ CATEGORIES = (
     "subagent", "compaction", "lifecycle", "notification",
 )
 
-# "finding" records an insight. "ask"/"deny" are the enforcement actions a
-# synchronous PreToolUse hook will return; validation rejects them until then.
+# "finding" records an insight. "ask"/"deny" are returned from the agent's
+# pre-tool hook (and still record findings over history).
 ACTIONS = ("finding", "ask", "deny")
 ENFORCEMENT_ACTIONS = ("ask", "deny")
-ENFORCEMENT_ENABLED = False
+ENFORCEMENT_ENABLED = True
+
+# Agents whose pre-tool hook reply can carry a decision, and which actions each
+# honours. The bridge holds the matching reply shapes (``_hook_response``).
+ENFORCEMENT_SUPPORT: dict[str, tuple[str, ...]] = {
+    "claude": ("deny", "ask"),
+    "cursor": ("deny", "ask"),
+}
+# The hook each agent fires before a tool runs.
+PRE_TOOL_HOOKS = {"claude": "PreToolUse", "cursor": "preToolUse"}
+# Settings key for the global "pause all blocks" switch.
+PAUSED_KEY = "rules_enforcement_paused"
 
 ID_PREFIX = "user."
 
@@ -505,7 +519,25 @@ def validate(spec: Any, *, allow_enforcement: bool | None = None) -> dict[str, A
         out["threshold"] = _validate_threshold(spec.get("threshold"))
         if out["action"] in ENFORCEMENT_ACTIONS:
             raise SpecError("action", "only match rules can block")
+    if out["action"] in ENFORCEMENT_ACTIONS:
+        _check_blockable(out)
     return out
+
+
+def _check_blockable(spec: Mapping[str, Any]) -> None:
+    """A blocking rule must be decidable before the tool runs, on an agent that can block."""
+    late = sorted(f for f in _fields_used(spec["when"]) if FIELDS[f].phase == "post")
+    if late:
+        labels = ", ".join(FIELDS[f].label for f in late)
+        raise SpecError("action", f"can't block on {labels}: it's only known after the tool runs")
+    sources = spec["scope"]["sources"]
+    if sources and not any(s in ENFORCEMENT_SUPPORT for s in sources):
+        raise SpecError("scope.sources", f"blocking works for {_support_labels()} today")
+
+
+def _support_labels() -> str:
+    labels = {"claude": "Claude Code", "cursor": "Cursor"}
+    return " and ".join(labels.get(s, s) for s in ENFORCEMENT_SUPPORT)
 
 
 def _fields_used(node: Mapping[str, Any]) -> set[str]:
@@ -759,7 +791,7 @@ def compile_rule(rule_id: str, spec: dict[str, Any], enabled: bool = True) -> Co
     )
 
 
-# --- enforcement (not wired to the bridge yet) -------------------------------------
+# --- enforcement ---------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -773,13 +805,17 @@ class Decision:
 _ACTION_RANK = {"deny": 0, "ask": 1}
 
 
+def _reason(action: str, r: CompiledRule) -> str:
+    """What the agent and the person see: which rule, and the rule's advice."""
+    lead = f"Blocked by cot rule “{r.name}”" if action == "deny" else f"cot rule “{r.name}” asks first"
+    rec = (r.spec.get("recommendation") or "").strip()
+    return f"{lead}. {rec}" if rec else f"{lead}."
+
+
 def decide(facts: Mapping[str, Any], rules: list[CompiledRule] | None = None) -> Decision | None:
     """The strictest enforcement decision for a pending tool call, or None to allow.
 
     Only enabled, enforceable rules with an ``ask``/``deny`` action take part.
-    A future synchronous ``PreToolUse`` endpoint calls this with
-    :func:`facts_from_hook`; the bridge maps the decision onto each agent's
-    hook response (Claude ``permissionDecision``, Cursor ``permission``, …).
     """
     pool = rules if rules is not None else compiled_rules()
     best: Decision | None = None
@@ -789,15 +825,47 @@ def decide(facts: Mapping[str, Any], rules: list[CompiledRule] | None = None) ->
             continue
         if not r.matches(facts):
             continue
-        d = Decision(
-            action=action,
-            rule_id=r.id,
-            rule_name=r.name,
-            reason=r.spec.get("recommendation") or f"Blocked by cot rule “{r.name}”.",
-        )
+        d = Decision(action=action, rule_id=r.id, rule_name=r.name, reason=_reason(action, r))
         if best is None or _ACTION_RANK[action] < _ACTION_RANK[best.action]:
             best = d
     return best
+
+
+# cot's own bridge runs as a shell command from some agents' tools; blocking it
+# could cut off the hooks that do the blocking.
+_COT_SELF = re.compile(r"(^|[\s/])\.cot/bin/cot(\s|$)")
+
+
+def decide_hook(source: str, body: Mapping[str, Any]) -> Decision | None:
+    """The decision for a live pre-tool hook body, or None to allow.
+
+    Reads only the in-memory rule cache once it is warm, so it stays well
+    inside the bridge's short decide timeout.
+    """
+    supported = ENFORCEMENT_SUPPORT.get(source)
+    if not supported or enforcement_paused():
+        return None
+    hook = body.get("hook_event_name") or body.get("hook") or body.get("event")
+    if hook != PRE_TOOL_HOOKS.get(source):
+        return None
+    if not any(r.enabled and r.spec.get("action") in ENFORCEMENT_ACTIONS for r in compiled_rules()):
+        return None
+    facts = facts_from_hook(source, body)
+    if _COT_SELF.search(_as_text(facts.get("target"))):
+        return None
+    d = decide(facts)
+    return d
+
+
+def enforcement_paused() -> bool:
+    if _cache["paused"] is None:
+        _cache["paused"] = db.get_setting(PAUSED_KEY) == "1"
+    return bool(_cache["paused"])
+
+
+def set_enforcement_paused(paused: bool) -> None:
+    db.set_setting(PAUSED_KEY, "1" if paused else "0")
+    _cache["paused"] = paused
 
 
 # --- storage & cache --------------------------------------------------------------
@@ -808,11 +876,11 @@ def decide(facts: Mapping[str, Any], rules: list[CompiledRule] | None = None) ->
 # because a read there can queue for seconds behind a long findings pass plus a
 # pending writer (rollback-journal mode). Keyed by DB path: tests and the replay
 # store swap databases under the same process.
-_cache: dict[str, Any] = {"path": None, "rows": None, "compiled": None}
+_cache: dict[str, Any] = {"path": None, "rows": None, "compiled": None, "paused": None}
 
 
 def _invalidate() -> None:
-    _cache.update(path=None, rows=None, compiled=None)
+    _cache.update(path=None, rows=None, compiled=None, paused=None)
     # Findings computed with the old rule set are shared for a few seconds;
     # drop them so a saved rule shows up straight away.
     from .insights import forget_shared_insights  # insights imports this module
@@ -824,7 +892,7 @@ def _rows() -> list[dict[str, Any]]:
     path = str(db.db_path())
     if _cache["path"] != path or _cache["rows"] is None:
         rows = [dict(r) for r in db.list_user_rules()]
-        _cache.update(path=path, rows=rows, compiled=None)
+        _cache.update(path=path, rows=rows, compiled=None, paused=None)
     return _cache["rows"]
 
 
@@ -953,6 +1021,8 @@ def schema() -> dict[str, Any]:
         "severities": list(SEVERITIES),
         "actions": [a for a in ACTIONS if ENFORCEMENT_ENABLED or a not in ENFORCEMENT_ACTIONS],
         "enforcement_enabled": ENFORCEMENT_ENABLED,
+        "enforcement_sources": {s: list(a) for s, a in ENFORCEMENT_SUPPORT.items()},
+        "enforcement_paused": enforcement_paused(),
         "sources": list(SOURCES),
         "fields": [
             {"name": f.name, "label": f.label, "kind": f.kind, "phase": f.phase,
