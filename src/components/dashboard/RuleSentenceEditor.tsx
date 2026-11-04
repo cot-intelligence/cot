@@ -3,6 +3,7 @@ import {
   draftRuleFromText,
   getSettings,
   RuleSpecError,
+  type RuleAction,
   type RuleEventDraft,
   type RuleLeaf,
   type RulePreview,
@@ -10,7 +11,10 @@ import {
   type RuleSpec,
 } from '../../lib/api';
 import {
+  ACTION_LEADS,
   autoName,
+  blocks,
+  fitForBlocking,
   fromSpec,
   isSpecific,
   opsFor,
@@ -30,7 +34,7 @@ import { Icon } from '../forest/icons';
 import { Seg } from '../forest/ui';
 
 const PREVIEW_DAYS = 30;
-const PRE_RUN_HINT = 'Uses only details known before a tool runs, so this rule can switch to blocking once cot supports it.';
+const PRE_RUN_HINT = 'Uses only details known before a tool runs, so this rule can block or ask first.';
 
 /** The friendly editor: a rule written as one sentence, with real examples underneath. */
 export function RuleSentenceEditor({ schema, title, initial, draft, onCancel, onSave, onAdvanced }: {
@@ -68,6 +72,11 @@ export function RuleSentenceEditor({ schema, title, initial, draft, onCancel, on
       limit: verb === 'spend' ? null : s.limit,
     });
   };
+  const canBlock = (agent: string) => !agent || agent in schema.enforcement_sources;
+  const blocking = blocks(s.action);
+  const pickAction = (action: RuleAction) => set({ action, ...(blocks(action) ? fitForBlocking(s, canBlock) : {}) });
+  const blockingAgents = Object.keys(schema.enforcement_sources).map(agentLabel).join(' and ');
+
   const pickChoice = (i: number) => {
     if (!draft) return;
     setPicked(i);
@@ -89,7 +98,8 @@ export function RuleSentenceEditor({ schema, title, initial, draft, onCancel, on
     }
   };
 
-  const agents = [{ value: '', label: 'any agent' }, ...schema.sources.map((a) => ({ value: a, label: agentLabel(a) }))];
+  const agents = [{ value: '', label: 'any agent' }, ...schema.sources.filter((a) => !blocking || canBlock(a)).map((a) => ({ value: a, label: agentLabel(a) }))];
+  const verbs = VERBS.filter((x) => !blocking || x.key !== 'spend');
   const perOptions = Object.entries(PER)
     .filter(([k]) => k !== 'mcp_server' || s.verb === 'mcp')
     .filter(([k]) => k !== 'tool' || s.verb === 'mcp' || s.verb === 'any')
@@ -140,9 +150,9 @@ export function RuleSentenceEditor({ schema, title, initial, draft, onCancel, on
         <section className="card">
           <div className="card-b rule-sentence">
             <div className="rule-sline">
-              <span>Tell me when</span>
+              <Dropdown label="What cot does" value={s.action} onChange={(a) => pickAction(a as RuleAction)} options={ACTION_LEADS.map((x) => ({ value: x.action, label: x.label }))} />
               <Dropdown label="Agent" value={s.agent} onChange={(agent) => set({ agent })} options={agents} />
-              <Dropdown label="Activity" value={s.verb} onChange={(k) => pickVerb(k as VerbKey)} options={VERBS.map((x) => ({ value: x.key, label: x.label }))} />
+              <Dropdown label="Activity" value={s.verb} onChange={(k) => pickVerb(k as VerbKey)} options={verbs.map((x) => ({ value: x.key, label: x.label }))} />
               {s.verb === 'spend' && (
                 <>
                   <span className="input-wrap"><span className="dim" style={{ position: 'absolute', left: 10, fontSize: 13 }}>$</span>
@@ -179,9 +189,9 @@ export function RuleSentenceEditor({ schema, title, initial, draft, onCancel, on
             {s.verb !== 'spend' && (
               <div className="rule-adds">
                 {v.about.length > 0 && <button type="button" className="rule-add" onClick={() => set({ conds: [...s.conds, { field: v.about[0].field, op: 'contains', value: '' }] })}>+ another condition</button>}
-                <button type="button" className="rule-add" aria-pressed={s.fails} onClick={() => set({ fails: !s.fails })}>{s.fails ? '✓ ' : '+ '}and it fails</button>
+                {!blocking && <button type="button" className="rule-add" aria-pressed={s.fails} onClick={() => set({ fails: !s.fails })}>{s.fails ? '✓ ' : '+ '}and it fails</button>}
                 {!s.projects.length && !details && <button type="button" className="rule-add" onClick={() => setDetails(true)}>+ only in some projects</button>}
-                {s.limit ? (
+                {blocking ? null : s.limit ? (
                   <span className="rule-sline" style={{ gap: 6 }}>
                     <span>at least</span>
                     <input className="input mono" type="number" min={1} aria-label="Times" style={{ width: 70 }} value={s.limit.count}
@@ -200,6 +210,12 @@ export function RuleSentenceEditor({ schema, title, initial, draft, onCancel, on
               <div className="rule-adds"><button type="button" className="rule-add" onClick={() => setDetails(true)}>+ only in some projects</button></div>
             )}
 
+            {blocking && (
+              <p className="rule-note">
+                {s.action === 'deny' ? 'The agent stops before the tool runs' : 'The agent waits for your OK before the tool runs'} and sees your reason.
+                {!s.agent && ` Works in ${blockingAgents}. Other agents keep recording it.`}
+              </p>
+            )}
             {needsDetail && <p className="rule-err">Say what to look for first, for example what the {v.noun} contains. Without it, this rule would flag every {v.noun}.</p>}
             {problem && <p className="rule-err">{problem.message}</p>}
           </div>
@@ -231,8 +247,9 @@ export function RuleSentenceEditor({ schema, title, initial, draft, onCancel, on
                   </div>
                 </div>
                 <div className="rule-sec">
-                  <label className="label" htmlFor="vf-rs-rec">What to do about it</label>
-                  <textarea id="vf-rs-rec" className="input textarea" rows={2} maxLength={1000} placeholder="Shown with every finding. Optional."
+                  <label className="label" htmlFor="vf-rs-rec">{blocking ? 'Reason' : 'What to do about it'}</label>
+                  <textarea id="vf-rs-rec" className="input textarea" rows={2} maxLength={1000}
+                    placeholder={blocking ? 'Shown to you and the agent when it is stopped, e.g. “Use the read replica.” Optional.' : 'Shown with every finding. Optional.'}
                     value={s.recommendation} onChange={(e) => set({ recommendation: e.target.value })} />
                 </div>
               </div>
@@ -240,7 +257,7 @@ export function RuleSentenceEditor({ schema, title, initial, draft, onCancel, on
           </div>
         </section>
 
-        {specific && <RulePreviewCard preview={preview} loading={loading} failed={!!problem} noun={v.noun} />}
+        {specific && <RulePreviewCard preview={preview} loading={loading} failed={!!problem} noun={v.noun} action={s.action} />}
       </div>
     </div>
   );
@@ -303,13 +320,13 @@ function BackticksAsMono({ text }: { text: string }) {
 }
 
 /** What the rule would have caught: counts, then the most frequent real examples. */
-export function RulePreviewCard({ preview, loading, failed, noun = 'event', flush = false }: { preview: RulePreview | null; loading: boolean; failed: boolean; noun?: string; flush?: boolean }) {
+export function RulePreviewCard({ preview, loading, failed, noun = 'event', flush = false, action = 'finding' }: { preview: RulePreview | null; loading: boolean; failed: boolean; noun?: string; flush?: boolean; action?: RuleAction }) {
   // Stacked under the sentence builder it needs a gap; beside the form
   // (`flush`) its top lines up with the form card's.
   return (
     <section className="card" style={flush ? undefined : { marginTop: 16 }} aria-live="polite" aria-busy={loading}>
       <div className="card-h">
-        <span className="card-t">Would have caught</span>
+        <span className="card-t">{action === 'deny' ? 'Would have blocked' : action === 'ask' ? 'Would have asked about' : 'Would have caught'}</span>
         <span className="mono faint" style={{ fontSize: 11 }}>{loading ? 'checking…' : `last ${PREVIEW_DAYS} days`}</span>
       </div>
       <div className="card-b" style={{ display: 'grid', gap: 12 }}>
@@ -318,7 +335,7 @@ export function RulePreviewCard({ preview, loading, failed, noun = 'event', flus
         ) : !preview ? (
           <span className="sk" style={{ height: 18, width: 200 }} />
         ) : preview.events_matched === 0 ? (
-          <p className="dim" style={{ margin: 0 }}>Nothing in the last {PREVIEW_DAYS} days. It will still catch new matches from now on.</p>
+          <p className="dim" style={{ margin: 0 }}>Nothing in the last {PREVIEW_DAYS} days. It will {action === 'deny' ? 'block' : action === 'ask' ? 'ask about' : 'still catch'} new matches from now on.</p>
         ) : (
           <>
             <p style={{ margin: 0 }}>

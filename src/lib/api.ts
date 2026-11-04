@@ -2090,6 +2090,10 @@ export interface RuleSchema {
   severities: InsightSeverity[];
   actions: RuleAction[];
   enforcement_enabled: boolean;
+  /** Agents whose hooks can block, and which of ask/deny each honours. */
+  enforcement_sources: Record<string, RuleAction[]>;
+  /** The global switch: while true no rule blocks or asks. */
+  enforcement_paused: boolean;
   sources: string[];
   fields: RuleField[];
   operators: RuleOperator[];
@@ -2135,7 +2139,7 @@ export interface UserRule {
   /** False when a stored spec no longer validates (it is skipped, not run). */
   valid: boolean;
   error: string | null;
-  /** Decidable before the tool runs, so it could block once enforcement ships. */
+  /** Decidable before the tool runs, so it can block. */
   enforceable: boolean;
 }
 
@@ -2179,6 +2183,11 @@ const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
 export async function getRuleSchema(): Promise<RuleSchema> {
   return json<RuleSchema>(await fetch('/v1/rules/schema'));
+}
+
+/** Pause (or resume) every Block / Ask first rule at once. */
+export async function setEnforcementPaused(paused: boolean): Promise<{ paused: boolean }> {
+  return json(await fetch('/v1/enforcement', { method: 'PUT', headers: JSON_HEADERS, body: JSON.stringify({ paused }) }));
 }
 
 export async function getRules(): Promise<UserRule[]> {

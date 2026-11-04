@@ -2186,6 +2186,55 @@ def delete_rule(rule_id: str) -> dict[str, Any]:
     return {"ok": True}
 
 
+class EnforcementBody(BaseModel):
+    paused: bool
+
+
+@app.put("/v1/enforcement")
+def set_rule_enforcement(body: EnforcementBody) -> dict[str, Any]:
+    """The global switch that pauses every Block / Ask first rule at once."""
+    user_rules.set_enforcement_paused(body.paused)
+    db.record_audit_event("rules.enforcement", target="rules", detail={"paused": body.paused})
+    return {"paused": body.paused}
+
+
+def _record_block(source: str, body: dict[str, Any], d: user_rules.Decision) -> None:
+    try:
+        db.record_audit_event(
+            f"rules.{d.action}",
+            target=d.rule_id,
+            detail={
+                "source": source,
+                "rule": d.rule_name,
+                "session_id": body.get("session_id"),
+                "tool": body.get("tool_name"),
+            },
+        )
+    except Exception:
+        pass
+
+
+@app.post("/v1/decide/{source}")
+async def decide_hook(source: str, request: Request) -> dict[str, Any]:
+    """Allow, ask or deny a pending tool call. The bridge calls this from an
+    agent's pre-tool hook with a short timeout and allows the call on any
+    failure, so this must answer from memory and never wait on a DB write."""
+    try:
+        body = await request.json()
+    except Exception:
+        return {"decision": "allow"}
+    if not isinstance(body, dict):
+        return {"decision": "allow"}
+    try:
+        d = await asyncio.to_thread(user_rules.decide_hook, source, body)
+    except Exception:
+        return {"decision": "allow"}
+    if d is None:
+        return {"decision": "allow"}
+    threading.Thread(target=_record_block, args=(source, body, d), daemon=True).start()
+    return {"decision": d.action, "rule_id": d.rule_id, "rule_name": d.rule_name, "reason": d.reason}
+
+
 class AnalyzeRequest(BaseModel):
     days: int = 30
 

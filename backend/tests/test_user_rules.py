@@ -3,7 +3,7 @@
 Covers spec validation, the condition evaluator as a pure function over facts,
 match/threshold compilation against a real store, the insights integration
 (lifecycle + cleanup on delete), the HTTP API, and the enforcement seam
-(``decide`` over hook facts) that isn't wired to the bridge yet.
+(``decide`` over hook facts) and the ``/v1/decide`` endpoint the bridge calls.
 """
 
 from __future__ import annotations
@@ -99,11 +99,23 @@ def test_validate_rejects_with_path(bad, path):
     assert exc.value.path == path
 
 
-def test_blocking_actions_reserved_until_enforcement_ships():
+def test_blocking_actions_validate_when_enforceable():
+    assert user_rules.validate(_spec(action="deny"))["action"] == "deny"
     with pytest.raises(user_rules.SpecError) as exc:
-        user_rules.validate(_spec(action="deny"))
+        user_rules.validate(_spec(action="deny"), allow_enforcement=False)
     assert exc.value.path == "action"
-    assert user_rules.validate(_spec(action="deny"), allow_enforcement=True)["action"] == "deny"
+
+
+def test_blocking_rule_rejects_post_fields_and_unsupported_agents():
+    late = _spec(action="deny", when={"field": "status", "op": "eq", "value": "error"})
+    with pytest.raises(user_rules.SpecError) as exc:
+        user_rules.validate(late)
+    assert exc.value.path == "action" and "Result" in str(exc.value)
+    with pytest.raises(user_rules.SpecError) as exc:
+        user_rules.validate(_spec(action="ask", scope={"sources": ["codex"]}))
+    assert exc.value.path == "scope.sources"
+    # A mixed scope is fine: it blocks where it can.
+    assert user_rules.validate(_spec(action="ask", scope={"sources": ["codex", "claude"]}))
 
 
 def test_condition_count_is_capped():
@@ -299,7 +311,9 @@ def client():
 def test_api_crud_preview_and_errors(client):
     _event("s1", category="shell", target="psql -h prod-db", status="ok")
     schema = client.get("/v1/rules/schema").json()
-    assert "deny" not in schema["actions"] and schema["enforcement_enabled"] is False
+    assert "deny" in schema["actions"] and schema["enforcement_enabled"] is True
+    assert schema["enforcement_sources"]["claude"] == ["deny", "ask"]
+    assert schema["enforcement_paused"] is False
     assert any(f["name"] == "target" and f["phase"] == "pre" for f in schema["fields"])
 
     preview = client.post("/v1/rules/preview", json={"spec": _spec(), "days": 30}).json()
@@ -455,3 +469,70 @@ def test_saving_a_rule_drops_shared_findings():
     insights.compute_insights_shared(30)  # cached without the rule
     rule = user_rules.create_rule(_spec())
     assert any(f["id"] == rule["id"] for f in insights.compute_insights_shared(30)["insights"])
+
+
+# --- live decisions (/v1/decide) ---------------------------------------------------
+
+_CLAUDE_PRE = {
+    "hook_event_name": "PreToolUse",
+    "session_id": "s1",
+    "cwd": "/work/app",
+    "tool_name": "Bash",
+    "tool_input": {"command": "psql -h prod-db -c 'select 1'"},
+}
+_CURSOR_PRE = {
+    "hook_event_name": "preToolUse",
+    "conversation_id": "c1",
+    "workspace_roots": ["/work/app"],
+    "tool_name": "Shell",
+    "tool_input": {"command": "psql -h prod-db"},
+}
+
+
+def test_decide_hook_blocks_pre_tool_calls_only():
+    user_rules.create_rule(_spec(action="deny", recommendation="Use the replica."))
+    d = user_rules.decide_hook("claude", _CLAUDE_PRE)
+    assert d is not None and d.action == "deny"
+    assert d.reason == "Blocked by cot rule “Prod database access”. Use the replica."
+    assert user_rules.decide_hook("claude", {**_CLAUDE_PRE, "hook_event_name": "PostToolUse"}) is None
+    assert user_rules.decide_hook("codex", _CLAUDE_PRE) is None  # can't carry a decision
+    safe = {**_CLAUDE_PRE, "tool_input": {"command": "ls"}}
+    assert user_rules.decide_hook("claude", safe) is None
+
+
+def test_decide_hook_reads_cursor_payloads():
+    user_rules.create_rule(_spec(action="ask"))
+    d = user_rules.decide_hook("cursor", _CURSOR_PRE)
+    assert d is not None and d.action == "ask" and "asks first" in d.reason
+
+
+def test_decide_hook_ignores_finding_and_disabled_rules():
+    user_rules.create_rule(_spec())
+    user_rules.create_rule(_spec(action="deny"), enabled=False)
+    assert user_rules.decide_hook("claude", _CLAUDE_PRE) is None
+
+
+def test_decide_hook_never_blocks_cot_itself():
+    user_rules.create_rule(_spec(action="deny", when={"field": "category", "op": "eq", "value": "shell"}))
+    own = {**_CLAUDE_PRE, "tool_input": {"command": "$HOME/.cot/bin/cot status"}}
+    assert user_rules.decide_hook("claude", own) is None
+    assert user_rules.decide_hook("claude", _CLAUDE_PRE) is not None
+
+
+def test_pause_switch_allows_everything(client):
+    user_rules.create_rule(_spec(action="deny"))
+    assert client.post("/v1/decide/claude", json=_CLAUDE_PRE).json()["decision"] == "deny"
+    assert client.put("/v1/enforcement", json={"paused": True}).json() == {"paused": True}
+    assert client.post("/v1/decide/claude", json=_CLAUDE_PRE).json() == {"decision": "allow"}
+    assert client.get("/v1/rules/schema").json()["enforcement_paused"] is True
+    client.put("/v1/enforcement", json={"paused": False})
+    assert client.post("/v1/decide/claude", json=_CLAUDE_PRE).json()["decision"] == "deny"
+
+
+def test_decide_endpoint_answers_and_allows_on_bad_input(client):
+    rule = user_rules.create_rule(_spec(action="deny"))
+    r = client.post("/v1/decide/claude", json=_CLAUDE_PRE).json()
+    assert r["decision"] == "deny" and r["rule_id"] == rule["id"]
+    assert client.post("/v1/decide/claude", content=b"not json").json() == {"decision": "allow"}
+    assert client.post("/v1/decide/claude", json=[1, 2]).json() == {"decision": "allow"}
+    assert client.post("/v1/decide/nope", json=_CLAUDE_PRE).json() == {"decision": "allow"}
