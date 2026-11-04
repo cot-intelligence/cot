@@ -65,7 +65,7 @@ export function useConnections(agentIds: AgentId[]) {
         if (!active) return;
         setConnected(Object.fromEntries(agentIds.map((id) => {
           const a = hooks.agents.find((x) => x.source === id);
-          return [id, { ok: !!a && a.health !== 'not_installed' && a.health !== 'missing_hooks', events: a?.events ?? 0 }];
+          return [id, { ok: !!a && a.health !== 'not_installed' && a.health !== 'missing_hooks' && a.health !== 'bridge_broken', events: a?.events ?? 0 }];
         })));
       } catch {
         /* the collector may still be starting */

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app import db, main, store
+from app import db, hooks_guard, main, store
 from app.normalize import normalize
 from app.tool_classification import canonical_tool
 
@@ -56,7 +56,7 @@ def test_terminal_execution_status_is_visible(fields, status):
 
 def test_removed_plugin_is_not_inferred_from_historical_events(fresh_db, monkeypatch):
     db.record_ingest("opencode", {"session_id": "history", "hook_event_name": "UserPromptSubmit", "prompt": "old"})
-    monkeypatch.setattr(main, "_read_hook_manifest", lambda: {"agents": {"opencode": {
+    monkeypatch.setattr(hooks_guard, "read_manifest", lambda: {"agents": {"opencode": {
         "installed": False, "installed_hooks": [], "missing_hooks": main.EXPECTED_HOOKS["opencode"],
     }}})
     status = next(a for a in main.get_hook_status()["agents"] if a["source"] == "opencode")
@@ -67,7 +67,7 @@ def test_removed_plugin_is_not_inferred_from_historical_events(fresh_db, monkeyp
 
 def test_manual_plugin_inferred_without_its_own_manifest_entry(fresh_db, monkeypatch):
     db.record_ingest("opencode", {"session_id": "manual", "hook_event_name": "UserPromptSubmit", "prompt": "new"})
-    monkeypatch.setattr(main, "_read_hook_manifest", lambda: {"agents": {"claude": {"installed": True}}})
+    monkeypatch.setattr(hooks_guard, "read_manifest", lambda: {"agents": {"claude": {"installed": True}}})
     status = next(a for a in main.get_hook_status()["agents"] if a["source"] == "opencode")
     assert status["installed"] is True
     assert status["missing_hooks"] == []

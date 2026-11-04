@@ -32,6 +32,8 @@ import {
   type McpInstallAgent,
   getHooksInstall,
   installHooks,
+  refreshHooks,
+  uninstallHooks,
   type HooksInstallStatus,
 } from '../../lib/api';
 import { sourceLabel } from '../../lib/sourceLabels';
@@ -39,6 +41,7 @@ import { setPref, usePrefs, type Prefs } from '../../lib/prefs';
 import { useTheme } from '../../lib/theme';
 import { checkAppUpdate, inApp, installAppUpdate, mb, useAppUpdate } from '../../lib/appUpdates';
 import { usePolling } from '../../lib/usePolling';
+import { latestRepairs, PAUSED_NOTE, repairLine } from '../../lib/hookRepairs';
 import { fmt } from '../forest/format';
 import { Icon } from '../forest/icons';
 import { Agent, Seg, Switch } from '../forest/ui';
@@ -81,6 +84,7 @@ const HOOK_HEALTH: Record<HookHealthState, { label: string; c: string }> = {
   healthy: { label: 'healthy', c: 'c-ok' },
   missing_hooks: { label: 'missing hooks', c: 'c-critical' },
   not_installed: { label: 'not installed', c: 'c-critical' },
+  bridge_broken: { label: 'bridge broken', c: 'c-critical' },
   stale: { label: 'stale', c: 'c-warn' },
   no_events: { label: 'no events yet', c: 'c-dim' },
 };
@@ -305,17 +309,21 @@ function AiSection({ settings: s, onSettings }: { settings: Settings | null; onS
 }
 
 function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) {
+  const queryClient = useQueryClient();
   const { data: health, error } = usePolling<Health>(['health'], () => getHealth(), 10000);
   const { data: hooks } = usePolling<HookStatus>(['hookStatus'], () => getHookStatus(), 10000);
   const [r, setR] = useState<RetentionStatus | null>(null);
   const [direct, setDirect] = useState<HooksInstallStatus | null>(null);
   const [wiring, setWiring] = useState(false);
   const [wireNote, setWireNote] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [busyAgent, setBusyAgent] = useState<string | null>(null);
   useEffect(() => {
     getHooksInstall().then(setDirect).catch(() => {});
     getRetention().then(setR).catch(() => {});
   }, []);
-  const unwired = (hooks?.agents ?? []).filter((h) => h.health === 'not_installed' || h.health === 'missing_hooks').map((h) => h.source);
+  const unwired = (hooks?.agents ?? []).filter((h) => h.health === 'not_installed' || h.health === 'missing_hooks' || h.health === 'bridge_broken').map((h) => h.source);
+  const reload = () => queryClient.invalidateQueries({ queryKey: ['hookStatus'] });
   const wire = async () => {
     setWiring(true);
     setWireNote(null);
@@ -331,9 +339,42 @@ function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) 
       setWireNote(e instanceof Error ? e.message : 'Could not connect the agents.');
     } finally {
       setWiring(false);
+      void reload();
     }
   };
+  const check = async () => {
+    setChecking(true);
+    try {
+      queryClient.setQueryData(['hookStatus'], await refreshHooks());
+    } catch {
+      void reload();
+    } finally {
+      setChecking(false);
+    }
+  };
+  const disconnect = async (agent: string) => {
+    setBusyAgent(agent);
+    setWireNote(null);
+    try {
+      await uninstallHooks([agent]);
+      setWireNote(`Disconnected ${sourceLabel(agent)}. Its own hooks are untouched.`);
+    } catch (e) {
+      setWireNote(e instanceof Error ? e.message : 'Could not disconnect the agent.');
+    } finally {
+      setBusyAgent(null);
+      void reload();
+    }
+  };
+  const setKeep = (on: boolean) => {
+    if (!hooks) return;
+    queryClient.setQueryData(['hookStatus'], { ...hooks, keep_wired: on });
+    updateSettings({ hooks_keep_wired: on }).catch(() => {}).finally(() => void reload());
+  };
   const now = new Date().toISOString();
+  const lastRepair = latestRepairs(hooks);
+  const keepHint = hooks?.keep_wired
+    ? `When an agent you connected loses cot's hooks, cot adds them back and backs up the config first. ${hooks.checked_at ? `Checked ${fmt.ago(hooks.checked_at, now)}.` : ''}`
+    : 'Off: cot reports missing hooks but leaves agent configs alone.';
   return (
     <Section id="collector" title="Collector & hooks" desc="The local API that receives agent events, and the hooks that feed it.">
       <dl className="set-facts">
@@ -343,17 +384,27 @@ function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) 
         <div><dt className="label">Database</dt><dd className="mono" title={health?.db_path}>{health ? homePath(health.db_path) : '—'}{r ? ` · ${fmt.bytes(r.db_size_bytes)}` : ''}</dd></div>
       </dl>
       <ul className="set-list">
-        {(hooks?.agents ?? []).map((h) => (
-          <li key={h.source}>
-            <div style={{ display: 'grid', gap: 2, minWidth: 0 }}>
-              <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Agent id={h.source} /><span className={`vchip ${HOOK_HEALTH[h.health].c}`}><span className="dot" />{HOOK_HEALTH[h.health].label}</span></span>
-              <span className="mono faint truncate" style={{ fontSize: 11 }} title={h.config_path ?? ''}>{h.config_path ? homePath(h.config_path) : 'no config file'}</span>
-            </div>
-            <span className="mono dim" style={{ fontSize: 12, textAlign: 'right', whiteSpace: 'nowrap' }}>
-              {h.installed_hooks.length}/{h.expected_hooks.length} hooks<br /><span className="faint">{h.last_event ? `last event ${fmt.ago(h.last_event, now)}` : 'no events yet'}</span>
-            </span>
-          </li>
-        ))}
+        {(hooks?.agents ?? []).map((h) => {
+          const rep = lastRepair.get(h.source);
+          const note = h.repair_paused ? PAUSED_NOTE : rep ? repairLine(rep, fmt.ago(rep.at, now)) : null;
+          return (
+            <li key={h.source}>
+              <div style={{ display: 'grid', gap: 2, minWidth: 0 }}>
+                <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Agent id={h.source} /><span className={`vchip ${HOOK_HEALTH[h.health].c}`}><span className="dot" />{HOOK_HEALTH[h.health].label}</span></span>
+                <span className="mono faint truncate" style={{ fontSize: 11 }} title={h.config_path ?? ''}>{h.config_path ? homePath(h.config_path) : 'no config file'}</span>
+                {note && <span className="dim" style={{ fontSize: 12, ...(h.repair_paused || rep?.status === 'error' ? { color: 'var(--v-amber)' } : {}) }}>{note}</span>}
+              </div>
+              <span style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                <span className="mono dim" style={{ fontSize: 12, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                  {h.installed_hooks.length}/{h.expected_hooks.length} hooks<br /><span className="faint">{h.last_event ? `last event ${fmt.ago(h.last_event, now)}` : 'no events yet'}</span>
+                </span>
+                {direct?.available && h.wanted && h.installed && (
+                  <button type="button" className="vbtn vbtn-ghost vbtn-sm" disabled={busyAgent !== null} onClick={() => void disconnect(h.source)}>{busyAgent === h.source ? 'Disconnecting…' : 'Disconnect'}</button>
+                )}
+              </span>
+            </li>
+          );
+        })}
         {!hooks && <li className="dim" style={{ fontSize: 13 }}>Checking hook status…</li>}
       </ul>
       {direct?.available && (unwired.length > 0 || wireNote) && (
@@ -361,6 +412,12 @@ function CollectorSection({ onRunOnboarding }: { onRunOnboarding: () => void }) 
           {unwired.length > 0 && (
             <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={wiring} onClick={() => void wire()}>{wiring ? 'Connecting…' : 'Connect'}</button>
           )}
+        </Row>
+      )}
+      {direct?.available && (
+        <Row label="Keep hooks wired" hint={keepHint}>
+          <button type="button" className="vbtn vbtn-quiet vbtn-sm" disabled={checking} onClick={() => void check()}>{checking ? 'Checking…' : 'Check now'}</button>
+          <Switch on={!!hooks?.keep_wired} disabled={!hooks} label="Keep hooks wired" onChange={setKeep} />
         </Row>
       )}
       <Row label="Setup wizard" hint="Re-run onboarding to switch agents or re-verify hooks.">

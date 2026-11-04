@@ -2327,7 +2327,17 @@ def _cmd_install(args: list[str]) -> int:
     return 0
 
 
-def _cmd_status() -> int:
+def _cmd_status(args: list[str]) -> int:
+    if "--write" in args:
+        # The collector's hook guard: re-read every agent's config and rewrite
+        # the manifest it serves, then print that manifest.
+        try:
+            _write_hook_status()
+        except OSError as exc:
+            print(f"cot: failed to write hook status: {exc}", file=sys.stderr)
+            return 1
+        print(HOOK_STATUS_PATH.read_text(), end="")
+        return 0
     status = {agent: _hooks_installed(agent) for agent in AGENTS}
     out = {"endpoint": COT_ENDPOINT, "hooks": status}
     queued = _spool_count()
@@ -2610,6 +2620,27 @@ def _cmd_uninstall_hooks(agents: list[str]) -> tuple[list[dict], bool]:
             print(f"cot: failed to remove {agent} hooks: {result.get('error')}", file=sys.stderr)
     ok = all(r.get("status") == "ok" for r in results)
     return results, ok
+
+
+def _cmd_uninstall(args: list[str]) -> int:
+    agents = [a for a in args if a in AGENTS]
+    if not agents:
+        print("Usage: cot uninstall <claude|cursor|codex|opencode|hermes> ...", file=sys.stderr)
+        return 1
+    results, ok = _cmd_uninstall_hooks(agents)
+    try:
+        _write_hook_status()
+    except OSError as exc:
+        ok = False
+        print(f"cot: failed to write hook status: {exc}", file=sys.stderr)
+    _audit_self(
+        "bridge.hooks.uninstalled",
+        target="hooks",
+        status="ok" if ok else "error",
+        detail={"agents": [{"agent": r.get("agent"), "config_path": r.get("config_path"),
+                            "status": r.get("status"), "changed": r.get("changed")} for r in results]},
+    )
+    return 0 if ok else 1
 
 
 def _confirm_purge(assume_yes: bool) -> bool:
@@ -8873,7 +8904,9 @@ def main() -> int:
     if len(sys.argv) >= 2 and sys.argv[1] == "install":
         return _cmd_install(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "status":
-        return _cmd_status()
+        return _cmd_status(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == "uninstall":
+        return _cmd_uninstall(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "up":
         return _cmd_up(sys.argv[2:])
     if len(sys.argv) >= 2 and sys.argv[1] == "down":
@@ -8911,7 +8944,8 @@ def main() -> int:
             "  cot reimport                       # wipe + re-import all transcripts\n"
             "  cot recover-questions              # fill AskQuestion answers from transcripts\n"
             "  cot watch [--agent X] [--interval]  # tail transcripts continuously\n"
-            "  cot status                         # show endpoint + installed hooks\n"
+            "  cot uninstall [agents]             # remove cot's hooks, keep the agent's own\n"
+            "  cot status [--write]               # show endpoint + installed hooks\n"
             "  cot up                             # start/resume collector container\n"
             "  cot down                           # stop collector container\n"
             "  cot purge [--yes]                  # remove container, hooks, and ~/.cot\n"

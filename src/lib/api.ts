@@ -315,6 +315,8 @@ export interface Settings {
   ui_onboarding_agents: AgentId[];
   /** The Mac app posts new inbox items as macOS notifications. */
   notify_desktop: boolean;
+  /** Re-wire connected agents when their hooks disappear. */
+  hooks_keep_wired: boolean;
   /** Read project folders macOS protects (Documents, Desktop, Downloads, iCloud Drive, volumes). */
   read_protected_folders: boolean;
   /** Sessions whose project sits in one of those folders. */
@@ -947,6 +949,8 @@ export type HookHealthState =
   | 'healthy'
   | 'missing_hooks'
   | 'not_installed'
+  /** Hooks are in place but ~/.cot/bin/cot can't start (missing, or its Python is gone). */
+  | 'bridge_broken'
   | 'stale'
   | 'no_events';
 
@@ -980,6 +984,19 @@ export interface HookStatusAgent {
   warnings: string[];
   health: HookHealthState;
   repair_url: string;
+  /** Connected by the person, so the hook guard keeps it wired. */
+  wanted: boolean;
+  /** Why the guard stopped re-wiring it ('keeps_reverting'), or null. */
+  repair_paused: string | null;
+}
+
+/** One pass of the hook guard (backend/app/hooks_guard.py) on one agent. */
+export interface HookRepair {
+  agent: AgentId;
+  at: string;
+  reason: 'hooks_missing' | 'config_missing' | `bridge_${string}`;
+  status: 'repaired' | 'paused' | 'error';
+  error?: string;
 }
 
 export interface HookStatus {
@@ -988,6 +1005,12 @@ export interface HookStatus {
   manifest_found: boolean;
   repair_all_url: string;
   agents: HookStatusAgent[];
+  bridge: { state: 'ok' | 'missing' | 'not_executable' | 'no_python' | 'unknown'; path: string | null; python: string | null };
+  /** Re-wire connected agents whose hooks disappear. */
+  keep_wired: boolean;
+  /** Last time the guard re-read the agent configs; null until its first pass. */
+  checked_at: string | null;
+  repairs: HookRepair[];
 }
 
 export async function getHookStatus(): Promise<HookStatus> {
@@ -1011,6 +1034,20 @@ export interface HooksInstallResult {
 
 export async function getHooksInstall(): Promise<HooksInstallStatus> {
   return json<HooksInstallStatus>(await fetch('/v1/hooks/install'));
+}
+
+/** Re-read every agent's config now; the guard also re-wires what it can. */
+export async function refreshHooks(): Promise<HookStatus> {
+  return detailOrStatus<HookStatus>(await fetch('/v1/hooks/refresh', { method: 'POST' }));
+}
+
+/** Remove cot's hooks from these agents, and stop the guard re-adding them. */
+export async function uninstallHooks(agents: string[]): Promise<{ ok: boolean; agents: string[] }> {
+  return detailOrStatus<{ ok: boolean; agents: string[] }>(await fetch('/v1/hooks/uninstall', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agents }),
+  }));
 }
 
 export async function installHooks(agents: string[]): Promise<HooksInstallResult> {

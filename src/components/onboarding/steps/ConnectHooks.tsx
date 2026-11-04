@@ -24,7 +24,7 @@ interface AgentHookInfo {
 const POLL_MS = 2500;
 
 function deriveState(current: HookStatusAgent | null): HookState {
-  if (!current || current.health === 'not_installed' || current.health === 'missing_hooks')
+  if (!current || current.health === 'not_installed' || current.health === 'missing_hooks' || current.health === 'bridge_broken')
     return 'missing';
   return 'installed';
 }
@@ -210,7 +210,7 @@ function ManualSteps({
 
   return (
     <div className="onb-manual">
-      {status && (status.health === 'missing_hooks' || status.health === 'not_installed') && (
+      {status && (status.health === 'missing_hooks' || status.health === 'not_installed' || status.health === 'bridge_broken') && (
         <div className="space-y-1">
           <span className="label">Repair</span>
           <a href={status.repair_url} download={`cot-repair-${agentId}.sh`} className="vbtn vbtn-quiet vbtn-sm">

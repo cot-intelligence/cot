@@ -8,6 +8,8 @@ import pytest
 
 # Tests start the app; never watch the real transcript folders from them.
 os.environ.setdefault("COT_PASSIVE_WATCH", "0")
+# ... nor rewrite the real agent configs.
+os.environ.setdefault("COT_HOOK_GUARD", "0")
 
 
 BACKEND = Path(__file__).resolve().parents[1]

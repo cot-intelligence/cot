@@ -829,7 +829,7 @@ const CATEGORY_HREF: Record<string, string> = {
  *  are a warning; agents read from disk are simply imported. */
 function CaptureChip({ health }: { health: HookHealthState | undefined }) {
   if (health === undefined) return <span className="vchip c-dim" title="Read from the agent's files on disk">imported</span>;
-  if (health === 'missing_hooks' || health === 'not_installed') {
+  if (health === 'missing_hooks' || health === 'not_installed' || health === 'bridge_broken') {
     return <span className="vchip c-warn" title="Hooks are missing: new sessions only arrive by import. Fix it under Coverage."><span className="dot" />hooks off</span>;
   }
   return <span className="vchip c-ok" title="Events arrive live from the agent's hooks"><span className="dot" />live hooks</span>;

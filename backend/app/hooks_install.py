@@ -36,6 +36,11 @@ def _in_container() -> bool:
     return Path("/.dockerenv").exists() or os.environ.get("COT_IN_DOCKER") in ("1", "true", "yes")
 
 
+def in_container() -> bool:
+    """The collector can't reach the person's home from a container."""
+    return _in_container()
+
+
 def _xcode_tools_present() -> bool:
     # Without the Command Line Tools, /usr/bin/python3 is a stub that opens an
     # install dialog instead of running.
@@ -94,9 +99,28 @@ def _write_atomic(target: Path, data: bytes, mode: int) -> None:
         raise
 
 
-def install(agents: list[str], *, endpoint: str, bridge_source: Path) -> dict[str, Any]:
+def _bridge_env(endpoint: str | None, *, repair: bool = False) -> dict[str, str]:
+    env = {**os.environ, "COT_REPAIR": "1" if repair else "0", "COT_SKIP_IMPORT": "1"}
+    if endpoint:
+        env["COT_ENDPOINT"] = endpoint
+    # The app's collector is frozen; don't hand its loader paths to the bridge.
+    for key in ("PYTHONHOME", "PYTHONPATH", "DYLD_LIBRARY_PATH", "LD_LIBRARY_PATH"):
+        env.pop(key, None)
+    return env
+
+
+def _run_bridge(python: str, target: Path, args: list[str], env: dict[str, str], timeout: float) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [python, str(target), *args],
+        env=env, capture_output=True, text=True, timeout=timeout,
+        cwd=str(Path.home()),
+    )
+
+
+def install(agents: list[str], *, endpoint: str, bridge_source: Path, repair: bool = False) -> dict[str, Any]:
     """Install the bridge and wire hooks for ``agents``. Returns the bridge's
-    own report (one line per agent) and which agents it skipped."""
+    own report (one line per agent) and which agents it skipped. ``repair``
+    only changes how the bridge labels its backups and audit event."""
     if _in_container():
         raise InstallError("This collector runs in a container, so it can't reach your agents' config files.")
     chosen = [a for a in dict.fromkeys(agents) if a in AGENTS]
@@ -114,16 +138,8 @@ def install(agents: list[str], *, endpoint: str, bridge_source: Path) -> dict[st
     endpoint = endpoint.rstrip("/")
     _write_atomic(target.parent.parent / "config.json", (f'{{"endpoint": "{endpoint}"}}\n').encode(), 0o644)
 
-    env = {**os.environ, "COT_ENDPOINT": endpoint, "COT_REPAIR": "0", "COT_SKIP_IMPORT": "1"}
-    # The app's collector is frozen; don't hand its loader paths to the bridge.
-    for key in ("PYTHONHOME", "PYTHONPATH", "DYLD_LIBRARY_PATH", "LD_LIBRARY_PATH"):
-        env.pop(key, None)
     try:
-        proc = subprocess.run(
-            [python, str(target), "install", *chosen],
-            env=env, capture_output=True, text=True, timeout=_INSTALL_TIMEOUT_S,
-            cwd=str(Path.home()),
-        )
+        proc = _run_bridge(python, target, ["install", *chosen], _bridge_env(endpoint, repair=repair), _INSTALL_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         raise InstallError("Wiring hooks took too long. Try again, or run the terminal command instead.") from None
     except OSError as exc:
@@ -135,3 +151,62 @@ def install(agents: list[str], *, endpoint: str, bridge_source: Path) -> dict[st
         raise InstallError(failed[0] if failed else (lines[-1] if lines else "The bridge couldn't wire the hooks."))
     return {"ok": True, "agents": chosen, "skipped": skipped, "bridge": str(target), "python": python, "output": lines}
 
+
+def bridge_health() -> dict[str, Any]:
+    """Whether the bridge every hook runs (``~/.cot/bin/cot``) can start.
+    Hook entries pointing at a bridge whose Python was removed fail silently
+    inside the agent, so the entries alone don't prove anything."""
+    target = mcp_install.bridge_path()
+    if not target.is_file():
+        return {"state": "missing", "path": str(target), "python": None}
+    if not os.access(target, os.X_OK):
+        return {"state": "not_executable", "path": str(target), "python": None}
+    try:
+        with target.open("rb") as fh:
+            shebang = fh.readline().decode("utf-8", "replace").strip()
+    except OSError:
+        return {"state": "missing", "path": str(target), "python": None}
+    python = shebang[2:].strip() if shebang.startswith("#!") else ""
+    if " " in python:  # "/usr/bin/env python3" and the like
+        python = ""
+    if not _python_works(python or None):
+        return {"state": "no_python", "path": str(target), "python": python or None}
+    return {"state": "ok", "path": str(target), "python": python}
+
+
+def refresh_status() -> bool:
+    """Have the installed bridge re-read every agent's config and rewrite the
+    hook manifest. False when it can't run (no bridge, or its Python is gone)."""
+    if _in_container():
+        return False
+    health = bridge_health()
+    if health["state"] != "ok":
+        return False
+    try:
+        proc = _run_bridge(health["python"], Path(health["path"]), ["status", "--write"], _bridge_env(None), 20)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def uninstall(agents: list[str]) -> dict[str, Any]:
+    """Remove cot's hooks from ``agents``, leaving the person's own hooks."""
+    if _in_container():
+        raise InstallError("This collector runs in a container, so it can't reach your agents' config files.")
+    chosen = [a for a in dict.fromkeys(agents) if a in AGENTS]
+    if not chosen:
+        raise InstallError("Pick at least one agent.")
+    health = bridge_health()
+    if health["state"] != "ok":
+        raise InstallError("The bridge isn't runnable, so cot can't edit agent configs. Connect the agent first to repair it.")
+    try:
+        proc = _run_bridge(health["python"], Path(health["path"]), ["uninstall", *chosen], _bridge_env(None), _INSTALL_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise InstallError("Removing hooks took too long. Try again.") from None
+    except OSError as exc:
+        raise InstallError(f"Could not run the bridge: {exc.strerror or exc}") from None
+    lines = [ln for ln in (proc.stdout + proc.stderr).splitlines() if ln.strip()]
+    if proc.returncode != 0:
+        failed = [ln.removeprefix("cot: ") for ln in lines if "failed" in ln]
+        raise InstallError(failed[0] if failed else (lines[-1] if lines else "The bridge couldn't remove the hooks."))
+    return {"ok": True, "agents": chosen, "output": lines}

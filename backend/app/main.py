@@ -44,7 +44,7 @@ from pydantic import BaseModel, Field
 
 from . import (
     __version__, activity, ai_insights, analysis, analysis_personas, analysis_tools, context_cost, cron, db, edits,
-    extension_usage, folders, hooks_install, insights, mcp_install, otlp, outcomes, passive, recovery, rule_drafts, semantic,
+    extension_usage, folders, hooks_guard, hooks_install, insights, mcp_install, otlp, outcomes, passive, recovery, rule_drafts, semantic,
     session_html, session_markdown, session_shape, store, timeutil, usage_line, user_rules, watch,
 )
 
@@ -370,6 +370,8 @@ async def _startup() -> None:
     # walks the tree), so it starts off the startup path too.
     threading.Thread(target=watch.start, name="transcript-watch-start", daemon=True).start()
     semantic.start()
+    # Re-reads agent configs when they change and re-wires connected agents.
+    hooks_guard.start(_BRIDGE_DIR / "cot")
 
 
 @app.get("/health")
@@ -383,18 +385,6 @@ def health() -> dict[str, Any]:
         # takes a JSON array of hook bodies.
         "features": ["ingest_batch"],
     }
-
-
-def _hook_status_path() -> Path:
-    return store.path().parent / "hooks_status.json"
-
-
-def _read_hook_manifest() -> dict[str, Any]:
-    try:
-        data = json.loads(_hook_status_path().read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
 
 
 def _hook_label(name: str) -> str:
@@ -669,6 +659,8 @@ def get_settings() -> dict[str, Any]:
         "ui_onboarding_agents": _stored_onboarding_agents(),
         # macOS notifications from the Mac app for new inbox items.
         "notify_desktop": db.get_setting("notify_desktop", "1") != "0",
+        # Re-wire connected agents when their hooks disappear (hooks_guard.py).
+        "hooks_keep_wired": hooks_guard.keep_wired(),
         # Reading project folders macOS protects (Documents, Desktop …); see folders.py.
         "read_protected_folders": folders.allowed(),
         "protected_folder_sessions": folders.sessions_in_protected(),
@@ -719,6 +711,10 @@ async def update_settings(request: Request) -> dict[str, Any]:
     for key in ("ui_nav_collapsed", "ui_sidebar_open", "ui_onboarded", "notify_desktop"):
         if key in body:
             db.set_setting(key, "1" if bool(body[key]) else "0")
+    if "hooks_keep_wired" in body:
+        on = bool(body["hooks_keep_wired"])
+        hooks_guard.set_keep_wired(on)
+        db.record_audit_event("settings.hooks_keep_wired.updated", target="hooks_keep_wired", detail={"hooks_keep_wired": on})
     if "read_protected_folders" in body:
         folders.set_allowed(bool(body["read_protected_folders"]))
     if "ui_onboarding_agents" in body:
@@ -1785,20 +1781,50 @@ async def post_hooks_install(request: Request) -> dict[str, Any]:
     endpoint = str(request.base_url).rstrip("/")
     try:
         # Off the event loop: the bridge calls back into this collector.
-        return await asyncio.to_thread(
+        res = await asyncio.to_thread(
             hooks_install.install, agents, endpoint=endpoint, bridge_source=_BRIDGE_DIR / "cot",
         )
     except hooks_install.InstallError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except OSError as exc:
         raise HTTPException(status_code=400, detail=f"Could not write {exc.filename or 'the bridge'}: {exc.strerror or exc}")
+    hooks_guard.mark_wanted([a for a in res["agents"] if a not in res["skipped"]])
+    return res
+
+
+@app.post("/v1/hooks/uninstall")
+async def post_hooks_uninstall(request: Request) -> dict[str, Any]:
+    """Disconnect agents: remove cot's hooks and stop the guard re-adding them."""
+    body = await _json_body(request)
+    agents = body.get("agents")
+    if not isinstance(agents, list) or not all(isinstance(a, str) for a in agents):
+        raise HTTPException(status_code=400, detail="agents must be a list of agent ids")
+    # Forget before and after: a guard pass mid-uninstall still sees the hooks
+    # and would count the agent as connected again.
+    hooks_guard.mark_unwanted(agents)
+    try:
+        res = await asyncio.to_thread(hooks_install.uninstall, agents)
+    except hooks_install.InstallError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    hooks_guard.mark_unwanted(agents)
+    return res
+
+
+@app.post("/v1/hooks/refresh")
+async def post_hooks_refresh() -> dict[str, Any]:
+    """Re-read every agent's config now (and re-wire if needed)."""
+    await asyncio.to_thread(hooks_guard.check, _BRIDGE_DIR / "cot", force=True)
+    return get_hook_status()
 
 
 @app.get("/v1/hooks/status")
 def get_hook_status() -> dict[str, Any]:
-    manifest = _read_hook_manifest()
+    manifest = hooks_guard.read_manifest()
     manifest_agents = manifest.get("agents") if isinstance(manifest.get("agents"), dict) else {}
     connections = {c["source"]: c for c in _connections()}
+    bridge = hooks_install.bridge_health() if not hooks_install.in_container() else {"state": "unknown", "path": None, "python": None}
+    wanted = hooks_guard.wanted()
+    paused = hooks_guard.paused()
 
     agents: list[dict[str, Any]] = []
     for source in AGENTS:
@@ -1815,7 +1841,8 @@ def get_hook_status() -> dict[str, Any]:
         events = int(conn.get("events") or 0)
         connected = bool(conn.get("connected"))
         manifest_installed = bool(entry.get("installed"))
-        installed = manifest_installed or (not manifest_agents and events > 0)
+        # A partial install is still an install: report it as missing hooks.
+        installed = manifest_installed or bool(installed_hooks) or (not manifest_agents and events > 0)
         if source in ("opencode", "hermes") and source not in manifest_agents and events > 0:
             # A manually copied plugin has no bridge-written manifest. Its
             # events prove installation only when no explicit entry exists.
@@ -1824,6 +1851,9 @@ def get_hook_status() -> dict[str, Any]:
             missing_hooks = []
         if not installed:
             health = "not_installed"
+        elif bridge["state"] not in ("ok", "unknown"):
+            # Every hook runs the bridge; with it gone they fail inside the agent.
+            health = "bridge_broken"
         elif missing_hooks:
             health = "missing_hooks"
         elif installed and events == 0:
@@ -1856,6 +1886,8 @@ def get_hook_status() -> dict[str, Any]:
                 "warnings": entry.get("warnings") if isinstance(entry.get("warnings"), list) else [],
                 "health": health,
                 "repair_url": repair_url,
+                "wanted": source in wanted,
+                "repair_paused": paused.get(source),
             }
         )
 
@@ -1865,6 +1897,10 @@ def get_hook_status() -> dict[str, Any]:
         "manifest_found": bool(manifest_agents),
         "repair_all_url": "/repair.sh?agents=" + ",".join(AGENTS),
         "agents": agents,
+        "bridge": bridge,
+        "keep_wired": hooks_guard.keep_wired(),
+        "checked_at": hooks_guard.checked_at(),
+        "repairs": hooks_guard.repairs(),
     }
 
 

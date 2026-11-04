@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from app import db, main
+from app import db, hooks_guard, main
 from app.normalize import normalize
 from app.tool_classification import canonical_tool
 
@@ -471,7 +471,7 @@ def test_bridge_and_collector_agree_on_expected_hooks():
 
 def test_manual_plugin_inferred_from_events(fresh_db, monkeypatch):
     db.record_ingest("hermes", {"session_id": "manual", "hook_event_name": "UserPromptSubmit", "prompt": "hi"})
-    monkeypatch.setattr(main, "_read_hook_manifest", lambda: {"agents": {"claude": {"installed": True}}})
+    monkeypatch.setattr(hooks_guard, "read_manifest", lambda: {"agents": {"claude": {"installed": True}}})
     status = next(a for a in main.get_hook_status()["agents"] if a["source"] == "hermes")
     assert (status["installed"], status["missing_hooks"]) == (True, [])
 

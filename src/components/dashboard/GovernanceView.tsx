@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
 import { useEffect, useState, type ReactNode } from 'react';
 import {
@@ -7,6 +8,7 @@ import {
   getRetention,
   getSelfAudit,
   getSettings,
+  refreshHooks,
   updateRetention,
   type AuditEvent,
   type Health,
@@ -18,6 +20,7 @@ import {
   type Settings,
 } from '../../lib/api';
 import { usePolling } from '../../lib/usePolling';
+import { latestRepairs, PAUSED_NOTE, repairLine } from '../../lib/hookRepairs';
 import { fmt, shortId } from '../forest/format';
 import { Icon } from '../forest/icons';
 import { listItem, listParent } from '../forest/motion';
@@ -37,6 +40,7 @@ const HOOK_HEALTH: Record<HookHealthState, { label: string; c: string }> = {
   healthy: { label: 'healthy', c: 'c-ok' },
   missing_hooks: { label: 'missing hooks', c: 'c-critical' },
   not_installed: { label: 'not installed', c: 'c-critical' },
+  bridge_broken: { label: 'bridge broken', c: 'c-critical' },
   stale: { label: 'stale', c: 'c-warn' },
   no_events: { label: 'no events yet', c: 'c-dim' },
 };
@@ -56,6 +60,8 @@ export function GovernanceView({ onRunOnboarding, onSelect }: GovernanceViewProp
   const [busy, setBusy] = useState(false);
   const [windowOpen, setWindowOpen] = useState(false);
   const [cleanup, setCleanup] = useState<RetentionCleanupResult | null>(null);
+  const [checking, setChecking] = useState(false);
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     let live = true;
@@ -105,7 +111,20 @@ export function GovernanceView({ onRunOnboarding, onSelect }: GovernanceViewProp
   const hooks = hookStatus?.agents ?? [];
   const m = hookMatrix(hooks);
   const complete = hooks.filter((h) => h.missing_hooks.length === 0 && h.installed).length;
-  const repair = hooks.some((h) => h.health === 'missing_hooks' || h.health === 'not_installed');
+  const repair = hooks.some((h) => h.health === 'missing_hooks' || h.health === 'not_installed' || h.health === 'bridge_broken');
+  const lastRepair = latestRepairs(hookStatus);
+  const now = new Date().toISOString();
+  const checkHooks = async () => {
+    setChecking(true);
+    try {
+      queryClient.setQueryData(['hookStatus'], await refreshHooks());
+      setAudit(await getSelfAudit(100));
+    } catch {
+      void queryClient.invalidateQueries({ queryKey: ['hookStatus'] });
+    } finally {
+      setChecking(false);
+    }
+  };
 
   return (
     <div className="scroll" id="vf-scroll">
@@ -138,7 +157,10 @@ export function GovernanceView({ onRunOnboarding, onSelect }: GovernanceViewProp
           </div>
           {hookStatus && (
             <>
-              {hooks.map((h) => (
+              {hooks.map((h) => {
+                const rep = lastRepair.get(h.source);
+                const note = h.repair_paused ? PAUSED_NOTE : rep ? repairLine(rep, fmt.ago(rep.at, now)) : null;
+                return (
                 <div key={h.source} style={{ display: 'flex', gap: 16, alignItems: 'center', justifyContent: 'space-between', padding: '12px 20px', borderTop: '1px solid var(--v-line)' }}>
                   <div style={{ display: 'grid', gap: 2, minWidth: 0 }}>
                     <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Agent id={h.source} /><span className={`vchip ${HOOK_HEALTH[h.health].c}`}><span className="dot" />{HOOK_HEALTH[h.health].label}</span></span>
@@ -147,16 +169,24 @@ export function GovernanceView({ onRunOnboarding, onSelect }: GovernanceViewProp
                       {h.latest_backup ? ` · backup ${fmt.day(h.latest_backup.created_at)}` : ''}
                       {h.missing_labels.length ? ` · missing ${h.missing_labels.slice(0, 3).join(', ')}${h.missing_labels.length > 3 ? ` +${h.missing_labels.length - 3}` : ''}` : ''}
                     </span>
+                    {note && <span className="dim" style={{ fontSize: 12, ...(h.repair_paused || rep?.status === 'error' ? { color: 'var(--v-amber)' } : {}) }}>{note}</span>}
                   </div>
                   <span className="mono dim" style={{ fontSize: 12, textAlign: 'right', whiteSpace: 'nowrap' }}>
                     {h.installed_hooks.length}/{h.expected_hooks.length} hooks<br />
-                    <span className="faint">{h.last_event ? `last event ${fmt.ago(h.last_event, new Date().toISOString())}` : 'no events yet'}</span>
+                    <span className="faint">{h.last_event ? `last event ${fmt.ago(h.last_event, now)}` : 'no events yet'}</span>
                   </span>
                 </div>
-              ))}
+                );
+              })}
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 20px 14px', borderTop: '1px solid var(--v-line)' }}>
-                <span className="mono faint" style={{ fontSize: 11 }}>{hookStatus.updated_at ? `Updated ${fmt.ago(hookStatus.updated_at, new Date().toISOString())} · ` : ''}{hookStatus.manifest_found ? 'bridge manifest found' : 'using event history'}</span>
-                <button type="button" className={`vbtn ${repair ? 'vbtn-primary' : 'vbtn-quiet'} vbtn-sm`} style={{ marginLeft: 'auto' }} onClick={onRunOnboarding}>{repair ? 'Reconfigure cot' : 'Run setup wizard'}</button>
+                <span className="mono faint" style={{ fontSize: 11 }}>
+                  {hookStatus.checked_at ? `Checked ${fmt.ago(hookStatus.checked_at, now)} · ` : hookStatus.updated_at ? `Updated ${fmt.ago(hookStatus.updated_at, now)} · ` : ''}
+                  {hookStatus.manifest_found ? 'bridge manifest found' : 'using event history'}
+                  {hookStatus.bridge.state === 'ok' || hookStatus.bridge.state === 'unknown' ? '' : ' · bridge can\'t start'}
+                  {' · '}<a href="#/settings/collector">{hookStatus.keep_wired ? 'kept wired' : 'auto-repair off'}</a>
+                </span>
+                <button type="button" className="vbtn vbtn-quiet vbtn-sm" style={{ marginLeft: 'auto' }} disabled={checking} onClick={() => void checkHooks()}>{checking ? 'Checking…' : 'Check now'}</button>
+                <button type="button" className={`vbtn ${repair ? 'vbtn-primary' : 'vbtn-quiet'} vbtn-sm`} onClick={onRunOnboarding}>{repair ? 'Reconfigure cot' : 'Run setup wizard'}</button>
               </div>
             </>
           )}
